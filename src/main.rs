@@ -4,6 +4,7 @@
 //! One window. A slim UI page for the sidebar. Pages beside it.
 //! Rust decides who lives, who sleeps, and when the UI hears about it.
 
+mod agent;
 mod blocker;
 mod chrome;
 mod engine;
@@ -44,6 +45,7 @@ enum Panel {
     None,
     Settings,
     Control,
+    Downloads,
 }
 
 impl Panel {
@@ -52,6 +54,7 @@ impl Panel {
             Panel::None => "none",
             Panel::Settings => "settings",
             Panel::Control => "control",
+            Panel::Downloads => "downloads",
         }
     }
 }
@@ -69,6 +72,8 @@ struct Tab {
     muted: bool,
     suspended: bool,
     trimmed: bool,
+    /// Opened by an AI agent. Marked in the sidebar, never saved in the session.
+    agent: bool,
     view: Option<WebView>,
     hidden_at: Option<Instant>,
 }
@@ -88,6 +93,7 @@ impl Tab {
             muted: false,
             suspended: false,
             trimmed: false,
+            agent: false,
             view: None,
             hidden_at: None,
         }
@@ -140,6 +146,11 @@ struct App {
     net: monitor::NetBytes,
     watches: HashMap<u64, monitor::NetWatch>,
     cores: f64,
+    /// Newest first. Kept for this session.
+    downloads: Vec<engine::Dl>,
+    agent: agent::Agent,
+    /// Last time an agent did something. Drives the "Agent working" chip.
+    agent_seen: Option<Instant>,
 }
 
 fn main() {
@@ -183,6 +194,8 @@ fn main() {
         web_context: RefCell::new(wry::WebContext::new(Some(store::data_dir().join("WebView2")))),
         args: engine::browser_args(settings.gpu_in_process, settings.share_processes),
         tracking: RefCell::new(settings.tracking.clone()),
+        downloads: RefCell::new(HashMap::new()),
+        passwords: Cell::new(settings.save_passwords),
     });
 
     let blocker = blocker::Blocker::start(store::data_dir());
@@ -227,7 +240,11 @@ fn main() {
         net: Rc::new(RefCell::new(HashMap::new())),
         watches: HashMap::new(),
         cores: std::thread::available_parallelism().map_or(1.0, |n| n.get() as f64),
+        downloads: Vec::new(),
+        agent: agent::Agent::new(&store::data_dir()),
+        agent_seen: None,
     };
+    app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
     app.apply_backdrop();
     app.apply_limits(None);
     app.restore(session);
@@ -372,6 +389,19 @@ fn debug_log(ev: &Ev) {
     }
 }
 
+/// Open a downloaded file, or show it selected in Explorer.
+fn open_path(path: &str, folder: bool) {
+    use windows::{Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL}, core::HSTRING};
+    unsafe {
+        if folder {
+            let args = HSTRING::from(format!("/select,\"{path}\""));
+            ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from("explorer.exe"), &args, None, SW_SHOWNORMAL);
+        } else {
+            ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(path), None, None, SW_SHOWNORMAL);
+        }
+    }
+}
+
 fn resize_dir(d: &str) -> Option<ResizeDirection> {
     Some(match d {
         "n" => ResizeDirection::North,
@@ -501,6 +531,7 @@ impl App {
                         audio: t.audio,
                         muted: t.muted,
                         status: t.status(),
+                        agent: t.agent,
                     })
                     .collect(),
                 active: self.active,
@@ -514,6 +545,21 @@ impl App {
                 mem: self.mem,
                 blocked: self.blocker.blocked(),
                 cpu_cap: self.job.is_some(),
+                downloads: self
+                    .downloads
+                    .iter()
+                    .map(|d| chrome::UiDl {
+                        id: d.id,
+                        name: d.path.rsplit(['\\', '/']).next().unwrap_or(&d.path).to_string(),
+                        url: d.url.clone(),
+                        received: d.received,
+                        total: d.total,
+                        state: d.state,
+                    })
+                    .collect(),
+                agent_busy: self.agent_seen.is_some(),
+                agent_endpoint: self.agent.endpoint(self.settings.agent_port),
+                agent_cmd: self.agent.setup_command(self.settings.agent_port),
             };
             self.chrome.set_state(state);
             let bg = self.chrome.bg();
@@ -559,7 +605,8 @@ impl App {
         }
         let (x, y, w, h) = self.stage();
         let t = &mut self.tabs[i];
-        if let Ok(v) = engine::build_tab(&self.ctx, t.id, Some(&t.url), logical_rect(x, y, w, h)) {
+        let isolated = t.agent && !self.settings.agent_shared_profile;
+        if let Ok(v) = engine::build_tab(&self.ctx, t.id, Some(&t.url), logical_rect(x, y, w, h), isolated) {
             if t.muted {
                 engine::set_muted(&v, true);
             }
@@ -878,6 +925,17 @@ impl App {
         }
         self.blocker.set_enabled(self.settings.adblock);
         self.apply_limits(Some(&old));
+        if old.save_passwords != self.settings.save_passwords {
+            self.ctx.passwords.set(self.settings.save_passwords);
+            for t in self.tabs.iter().filter(|t| !t.agent || self.settings.agent_shared_profile) {
+                if let Some(v) = &t.view {
+                    engine::set_passwords(v, self.settings.save_passwords);
+                }
+            }
+        }
+        if old.agent != self.settings.agent || old.agent_port != self.settings.agent_port {
+            self.agent.set(self.settings.agent, self.settings.agent_port, &self.ctx.proxy);
+        }
         store::save_settings(&self.settings);
         self.layout();
         self.push();
@@ -953,13 +1011,26 @@ impl App {
             }
             Ev::CloseMe(id) => self.close(id),
             Ev::Usage(procs) => self.on_usage(procs),
-            Ev::Popup(id) => {
+            Ev::Download(d) => {
+                match self.downloads.iter_mut().find(|x| x.id == d.id) {
+                    Some(x) => *x = d,
+                    None => {
+                        self.downloads.insert(0, d);
+                        self.downloads.truncate(100);
+                    }
+                }
+                self.push();
+            }
+            Ev::Agent(call) => self.on_agent(call),
+            Ev::Popup(id, parent) => {
+                let agent = self.idx(parent).is_some_and(|i| self.tabs[i].agent);
                 let found = {
                     let mut p = self.ctx.popups.borrow_mut();
                     p.iter().position(|(pid, _)| *pid == id).map(|k| p.remove(k).1)
                 };
                 if let Some(v) = found {
                     let mut t = Tab::new(id, String::new());
+                    t.agent = agent;
                     t.view = Some(v);
                     t.title = "Loading…".into();
                     let at = (self.active_idx() + 1).max(self.pinned_count()).min(self.tabs.len());
@@ -1027,6 +1098,10 @@ impl App {
             }
             Action::Settings => {
                 let p = if self.panel == Panel::Settings { Panel::None } else { Panel::Settings };
+                self.set_panel(p);
+            }
+            Action::Downloads => {
+                let p = if self.panel == Panel::Downloads { Panel::None } else { Panel::Downloads };
                 self.set_panel(p);
             }
             Action::Control => {
@@ -1154,6 +1229,7 @@ impl App {
                 let p = match (m["open"].as_bool().unwrap_or(false), m["which"].as_str()) {
                     (false, _) => Panel::None,
                     (true, Some("control")) => Panel::Control,
+                    (true, Some("downloads")) => Panel::Downloads,
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);
@@ -1164,6 +1240,40 @@ impl App {
                 self.push();
             }
             "focusPage" => self.focus_page(),
+            "dl" => {
+                let a = m["a"].as_str().unwrap_or("");
+                match a {
+                    "pause" | "resume" | "cancel" => engine::dl_control(&self.ctx, id, a),
+                    "open" | "folder" => {
+                        if let Some(d) = self.downloads.iter().find(|d| d.id == id) {
+                            open_path(&d.path, a == "folder");
+                        }
+                    }
+                    "clear" => {
+                        self.downloads.retain(|d| d.state == "progress" || d.state == "paused");
+                        self.ctx.downloads.borrow_mut().retain(|k, _| self.downloads.iter().any(|d| d.id == *k));
+                        self.push();
+                    }
+                    _ => {}
+                }
+            }
+            "clearPasswords" => {
+                if let Some(v) = self.tabs.iter().filter(|t| !t.agent).find_map(|t| t.view.as_ref()) {
+                    engine::clear_passwords(v);
+                }
+            }
+            "agentStop" => {
+                // The kill switch: door shut, agent tabs gone.
+                let mut s = self.settings.clone();
+                s.agent = false;
+                self.apply_settings(s);
+                let ids: Vec<u64> = self.tabs.iter().filter(|t| t.agent).map(|t| t.id).collect();
+                for id in ids {
+                    self.close(id);
+                }
+                self.agent_seen = None;
+                self.push();
+            }
             _ => {}
         }
     }
@@ -1210,6 +1320,10 @@ impl App {
             }
         }
         self.enforce_ram(now);
+        if self.agent_seen.is_some_and(|t| now - t > Duration::from_secs(6)) {
+            self.agent_seen = None;
+            self.push();
+        }
 
         // The UI never said ready. Show the window anyway so the user is not stuck.
         if !self.shown && now - self.born > Duration::from_secs(3) {
@@ -1219,6 +1333,107 @@ impl App {
 
         if self.dirty {
             self.save_session();
+        }
+    }
+
+    /// One primitive for an agent. Agent tabs only, unless the user shared their profile.
+    fn on_agent(&mut self, call: agent::Call) {
+        use agent::Op;
+        self.agent_seen = Some(Instant::now());
+        self.push();
+        let reply = call.reply;
+        let shared = self.settings.agent_shared_profile;
+        let mine = |app: &App, tab: u64| app.idx(tab).filter(|&i| app.tabs[i].agent || shared);
+        match call.op {
+            Op::List => {
+                let list: Vec<Value> = self
+                    .tabs
+                    .iter()
+                    .filter(|t| t.agent || shared)
+                    .map(|t| json!({"tab": t.id, "title": t.title, "url": t.url, "active": t.id == self.active}))
+                    .collect();
+                let _ = reply.send(Ok(Value::Array(list)));
+            }
+            Op::Open { url, activate } => {
+                let Some(url) = resolve_input(&url, &self.settings.search) else {
+                    let _ = reply.send(Err("empty url".into()));
+                    return;
+                };
+                let id = self.ctx.alloc_id();
+                let mut t = Tab::new(id, url);
+                t.agent = true;
+                self.tabs.push(t);
+                if activate {
+                    self.activate(id);
+                } else {
+                    let i = self.tabs.len() - 1;
+                    self.ensure_view(i);
+                }
+                let _ = reply.send(Ok(json!({"tab": id})));
+            }
+            Op::Navigate { tab, url } => match (mine(self, tab), resolve_input(&url, &self.settings.search)) {
+                (Some(i), Some(url)) => {
+                    match &self.tabs[i].view {
+                        Some(v) => {
+                            let _ = v.load_url(&url);
+                            self.tabs[i].url = url;
+                        }
+                        None => {
+                            self.tabs[i].url = url;
+                            self.ensure_view(i);
+                        }
+                    }
+                    let _ = reply.send(Ok(Value::Null));
+                }
+                _ => {
+                    let _ = reply.send(Err(format!("no tab {tab} you may use")));
+                }
+            },
+            Op::Back { tab } => {
+                if let Some(v) = mine(self, tab).and_then(|i| self.tabs[i].view.as_ref()) {
+                    let _ = v.go_back();
+                }
+                let _ = reply.send(Ok(Value::Null));
+            }
+            Op::Eval { tab, js } => {
+                let Some(i) = mine(self, tab) else {
+                    let _ = reply.send(Err(format!("no tab {tab} you may use")));
+                    return;
+                };
+                if self.tabs[i].view.is_none() {
+                    self.ensure_view(i);
+                }
+                match &self.tabs[i].view {
+                    Some(v) => {
+                        let r = reply.clone();
+                        let ok = v.evaluate_script_with_callback(&js, move |out| {
+                            let val = serde_json::from_str(&out).unwrap_or(Value::String(out));
+                            let _ = r.send(Ok(val));
+                        });
+                        if ok.is_err() {
+                            let _ = reply.send(Err("script failed to start".into()));
+                        }
+                    }
+                    None => {
+                        let _ = reply.send(Err("tab has no page".into()));
+                    }
+                }
+            }
+            Op::Shot { tab, png } => {
+                match mine(self, tab).and_then(|i| self.tabs[i].view.as_ref()) {
+                    Some(v) => engine::capture(v, png),
+                    None => {
+                        let _ = png.send(Err(format!("no tab {tab} you may use")));
+                    }
+                }
+                let _ = reply.send(Ok(Value::Null));
+            }
+            Op::Close { tab } => {
+                if mine(self, tab).is_some() {
+                    self.close(tab);
+                }
+                let _ = reply.send(Ok(Value::Null));
+            }
         }
     }
 
@@ -1253,7 +1468,7 @@ impl App {
         self.dirty = false;
         let (width, height) = logical_size(&self.ctx);
         let maximized = self.ctx.window.is_maximized();
-        let keep: Vec<&Tab> = self.tabs.iter().filter(|t| !t.url.is_empty() || t.id == self.active).collect();
+        let keep: Vec<&Tab> = self.tabs.iter().filter(|t| !t.agent && (!t.url.is_empty() || t.id == self.active)).collect();
         let s = Session {
             tabs: keep
                 .iter()

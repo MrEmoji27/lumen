@@ -53,6 +53,17 @@ pub struct UiTab {
     pub audio: bool,
     pub muted: bool,
     pub status: &'static str,
+    pub agent: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct UiDl {
+    pub id: u64,
+    pub name: String,
+    pub url: String,
+    pub received: i64,
+    pub total: i64,
+    pub state: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +82,10 @@ pub struct UiState {
     pub mem: Option<(u64, u32)>,
     pub blocked: u64,
     pub cpu_cap: bool,
+    pub downloads: Vec<UiDl>,
+    pub agent_busy: bool,
+    pub agent_endpoint: String,
+    pub agent_cmd: String,
 }
 
 impl UiState {
@@ -102,6 +117,8 @@ pub enum Hit {
     NewTab,
     Gear,
     Mem,
+    DlFooter,
+    AgentStop,
     Sugg(usize),
     Shortcut(usize),
     NtpSearch,
@@ -635,7 +652,7 @@ impl Inner {
             let (x, y, w, h) = s.stage;
             let st = R::new(x, y, w, h);
             self.gfx.round(st, s.settings.radius as f32, th.raise);
-            if s.panel == "settings" || s.panel == "control" {
+            if s.panel != "none" {
                 pages::draw(self, st, &s);
             } else if self.ntp_visible() {
                 self.draw_ntp(st, &s);
@@ -815,6 +832,35 @@ impl Inner {
         let fy = sb.h - 38.0;
         let gear = if compact { R::new(sb.x + (sb.w - 28.0) / 2.0, fy + 2.0, 28.0, 28.0) } else { R::new(sb.right() - 8.0 - 28.0, fy + 2.0, 28.0, 28.0) };
         self.button(gear, "sliders", Hit::Gear, true);
+        // Downloads in flight: an arrow with a progress ring, left of the gear.
+        let live: Vec<&UiDl> = s.downloads.iter().filter(|d| d.state == "progress").collect();
+        let mut mem_room = sb.w - 56.0;
+        if !live.is_empty() && !compact {
+            let r = R::new(gear.x - 30.0, gear.y, 28.0, 28.0);
+            let (got, total): (i64, i64) = live.iter().fold((0, 0), |a, d| (a.0 + d.received, a.1 + d.total.max(0)));
+            let p = if total > 0 { got as f32 / total as f32 } else { 0.0 };
+            if self.is_hover(&Hit::DlFooter) {
+                self.gfx.round(r, 7.0, th.hover);
+            }
+            self.gfx.ring(r.x + 14.0, r.y + 14.0, 10.0, 10.0, th.line, 1.5);
+            if p > 0.0 {
+                self.gfx.arc(r.x + 14.0, r.y + 14.0, 10.0, -90.0, 359.0 * p.min(1.0), th.accent, 2.0);
+            }
+            self.gfx.icon("download", r.x + 8.0, r.y + 8.0, 12.0, th.dim);
+            self.hit(r, Hit::DlFooter);
+            mem_room -= 30.0;
+        }
+        if s.agent_busy && !compact {
+            let t = "Agent working · Stop";
+            let tw = self.gfx.measure(t, Font::ui(11.5, 500)) + 28.0;
+            let r = R::new(sb.x + 8.0, fy + 5.0, tw.min(mem_room), 24.0);
+            let hov = self.is_hover(&Hit::AgentStop);
+            self.gfx.round(r, 12.0, if hov { th.accent.alpha(0.35) } else { th.accent.alpha(0.18) });
+            self.gfx.circle(r.x + 10.0, r.y + 12.0, 3.0, th.accent);
+            self.gfx.text(t, R::new(r.x + 18.0, r.y, r.w - 18.0, r.h), Font::ui(11.5, 500), th.text);
+            self.hit(r, Hit::AgentStop);
+            return;
+        }
         if !compact && s.settings.show_memory
             && let Some((bytes, _)) = s.mem
         {
@@ -824,7 +870,7 @@ impl Inner {
                 t.push_str(&format!(" · {} blocked", s.blocked));
             }
             let tw = self.gfx.measure(&t, Font::ui(11.5, 400)) + 10.0;
-            let r = R::new(sb.x + 8.0, fy + 6.0, tw.min(sb.w - 56.0), 22.0);
+            let r = R::new(sb.x + 8.0, fy + 6.0, tw.min(mem_room), 22.0);
             let hov = self.is_hover(&Hit::Mem);
             if hov {
                 self.gfx.round(r, 6.0, th.hover);
@@ -881,6 +927,9 @@ impl Inner {
                 }
             }
         }
+        if t.agent && (pinned || compact) {
+            self.gfx.circle(r.right() - 5.0, r.y + 5.0, 3.0, th.accent);
+        }
         if (t.audio || t.muted) && pinned {
             let b = R::new(r.right() - 15.0, r.y + 1.0, 14.0, 14.0);
             self.gfx.round(b, 4.0, th.bg);
@@ -891,6 +940,14 @@ impl Inner {
             return;
         }
         let mut right = r.right() - 6.0;
+        if t.agent {
+            let b = R::new(right - (if show_x { 50.0 } else { 24.0 }), r.y + 9.0, 22.0, 14.0);
+            self.gfx.round(b, 4.0, th.accent.alpha(0.22));
+            self.gfx.text("AI", b, Font::ui(9.0, 650).align(Align::Center), th.accent);
+            if !show_x {
+                right = b.x - 2.0;
+            }
+        }
         if show_x {
             let x = R::new(right - 22.0, r.y + 5.0, 22.0, 22.0);
             if self.is_hover(&Hit::TabX(t.id)) {
@@ -1094,6 +1151,11 @@ impl Inner {
                 send(p, json!({"t": "panel", "open": open, "which": "control"}));
             }
             Hit::Sugg(i) => self.pick(i),
+            Hit::DlFooter => {
+                let open = self.state.as_ref().is_some_and(|s| s.panel != "downloads");
+                send(p, json!({"t": "panel", "open": open, "which": "downloads"}));
+            }
+            Hit::AgentStop => send(p, json!({"t": "agentStop"})),
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {
                     send(p, json!({"t": "nav", "url": sc.url}));
@@ -1222,6 +1284,35 @@ impl Inner {
             return true;
         }
         false
+    }
+}
+
+/// Put text on the Windows clipboard.
+pub(crate) fn copy_text(hwnd: HWND, text: &str) {
+    use windows::Win32::{
+        Foundation::HANDLE,
+        System::{
+            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
+        },
+    };
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+        if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) {
+            let p = GlobalLock(h) as *mut u16;
+            if !p.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+                let _ = GlobalUnlock(h);
+                // The clipboard owns the memory now.
+                let _ = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0)));
+            }
+        }
+        let _ = CloseClipboard();
     }
 }
 

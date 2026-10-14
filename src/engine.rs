@@ -4,12 +4,16 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
-    AcceleratorKeyPressedEventHandler, ContainsFullScreenElementChangedEventHandler,
+    AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler, CapturePreviewCompletedHandler,
+    ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
+    StateChangedEventHandler,
     FaviconChangedEventHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
     SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
@@ -47,10 +51,26 @@ pub enum Ev {
     Audio(u64, bool),
     FullScreen(u64, bool),
     CloseMe(u64),
-    Popup(u64),
+    /// New popup tab, and the tab that opened it.
+    Popup(u64, u64),
+    Download(Dl),
+    /// A request from the agent thread, answered through its channel.
+    Agent(crate::agent::Call),
     Suspended(u64, bool),
     Key(Action),
     Usage(Vec<crate::monitor::Proc>),
+}
+
+/// A download's state, copied out of WebView2 for the main loop.
+#[derive(Debug, Clone)]
+pub struct Dl {
+    pub id: u64,
+    pub url: String,
+    pub path: String,
+    pub received: i64,
+    pub total: i64,
+    /// "progress" | "done" | "failed" | "paused"
+    pub state: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +90,7 @@ pub enum Action {
     Fullscreen,
     Settings,
     Control,
+    Downloads,
     DevTools,
 }
 
@@ -87,6 +108,9 @@ pub struct Ctx {
     pub web_context: RefCell<wry::WebContext>,
     pub args: String,
     pub tracking: RefCell<String>,
+    /// Live download operations, by Lumen's download id.
+    pub downloads: RefCell<HashMap<u64, ICoreWebView2DownloadOperation>>,
+    pub passwords: Cell<bool>,
 }
 
 impl Ctx {
@@ -156,9 +180,10 @@ pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
 
 /// One page. All pages share the UI's environment, so one browser process,
 /// one GPU process, one network process for the whole app.
-pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect) -> wry::Result<WebView> {
+/// `isolated`: the page lives in the separate "agent" profile (own cookies and storage).
+pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, isolated: bool) -> wry::Result<WebView> {
     let env = ctx.env.borrow().clone();
-    build_tab_in(ctx, id, url, bounds, env)
+    build_tab_in(ctx, id, url, bounds, env, isolated)
 }
 
 fn build_tab_in(
@@ -167,6 +192,7 @@ fn build_tab_in(
     url: Option<&str>,
     bounds: Rect,
     env: Option<ICoreWebView2Environment>,
+    isolated: bool,
 ) -> wry::Result<WebView> {
     let dark = ctx.dark.get();
     let p_title = ctx.proxy.clone();
@@ -181,6 +207,7 @@ fn build_tab_in(
         (None, Some(wc)) => WebViewBuilder::new_with_web_context(wc).with_additional_browser_args(ctx.args.clone()),
         (None, None) => unreachable!(),
     };
+    let base = if isolated { base.with_profile_name("agent") } else { base };
     let mut b = base
         .with_bounds(bounds)
         .with_visible(false)
@@ -200,11 +227,11 @@ fn build_tab_in(
             let ctx = &popup_ctx;
             let new_id = ctx.alloc_id();
             let bounds = content_bounds_now(ctx);
-            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone())) {
+            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), isolated) {
                 Ok(wv) => {
                     let core = wv.webview();
                     ctx.popups.borrow_mut().push((new_id, wv));
-                    let _ = ctx.proxy.send_event(Ev::Popup(new_id));
+                    let _ = ctx.proxy.send_event(Ev::Popup(new_id, id));
                     NewWindowResponse::Create { webview: core }
                 }
                 Err(_) => NewWindowResponse::Deny,
@@ -220,6 +247,9 @@ fn build_tab_in(
         set_tracking(&wv, &ctx.tracking.borrow());
     }
     hook_page(&wv, id, ctx.proxy.clone());
+    hook_downloads(ctx, &wv);
+    // Password saving is per profile. The agent's profile never saves passwords.
+    set_passwords(&wv, ctx.passwords.get() && !isolated);
     hook_keys(&wv, ctx.proxy.clone());
     if let Some(f) = ctx.on_built.borrow().as_ref() {
         f(&wv);
@@ -416,9 +446,170 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, false, false, COMMA) => Settings,
         (false, false, false, F12) => DevTools,
         (false, true, false, ESC) => Control,
+        (true, false, false, v) if v == k('J') => Downloads,
         (true, true, false, v) if v == k('I') => DevTools,
         _ => return None,
     })
+}
+
+// --------------------------------------------------------------- downloads
+
+static NEXT_DL: AtomicU64 = AtomicU64::new(1);
+
+fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64) -> Dl {
+    unsafe {
+        let (mut uri, mut path) = (PWSTR::null(), PWSTR::null());
+        let _ = op.Uri(&mut uri);
+        let _ = op.ResultFilePath(&mut path);
+        let (mut got, mut total) = (0i64, 0i64);
+        let _ = op.BytesReceived(&mut got);
+        let _ = op.TotalBytesToReceive(&mut total);
+        let mut st = COREWEBVIEW2_DOWNLOAD_STATE::default();
+        let _ = op.State(&mut st);
+        let mut resumable = Default::default();
+        let _ = op.CanResume(&mut resumable);
+        let state = match st {
+            COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED => "done",
+            COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED if resumable.as_bool() => "paused",
+            COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED => "failed",
+            _ => "progress",
+        };
+        Dl { id, url: take(uri), path: take(path), received: got, total, state }
+    }
+}
+
+/// Downloads come to Lumen. WebView2's own flyout stays hidden; the Downloads page shows them.
+fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView) {
+    let Ok(c4) = wv.webview().cast::<ICoreWebView2_4>() else { return };
+    let ctx = ctx.clone();
+    let mut token = 0i64;
+    unsafe {
+        let _ = c4.add_DownloadStarting(
+            &DownloadStartingEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                args.SetHandled(true)?;
+                let op = args.DownloadOperation()?;
+                let id = NEXT_DL.fetch_add(1, Ordering::Relaxed);
+                let mut t = 0i64;
+                let p = ctx.proxy.clone();
+                let _ = op.add_BytesReceivedChanged(
+                    &BytesReceivedChangedEventHandler::create(Box::new(move |op, _| {
+                        if let Some(op) = op {
+                            let _ = p.send_event(Ev::Download(dl_state(&op, id)));
+                        }
+                        Ok(())
+                    })),
+                    &mut t,
+                );
+                let p = ctx.proxy.clone();
+                let _ = op.add_StateChanged(
+                    &StateChangedEventHandler::create(Box::new(move |op, _| {
+                        if let Some(op) = op {
+                            let _ = p.send_event(Ev::Download(dl_state(&op, id)));
+                        }
+                        Ok(())
+                    })),
+                    &mut t,
+                );
+                let _ = ctx.proxy.send_event(Ev::Download(dl_state(&op, id)));
+                ctx.downloads.borrow_mut().insert(id, op);
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+/// "pause" | "resume" | "cancel" on a running download.
+pub fn dl_control(ctx: &Ctx, id: u64, action: &str) {
+    let Some(op) = ctx.downloads.borrow().get(&id).cloned() else { return };
+    unsafe {
+        let _ = match action {
+            "pause" => op.Pause(),
+            "resume" => op.Resume(),
+            "cancel" => op.Cancel(),
+            _ => Ok(()),
+        };
+    }
+}
+
+// --------------------------------------------------------------- passwords
+
+/// Offer to save passwords, and fill them in. Per profile; Windows encrypts the store.
+pub fn set_passwords(wv: &WebView, on: bool) {
+    unsafe {
+        if let Ok(p6) = wv
+            .webview()
+            .cast::<ICoreWebView2_13>()
+            .and_then(|c| c.Profile())
+            .and_then(|p| p.cast::<ICoreWebView2Profile6>())
+        {
+            let _ = p6.SetIsPasswordAutosaveEnabled(on);
+            let _ = p6.SetIsGeneralAutofillEnabled(on);
+        }
+    }
+}
+
+/// Forget every saved password in this page's profile.
+pub fn clear_passwords(wv: &WebView) {
+    unsafe {
+        if let Ok(p2) = wv
+            .webview()
+            .cast::<ICoreWebView2_13>()
+            .and_then(|c| c.Profile())
+            .and_then(|p| p.cast::<ICoreWebView2Profile2>())
+        {
+            let _ = p2.ClearBrowsingData(
+                COREWEBVIEW2_BROWSING_DATA_KINDS_PASSWORD_AUTOSAVE,
+                &ClearBrowsingDataCompletedHandler::create(Box::new(|_| Ok(()))),
+            );
+        }
+    }
+}
+
+// ------------------------------------------------------------------ capture
+
+/// PNG of what a page shows, for the agent. Answers on `reply`.
+pub fn capture(wv: &WebView, reply: std::sync::mpsc::Sender<Result<Vec<u8>, String>>) {
+    use windows::Win32::{System::Com::STREAM_SEEK_SET, UI::Shell::SHCreateMemStream};
+    unsafe {
+        let Some(stream) = SHCreateMemStream(None) else {
+            let _ = reply.send(Err("no stream".into()));
+            return;
+        };
+        let s2 = stream.clone();
+        let r2 = reply.clone();
+        let res = wv.webview().CapturePreview(
+            COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+            &stream,
+            &CapturePreviewCompletedHandler::create(Box::new(move |hr| {
+                if hr.is_err() {
+                    let _ = r2.send(Err("capture failed".into()));
+                    return Ok(());
+                }
+                let _ = s2.Seek(0, STREAM_SEEK_SET, None);
+                let _ = r2.send(Ok(read_stream_all(&s2)));
+                Ok(())
+            })),
+        );
+        if res.is_err() {
+            let _ = reply.send(Err("capture failed".into()));
+        }
+    }
+}
+
+fn read_stream_all(stream: &windows::Win32::System::Com::IStream) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let mut n = 0u32;
+        let hr = unsafe { stream.Read(buf.as_mut_ptr() as _, buf.len() as u32, Some(&mut n)) };
+        if hr.is_err() || n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    out
 }
 
 // ------------------------------------------------------------ memory knobs

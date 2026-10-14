@@ -63,6 +63,13 @@ pub struct Settings {
     /// Tabs of the same site share one renderer process. Fewer processes, less memory.
     /// Applies on restart.
     pub share_processes: bool,
+    /// Offer to save passwords and fill them in (WebView2's own, encrypted by Windows).
+    pub save_passwords: bool,
+    /// Let AI agents browse through the built-in MCP server on localhost.
+    pub agent: bool,
+    pub agent_port: u32,
+    /// Agent tabs use the user's profile (logins, cookies) instead of their own.
+    pub agent_shared_profile: bool,
     /// Soft RAM limit: over it, the oldest hidden tabs are unloaded.
     pub ram_limit: bool,
     pub ram_limit_mb: u32,
@@ -98,6 +105,10 @@ impl Default for Settings {
             show_memory: true,
             gpu_in_process: true,
             share_processes: true,
+            save_passwords: true,
+            agent: false,
+            agent_port: 47615,
+            agent_shared_profile: false,
             ram_limit: false,
             ram_limit_mb: 2048,
             cpu_limit: false,
@@ -138,6 +149,7 @@ impl Settings {
         self.sleep_after_min = self.sleep_after_min.clamp(1, 240);
         self.discard_after_min = self.discard_after_min.clamp(self.sleep_after_min, 1440);
         self.ram_limit_mb = self.ram_limit_mb.clamp(512, 32768);
+        self.agent_port = self.agent_port.clamp(1024, 65535);
         self.cpu_limit_pct = self.cpu_limit_pct.clamp(5, 100);
         self.net_limit_kbps = self.net_limit_kbps.clamp(32, 1_000_000);
         if !self.search.contains("%s") {

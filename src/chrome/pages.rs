@@ -25,6 +25,10 @@ pub enum PageHit {
     Nav(usize),
     Done,
     Unload(u64),
+    ClearPasswords,
+    CopyAgent,
+    Dl(&'static str, u64),
+    DlClear,
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +64,8 @@ enum Item {
     Range(&'static str, &'static str, &'static str, Scale, &'static str),
     Engine,
     Keys,
+    Button(&'static str, &'static str, &'static str, PageHit),
+    AgentSetup,
 }
 
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
@@ -109,6 +115,15 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
             Toggle("show_memory", "Memory in sidebar", ""),
         ]),
+        ("Passwords", vec![
+            Toggle("save_passwords", "Offer to save passwords", "Saved by WebView2, encrypted by Windows with your sign-in. Fills them in next time."),
+            Button("Saved passwords", "WebView2 cannot list them. You can wipe them all.", "Clear all", PageHit::ClearPasswords),
+        ]),
+        ("AI agent", vec![
+            Toggle("agent", "Let AI agents browse", "A local MCP server. Agents open their own tabs, marked AI, and you can stop them any time."),
+            Toggle("agent_shared_profile", "Agents use my profile", "Off: agent tabs have their own cookies and logins. On: they act as you."),
+            AgentSetup,
+        ]),
         ("Keys", vec![Keys]),
     ]
 }
@@ -118,7 +133,7 @@ fn limits_schema() -> Vec<Item> {
     vec![
         Range("ram_limit_mb", "RAM limit", "Over the limit, the hidden tab looked at longest ago unloads.", Scale::Steps(RAM), "mb"),
         Range("cpu_limit_pct", "CPU limit", "Hard cap for the whole browser, share of all cores.", Scale::Linear(5.0, 100.0, 5.0), "%"),
-        Range("net_limit_kbps", "Network limit", "Bandwidth cap for each tab.", Scale::Steps(NET), "kbps"),
+        Range("net_limit_kbps", "Network limit", "Bandwidth cap for each tab. Downloads are not capped.", Scale::Steps(NET), "kbps"),
         Toggle("gpu_in_process", "Graphics in browser process", "About 100 MB less memory. A driver crash restarts the browser. Applies after restart."),
         Toggle("share_processes", "Share processes within a site", "Far fewer processes. One heavy tab can slow its siblings. Applies after restart."),
     ]
@@ -197,10 +212,10 @@ fn value_at(scale: Scale, r: f32) -> f32 {
 pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     i.page.sliders.clear();
     i.page.view = st;
-    if s.panel == "settings" {
-        draw_settings(i, st, s);
-    } else {
-        draw_control(i, st, s);
+    match s.panel {
+        "settings" => draw_settings(i, st, s),
+        "downloads" => draw_downloads(i, st, s),
+        _ => draw_control(i, st, s),
     }
 }
 
@@ -344,6 +359,19 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             }
             54.0
         }
+        Item::Button(label, hint, action, hit) => {
+            row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint);
+            draw_button(i, right, r.y + 27.0, action, hit.clone());
+            54.0
+        }
+        Item::AgentSetup => {
+            let on = s.settings.agent;
+            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Connect Claude Code", if on { &s.agent_endpoint } else { "Turn the agent on first." });
+            if on {
+                draw_button(i, right, r.y + 27.0, "Copy setup command", PageHit::CopyAgent);
+            }
+            54.0
+        }
         Item::Keys => {
             let mut y = r.y;
             for (what, keys) in KEYS {
@@ -355,6 +383,89 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             y - r.y
         }
     }
+}
+
+fn draw_button(i: &mut Inner, right: f32, cy: f32, label: &str, hit: PageHit) {
+    let th = i.theme;
+    let f = Font::ui(13.0, 450).align(Align::Center);
+    let w = i.gfx.measure(label, f) + 26.0;
+    let r = R::new(right - w, cy - 15.0, w, 30.0);
+    let h = Hit::Page(hit);
+    i.gfx.round(r, 8.0, if i.is_hover(&h) { th.press } else { th.bg });
+    i.gfx.round_stroke(r, 8.0, th.line, 1.0);
+    i.gfx.text(label, r, f, th.text);
+    i.hit(r, h);
+}
+
+fn fmt_bytes(b: i64) -> String {
+    let b = b.max(0) as f64;
+    if b >= 1073741824.0 {
+        format!("{:.2} GB", b / 1073741824.0)
+    } else if b >= 1048576.0 {
+        format!("{:.1} MB", b / 1048576.0)
+    } else {
+        format!("{} KB", (b / 1024.0).round())
+    }
+}
+
+fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
+    let th = i.theme;
+    let col = R::new(st.x + ((st.w - 760.0) / 2.0).max(40.0), st.y, st.w.min(760.0 + 80.0) - 80.0, st.h);
+    i.gfx.clip(st);
+    let mut y = st.y + 26.0 - i.page.scroll;
+    i.gfx.text("Downloads", R::new(col.x, y, 300.0, 40.0), Font::serif(30.0), th.text);
+    done_button(i, R::new(col.right() - 90.0, y + 5.0, 90.0, 30.0));
+    if s.downloads.iter().any(|d| d.state == "done" || d.state == "failed") {
+        let r = R::new(col.right() - 210.0, y + 10.0, 110.0, 20.0);
+        let h = Hit::Page(PageHit::DlClear);
+        i.gfx.text("Clear finished", r, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
+        i.hit(r, h);
+    }
+    y += 64.0;
+    if s.downloads.is_empty() {
+        i.gfx.text("Nothing yet. Files you download show up here.", R::new(col.x, y, col.w, 30.0), Font::ui(13.0, 400), th.faint);
+    }
+    for d in &s.downloads {
+        let r = R::new(col.x, y, col.w, 64.0);
+        i.gfx.text(&d.name, R::new(r.x, r.y + 10.0, r.w - 220.0, 22.0), Font::ui(13.5, 500), if d.state == "failed" { th.faint } else { th.text });
+        let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
+        let status = match d.state {
+            "done" => format!("Done · {}", fmt_bytes(d.received)),
+            "failed" => "Failed".to_string(),
+            "paused" => format!("Paused · {} of {}", fmt_bytes(d.received), fmt_bytes(d.total)),
+            _ if d.total > 0 => format!("{} of {} · {}%", fmt_bytes(d.received), fmt_bytes(d.total), (pct * 100.0) as u32),
+            _ => fmt_bytes(d.received),
+        };
+        let host = super::host(&d.url);
+        i.gfx.text(&format!("{status}   {host}"), R::new(r.x, r.y + 32.0, r.w - 220.0, 18.0), Font::ui(12.0, 400), th.faint);
+        if d.state == "progress" || d.state == "paused" {
+            let bar = R::new(r.x, r.bottom() - 6.0, r.w - 220.0, 3.0);
+            i.gfx.round(bar, 1.5, th.press);
+            i.gfx.round(R::new(bar.x, bar.y, bar.w * pct.min(1.0), 3.0), 1.5, th.accent);
+        }
+        let acts: &[(&str, &'static str)] = match d.state {
+            "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
+            "paused" => &[("Resume", "resume"), ("Cancel", "cancel")],
+            "done" => &[("Open", "open"), ("Show in folder", "folder")],
+            _ => &[],
+        };
+        let mut x = r.right();
+        for (label, a) in acts.iter().rev() {
+            let w = i.gfx.measure(label, Font::ui(12.5, 450)) + 18.0;
+            let br = R::new(x - w, r.y + 18.0, w, 28.0);
+            let h = Hit::Page(PageHit::Dl(a, d.id));
+            if i.is_hover(&h) {
+                i.gfx.round(br, 7.0, th.hover);
+            }
+            i.gfx.text(label, br, Font::ui(12.5, 450).align(Align::Center), th.dim);
+            i.hit(br, h);
+            x -= w + 4.0;
+        }
+        i.gfx.line(col.x, r.bottom(), col.right(), r.bottom(), th.line, 1.0);
+        y += 65.0;
+    }
+    i.gfx.unclip();
+    i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
 }
 
 fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
@@ -600,6 +711,10 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::Done => send(&i.proxy, json!({"t": "panel", "open": false})),
         PageHit::Unload(id) => send(&i.proxy, json!({"t": "sleep", "id": id})),
         PageHit::Slider(_) => {}
+        PageHit::ClearPasswords => send(&i.proxy, json!({"t": "clearPasswords"})),
+        PageHit::CopyAgent => super::copy_text(i.hwnd_raw(), &s.agent_cmd),
+        PageHit::Dl(a, id) => send(&i.proxy, json!({"t": "dl", "a": a, "id": id})),
+        PageHit::DlClear => send(&i.proxy, json!({"t": "dl", "a": "clear"})),
     }
 }
 
