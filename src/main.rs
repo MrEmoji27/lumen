@@ -12,6 +12,7 @@ mod engine;
 mod library;
 mod monitor;
 mod pagekit;
+mod recall;
 mod video;
 mod store;
 
@@ -177,6 +178,8 @@ struct App {
     aria: std::sync::Arc<aria::Aria>,
     aria_ids: HashMap<String, u64>,
     aria_poll: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Page text for searching history by content.
+    recall: recall::Recall,
     /// Video grabs: download id -> (page url, user agent, running yt-dlp).
     videos: HashMap<u64, (String, String, video::Slot)>,
 }
@@ -288,6 +291,7 @@ fn main() {
         aria_ids: HashMap::new(),
         aria_poll: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         videos: HashMap::new(),
+        recall: recall::Recall::start(&store::data_dir()),
     };
     {
         // One small thread polls aria2 while it has work, and sleeps otherwise.
@@ -1389,7 +1393,52 @@ impl App {
                 {
                     self.tabs[i].loading = on;
                     self.push();
+                    // Done loading: read the page a little later, once scripts have filled it in.
+                    let t = &self.tabs[i];
+                    if !on && self.settings.remember_text && !t.agent && t.reader.is_none() && t.url.starts_with("http") {
+                        let (proxy, url) = (self.ctx.proxy.clone(), t.url.clone());
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(1500));
+                            let _ = proxy.send_event(Ev::Capture(id, url));
+                        });
+                    }
                 }
+            }
+            Ev::Capture(id, url) => {
+                if let Some(i) = self.idx(id)
+                    && self.tabs[i].url == url
+                    && self.tabs[i].reader.is_none()
+                    && let Some(v) = &self.tabs[i].view
+                {
+                    // Pages that ask for a password are not kept.
+                    let js = format!(
+                        "(()=>{{if(document.querySelector('input[type=password]'))return null;const b=document.body;if(!b)return null;return {{t:document.title,x:b.innerText.slice(0,{})}}}})()",
+                        recall::MAX_TEXT
+                    );
+                    let proxy = self.ctx.proxy.clone();
+                    let _ = v.evaluate_script_with_callback(&js, move |out| {
+                        let _ = proxy.send_event(Ev::PageText(id, url.clone(), out));
+                    });
+                }
+            }
+            Ev::PageText(id, url, out) => {
+                if self.idx(id).is_some_and(|i| self.tabs[i].url == url)
+                    && let Ok(v) = serde_json::from_str::<Value>(&out)
+                    && let Some(text) = v["x"].as_str()
+                    && text.trim().len() > 40
+                {
+                    self.recall.add(&url, v["t"].as_str().unwrap_or(""), text);
+                }
+            }
+            Ev::TextHits(q, hits) => {
+                let hits = hits
+                    .into_iter()
+                    .map(|(url, title, snip)| {
+                        let name = if title.is_empty() { host_of(&url) } else { title };
+                        (url, name, false, snip)
+                    })
+                    .collect();
+                self.chrome.set_suggest(&q, hits);
             }
             Ev::Favicon(id, f) => {
                 if let Some(i) = self.idx(id)
@@ -1844,9 +1893,18 @@ impl App {
                     .library
                     .search(&q, 6)
                     .into_iter()
-                    .map(|h| (h.url, h.title, h.kind == library::Kind::Bookmark))
+                    .map(|h| (h.url, h.title, h.kind == library::Kind::Bookmark, String::new()))
                     .collect();
                 self.chrome.set_suggest(&q, hits);
+                // Then what pages said, from the worker thread, when it has looked.
+                if self.settings.remember_text && q.trim().len() >= 3 && !q.contains("://") && !(q.contains('.') && !q.contains(' ')) {
+                    let proxy = self.ctx.proxy.clone();
+                    self.recall.search(&q, 4, move |q, hits| {
+                        if !hits.is_empty() {
+                            let _ = proxy.send_event(Ev::TextHits(q, hits));
+                        }
+                    });
+                }
             }
             "bookmark" => self.toggle_bookmark(),
             "unbookmark" => {
@@ -1855,10 +1913,12 @@ impl App {
             }
             "forget" => {
                 self.library.forget(m["url"].as_str().unwrap_or(""));
+                self.recall.forget(m["url"].as_str().unwrap_or(""));
                 self.push();
             }
             "clearHistory" => {
                 self.library.clear_history(None);
+                self.recall.clear(None);
                 self.push();
             }
             "perm" => {

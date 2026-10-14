@@ -155,6 +155,8 @@ pub enum Hit {
 struct Sugg {
     kind: SuggKind,
     label: String,
+    /// A second line: the words a page-text match was found in.
+    detail: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -394,19 +396,20 @@ impl Chrome {
     }
 
     /// History and bookmark matches for `q`, from the main loop. Merged if still current.
-    pub fn set_suggest(&self, q: &str, hits: Vec<(String, String, bool)>) {
+    /// Hits are (url, title, bookmarked, detail). Detail, when not empty, is a second line.
+    pub fn set_suggest(&self, q: &str, hits: Vec<(String, String, bool, String)>) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         if !i.editing || wide_text(i.edit).trim() != q {
             return;
         }
         let at = i.sugg.iter().position(|s| matches!(s.kind, SuggKind::Tab(_))).unwrap_or(i.sugg.len());
         let mut add = Vec::new();
-        for (url, title, bm) in hits {
-            if i.sugg.iter().any(|s| matches!(&s.kind, SuggKind::Go(u) if *u == url)) {
+        for (url, title, bm, detail) in hits {
+            if i.sugg.iter().any(|s| matches!(&s.kind, SuggKind::Go(u) | SuggKind::Url(u, _) if *u == url)) {
                 continue;
             }
             let label = if title.is_empty() { url.clone() } else { title };
-            add.push(Sugg { kind: SuggKind::Url(url, bm), label });
+            add.push(Sugg { kind: SuggKind::Url(url, bm), label, detail });
         }
         for (n, s) in add.into_iter().enumerate() {
             i.sugg.insert(at + n, s);
@@ -687,9 +690,9 @@ impl Inner {
             h.rsplit_once('.').is_some_and(|(_, t)| t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphabetic()))
         });
         if looks_url {
-            self.sugg.push(Sugg { kind: SuggKind::Go(q.clone()), label: q.clone() });
+            self.sugg.push(Sugg { kind: SuggKind::Go(q.clone()), label: q.clone(), detail: String::new() });
         }
-        self.sugg.push(Sugg { kind: SuggKind::Search(q.clone()), label: q.clone() });
+        self.sugg.push(Sugg { kind: SuggKind::Search(q.clone()), label: q.clone(), detail: String::new() });
         send(&self.proxy, json!({"t": "suggest", "q": q}));
         let lq = q.to_lowercase();
         if let Some(s) = &self.state {
@@ -699,7 +702,7 @@ impl Inner {
                 }
                 if t.title.to_lowercase().contains(&lq) || t.url.to_lowercase().contains(&lq) {
                     let label = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
-                    self.sugg.push(Sugg { kind: SuggKind::Tab(t.id), label });
+                    self.sugg.push(Sugg { kind: SuggKind::Tab(t.id), label, detail: String::new() });
                 }
             }
         }
@@ -933,13 +936,17 @@ impl Inner {
         }
         if self.editing && !self.sugg.is_empty() {
             let t = self.anim.from("sugg", 0.0, 1.0, 0.05);
-            let h = self.sugg.len() as f32 * 31.0 + 8.0;
+            let row_h = |s: &Sugg| if s.detail.is_empty() { 31.0 } else { 47.0 };
+            let h = self.sugg.iter().map(row_h).sum::<f32>() + 8.0;
             let box_ = R::new(o.x, o.bottom() + 6.0 - (1.0 - t) * 6.0, o.w, h);
             self.gfx.round(R::new(box_.x, box_.y + 4.0, box_.w, box_.h), 10.0, th.shade.alpha(0.6));
             self.gfx.round(box_, 10.0, th.raise);
             self.gfx.round_stroke(box_, 10.0, th.line, 1.0);
+            let mut y = box_.y + 4.0;
             for i in 0..self.sugg.len() {
-                let r = R::new(box_.x + 4.0, box_.y + 4.0 + i as f32 * 31.0, box_.w - 8.0, 30.0);
+                let rh = row_h(&self.sugg[i]);
+                let r = R::new(box_.x + 4.0, y, box_.w - 8.0, rh - 1.0);
+                y += rh;
                 if i == self.sel {
                     self.gfx.round(r, 7.0, th.hover);
                 }
@@ -949,12 +956,16 @@ impl Inner {
                     SuggKind::Search(_) => ("search", "Search"),
                     SuggKind::Tab(_) => ("tab", "Switch to tab"),
                     SuggKind::Url(_, true) => ("star", "Bookmark"),
+                    SuggKind::Url(_, false) if !sg.detail.is_empty() => ("clock", "In page"),
                     SuggKind::Url(_, false) => ("clock", "History"),
                 };
                 self.gfx.icon(icon, r.x + 8.0, r.y + 7.0, 16.0, th.faint);
                 let hw = self.gfx.measure(hint, Font::ui(11.5, 400)) + 10.0;
-                self.gfx.text(&sg.label, R::new(r.x + 33.0, r.y, r.w - 33.0 - hw, r.h), Font::ui(13.0, 400), th.text);
-                self.gfx.text(hint, R::new(r.right() - hw, r.y, hw - 8.0, r.h), Font::ui(11.5, 400).align(Align::Right), th.faint);
+                self.gfx.text(&sg.label, R::new(r.x + 33.0, r.y, r.w - 33.0 - hw, 30.0), Font::ui(13.0, 400), th.text);
+                self.gfx.text(hint, R::new(r.right() - hw, r.y, hw - 8.0, 30.0), Font::ui(11.5, 400).align(Align::Right), th.faint);
+                if !sg.detail.is_empty() {
+                    self.gfx.text(&sg.detail, R::new(r.x + 33.0, r.y + 24.0, r.w - 41.0, 18.0), Font::ui(11.5, 400), th.dim);
+                }
                 self.hit(r, Hit::Sugg(i));
             }
         }

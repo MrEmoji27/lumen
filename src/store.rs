@@ -69,6 +69,8 @@ pub struct Settings {
     pub save_passwords: bool,
     /// Hand http(s) downloads to aria2: many connections per file, resume, queue.
     pub accelerate_downloads: bool,
+    /// Keep the text of opened pages so history can be searched by it.
+    pub remember_text: bool,
     /// When Lumen is dark, darken light sites too (Dark Reader).
     pub dark_pages: bool,
     /// Hosts Dark Reader leaves alone.
@@ -121,6 +123,7 @@ impl Default for Settings {
             accelerate_downloads: true,
             cosmetic: true,
             dark_pages: false,
+            remember_text: true,
             dark_skip: Vec::new(),
             ui_font: "segoe".into(),
             display_font: "instrument".into(),

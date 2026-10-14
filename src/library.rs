@@ -216,6 +216,9 @@ impl Library {
             if host_starts_with(&m.b.url, &typed) {
                 score += HOST_BOOST;
             }
+            if host_is(&m.b.url, &typed) {
+                score += HOST_BOOST;
+            }
             hits.push((score, Hit { url: m.b.url.clone(), title: m.b.title.clone(), kind: Kind::Bookmark }));
         }
         for e in self.hist.values() {
@@ -224,6 +227,9 @@ impl Library {
             }
             let mut score = frecency(e.v.count, now.saturating_sub(e.v.last));
             if host_starts_with(&e.v.url, &typed) {
+                score += HOST_BOOST;
+            }
+            if host_is(&e.v.url, &typed) {
                 score += HOST_BOOST;
             }
             hits.push((score, Hit { url: e.v.url.clone(), title: e.v.title.clone(), kind: Kind::History }));
@@ -462,7 +468,20 @@ fn host_starts_with(url: &str, q: &str) -> bool {
     }
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    rest[..end].to_lowercase().starts_with(q)
+    let host = rest[..end].to_lowercase();
+    host.starts_with(q) || host.strip_prefix("www.").is_some_and(|h| h.starts_with(q))
+}
+
+/// The typed text is a whole name of the host: "github" for github.com, not for githubstatus.com.
+fn host_is(url: &str, q: &str) -> bool {
+    if q.is_empty() {
+        return false;
+    }
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = rest[..end].to_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    host == q || host.split('.').next() == Some(q)
 }
 
 /// about:, data:, blob:, file: and friends. Not pages; not history.

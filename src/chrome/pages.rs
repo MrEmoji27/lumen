@@ -121,7 +121,10 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Range("gap", "Page margin", "", Scale::Linear(0.0, 24.0, 1.0), "px"),
             Range("radius", "Page corners", "", Scale::Linear(0.0, 20.0, 1.0), "px"),
         ]),
-        ("Search", vec![Engine]),
+        ("Search", vec![
+            Engine,
+            Toggle("remember_text", "Search history by page text", "Lumen keeps the words of pages you open, on this PC only, so the address bar finds them by what they said. Pages with a password box are skipped."),
+        ]),
         ("Performance", vec![
             Toggle("adblock", "Block ads and trackers", "Stops them before they load. Saves memory and data."),
             Toggle("cosmetic", "Hide cookie banners and ad leftovers", "Filter-list hiding rules, applied as plain CSS."),

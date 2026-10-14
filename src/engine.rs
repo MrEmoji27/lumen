@@ -58,6 +58,12 @@ pub enum Ev {
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
+    /// Time to read this tab's text for history search: (tab, url it was loading).
+    Capture(u64, String),
+    /// The text came back: (tab, url, JSON or "null").
+    PageText(u64, String, String),
+    /// Text search answers for the address bar: (query, hits).
+    TextHits(String, Vec<crate::recall::Hit>),
     /// This tab only existed to start a download, now handed off.
     Orphan(u64),
     /// A video grab moved: (download id, what happened).
