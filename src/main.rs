@@ -21,7 +21,8 @@ use std::{
 use serde_json::{Value, json};
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
-    event::{Event, StartCause, WindowEvent},
+    event::{ElementState, Event, StartCause, WindowEvent},
+    keyboard::{KeyCode, ModifiersState},
     event_loop::{ControlFlow, EventLoopBuilder},
     platform::windows::{IconExtWindows, WindowBuilderExtWindows, WindowExtWindows},
     window::{Fullscreen, Icon, ResizeDirection, Theme as WinTheme, WindowBuilder},
@@ -151,6 +152,8 @@ struct App {
     agent: agent::Agent,
     /// Last time an agent did something. Drives the "Agent working" chip.
     agent_seen: Option<Instant>,
+    /// Modifier keys as the main window last saw them.
+    mods: ModifiersState,
 }
 
 fn main() {
@@ -243,6 +246,7 @@ fn main() {
         downloads: Vec::new(),
         agent: agent::Agent::new(&store::data_dir()),
         agent_seen: None,
+        mods: ModifiersState::empty(),
     };
     app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
     app.apply_backdrop();
@@ -292,6 +296,19 @@ fn main() {
                     app.push();
                 }
                 WindowEvent::CloseRequested => app.exit = true,
+                WindowEvent::ModifiersChanged(m) => app.mods = m,
+                // Closing a tab drops focus onto the bare window until the next page takes it.
+                // Keys typed in that gap land here; handle them instead of losing them.
+                WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                    let m = app.mods;
+                    if let Some(vk) = vk_of(event.physical_key)
+                        && let Some(a) = engine::map_key(vk, m.control_key(), m.shift_key(), m.alt_key())
+                        && (!event.repeat || matches!(a, Action::NextTab | Action::PrevTab))
+                    {
+                        app.on_key(a);
+                    }
+                    app.focus_page();
+                }
                 _ => {}
             },
             Event::UserEvent(ev) => app.on_event(ev),
@@ -386,6 +403,41 @@ fn debug_log(ev: &Ev) {
         .open(store::data_dir().join("debug.log"))
     {
         let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Virtual-key code for the keys Lumen has shortcuts on.
+fn vk_of(k: KeyCode) -> Option<u32> {
+    use KeyCode::*;
+    let letter = |c: char| Some(c as u32);
+    match k {
+        KeyT => letter('T'),
+        KeyW => letter('W'),
+        KeyL => letter('L'),
+        KeyK => letter('K'),
+        KeyR => letter('R'),
+        KeyB => letter('B'),
+        KeyJ => letter('J'),
+        KeyI => letter('I'),
+        Digit1 => letter('1'),
+        Digit2 => letter('2'),
+        Digit3 => letter('3'),
+        Digit4 => letter('4'),
+        Digit5 => letter('5'),
+        Digit6 => letter('6'),
+        Digit7 => letter('7'),
+        Digit8 => letter('8'),
+        Digit9 => letter('9'),
+        Tab => Some(0x09),
+        Escape => Some(0x1B),
+        ArrowLeft => Some(0x25),
+        ArrowRight => Some(0x27),
+        F5 => Some(0x74),
+        F6 => Some(0x75),
+        F11 => Some(0x7A),
+        F12 => Some(0x7B),
+        Comma => Some(0xBC),
+        _ => None,
     }
 }
 
