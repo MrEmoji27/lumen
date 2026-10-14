@@ -176,6 +176,8 @@ svg{ display: block; width: 16px; height: 16px }
 #newtab:hover{ color: var(--text) }
 
 #foot{ display: flex; align-items: center; justify-content: space-between; height: 32px; flex: none; padding-left: 4px }
+#mem{ cursor: pointer; border-radius: 6px; padding: 2px 4px; margin-left: -4px }
+#mem:hover{ color: var(--text); background: var(--hover) }
 #mem{ font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 
 /* Context menu, inside the sidebar. Pages cover everything else. */
@@ -304,6 +306,37 @@ input[type="range"]::-webkit-slider-thumb{ -webkit-appearance: none; width: 14px
 .keys{ display: grid; grid-template-columns: 1fr auto; gap: 0 24px }
 .keys div{ padding: 9px 0; border-bottom: 1px solid var(--line); color: var(--dim) }
 .keys kbd{ font: 12px var(--sans); color: var(--text); padding: 9px 0; border-bottom: 1px solid var(--line); text-align: right }
+
+/* --------------------------------------------------------------- control */
+#ctl{ position: absolute; inset: 0; overflow-y: auto; scrollbar-width: thin }
+[data-anim] #ctl:not([hidden]){ animation: fade .16s var(--ease) }
+.ctl-in{ max-width: 860px; margin: 0 auto; padding: 26px 40px 60px }
+.ctl-head{ display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 22px }
+.ctl-head h1{ font: 400 30px/1 var(--serif) }
+.ctl-head .link span{ margin-left: 4px; opacity: .7 }
+#ctl h2{ font: 400 22px/1.1 var(--serif); margin: 34px 0 6px }
+
+.stats{ display: flex; gap: 44px; padding-bottom: 22px; border-bottom: 1px solid var(--line) }
+.stats b{ display: block; font: 400 30px/1 var(--serif); font-variant-numeric: tabular-nums; color: var(--text) }
+.stats small{ display: block; margin-top: 6px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--faint) }
+
+.use{ margin-top: 10px }
+.use-h, .use-r{ display: grid; grid-template-columns: minmax(0, 1fr) 110px 70px 90px 70px; align-items: center; gap: 12px }
+.use-h{ height: 32px; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint) }
+.use-h span:not(:first-child){ text-align: right }
+.use-r{ height: 40px; border-bottom: 1px solid var(--line); padding: 0 2px }
+.use-r.off{ color: var(--faint) }
+.use-r.sys .nm{ color: var(--dim) }
+.use-name{ display: flex; align-items: center; gap: 10px; min-width: 0 }
+.use-name .nm{ overflow: hidden; white-space: nowrap; text-overflow: ellipsis }
+.use-name em{ font-style: normal; font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.use-name .fav img{ display: block }
+.mono.sys{ background: var(--press); color: var(--faint) }
+.num{ position: relative; text-align: right; font-variant-numeric: tabular-nums; color: var(--dim) }
+.use-r:not(.off) .num:nth-child(2){ color: var(--text) }
+.bar{ position: absolute; right: 0; bottom: -7px; height: 2px; width: var(--w); max-width: 100%; border-radius: 1px; background: var(--acc-soft) }
+.acts{ text-align: right }
+.tog:disabled{ opacity: .35 }
 
 /* ---------------------------------------------------------------- motion */
 @keyframes spin{ to{ transform: rotate(360deg) } }

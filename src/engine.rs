@@ -20,8 +20,7 @@ use windows::{
         Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn},
         System::{
             Com::CoTaskMemFree,
-            ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX},
-            Threading::{GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ},
+            Threading::{GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
         },
         UI::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT},
@@ -51,6 +50,7 @@ pub enum Ev {
     Popup(u64),
     Suspended(u64, bool),
     Key(Action),
+    Usage(Vec<crate::monitor::Proc>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +69,7 @@ pub enum Action {
     Sidebar,
     Fullscreen,
     Settings,
+    Control,
     DevTools,
 }
 
@@ -133,6 +134,7 @@ pub fn build_ui(
     web_context: &mut wry::WebContext,
     html: String,
     bounds: Rect,
+    gpu_in_process: bool,
 ) -> wry::Result<WebView> {
     let proxy = ctx.proxy.clone();
     let ui = WebViewBuilder::new_with_web_context(web_context)
@@ -147,10 +149,28 @@ pub fn build_ui(
         .with_default_context_menus(cfg!(debug_assertions))
         .with_browser_accelerator_keys(false)
         .with_theme(theme(ctx.dark.get()))
+        .with_additional_browser_args(browser_args(gpu_in_process))
         .build_as_child(&*ctx.window)?;
     hook_keys(&ui, ctx.proxy.clone());
     ctx.env.replace(Some(ui.environment()));
     Ok(ui)
+}
+
+/// Chromium switches for the whole browser. Set once, when the environment is born.
+/// LUMEN_ARGS appends more, for measuring without a rebuild.
+fn browser_args(gpu_in_process: bool) -> String {
+    // wry's own defaults. Passing args replaces them, so keep them.
+    let mut a = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
+    if gpu_in_process {
+        // Measured: about 100 MB less commit, 55 MB less working set, one process fewer.
+        // Cost: a GPU driver crash takes the browser down with it.
+        a.push_str(" --in-process-gpu --enable-features=NetworkServiceInProcess2");
+    }
+    if let Ok(extra) = std::env::var("LUMEN_ARGS") {
+        a.push(' ');
+        a.push_str(&extra);
+    }
+    a
 }
 
 /// One page. All pages share the UI's environment, so one browser process,
@@ -381,6 +401,7 @@ fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
     const F6: u32 = 0x75;
     const F11: u32 = 0x7A;
     const F12: u32 = 0x7B;
+    const ESC: u32 = 0x1B;
     const COMMA: u32 = 0xBC;
     let k = |c: char| c as u32;
     Some(match (ctrl, shift, alt, vk) {
@@ -401,6 +422,7 @@ fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (false, false, false, F11) => Fullscreen,
         (true, false, false, COMMA) => Settings,
         (false, false, false, F12) => DevTools,
+        (false, true, false, ESC) => Control,
         (true, true, false, v) if v == k('I') => DevTools,
         _ => return None,
     })
@@ -489,20 +511,11 @@ pub fn round_corners(wv: &WebView, r: i32) {
     }
 }
 
-/// Private bytes of this app plus every WebView2 process it owns.
+/// Private working set of this app plus every WebView2 process it owns.
+/// Same number Task Manager shows as "Memory".
 pub fn memory(env: &ICoreWebView2Environment) -> (u64, u32) {
-    fn private_of(h: windows::Win32::Foundation::HANDLE) -> u64 {
-        let mut c = PROCESS_MEMORY_COUNTERS_EX::default();
-        let ok = unsafe {
-            GetProcessMemoryInfo(
-                h,
-                &mut c as *mut _ as *mut PROCESS_MEMORY_COUNTERS,
-                std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-            )
-        };
-        if ok.is_ok() { c.PrivateUsage as u64 } else { 0 }
-    }
-    let mut total = private_of(unsafe { GetCurrentProcess() });
+    use crate::monitor::private_ws;
+    let mut total = private_ws(unsafe { GetCurrentProcess() });
     let mut count = 1u32;
     unsafe {
         let Ok(list) = env.cast::<ICoreWebView2Environment8>().and_then(|e| e.GetProcessInfos()) else {
@@ -516,8 +529,8 @@ pub fn memory(env: &ICoreWebView2Environment) -> (u64, u32) {
             if info.ProcessId(&mut pid).is_err() {
                 continue;
             }
-            if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, false, pid as u32) {
-                total += private_of(h);
+            if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32) {
+                total += private_ws(h);
                 count += 1;
                 let _ = CloseHandle(h);
             }

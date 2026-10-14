@@ -6,10 +6,12 @@
 
 mod blocker;
 mod engine;
+mod monitor;
 mod store;
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -33,6 +35,25 @@ const TICK: Duration = Duration::from_secs(3);
 const TRIM_AFTER: Duration = Duration::from_secs(60);
 const MAX_CLOSED: usize = 25;
 const COMPACT_W: f64 = 56.0;
+/// Control page refresh. Only runs while the page is open.
+const SAMPLE: Duration = Duration::from_millis(1000);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    None,
+    Settings,
+    Control,
+}
+
+impl Panel {
+    fn name(self) -> &'static str {
+        match self {
+            Panel::None => "none",
+            Panel::Settings => "settings",
+            Panel::Control => "control",
+        }
+    }
+}
 
 struct Tab {
     id: u64,
@@ -90,7 +111,7 @@ struct App {
     active: u64,
     closed: Vec<SavedTab>,
     settings: Settings,
-    panel: bool,
+    panel: Panel,
     peek: bool,
     page_fs: bool,
     user_fs: bool,
@@ -110,9 +131,20 @@ struct App {
     born: Instant,
     next_tick: Instant,
     exit: bool,
+    /// The browser tree's Job Object. The CPU cap lives here.
+    job: Option<monitor::Job>,
+    /// Control page bookkeeping.
+    next_sample: Option<Instant>,
+    prev_cpu: HashMap<u32, u64>,
+    prev_at: Instant,
+    net: monitor::NetBytes,
+    watches: HashMap<u64, monitor::NetWatch>,
+    cores: f64,
 }
 
 fn main() {
+    // Before WebView2 starts: its processes must be born inside the job.
+    let job = monitor::Job::adopt_self();
     let settings = store::load_settings();
     let session = store::load_session();
 
@@ -158,7 +190,7 @@ fn main() {
     }
 
     let mut web_context = WebContext::new(Some(store::data_dir().join("WebView2")));
-    let ui = engine::build_ui(&ctx, &mut web_context, ui_html(), full_rect(&ctx)).expect("ui webview");
+    let ui = engine::build_ui(&ctx, &mut web_context, ui_html(), full_rect(&ctx), settings.gpu_in_process).expect("ui webview");
     engine::set_tracking(&ui, &settings.tracking);
 
     let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
@@ -171,7 +203,7 @@ fn main() {
         active: 0,
         closed: Vec::new(),
         settings,
-        panel: false,
+        panel: Panel::None,
         peek: false,
         page_fs: false,
         user_fs: false,
@@ -187,13 +219,29 @@ fn main() {
         born: Instant::now(),
         next_tick: Instant::now() + TICK,
         exit: false,
+        job,
+        next_sample: None,
+        prev_cpu: HashMap::new(),
+        prev_at: Instant::now(),
+        net: Rc::new(RefCell::new(HashMap::new())),
+        watches: HashMap::new(),
+        cores: std::thread::available_parallelism().map_or(1.0, |n| n.get() as f64),
     };
     app.apply_backdrop();
+    app.apply_limits(None);
     app.restore(session);
 
     event_loop.run(move |event, _, cf| {
         match event {
-            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => app.tick(),
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                let now = Instant::now();
+                if app.next_sample.is_some_and(|t| t <= now) {
+                    app.sample();
+                }
+                if app.next_tick <= now {
+                    app.tick();
+                }
+            }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::Resized(size) => {
                     if size.width == 0 || size.height == 0 {
@@ -231,7 +279,8 @@ fn main() {
             app.save_session();
             *cf = ControlFlow::Exit;
         } else {
-            *cf = ControlFlow::WaitUntil(app.next_tick);
+            let wake = app.next_sample.map_or(app.next_tick, |t| t.min(app.next_tick));
+            *cf = ControlFlow::WaitUntil(wake);
         }
     });
 }
@@ -406,7 +455,7 @@ impl App {
     /// The UI needs the whole window only for the new tab page and settings.
     /// The rest of the time it is a strip. A small surface is a fast surface.
     fn ui_full(&self) -> bool {
-        self.panel || self.active_tab().is_some_and(|t| t.status() == "new")
+        self.panel != Panel::None || self.active_tab().is_some_and(|t| t.status() == "new")
     }
 
     /// The page rectangle, in window coordinates.
@@ -455,7 +504,7 @@ impl App {
 
     fn focus_page(&self) {
         match self.active_tab().and_then(|t| t.view.as_ref()) {
-            Some(v) if !self.panel => {
+            Some(v) if self.panel == Panel::None => {
                 let _ = v.focus();
             }
             _ => {
@@ -495,7 +544,8 @@ impl App {
                 "dark": self.ctx.dark.get(),
                 "maximized": self.ctx.window.is_maximized(),
                 "fullscreen": self.fullscreen(),
-                "panel": self.panel,
+                "panel": self.panel.name(),
+                "cpuCap": self.job.is_some(),
                 "peek": self.peek,
                 "frame": if self.ui_full() { "full" } else { "strip" },
                 "win": [w, h],
@@ -554,13 +604,29 @@ impl App {
             t.suspended = false;
             t.trimmed = false;
         }
+        self.limit_tab(i);
+    }
+
+    /// New page: give it the bandwidth cap and, if the Control page is open, a byte counter.
+    fn limit_tab(&mut self, i: usize) {
+        let t = &self.tabs[i];
+        let Some(v) = &t.view else { return };
+        if self.settings.net_limit {
+            monitor::throttle(v, Some(self.settings.net_limit_kbps));
+        }
+        if self.panel == Panel::Control
+            && !self.watches.contains_key(&t.id)
+            && let Some(w) = monitor::watch(v, t.id, self.net.clone())
+        {
+            self.watches.insert(t.id, w);
+        }
     }
 
     fn activate(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
-        self.panel = false;
+        self.leave_panel();
         self.ensure_view(i);
         // Show the new page first, then hide the old. No flash of empty stage between.
         self.layout();
@@ -601,6 +667,9 @@ impl App {
     fn close(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
         let t = self.tabs.remove(i);
+        if let Some(w) = self.watches.remove(&id) {
+            monitor::unwatch(None, w, true);
+        }
         if !t.url.is_empty() {
             self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned });
             if self.closed.len() > MAX_CLOSED {
@@ -628,6 +697,9 @@ impl App {
         if t.id == self.active || t.view.is_none() {
             return;
         }
+        if let Some(w) = self.watches.remove(&t.id) {
+            monitor::unwatch(None, w, true);
+        }
         t.view = None;
         t.suspended = false;
         t.trimmed = false;
@@ -638,7 +710,7 @@ impl App {
     fn navigate(&mut self, raw: &str) {
         let Some(url) = resolve_input(raw, &self.settings.search) else { return };
         let i = self.active_idx();
-        self.panel = false;
+        self.leave_panel();
         if let Some(v) = &self.tabs[i].view {
             let _ = v.load_url(&url);
             self.tabs[i].url = url;
@@ -662,14 +734,136 @@ impl App {
         self.activate(id);
     }
 
-    fn set_panel(&mut self, open: bool) {
-        self.panel = open;
+    fn set_panel(&mut self, p: Panel) {
+        let was = self.panel;
+        self.panel = p;
+        if was == Panel::Control && p != Panel::Control {
+            self.stop_monitor();
+        }
+        if p == Panel::Control && was != Panel::Control {
+            self.start_monitor();
+        }
         if let Some(v) = self.active_tab().and_then(|t| t.view.as_ref()) {
-            let _ = v.set_visible(!open);
+            let _ = v.set_visible(p == Panel::None);
         }
         self.layout();
         self.focus_page();
         self.push();
+    }
+
+    /// Switching tabs or navigating closes any panel, quietly.
+    fn leave_panel(&mut self) {
+        if self.panel == Panel::Control {
+            self.stop_monitor();
+        }
+        self.panel = Panel::None;
+    }
+
+    fn start_monitor(&mut self) {
+        self.net.borrow_mut().clear();
+        self.prev_cpu.clear();
+        for i in 0..self.tabs.len() {
+            self.limit_tab(i);
+        }
+        self.sample();
+    }
+
+    fn stop_monitor(&mut self) {
+        self.next_sample = None;
+        let keep = self.settings.net_limit;
+        for (id, w) in std::mem::take(&mut self.watches) {
+            let v = self.idx(id).and_then(|i| self.tabs[i].view.as_ref());
+            monitor::unwatch(v, w, keep);
+        }
+    }
+
+    fn sample(&mut self) {
+        self.next_sample = Some(Instant::now() + SAMPLE);
+        if let Some(env) = self.ctx.env.borrow().as_ref() {
+            monitor::sample(env, self.ctx.proxy.clone());
+        }
+    }
+
+    /// Raw process numbers in; per-tab memory, CPU and network out, straight to the UI.
+    fn on_usage(&mut self, procs: Vec<monitor::Proc>) {
+        if self.panel != Panel::Control {
+            return;
+        }
+        let now = Instant::now();
+        let secs = (now - self.prev_at).as_secs_f64().max(0.001);
+        self.prev_at = now;
+        let first = self.prev_cpu.is_empty();
+        // Main-frame id -> tab.
+        let mut owner: HashMap<u32, u64> = HashMap::new();
+        for t in &self.tabs {
+            if let Some(f) = t.view.as_ref().and_then(monitor::frame_id) {
+                owner.insert(f, t.id);
+            }
+        }
+        let ui_frame = monitor::frame_id(&self.ui);
+        let mut tabs: HashMap<u64, (f64, f64)> = HashMap::new();
+        let (mut ui, mut core, mut total) = ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
+        let mut next_cpu = HashMap::new();
+        let mut parts: Vec<Value> = Vec::new();
+        for p in &procs {
+            let prev = self.prev_cpu.get(&p.pid).copied().unwrap_or(p.cpu);
+            next_cpu.insert(p.pid, p.cpu);
+            // 100 ns ticks to percent of the whole machine.
+            let cpu = if first { 0.0 } else { (p.cpu.saturating_sub(prev) as f64 / 1e7) / secs / self.cores * 100.0 };
+            let mem = p.mem as f64;
+            total.0 += mem;
+            total.1 += cpu;
+            let mine: Vec<u64> = p.frames.iter().filter_map(|f| owner.get(f).copied()).collect();
+            if !mine.is_empty() {
+                // A process shared by several tabs: split it evenly. Honest enough.
+                let n = mine.len() as f64;
+                for id in mine {
+                    let e = tabs.entry(id).or_default();
+                    e.0 += mem / n;
+                    e.1 += cpu / n;
+                }
+            } else if ui_frame.is_some_and(|f| p.frames.contains(&f)) {
+                ui = (ui.0 + mem, ui.1 + cpu);
+            } else {
+                core = (core.0 + mem, core.1 + cpu);
+                parts.push(json!({"kind": p.kind, "mem": mem, "cpu": cpu}));
+            }
+        }
+        self.prev_cpu = next_cpu;
+        let net: HashMap<u64, u64> = std::mem::take(&mut *self.net.borrow_mut());
+        let net_total: u64 = net.values().sum();
+        let per_tab: serde_json::Map<String, Value> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let (m, c) = tabs.get(&t.id).copied().unwrap_or_default();
+                let n = net.get(&t.id).copied().unwrap_or(0) as f64 / secs;
+                (t.id.to_string(), json!({"mem": m, "cpu": c, "net": n}))
+            })
+            .collect();
+        let report = json!({
+            "tabs": per_tab,
+            "ui": {"mem": ui.0, "cpu": ui.1},
+            "core": {"mem": core.0, "cpu": core.1, "parts": parts},
+            "total": {"mem": total.0, "cpu": total.1, "net": net_total as f64 / secs, "procs": procs.len()},
+        });
+        let _ = self.ui.evaluate_script(&format!("window.lumen&&lumen.usage&&lumen.usage({report})"));
+    }
+
+    /// CPU cap and bandwidth cap. The RAM limit is enforced in tick().
+    fn apply_limits(&mut self, old: Option<&Settings>) {
+        let s = &self.settings;
+        let cpu_changed = old.is_none_or(|o| (o.cpu_limit, o.cpu_limit_pct) != (s.cpu_limit, s.cpu_limit_pct));
+        if cpu_changed && let Some(job) = &self.job {
+            job.cap_cpu(s.cpu_limit.then_some(s.cpu_limit_pct));
+        }
+        let net_changed = old.is_some_and(|o| (o.net_limit, o.net_limit_kbps) != (s.net_limit, s.net_limit_kbps));
+        if net_changed {
+            let cap = s.net_limit.then_some(s.net_limit_kbps);
+            for v in self.tabs.iter().filter_map(|t| t.view.as_ref()) {
+                monitor::throttle(v, cap);
+            }
+        }
     }
 
     fn set_fullscreen(&mut self) {
@@ -733,6 +927,7 @@ impl App {
             self.rounded = None;
         }
         self.blocker.set_enabled(self.settings.adblock);
+        self.apply_limits(Some(&old));
         store::save_settings(&self.settings);
         self.layout();
         self.push();
@@ -807,6 +1002,7 @@ impl App {
                 }
             }
             Ev::CloseMe(id) => self.close(id),
+            Ev::Usage(procs) => self.on_usage(procs),
             Ev::Popup(id) => {
                 let found = {
                     let mut p = self.ctx.popups.borrow_mut();
@@ -818,6 +1014,7 @@ impl App {
                     t.title = "Loading…".into();
                     let at = (self.active_idx() + 1).max(self.pinned_count()).min(self.tabs.len());
                     self.tabs.insert(at, t);
+                    self.limit_tab(at);
                     self.activate(id);
                 }
             }
@@ -879,7 +1076,14 @@ impl App {
                 self.user_fs = !self.user_fs;
                 self.set_fullscreen();
             }
-            Action::Settings => self.set_panel(!self.panel),
+            Action::Settings => {
+                let p = if self.panel == Panel::Settings { Panel::None } else { Panel::Settings };
+                self.set_panel(p);
+            }
+            Action::Control => {
+                let p = if self.panel == Panel::Control { Panel::None } else { Panel::Control };
+                self.set_panel(p);
+            }
             Action::DevTools => match &self.tabs[i].view {
                 Some(v) => v.open_devtools(),
                 None => self.ui.open_devtools(),
@@ -1006,7 +1210,14 @@ impl App {
                     self.apply_settings(s);
                 }
             }
-            "panel" => self.set_panel(m["open"].as_bool().unwrap_or(false)),
+            "panel" => {
+                let p = match (m["open"].as_bool().unwrap_or(false), m["which"].as_str()) {
+                    (false, _) => Panel::None,
+                    (true, Some("control")) => Panel::Control,
+                    (true, _) => Panel::Settings,
+                };
+                self.set_panel(p);
+            }
             "peek" => {
                 self.peek = m["on"].as_bool().unwrap_or(false);
                 self.layout();
@@ -1058,6 +1269,7 @@ impl App {
                 self.ui_dirty = true;
             }
         }
+        self.enforce_ram(now);
 
         // The UI never said ready. Show the window anyway so the user is not stuck.
         if !self.shown && now - self.born > Duration::from_secs(3) {
@@ -1067,6 +1279,33 @@ impl App {
 
         if self.dirty {
             self.save_session();
+        }
+    }
+
+    /// Soft RAM limit. Over it: unload the hidden tab looked at longest ago.
+    /// One per tick, so a spike never empties the window.
+    fn enforce_ram(&mut self, now: Instant) {
+        if !self.settings.ram_limit {
+            return;
+        }
+        let used = if self.settings.show_memory {
+            self.mem.map_or(0, |m| m.0)
+        } else {
+            self.ctx.env.borrow().as_ref().map_or(0, |e| engine::memory(e).0)
+        };
+        if used <= self.settings.ram_limit_mb as u64 * 1024 * 1024 {
+            return;
+        }
+        let victim = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.id != self.active && t.view.is_some() && !t.pinned && !t.audio)
+            .min_by_key(|(_, t)| t.hidden_at.unwrap_or(now))
+            .map(|(i, _)| i);
+        if let Some(i) = victim {
+            self.discard(i);
+            self.push();
         }
     }
 

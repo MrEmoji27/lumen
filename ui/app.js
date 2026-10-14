@@ -46,6 +46,7 @@ window.lumen = {
     if (r) setFav(r, uri);
   },
   focusOmnibox() { addr.focus(); addr.select(); },
+  usage(u) { paintUsage(u); },
 };
 
 function render() {
@@ -119,7 +120,8 @@ reload.onclick = () => send({ t: reloadIcon === 'stop' ? 'stop' : 'reload' });
 $('#min').onclick = () => send({ t: 'win', a: 'min' });
 maxBtn.onclick = () => send({ t: 'win', a: 'max' });
 $('#close').onclick = () => send({ t: 'win', a: 'close' });
-$('#gear').onclick = () => send({ t: 'panel', open: !S.panel });
+$('#gear').onclick = () => send({ t: 'panel', open: S.panel !== 'settings', which: 'settings' });
+$('#mem').onclick = () => send({ t: 'panel', open: S.panel !== 'control', which: 'control' });
 $('#newtab').onclick = () => send({ t: 'newtab' });
 
 // Drag the window from any empty bit of the top bar. Resize from the top edge.
@@ -384,12 +386,18 @@ function footer() {
 }
 
 // ------------------------------------------------------------------ pages
-const stage = $('#stage'), ntp = $('#ntp'), setEl = $('#set');
+const stage = $('#stage'), ntp = $('#ntp'), setEl = $('#set'), ctlEl = $('#ctl');
 function pages() {
   const t = active();
-  const showSet = S.panel;
-  const showNtp = !showSet && !!t && t.status === 'new';
-  stage.hidden = !(showSet || showNtp);
+  const showSet = S.panel === 'settings';
+  const showCtl = S.panel === 'control';
+  const showNtp = S.panel === 'none' && !!t && t.status === 'new';
+  stage.hidden = !(showSet || showCtl || showNtp);
+  if (ctlEl.hidden === showCtl) {
+    ctlEl.hidden = !showCtl;
+    if (showCtl) openControl();
+  }
+  if (showCtl) syncControl();
   if (ntp.hidden === showNtp) {
     ntp.hidden = !showNtp;
     if (showNtp) openNtp();
@@ -506,7 +514,7 @@ const KEYS = [
   ['New tab', 'Ctrl+T'], ['Reopen closed tab', 'Ctrl+Shift+T'], ['Close tab', 'Ctrl+W'],
   ['Address bar', 'Ctrl+L'], ['Next / previous tab', 'Ctrl+Tab / Ctrl+Shift+Tab'], ['Jump to tab', 'Ctrl+1…9'],
   ['Back / forward', 'Alt+← / Alt+→'], ['Reload', 'Ctrl+R'], ['Compact sidebar', 'Ctrl+B'],
-  ['Find in page', 'Ctrl+F'], ['Fullscreen', 'F11'], ['Settings', 'Ctrl+,'], ['Developer tools', 'F12'],
+  ['Find in page', 'Ctrl+F'], ['Fullscreen', 'F11'], ['Settings', 'Ctrl+,'], ['Control (memory, CPU, network)', 'Shift+Esc'], ['Developer tools', 'F12'],
 ];
 
 let built = false;
@@ -599,15 +607,124 @@ function setOpt(k, v, now, delay) {
   S.settings = { ...S.settings, [k]: v };
   look();
   syncSettings();
+  syncControl();
   clearTimeout(sendTimer);
   const go = () => send({ t: 'settings', v: S.settings });
   if (now || !delay) go(); else sendTimer = setTimeout(go, delay);
 }
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && S && S.panel && !editing) { e.preventDefault(); send({ t: 'panel', open: false }); }
+  if (e.key === 'Escape' && S && S.panel !== 'none' && !editing) { e.preventDefault(); send({ t: 'panel', open: false }); }
   if (e.key === 'Escape') closeMenu();
 });
+
+// ---------------------------------------------------------------- control
+// Live use per tab, and the three limiters. Numbers arrive once a second
+// while this page is open; nothing runs when it is closed.
+const RAM_STEPS = [512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
+const NET_STEPS = [32, 64, 128, 256, 512, 1024, 2048, 5120, 10240, 25600, 51200, 102400];
+const nearest = (steps, v) => steps.reduce((bi, s, i) => Math.abs(s - v) < Math.abs(steps[bi] - v) ? i : bi, 0);
+const fmtMem = b => { const mb = b / 1048576; return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb >= 10 ? Math.round(mb) + ' MB' : mb.toFixed(1) + ' MB'; };
+const fmtMB = mb => mb >= 1024 ? (mb / 1024).toFixed(mb % 1024 ? 1 : 0) + ' GB' : mb + ' MB';
+const fmtCpu = c => c >= 10 ? Math.round(c) + '%' : c.toFixed(1) + '%';
+const fmtNet = bps => bps < 1 ? '—' : bps >= 1048576 ? (bps / 1048576).toFixed(1) + ' MB/s' : Math.max(1, Math.round(bps / 1024)) + ' KB/s';
+const fmtKbps = k => k >= 1024 ? (k / 1024).toFixed(k % 1024 ? 1 : 0) + ' MB/s' : k + ' KB/s';
+const KIND = { browser: 'Browser', gpu: 'Graphics', utility: 'Services', host: 'Lumen', renderer: 'Spare renderer', other: 'Other' };
+
+let ctlBuilt = false, U = null;
+function openControl() {
+  if (!ctlBuilt) buildControl();
+  syncControl();
+}
+
+function buildControl() {
+  ctlBuilt = true;
+  ctlEl.innerHTML = `
+    <div class="ctl-in">
+      <header class="ctl-head">
+        <h1>Control</h1>
+        <button class="link" id="ctl-done">Done <span>Esc</span></button>
+      </header>
+      <div class="stats">
+        <div><b id="st-mem">—</b><small>Memory</small></div>
+        <div><b id="st-cpu">—</b><small>CPU</small></div>
+        <div><b id="st-net">—</b><small>Network</small></div>
+        <div><b id="st-procs">—</b><small>Processes</small></div>
+      </div>
+      <div class="use">
+        <div class="use-h"><span>Tab</span><span>Memory</span><span>CPU</span><span>Network</span><span></span></div>
+        <div id="use-rows"></div>
+      </div>
+      <h2>Limits</h2>
+      <div class="opt"><div class="lab"><b>RAM limit</b><small>Over the limit, the hidden tab you looked at longest ago unloads.</small></div>
+        <div class="ctl"><input type="range" id="lim-ram" min="0" max="${RAM_STEPS.length - 1}" step="1"><span class="val" id="lim-ram-v"></span><button class="tog" data-lim="ram_limit" role="switch" aria-label="RAM limit"></button></div></div>
+      <div class="opt"><div class="lab"><b>CPU limit</b><small id="lim-cpu-hint">Hard cap for the whole browser, share of all cores.</small></div>
+        <div class="ctl"><input type="range" id="lim-cpu" min="5" max="100" step="5"><span class="val" id="lim-cpu-v"></span><button class="tog" data-lim="cpu_limit" role="switch" aria-label="CPU limit"></button></div></div>
+      <div class="opt"><div class="lab"><b>Network limit</b><small>Bandwidth cap for each tab.</small></div>
+        <div class="ctl"><input type="range" id="lim-net" min="0" max="${NET_STEPS.length - 1}" step="1"><span class="val" id="lim-net-v"></span><button class="tog" data-lim="net_limit" role="switch" aria-label="Network limit"></button></div></div>
+      <div class="opt"><div class="lab"><b>Graphics in browser process</b><small>About 100 MB less memory. A graphics driver crash then restarts the whole browser. Applies after restart.</small></div>
+        <div class="ctl"><button class="tog" data-lim="gpu_in_process" role="switch" aria-label="Graphics in browser process"></button></div></div>
+    </div>`;
+  $('#ctl-done').onclick = () => send({ t: 'panel', open: false });
+  ctlEl.querySelectorAll('[data-lim]').forEach(b => b.addEventListener('click', () => setOpt(b.dataset.lim, !S.settings[b.dataset.lim])));
+  $('#lim-ram').addEventListener('input', e => setOpt('ram_limit_mb', RAM_STEPS[+e.target.value], false, 60));
+  $('#lim-cpu').addEventListener('input', e => setOpt('cpu_limit_pct', +e.target.value, false, 60));
+  $('#lim-net').addEventListener('input', e => setOpt('net_limit_kbps', NET_STEPS[+e.target.value], false, 60));
+  $('#use-rows').addEventListener('click', e => {
+    const b = e.target.closest('button[data-a]');
+    if (b) send({ t: b.dataset.a, id: +b.dataset.id });
+  });
+}
+
+function syncControl() {
+  if (!ctlBuilt || !S) return;
+  const st = S.settings;
+  const range = (id, idx, label) => {
+    const r = $(id);
+    if (document.activeElement !== r && +r.value !== idx) r.value = idx;
+    r.style.setProperty('--p', ((r.value - r.min) / (r.max - r.min) * 100) + '%');
+    $(id + '-v').textContent = label;
+  };
+  range('#lim-ram', nearest(RAM_STEPS, st.ram_limit_mb), fmtMB(st.ram_limit_mb));
+  range('#lim-cpu', st.cpu_limit_pct, st.cpu_limit_pct + '%');
+  range('#lim-net', nearest(NET_STEPS, st.net_limit_kbps), fmtKbps(st.net_limit_kbps));
+  ctlEl.querySelectorAll('[data-lim]').forEach(b => { tog(b, 'on', !!st[b.dataset.lim]); b.setAttribute('aria-checked', !!st[b.dataset.lim]); });
+  const cpuTog = ctlEl.querySelector('[data-lim="cpu_limit"]');
+  cpuTog.disabled = !S.cpuCap;
+  $('#lim-cpu-hint').textContent = S.cpuCap ? 'Hard cap for the whole browser, share of all cores.' : 'Not available: Windows did not let Lumen manage its processes.';
+}
+
+function paintUsage(u) {
+  if (!ctlBuilt || ctlEl.hidden) return;
+  U = u;
+  $('#st-mem').textContent = fmtMem(u.total.mem);
+  $('#st-cpu').textContent = fmtCpu(u.total.cpu);
+  $('#st-net').textContent = fmtNet(u.total.net);
+  $('#st-procs').textContent = u.total.procs;
+  const max = Math.max(1, u.total.mem);
+  const rowsHtml = [];
+  const tabs = S.tabs.map(t => ({ t, x: u.tabs[t.id] || { mem: 0, cpu: 0, net: 0 } }))
+    .sort((a, b) => b.x.mem - a.x.mem);
+  for (const { t, x } of tabs) {
+    const f = favs.get(t.id);
+    const name = t.title || (t.status === 'new' ? 'New tab' : host(t.url) || 'Untitled');
+    const state = t.status === 'off' ? 'Unloaded' : t.status === 'asleep' ? 'Frozen' : t.status === 'new' ? '' : t.id === S.active ? 'Active' : '';
+    const live = t.status === 'live' || t.status === 'asleep';
+    rowsHtml.push(`<div class="use-r${live ? '' : ' off'}">
+      <span class="use-name"><span class="fav">${f ? `<img src="${esc(f)}" alt="">` : `<i class="mono">${esc((host(t.url) || '+')[0].toUpperCase())}</i>`}</span><span class="nm">${esc(name)}</span>${state ? `<em>${state}</em>` : ''}</span>
+      <span class="num">${live ? fmtMem(x.mem) : '—'}<i class="bar" style="--w:${(x.mem / max * 100).toFixed(1)}%"></i></span>
+      <span class="num">${live ? fmtCpu(x.cpu) : '—'}</span>
+      <span class="num">${live ? fmtNet(x.net) : '—'}</span>
+      <span class="acts">${live && t.id !== S.active ? `<button class="link" data-a="sleep" data-id="${t.id}">Unload</button>` : ''}</span>
+    </div>`);
+  }
+  const sys = (name, x, note) => `<div class="use-r sys"><span class="use-name"><span class="fav"><i class="mono sys">·</i></span><span class="nm">${name}</span>${note ? `<em>${note}</em>` : ''}</span>
+    <span class="num">${fmtMem(x.mem)}<i class="bar" style="--w:${(x.mem / max * 100).toFixed(1)}%"></i></span><span class="num">${fmtCpu(x.cpu)}</span><span class="num">—</span><span class="acts"></span></div>`;
+  rowsHtml.push(sys('Lumen interface', u.ui));
+  const parts = (u.core.parts || []).filter(p => p.mem > 0).sort((a, b) => b.mem - a.mem).map(p => KIND[p.kind] || p.kind).filter((n, i, a) => a.indexOf(n) === i).join(', ');
+  rowsHtml.push(sys('Browser core', u.core, parts));
+  $('#use-rows').innerHTML = rowsHtml.join('');
+}
 
 send({ t: 'ready' });
 })();

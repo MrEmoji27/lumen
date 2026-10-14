@@ -54,6 +54,17 @@ pub struct Settings {
     pub adblock: bool,
     pub show_memory: bool,
     pub shortcuts: Vec<Shortcut>,
+    /// Run GPU work inside the browser process. About 100 MB less. Applies on restart.
+    pub gpu_in_process: bool,
+    /// Soft RAM limit: over it, the oldest hidden tabs are unloaded.
+    pub ram_limit: bool,
+    pub ram_limit_mb: u32,
+    /// Hard CPU cap for the whole browser, percent of all cores (Windows Job Object).
+    pub cpu_limit: bool,
+    pub cpu_limit_pct: u32,
+    /// Bandwidth cap per tab, KB/s.
+    pub net_limit: bool,
+    pub net_limit_kbps: u32,
 }
 
 impl Default for Settings {
@@ -78,6 +89,13 @@ impl Default for Settings {
             tracking: "balanced".into(),
             adblock: true,
             show_memory: true,
+            gpu_in_process: true,
+            ram_limit: false,
+            ram_limit_mb: 2048,
+            cpu_limit: false,
+            cpu_limit_pct: 50,
+            net_limit: false,
+            net_limit_kbps: 2048,
             shortcuts: vec![
                 s("YouTube", "https://www.youtube.com"),
                 s("GitHub", "https://github.com"),
@@ -111,6 +129,9 @@ impl Settings {
         self.radius = self.radius.clamp(0, 20);
         self.sleep_after_min = self.sleep_after_min.clamp(1, 240);
         self.discard_after_min = self.discard_after_min.clamp(self.sleep_after_min, 1440);
+        self.ram_limit_mb = self.ram_limit_mb.clamp(512, 32768);
+        self.cpu_limit_pct = self.cpu_limit_pct.clamp(5, 100);
+        self.net_limit_kbps = self.net_limit_kbps.clamp(32, 1_000_000);
         if !self.search.contains("%s") {
             self.search = Settings::default().search;
         }
