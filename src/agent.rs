@@ -409,6 +409,8 @@ const t=__TEXT__;e.scrollIntoView({block:'center'});e.focus();
 if(e.isContentEditable){e.textContent=t;}else{const p=Object.getPrototypeOf(e);const d=Object.getOwnPropertyDescriptor(p,'value');
 if(d&&d.set)d.set.call(e,t);else e.value=t;}
 e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));
-if(__SUBMIT__){const k={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true};e.dispatchEvent(new KeyboardEvent('keydown',k));e.dispatchEvent(new KeyboardEvent('keypress',k));e.dispatchEvent(new KeyboardEvent('keyup',k));
-if(e.form){if(e.form.requestSubmit)e.form.requestSubmit();else e.form.submit();}}
+if(__SUBMIT__){const k={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};
+// A page that handles Enter itself says so with preventDefault; then the form is not submitted a second time.
+const free=e.dispatchEvent(new KeyboardEvent('keydown',k))&&e.dispatchEvent(new KeyboardEvent('keypress',k));e.dispatchEvent(new KeyboardEvent('keyup',k));
+if(free&&e.form){if(e.form.requestSubmit)e.form.requestSubmit();else e.form.submit();}}
 return 'ok';})()"#;
