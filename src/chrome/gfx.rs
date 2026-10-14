@@ -543,6 +543,25 @@ impl Gfx {
                     l(p(13.5, 6.5), p(10.5, 9.5));
                 }
             }
+            "star" | "star-on" => {
+                let pts: Vec<(f32, f32)> = (0..10)
+                    .map(|n| {
+                        let a = (-90.0 + n as f32 * 36.0).to_radians();
+                        let r = if n % 2 == 0 { 6.0 } else { 2.6 };
+                        p(8.0 + r * a.cos(), 8.4 + r * a.sin())
+                    })
+                    .collect();
+                self.polyline(&pts, c, w, true);
+                if name == "star-on" {
+                    let (cx, cy) = p(8.0, 8.4);
+                    self.circle(cx, cy, 2.8 * k, c);
+                }
+            }
+            "clock" => {
+                let (cx, cy) = p(8.0, 8.0);
+                self.ring(cx, cy, 5.5 * k, 5.5 * k, c, w);
+                self.polyline(&[p(8.0, 5.0), p(8.0, 8.0), p(10.2, 9.4)], c, w, false);
+            }
             "download" => {
                 l(p(8.0, 2.5), p(8.0, 11.0));
                 self.polyline(&[p(4.5, 7.5), p(8.0, 11.0), p(11.5, 7.5)], c, w, false);

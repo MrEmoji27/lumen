@@ -91,6 +91,20 @@ pub struct UiState {
     pub prompt: Option<(u64, String, &'static str)>,
     /// Remembered answers: (origin, what, allowed).
     pub rules: Vec<(String, String, bool)>,
+    /// The active page is bookmarked.
+    pub bookmarked: bool,
+    /// Filled only while the History page is open.
+    pub history: Vec<UiVisit>,
+    /// Filled only while the Bookmarks page is open: (url, title).
+    pub bookmarks: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UiVisit {
+    pub url: String,
+    pub title: String,
+    pub day: String,
+    pub time: String,
 }
 
 impl UiState {
@@ -126,6 +140,7 @@ pub enum Hit {
     AgentStop,
     PermAllow(u64),
     PermBlock(u64),
+    Star,
     Sugg(usize),
     Shortcut(usize),
     NtpSearch,
@@ -144,6 +159,8 @@ enum SuggKind {
     Go(String),
     Search(String),
     Tab(u64),
+    /// From history (false) or bookmarks (true).
+    Url(String, bool),
 }
 
 struct Drag {
@@ -367,6 +384,28 @@ impl Chrome {
             .unwrap_or_default();
         i.gfx.bitmaps.remove(&id);
         i.favs.insert(id, png);
+        i.invalidate();
+    }
+
+    /// History and bookmark matches for `q`, from the main loop. Merged if still current.
+    pub fn set_suggest(&self, q: &str, hits: Vec<(String, String, bool)>) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        if !i.editing || wide_text(i.edit).trim() != q {
+            return;
+        }
+        let at = i.sugg.iter().position(|s| matches!(s.kind, SuggKind::Tab(_))).unwrap_or(i.sugg.len());
+        let mut add = Vec::new();
+        for (url, title, bm) in hits {
+            if i.sugg.iter().any(|s| matches!(&s.kind, SuggKind::Go(u) if *u == url)) {
+                continue;
+            }
+            let label = if title.is_empty() { url.clone() } else { title };
+            add.push(Sugg { kind: SuggKind::Url(url, bm), label });
+        }
+        for (n, s) in add.into_iter().enumerate() {
+            i.sugg.insert(at + n, s);
+        }
+        i.sugg.truncate(9);
         i.invalidate();
     }
 
@@ -624,6 +663,7 @@ impl Inner {
             self.sugg.push(Sugg { kind: SuggKind::Go(q.clone()), label: q.clone() });
         }
         self.sugg.push(Sugg { kind: SuggKind::Search(q.clone()), label: q.clone() });
+        send(&self.proxy, json!({"t": "suggest", "q": q}));
         let lq = q.to_lowercase();
         if let Some(s) = &self.state {
             for t in s.tabs.iter().filter(|t| t.id != s.active && !t.url.is_empty()) {
@@ -643,7 +683,7 @@ impl Inner {
         let Some(sg) = self.sugg.get(i).cloned() else { return };
         match sg.kind {
             SuggKind::Tab(id) => send(&self.proxy, json!({"t": "activate", "id": id})),
-            SuggKind::Go(q) | SuggKind::Search(q) => send(&self.proxy, json!({"t": "nav", "url": q})),
+            SuggKind::Go(q) | SuggKind::Search(q) | SuggKind::Url(q, _) => send(&self.proxy, json!({"t": "nav", "url": q})),
         }
         self.end_edit();
     }
@@ -780,6 +820,14 @@ impl Inner {
             }
         }
         self.hit(o, Hit::Omni);
+        if !compact && !focused && act.as_ref().is_some_and(|t| !t.url.is_empty() && !t.agent) {
+            let r = R::new(o.right() - 30.0, o.y + 5.0, 24.0, 24.0);
+            if self.is_hover(&Hit::Star) {
+                self.gfx.round(r, 6.0, th.hover);
+            }
+            self.gfx.icon(if s.bookmarked { "star-on" } else { "star" }, r.x + 4.0, r.y + 4.0, 16.0, if s.bookmarked { th.accent } else { th.faint });
+            self.hit(r, Hit::Star);
+        }
 
         // Tabs.
         let list_top = if compact { 148.0 } else { 90.0 };
@@ -873,6 +921,8 @@ impl Inner {
                     SuggKind::Go(_) => ("globe", "Open"),
                     SuggKind::Search(_) => ("search", "Search"),
                     SuggKind::Tab(_) => ("tab", "Switch to tab"),
+                    SuggKind::Url(_, true) => ("star", "Bookmark"),
+                    SuggKind::Url(_, false) => ("clock", "History"),
                 };
                 self.gfx.icon(icon, r.x + 8.0, r.y + 7.0, 16.0, th.faint);
                 let hw = self.gfx.measure(hint, Font::ui(11.5, 400)) + 10.0;
@@ -1238,6 +1288,7 @@ impl Inner {
             }
             Hit::AgentStop => send(p, json!({"t": "agentStop"})),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
+            Hit::Star => send(p, json!({"t": "bookmark"})),
             Hit::PermBlock(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": false})),
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {

@@ -4,10 +4,12 @@
 //! One window. A slim UI page for the sidebar. Pages beside it.
 //! Rust decides who lives, who sleeps, and when the UI hears about it.
 
+mod aria;
 mod agent;
 mod blocker;
 mod chrome;
 mod engine;
+mod library;
 mod monitor;
 mod store;
 
@@ -47,6 +49,8 @@ enum Panel {
     Settings,
     Control,
     Downloads,
+    History,
+    Bookmarks,
 }
 
 impl Panel {
@@ -56,6 +60,8 @@ impl Panel {
             Panel::Settings => "settings",
             Panel::Control => "control",
             Panel::Downloads => "downloads",
+            Panel::History => "history",
+            Panel::Bookmarks => "bookmarks",
         }
     }
 }
@@ -157,6 +163,8 @@ struct App {
     /// Remembered permission answers, and requests waiting for the user.
     rules: store::Rules,
     prompts: Vec<(u64, u64, String, &'static str)>,
+    /// History and bookmarks.
+    library: library::Library,
 }
 
 fn main() {
@@ -253,6 +261,7 @@ fn main() {
         mods: ModifiersState::empty(),
         rules: store::load_rules(),
         prompts: Vec::new(),
+        library: library::Library::load(&store::data_dir()),
     };
     app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
     app.apply_backdrop();
@@ -322,6 +331,7 @@ fn main() {
             _ => {}
         }
         if app.exit {
+            app.library.flush();
             app.save_session();
             *cf = ControlFlow::Exit;
         } else {
@@ -459,6 +469,9 @@ fn vk_of(k: KeyCode) -> Option<u32> {
         KeyR => letter('R'),
         KeyB => letter('B'),
         KeyJ => letter('J'),
+        KeyD => letter('D'),
+        KeyH => letter('H'),
+        KeyO => letter('O'),
         KeyI => letter('I'),
         Digit1 => letter('1'),
         Digit2 => letter('2'),
@@ -480,6 +493,37 @@ fn vk_of(k: KeyCode) -> Option<u32> {
         Comma => Some(0xBC),
         _ => None,
     }
+}
+
+/// Unix seconds to ("Today" / "Yesterday" / "Monday 12 October", "14:05"), local time.
+fn local_day_time(secs: u64) -> (String, String) {
+    use windows::Win32::{
+        Foundation::{FILETIME, SYSTEMTIME},
+        System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime},
+    };
+    let to_local = |s: u64| -> SYSTEMTIME {
+        let ft100 = (s + 11_644_473_600) * 10_000_000;
+        let ft = FILETIME { dwLowDateTime: ft100 as u32, dwHighDateTime: (ft100 >> 32) as u32 };
+        let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+        unsafe {
+            let _ = FileTimeToSystemTime(&ft, &mut utc);
+            let _ = SystemTimeToTzSpecificLocalTime(None, &utc, &mut local);
+        }
+        local
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let (t, today, yday) = (to_local(secs), to_local(now), to_local(now.saturating_sub(86_400)));
+    let same = |a: &SYSTEMTIME, b: &SYSTEMTIME| (a.wYear, a.wMonth, a.wDay) == (b.wYear, b.wMonth, b.wDay);
+    const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let day = if same(&t, &today) {
+        "Today".to_string()
+    } else if same(&t, &yday) {
+        "Yesterday".to_string()
+    } else {
+        format!("{} {} {}", DAYS[t.wDayOfWeek as usize % 7], t.wDay, MONTHS[(t.wMonth as usize).saturating_sub(1) % 12])
+    };
+    (day, format!("{:02}:{:02}", t.wHour, t.wMinute))
 }
 
 /// Open a downloaded file, or show it selected in Explorer.
@@ -651,6 +695,24 @@ impl App {
                     })
                     .collect(),
                 agent_busy: self.agent_seen.is_some(),
+                bookmarked: self.active_tab().is_some_and(|t| !t.url.is_empty() && self.library.is_bookmarked(&t.url)),
+                history: if self.panel == Panel::History {
+                    self.library
+                        .recent("", 0, 400)
+                        .into_iter()
+                        .map(|v| {
+                            let (day, time) = local_day_time(v.last);
+                            chrome::UiVisit { url: v.url, title: v.title, day, time }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                bookmarks: if self.panel == Panel::Bookmarks {
+                    self.library.bookmarks().into_iter().map(|b| (b.url, b.title)).collect()
+                } else {
+                    Vec::new()
+                },
                 prompt: self
                     .prompts
                     .iter()
@@ -1061,6 +1123,9 @@ impl App {
             Ev::Key(a) => self.on_key(a),
             Ev::Title(id, t) => {
                 if let Some(i) = self.idx(id) {
+                    if !self.tabs[i].agent {
+                        self.library.set_title(&self.tabs[i].url, &t);
+                    }
                     self.tabs[i].title = t;
                     self.dirty = true;
                     self.push();
@@ -1068,6 +1133,10 @@ impl App {
             }
             Ev::Url(id, u) => {
                 if let Some(i) = self.idx(id) {
+                    // Agents browse off the record.
+                    if !self.tabs[i].agent {
+                        self.library.visit(&u, &self.tabs[i].title);
+                    }
                     self.tabs[i].url = u;
                     self.dirty = true;
                     self.push();
@@ -1226,6 +1295,15 @@ impl App {
                 let p = if self.panel == Panel::Settings { Panel::None } else { Panel::Settings };
                 self.set_panel(p);
             }
+            Action::Bookmark => self.toggle_bookmark(),
+            Action::History => {
+                let p = if self.panel == Panel::History { Panel::None } else { Panel::History };
+                self.set_panel(p);
+            }
+            Action::Bookmarks => {
+                let p = if self.panel == Panel::Bookmarks { Panel::None } else { Panel::Bookmarks };
+                self.set_panel(p);
+            }
             Action::Downloads => {
                 let p = if self.panel == Panel::Downloads { Panel::None } else { Panel::Downloads };
                 self.set_panel(p);
@@ -1356,6 +1434,8 @@ impl App {
                     (false, _) => Panel::None,
                     (true, Some("control")) => Panel::Control,
                     (true, Some("downloads")) => Panel::Downloads,
+                    (true, Some("history")) => Panel::History,
+                    (true, Some("bookmarks")) => Panel::Bookmarks,
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);
@@ -1382,6 +1462,29 @@ impl App {
                     }
                     _ => {}
                 }
+            }
+            "suggest" => {
+                let q = m["q"].as_str().unwrap_or("").to_string();
+                let hits = self
+                    .library
+                    .search(&q, 6)
+                    .into_iter()
+                    .map(|h| (h.url, h.title, h.kind == library::Kind::Bookmark))
+                    .collect();
+                self.chrome.set_suggest(&q, hits);
+            }
+            "bookmark" => self.toggle_bookmark(),
+            "unbookmark" => {
+                self.library.unbookmark(m["url"].as_str().unwrap_or(""));
+                self.push();
+            }
+            "forget" => {
+                self.library.forget(m["url"].as_str().unwrap_or(""));
+                self.push();
+            }
+            "clearHistory" => {
+                self.library.clear_history(None);
+                self.push();
             }
             "perm" => {
                 let pid = m["pid"].as_u64().unwrap_or(0);
@@ -1468,6 +1571,7 @@ impl App {
             }
         }
         self.enforce_ram(now);
+        self.library.flush();
         if self.agent_seen.is_some_and(|t| now - t > Duration::from_secs(6)) {
             self.agent_seen = None;
             self.push();
@@ -1583,6 +1687,20 @@ impl App {
                 let _ = reply.send(Ok(Value::Null));
             }
         }
+    }
+
+    fn toggle_bookmark(&mut self) {
+        let Some(t) = self.active_tab() else { return };
+        if t.url.is_empty() || t.agent {
+            return;
+        }
+        let (url, title) = (t.url.clone(), t.title.clone());
+        if self.library.is_bookmarked(&url) {
+            self.library.unbookmark(&url);
+        } else {
+            self.library.bookmark(&url, &title);
+        }
+        self.push();
     }
 
     /// Soft RAM limit. Over it: unload the hidden tab looked at longest ago.

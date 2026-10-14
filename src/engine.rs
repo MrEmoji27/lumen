@@ -95,6 +95,9 @@ pub enum Action {
     Settings,
     Control,
     Downloads,
+    Bookmark,
+    History,
+    Bookmarks,
     DevTools,
 }
 
@@ -476,6 +479,9 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (false, false, false, F12) => DevTools,
         (false, true, false, ESC) => Control,
         (true, false, false, v) if v == k('J') => Downloads,
+        (true, false, false, v) if v == k('D') => Bookmark,
+        (true, false, false, v) if v == k('H') => History,
+        (true, true, false, v) if v == k('O') => Bookmarks,
         (true, true, false, v) if v == k('I') => DevTools,
         _ => return None,
     })

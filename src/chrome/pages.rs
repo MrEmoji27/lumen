@@ -30,6 +30,10 @@ pub enum PageHit {
     Dl(&'static str, u64),
     DlClear,
     PermReset(usize),
+    Open(String),
+    Forget(String),
+    Unbookmark(String),
+    ClearHistory,
 }
 
 #[derive(Clone, Copy)]
@@ -79,7 +83,7 @@ const ENGINES: [(&str, &str); 5] = [
     ("Bing", "https://www.bing.com/search?q=%s"),
     ("Startpage", "https://www.startpage.com/do/search?q=%s"),
 ];
-const KEYS: [(&str, &str); 14] = [
+const KEYS: [(&str, &str); 17] = [
     ("New tab", "Ctrl+T"),
     ("Reopen closed tab", "Ctrl+Shift+T"),
     ("Close tab", "Ctrl+W"),
@@ -93,6 +97,9 @@ const KEYS: [(&str, &str); 14] = [
     ("Fullscreen", "F11"),
     ("Settings", "Ctrl+,"),
     ("Control", "Shift+Esc"),
+    ("Bookmark this page", "Ctrl+D"),
+    ("History / bookmarks", "Ctrl+H / Ctrl+Shift+O"),
+    ("Downloads", "Ctrl+J"),
     ("Developer tools", "F12"),
 ];
 
@@ -220,6 +227,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     match s.panel {
         "settings" => draw_settings(i, st, s),
         "downloads" => draw_downloads(i, st, s),
+        "history" | "bookmarks" => draw_library(i, st, s),
         _ => draw_control(i, st, s),
     }
 }
@@ -491,6 +499,77 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
 }
 
+/// History (grouped by day) or bookmarks: one quiet list, click to open, x to remove.
+fn draw_library(i: &mut Inner, st: R, s: &UiState) {
+    let th = i.theme;
+    let history = s.panel == "history";
+    let col = R::new(st.x + ((st.w - 760.0) / 2.0).max(40.0), st.y, st.w.min(760.0 + 80.0) - 80.0, st.h);
+    i.gfx.clip(st);
+    let mut y = st.y + 26.0 - i.page.scroll;
+    i.gfx.text(if history { "History" } else { "Bookmarks" }, R::new(col.x, y, 300.0, 40.0), Font::serif(30.0), th.text);
+    done_button(i, R::new(col.right() - 90.0, y + 5.0, 90.0, 30.0));
+    if history && !s.history.is_empty() {
+        let r = R::new(col.right() - 210.0, y + 10.0, 110.0, 20.0);
+        let h = Hit::Page(PageHit::ClearHistory);
+        i.gfx.text("Clear history", r, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
+        i.hit(r, h);
+    }
+    y += 60.0;
+    let rows: Vec<(String, String, String, String)> = if history {
+        s.history.iter().map(|v| (v.url.clone(), v.title.clone(), v.day.clone(), v.time.clone())).collect()
+    } else {
+        s.bookmarks.iter().map(|(u, t)| (u.clone(), t.clone(), String::new(), String::new())).collect()
+    };
+    if rows.is_empty() {
+        let msg = if history { "Nothing yet. Pages you visit show up here." } else { "No bookmarks yet. Press Ctrl+D or the star in the address bar." };
+        i.gfx.text(msg, R::new(col.x, y, col.w, 30.0), Font::ui(13.0, 400), th.faint);
+    }
+    let mut last_day = String::new();
+    for (url, title, day, time) in rows {
+        if history && day != last_day {
+            y += 8.0;
+            i.gfx.text(&day.to_uppercase(), R::new(col.x, y, col.w, 22.0), Font::ui(11.0, 600), th.faint);
+            y += 28.0;
+            last_day = day;
+        }
+        let r = R::new(col.x - 8.0, y, col.w + 16.0, 36.0);
+        if y > st.bottom() || y + 36.0 < st.y {
+            y += 37.0;
+            continue;
+        }
+        let open = Hit::Page(PageHit::Open(url.clone()));
+        let rm = Hit::Page(if history { PageHit::Forget(url.clone()) } else { PageHit::Unbookmark(url.clone()) });
+        let hov = i.is_hover(&open) || i.is_hover(&rm);
+        if hov {
+            i.gfx.round(r, 8.0, th.hover);
+        }
+        let mut x = col.x;
+        if history {
+            i.gfx.text(&time, R::new(x, y, 44.0, 36.0), Font::ui(12.0, 400), th.faint);
+            x += 54.0;
+        }
+        let name = if title.is_empty() { url.clone() } else { title };
+        let host = super::host(&url);
+        let hw = i.gfx.measure(&host, Font::ui(12.0, 400)) + 20.0;
+        let nw = (col.right() - x - hw - 40.0).max(80.0);
+        i.gfx.text(&name, R::new(x, y, nw, 36.0), Font::ui(13.0, 450), th.text);
+        let used = i.gfx.measure(&name, Font::ui(13.0, 450)).min(nw);
+        i.gfx.text(&host, R::new(x + used + 12.0, y, hw, 36.0), Font::ui(12.0, 400), th.faint);
+        i.hit(r, open);
+        if hov {
+            let xr = R::new(col.right() - 26.0, y + 7.0, 22.0, 22.0);
+            if i.is_hover(&rm) {
+                i.gfx.round(xr, 6.0, th.press);
+            }
+            i.gfx.icon("close", xr.x + 4.0, xr.y + 4.0, 14.0, th.dim);
+            i.hit(xr, rm);
+        }
+        y += 37.0;
+    }
+    i.gfx.unclip();
+    i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+}
+
 fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let schema = settings_schema();
@@ -738,6 +817,10 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::CopyAgent => super::copy_text(i.hwnd_raw(), &s.agent_cmd),
         PageHit::Dl(a, id) => send(&i.proxy, json!({"t": "dl", "a": a, "id": id})),
         PageHit::DlClear => send(&i.proxy, json!({"t": "dl", "a": "clear"})),
+        PageHit::Open(url) => send(&i.proxy, json!({"t": "nav", "url": url})),
+        PageHit::Forget(url) => send(&i.proxy, json!({"t": "forget", "url": url})),
+        PageHit::Unbookmark(url) => send(&i.proxy, json!({"t": "unbookmark", "url": url})),
+        PageHit::ClearHistory => send(&i.proxy, json!({"t": "clearHistory"})),
         PageHit::PermReset(n) => {
             if let Some((origin, kind, _)) = s.rules.get(n) {
                 send(&i.proxy, json!({"t": "permReset", "origin": origin, "kind": kind}));
