@@ -5,6 +5,7 @@
 //! them unchanged. The address bar and new-tab search are real Win32 edit boxes;
 //! everything else is drawn.
 
+mod anim;
 mod gfx;
 mod pages;
 pub mod theme;
@@ -179,6 +180,8 @@ pub(crate) struct Inner {
     sel: usize,
     born: Instant,
     spinning: bool,
+    anim: anim::Anims,
+    animating: bool,
     pub(crate) page: pages::Page,
     theme_key: String,
     mouse: (f32, f32),
@@ -195,6 +198,7 @@ const ID_EDIT: usize = 101;
 const ID_NTP: usize = 102;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
+const TIMER_ANIM: usize = 3;
 
 fn send(proxy: &EventLoopProxy<Ev>, v: Value) {
     let _ = proxy.send_event(Ev::Ui(v.to_string()));
@@ -310,6 +314,8 @@ impl Chrome {
                 sel: 0,
                 born: Instant::now(),
                 spinning: false,
+                anim: anim::Anims::default(),
+                animating: false,
                 page: pages::Page::default(),
                 theme_key: String::new(),
                 mouse: (-1.0, -1.0),
@@ -654,18 +660,37 @@ impl Inner {
             return;
         }
         self.hits.clear();
+        self.anim.enabled = s.settings.animations && anim::system_allows();
+        self.anim.begin();
         if s.full {
             let (x, y, w, h) = s.stage;
             let st = R::new(x, y, w, h);
             self.gfx.round(st, s.settings.radius as f32, th.raise);
             if s.panel != "none" {
                 pages::draw(self, st, &s);
+                // Panels fade in over a few frames instead of popping.
+                let a = self.anim.from(&format!("panel:{}", s.panel), 0.0, 1.0, 0.06);
+                if a < 1.0 {
+                    self.gfx.round(st, s.settings.radius as f32, th.raise.alpha(1.0 - a));
+                }
             } else if self.ntp_visible() {
                 self.draw_ntp(st, &s);
             }
         }
         self.draw_sidebar(&s);
         self.gfx.end();
+        self.anim.end();
+        // The frame timer runs only while something moves.
+        if self.anim.moving != self.animating {
+            self.animating = self.anim.moving;
+            unsafe {
+                if self.animating {
+                    SetTimer(Some(self.hwnd), TIMER_ANIM, 16, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
+                }
+            }
+        }
     }
 
     fn hit(&mut self, r: R, h: Hit) {
@@ -679,9 +704,10 @@ impl Inner {
     fn button(&mut self, r: R, icon: &str, h: Hit, enabled: bool) {
         let th = self.theme;
         let hov = enabled && self.is_hover(&h);
-        if hov {
+        let a = self.anim.get(&format!("btn:{h:?}"), if hov { 1.0 } else { 0.0 }, 0.05);
+        if a > 0.01 {
             let bg = if h == Hit::Close { th.danger } else if self.press.as_ref() == Some(&h) { th.press } else { th.hover };
-            self.gfx.round(r, 7.0, bg);
+            self.gfx.round(r, 7.0, bg.alpha(a));
         }
         let c = if !enabled {
             th.faint.alpha(0.5)
@@ -772,6 +798,22 @@ impl Inner {
             self.gfx.line(sb.x + pad, y, sb.right() - pad, y, th.line, 1.0);
             y += 9.0;
         }
+        // The active highlight slides between tabs. Animated in list space, so scrolling
+        // moves it with the list instead of making it chase.
+        let mut ay = y;
+        let mut found = false;
+        for t in s.tabs.iter().filter(|t| !t.pinned) {
+            if t.id == s.active {
+                found = true;
+                break;
+            }
+            ay += 33.0;
+        }
+        if found && !self.drag.as_ref().is_some_and(|d| d.moved && d.id == s.active) {
+            let target = ay + self.scroll;
+            let slid = self.anim.get("active-y", target, 0.07) - self.scroll;
+            self.gfx.round(R::new(sb.x + pad, slid, sb.w - 2.0 * pad, 32.0), 8.0, th.raise);
+        }
         for t in s.tabs.iter().filter(|t| !t.pinned) {
             let r = R::new(sb.x + pad, y, sb.w - 2.0 * pad, 32.0);
             self.draw_tab(t, r, s, false);
@@ -809,9 +851,14 @@ impl Inner {
         self.gfx.unclip();
 
         // Suggestions float over the list.
+        if !(self.editing && !self.sugg.is_empty()) {
+            // Reset the entrance so the next dropdown animates again.
+            self.anim.get("sugg", 0.0, 0.001);
+        }
         if self.editing && !self.sugg.is_empty() {
+            let t = self.anim.from("sugg", 0.0, 1.0, 0.05);
             let h = self.sugg.len() as f32 * 31.0 + 8.0;
-            let box_ = R::new(o.x, o.bottom() + 6.0, o.w, h);
+            let box_ = R::new(o.x, o.bottom() + 6.0 - (1.0 - t) * 6.0, o.w, h);
             self.gfx.round(R::new(box_.x, box_.y + 4.0, box_.w, box_.h), 10.0, th.shade.alpha(0.6));
             self.gfx.round(box_, 10.0, th.raise);
             self.gfx.round_stroke(box_, 10.0, th.line, 1.0);
@@ -873,7 +920,8 @@ impl Inner {
             }
             self.gfx.ring(r.x + 14.0, r.y + 14.0, 10.0, 10.0, th.line, 1.5);
             if p > 0.0 {
-                self.gfx.arc(r.x + 14.0, r.y + 14.0, 10.0, -90.0, 359.0 * p.min(1.0), th.accent, 2.0);
+                let p = self.anim.get("dl-ring", p.min(1.0), 0.15);
+                self.gfx.arc(r.x + 14.0, r.y + 14.0, 10.0, -90.0, 359.0 * p, th.accent, 2.0);
             }
             self.gfx.icon("download", r.x + 8.0, r.y + 8.0, 12.0, th.dim);
             self.hit(r, Hit::DlFooter);
@@ -917,17 +965,12 @@ impl Inner {
         }
         let active = t.id == s.active;
         let hov = self.is_hover(&Hit::Tab(t.id)) || self.is_hover(&Hit::TabX(t.id)) || self.is_hover(&Hit::TabSnd(t.id));
-        let bg = if pinned {
-            if active { Some(th.press) } else if hov { Some(th.hover) } else { Some(th.raise) }
-        } else if active {
-            Some(th.raise)
-        } else if hov {
-            Some(th.hover)
-        } else {
-            None
-        };
-        if let Some(c) = bg {
-            self.gfx.round(r, 8.0, c);
+        let h = self.anim.get(&format!("tab:{}", t.id), if hov { 1.0 } else { 0.0 }, 0.05);
+        if pinned {
+            let base = if active { th.press } else { th.raise };
+            self.gfx.round(r, 8.0, if active { base } else { base.mix(th.hover, h) });
+        } else if !active && h > 0.01 {
+            self.gfx.round(r, 8.0, th.hover.alpha(h));
         }
         self.hit(r, Hit::Tab(t.id));
         self.draw_tab_body(t, r, s, pinned, hov || active);
@@ -1018,17 +1061,21 @@ impl Inner {
         // Clock: hours plain, minutes italic, a quiet colon. Local time.
         let (hh, mm, date) = local_time();
         let big = (st.w * 0.09).clamp(64.0, 104.0);
-        let cy = field.y - 30.0 - 40.0 - big * 0.5;
+        // Entrance: the clock rises first, then the date, then the shortcuts.
+        let t1 = self.anim.from("ntp-1", 0.0, 1.0, 0.09);
+        let t2 = self.anim.from("ntp-2", 0.0, 1.0, 0.13);
+        let t3 = self.anim.from("ntp-3", 0.0, 1.0, 0.18);
+        let cy = field.y - 30.0 - 40.0 - big * 0.5 + (1.0 - t1) * 14.0;
         let fh = Font::serif(big);
         let wh = self.gfx.measure(&hh, fh);
         let wc = self.gfx.measure(":", fh);
         let wm = self.gfx.measure(&mm, fh.italic());
         let x0 = field.x;
         let row = R::new(x0, cy - big * 0.6, wh + wc + wm + 20.0, big * 1.2);
-        self.gfx.text(&hh, R::new(row.x, row.y, wh + 4.0, row.h), fh, th.text);
-        self.gfx.text(":", R::new(row.x + wh, row.y, wc + 4.0, row.h), fh, th.faint);
-        self.gfx.text(&mm, R::new(row.x + wh + wc, row.y, wm + 8.0, row.h), fh.italic(), th.text);
-        self.gfx.text(&date.to_uppercase(), R::new(x0 + 2.0, row.bottom() + 2.0, field.w, 20.0), Font::ui(12.0, 450), th.faint);
+        self.gfx.text(&hh, R::new(row.x, row.y, wh + 4.0, row.h), fh, th.text.alpha(t1));
+        self.gfx.text(":", R::new(row.x + wh, row.y, wc + 4.0, row.h), fh, th.faint.alpha(t1));
+        self.gfx.text(&mm, R::new(row.x + wh + wc, row.y, wm + 8.0, row.h), fh.italic(), th.text.alpha(t1));
+        self.gfx.text(&date.to_uppercase(), R::new(x0 + 2.0, row.bottom() + 2.0 + (1.0 - t2) * 8.0, field.w, 20.0), Font::ui(12.0, 450), th.faint.alpha(t2));
         // Search field: the edit box sits on top of this.
         self.gfx.round(field, 12.0, th.bg);
         let focused = unsafe { GetFocus() } == self.ntp_edit;
@@ -1040,7 +1087,7 @@ impl Inner {
         self.hit(field, Hit::NtpSearch);
         // Shortcuts: a quiet row of names.
         let mut x = field.x;
-        let mut y = field.bottom() + 18.0;
+        let mut y = field.bottom() + 18.0 + (1.0 - t3) * 10.0;
         for (i, sc) in s.settings.shortcuts.iter().enumerate() {
             let name = if sc.title.is_empty() { host(&sc.url) } else { sc.title.clone() };
             let tw = self.gfx.measure(&name, Font::ui(13.0, 450));
@@ -1058,7 +1105,7 @@ impl Inner {
             self.gfx.round(m, 5.0, th.press.mix(th.accent, 0.3));
             let letter = name.chars().next().unwrap_or('?').to_uppercase().to_string();
             self.gfx.text(&letter, m, Font::ui(9.5, 650).align(Align::Center), th.text);
-            self.gfx.text(&name, R::new(r.x + 32.0, r.y, tw + 4.0, r.h), Font::ui(13.0, 450), if hov { th.text } else { th.dim });
+            self.gfx.text(&name, R::new(r.x + 32.0, r.y, tw + 4.0, r.h), Font::ui(13.0, 450), if hov { th.text } else { th.dim.alpha(t3) });
             self.hit(r, Hit::Shortcut(i));
             x += w + 6.0;
         }
@@ -1475,7 +1522,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(HTCLIENT as isize)
             }
             WM_TIMER => {
-                if wp.0 == TIMER_SPIN || wp.0 == TIMER_CLOCK {
+                if wp.0 == TIMER_SPIN || wp.0 == TIMER_CLOCK || wp.0 == TIMER_ANIM {
                     i.invalidate();
                 }
                 LRESULT(0)
