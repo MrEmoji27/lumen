@@ -18,9 +18,9 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, CLEARTYPE_QUALITY, ClientToScreen, ScreenToClient, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
-            DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, InvalidateRect, OUT_DEFAULT_PRECIS,
-            PAINTSTRUCT, SetBkColor, SetTextColor,
+            BeginPaint, CLEARTYPE_QUALITY, ClientToScreen, ScreenToClient, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW,
+            CreateSolidBrush, DEFAULT_CHARSET, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetTextFaceW, HBRUSH, HDC,
+            HFONT, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkColor, SetTextColor,
         },
         System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW},
         UI::{
@@ -192,6 +192,8 @@ pub(crate) struct Inner {
     edit: HWND,
     ntp_edit: HWND,
     edit_font: HFONT,
+    /// The family the edit boxes were made with, to remake them when it changes.
+    edit_face: String,
     ntp_font: HFONT,
     edit_brush: HBRUSH,
     ntp_brush: HBRUSH,
@@ -326,6 +328,7 @@ impl Chrome {
                 edit,
                 ntp_edit,
                 edit_font: HFONT::default(),
+                edit_face: String::new(),
                 ntp_font: HFONT::default(),
                 edit_brush: HBRUSH::default(),
                 ntp_brush: HBRUSH::default(),
@@ -466,7 +469,9 @@ impl Inner {
                 }
             }
             let k = self.k();
-            let mk = |px: f32| {
+            self.edit_face = self.gfx.ui_family().to_string();
+            let face = HSTRING::from(self.edit_face.as_str());
+            let mk = |px: f32, face: &HSTRING| {
                 CreateFontW(
                     -(px * k).round() as i32,
                     0,
@@ -481,11 +486,27 @@ impl Inner {
                     CLIP_DEFAULT_PRECIS,
                     CLEARTYPE_QUALITY,
                     FF_DONTCARE.0 as u32,
-                    w!("Segoe UI Variable Text"),
+                    face,
                 )
             };
-            self.edit_font = mk(13.0);
-            self.ntp_font = mk(15.0);
+            // GDI quietly swaps in another font when it lacks the name. Ask what it gave.
+            let real = |f: HFONT| -> String {
+                let dc = CreateCompatibleDC(None);
+                let old = SelectObject(dc, f.into());
+                let mut buf = [0u16; 64];
+                let n = GetTextFaceW(dc, Some(&mut buf));
+                SelectObject(dc, old);
+                let _ = DeleteDC(dc);
+                String::from_utf16_lossy(&buf[..(n.max(1) as usize - 1).min(63)])
+            };
+            let mut edit = mk(13.0, &face);
+            if real(edit) != self.edit_face {
+                let _ = DeleteObject(edit.into());
+                edit = mk(13.0, &HSTRING::from("Segoe UI Variable Text"));
+            }
+            let face = if real(edit) == self.edit_face { face } else { HSTRING::from("Segoe UI Variable Text") };
+            self.edit_font = edit;
+            self.ntp_font = mk(15.0, &face);
             SendMessageW(self.edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.ntp_edit, WM_SETFONT, Some(WPARAM(self.ntp_font.0 as usize)), Some(LPARAM(1)));
             for e in [self.edit, self.ntp_edit] {
@@ -508,6 +529,9 @@ impl Inner {
 
     fn apply(&mut self, s: UiState) {
         self.gfx.set_families(&s.settings.ui_font, &s.settings.display_font);
+        if self.gfx.ui_family() != self.edit_face && !self.edit.is_invalid() {
+            self.make_fonts();
+        }
         let key = format!("{}|{}|{}", s.settings.palette, s.dark, s.settings.accent);
         if key != self.theme_key {
             self.theme_key = key;

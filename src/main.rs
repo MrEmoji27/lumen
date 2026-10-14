@@ -85,6 +85,8 @@ struct Tab {
     agent: bool,
     /// Showing reader view of this URL.
     reader: Option<String>,
+    /// Opened by a page (window.open, target=_blank).
+    popup: bool,
     view: Option<WebView>,
     hidden_at: Option<Instant>,
 }
@@ -106,6 +108,7 @@ impl Tab {
             trimmed: false,
             agent: false,
             reader: None,
+            popup: false,
             view: None,
             hidden_at: None,
         }
@@ -1450,29 +1453,43 @@ impl App {
             }
             Ev::Handoff(tab, url, page, name) => {
                 let mut headers = Vec::new();
-                if let Some(v) = self.idx(tab).and_then(|i| self.tabs[i].view.as_ref()) {
-                    if let Ok(cookies) = v.cookies_for_url(&url) {
-                        let c: Vec<String> = cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect();
-                        if !c.is_empty() {
-                            headers.push(format!("Cookie: {}", c.join("; ")));
-                        }
-                    }
+                let view = self.idx(tab).and_then(|i| self.tabs[i].view.as_ref());
+                if let Some(v) = view {
                     let ua = engine::user_agent(v);
                     if !ua.is_empty() {
                         headers.push(format!("User-Agent: {ua}"));
                     }
                 }
-                if !page.is_empty() {
+                if !page.is_empty() && page != "about:blank" {
                     headers.push(format!("Referer: {page}"));
                 }
                 let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
-                std::thread::spawn(move || {
-                    let name = (!name.is_empty()).then_some(name);
-                    let _ = match aria.add(&url, &headers, name.as_deref()) {
-                        Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, url)),
-                        Err(_) => proxy.send_event(Ev::AriaFailed(tab, url)),
-                    };
-                });
+                let u = url.clone();
+                let start = move |cookie: String| {
+                    if !cookie.is_empty() {
+                        headers.push(format!("Cookie: {cookie}"));
+                    }
+                    std::thread::spawn(move || {
+                        let name = (!name.is_empty()).then_some(name);
+                        let _ = match aria.add(&u, &headers, name.as_deref()) {
+                            Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u)),
+                            Err(_) => proxy.send_event(Ev::AriaFailed(tab, u)),
+                        };
+                    });
+                };
+                // Cookies live in the profile, so ask a settled page of the same profile:
+                // a popup that is turning into a download may never answer.
+                let agent = self.idx(tab).is_some_and(|i| self.tabs[i].agent);
+                let asker = self
+                    .tabs
+                    .iter()
+                    .filter(|t| t.id != tab && !t.popup && t.agent == agent)
+                    .find_map(|t| t.view.as_ref())
+                    .or(view);
+                match asker {
+                    Some(v) => engine::cookie_header(v, &url, start),
+                    None => start(String::new()),
+                }
             }
             Ev::AriaAdded(gid, _url) => {
                 let id = (1u64 << 40) + self.aria_ids.len() as u64;
@@ -1515,6 +1532,25 @@ impl App {
             }
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
             Ev::Video(id, up) => self.on_video(id, up),
+            Ev::Orphan(id) => {
+                // Like Chrome: a tab a page opened just for a download goes away.
+                // A tab the user typed it into goes back to the new tab page.
+                if let Some(i) = self.idx(id) {
+                    if self.tabs[i].popup {
+                        self.close(id);
+                    } else {
+                        let t = &mut self.tabs[i];
+                        t.view = None;
+                        t.url.clear();
+                        t.title.clear();
+                        t.favicon.clear();
+                        t.loading = false;
+                        self.dirty = true;
+                        self.layout();
+                        self.push();
+                    }
+                }
+            }
             Ev::Redirect(id, url) => {
                 if let Some(i) = self.idx(id)
                     && let Some(v) = &self.tabs[i].view
@@ -1532,6 +1568,7 @@ impl App {
                 if let Some(v) = found {
                     let mut t = Tab::new(id, String::new());
                     t.agent = agent;
+                    t.popup = true;
                     t.view = Some(v);
                     t.title = "Loading…".into();
                     let at = (self.active_idx() + 1).max(self.pinned_count()).min(self.tabs.len());

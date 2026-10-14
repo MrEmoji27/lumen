@@ -14,7 +14,7 @@ use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler, CapturePreviewCompletedHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
     NavigationStartingEventHandler, PermissionRequestedEventHandler, StateChangedEventHandler,
-    FaviconChangedEventHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler,
+    FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
     SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
 };
@@ -58,6 +58,8 @@ pub enum Ev {
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
+    /// This tab only existed to start a download, now handed off.
+    Orphan(u64),
     /// A video grab moved: (download id, what happened).
     Video(u64, crate::video::Up),
     /// Reader mode extract came back: (tab, page url, JSON or "null").
@@ -557,6 +559,24 @@ fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64) -> Dl {
 
 /// Downloads come to Lumen. WebView2's own flyout stays hidden; the Downloads page shows them.
 fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64) {
+    // Lumen has its own downloads page. WebView2's flyout never stays open.
+    if let Ok(c9) = wv.webview().cast::<ICoreWebView2_9>() {
+        let mut token = 0i64;
+        unsafe {
+            let _ = c9.add_IsDefaultDownloadDialogOpenChanged(
+                &IsDefaultDownloadDialogOpenChangedEventHandler::create(Box::new(|w, _| {
+                    if let Some(w) = w.and_then(|w| w.cast::<ICoreWebView2_9>().ok()) {
+                        let mut open = Default::default();
+                        if w.IsDefaultDownloadDialogOpen(&mut open).is_ok() && open.as_bool() {
+                            let _ = w.CloseDefaultDownloadDialog();
+                        }
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            );
+        }
+    }
     let Ok(c4) = wv.webview().cast::<ICoreWebView2_4>() else { return };
     let ctx = ctx.clone();
     let mut token = 0i64;
@@ -576,14 +596,22 @@ fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64) {
                     let path = take(p);
                     let name = path.rsplit(['\\', '/']).next().unwrap_or("").to_string();
                     let page = sender
+                        .as_ref()
                         .map(|w| {
                             let mut s = PWSTR::null();
                             let _ = w.Source(&mut s);
                             take(s)
                         })
                         .unwrap_or_default();
+                    // The page never showed anything: the link was the download. Nothing to keep.
+                    let mut back = Default::default();
+                    let _ = sender.as_ref().map(|w| w.CanGoBack(&mut back));
+                    let orphan = !back.as_bool() && (page.is_empty() || page == "about:blank" || page == url);
                     args.SetCancel(true)?;
                     let _ = ctx.proxy.send_event(Ev::Handoff(tab, url, page, name));
+                    if orphan {
+                        let _ = ctx.proxy.send_event(Ev::Orphan(tab));
+                    }
                     return Ok(());
                 }
                 let id = NEXT_DL.fetch_add(1, Ordering::Relaxed);
@@ -757,6 +785,50 @@ mod tests {
     #[test]
     fn origins() {
         assert_eq!(origin_of("https://meet.example.com:8443/room?x=1"), "https://meet.example.com:8443");
+    }
+}
+
+/// The Cookie header this profile would send to `url`. Never blocks: `done` runs when
+/// WebView2 answers (or at once, empty, if it cannot be asked).
+pub fn cookie_header(wv: &WebView, url: &str, done: impl FnOnce(String) + 'static) {
+    let done = Rc::new(RefCell::new(Some(done)));
+    let fire = {
+        let done = done.clone();
+        move |s: String| {
+            if let Some(f) = done.borrow_mut().take() {
+                f(s);
+            }
+        }
+    };
+    let fire2 = fire.clone();
+    let asked = unsafe {
+        wv.webview().cast::<ICoreWebView2_2>().and_then(|c| c.CookieManager()).and_then(|m| {
+            m.GetCookies(
+                &HSTRING::from(url),
+                &GetCookiesCompletedHandler::create(Box::new(move |hr, list| {
+                    let mut out = Vec::new();
+                    if hr.is_ok()
+                        && let Some(list) = list
+                    {
+                        let mut n = 0u32;
+                        let _ = list.Count(&mut n);
+                        for i in 0..n {
+                            if let Ok(c) = list.GetValueAtIndex(i) {
+                                let (mut a, mut b) = (PWSTR::null(), PWSTR::null());
+                                let _ = c.Name(&mut a);
+                                let _ = c.Value(&mut b);
+                                out.push(format!("{}={}", take(a), take(b)));
+                            }
+                        }
+                    }
+                    fire2(out.join("; "));
+                    Ok(())
+                })),
+            )
+        })
+    };
+    if asked.is_err() {
+        fire(String::new());
     }
 }
 

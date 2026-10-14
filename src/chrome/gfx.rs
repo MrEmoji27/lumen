@@ -364,6 +364,11 @@ impl Gfx {
         }
     }
 
+    /// The interface family in use ("Segoe UI Variable Text" when the system one).
+    pub fn ui_family(&self) -> &str {
+        &self.ui_family
+    }
+
     fn format(&self, f: Font) -> Option<IDWriteTextFormat> {
         if let Some(x) = self.formats.borrow().get(&f) {
             return Some(x.clone());
@@ -621,6 +626,9 @@ fn load_woff2(dw: &IDWriteFactory5, files: &[&[u8]]) -> Option<IDWriteFontCollec
             }
             let bytes = std::slice::from_raw_parts(ptr as *const u8, size as usize).to_vec();
             stream.ReleaseFileFragment(ctx);
+            // Also for GDI, private to this process: the address bar is a Win32 edit box.
+            let mut n = 0u32;
+            let _ = windows::Win32::Graphics::Gdi::AddFontMemResourceEx(bytes.as_ptr() as _, bytes.len() as u32, None, &mut n);
             // No owner: DirectWrite copies the bytes.
             let Ok(file) = loader.CreateInMemoryFontFileReference(dw, bytes.as_ptr() as _, bytes.len() as u32, None) else { continue };
             let _ = builder.AddFontFile(&file);
