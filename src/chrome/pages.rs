@@ -83,7 +83,7 @@ const ENGINES: [(&str, &str); 5] = [
     ("Bing", "https://www.bing.com/search?q=%s"),
     ("Startpage", "https://www.startpage.com/do/search?q=%s"),
 ];
-const KEYS: [(&str, &str); 17] = [
+const KEYS: [(&str, &str); 19] = [
     ("New tab", "Ctrl+T"),
     ("Reopen closed tab", "Ctrl+Shift+T"),
     ("Close tab", "Ctrl+W"),
@@ -100,6 +100,8 @@ const KEYS: [(&str, &str); 17] = [
     ("Bookmark this page", "Ctrl+D"),
     ("History / bookmarks", "Ctrl+H / Ctrl+Shift+O"),
     ("Downloads", "Ctrl+J"),
+    ("Reader view", "F9"),
+    ("Darken this site / keep its colors", "Shift+F9"),
     ("Developer tools", "F12"),
 ];
 
@@ -110,6 +112,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Swatch,
             Accent,
             Seg("theme", "Theme", "", &[("dark", "Dark"), ("light", "Light"), ("system", "System")]),
+            Toggle("dark_pages", "Darken light sites", "When Lumen is dark, Dark Reader repaints sites that have no dark mode. Shift+F9 skips a site."),
             Seg("ui_font", "Interface font", "Atkinson Hyperlegible is designed for easy reading.", &[("segoe", "Segoe"), ("instrument", "Instrument"), ("figtree", "Figtree"), ("atkinson", "Atkinson")]),
             Seg("display_font", "Display font", "The clock and page titles.", &[("instrument", "Instrument Serif"), ("fraunces", "Fraunces"), ("newsreader", "Newsreader")]),
             Seg("sidebar_side", "Sidebar", "", &[("left", "Left"), ("right", "Right")]),

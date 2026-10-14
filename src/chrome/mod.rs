@@ -55,6 +55,7 @@ pub struct UiTab {
     pub muted: bool,
     pub status: &'static str,
     pub agent: bool,
+    pub reader: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1336,6 +1337,16 @@ impl Inner {
                     items.push((2, "Duplicate".into()));
                     items.push((7, "Add to new tab page".into()));
                 }
+                if t.url.starts_with("http") && (t.status == "live" || t.status == "asleep") {
+                    items.push((8, if t.reader { "Exit reader view\tF9".into() } else { "Reader view\tF9".into() }));
+                    let h = host(&t.url);
+                    let skipped = s.settings.dark_skip.iter().any(|x| *x == h);
+                    if s.dark && s.settings.dark_pages && !skipped {
+                        items.push((9, "Keep this site's colors\tShift+F9".into()));
+                    } else if s.dark {
+                        items.push((9, "Darken this site\tShift+F9".into()));
+                    }
+                }
                 if t.audio || t.muted {
                     items.push((3, if t.muted { "Unmute".into() } else { "Mute".into() }));
                 }
@@ -1353,6 +1364,8 @@ impl Inner {
                     4 => "sleep",
                     5 => "closeOthers",
                     6 => "close",
+                    8 => "reader",
+                    9 => "darksite",
                     7 => {
                         let mut st = s.settings.clone();
                         let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };

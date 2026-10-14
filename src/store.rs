@@ -67,6 +67,10 @@ pub struct Settings {
     pub save_passwords: bool,
     /// Hand http(s) downloads to aria2: many connections per file, resume, queue.
     pub accelerate_downloads: bool,
+    /// When Lumen is dark, darken light sites too (Dark Reader).
+    pub dark_pages: bool,
+    /// Hosts Dark Reader leaves alone.
+    pub dark_skip: Vec<String>,
     /// Interface font: "segoe" | "instrument" | "figtree" | "atkinson".
     pub ui_font: String,
     /// Display font for the clock and page titles: "instrument" | "fraunces" | "newsreader".
@@ -113,6 +117,8 @@ impl Default for Settings {
             share_processes: true,
             save_passwords: true,
             accelerate_downloads: true,
+            dark_pages: false,
+            dark_skip: Vec::new(),
             ui_font: "segoe".into(),
             display_font: "instrument".into(),
             agent: false,

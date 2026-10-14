@@ -11,7 +11,7 @@ use std::{
 
 use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
-    AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler, CapturePreviewCompletedHandler,
+    AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler, CapturePreviewCompletedHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
     NavigationStartingEventHandler, PermissionRequestedEventHandler, StateChangedEventHandler,
     FaviconChangedEventHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler,
@@ -31,7 +31,7 @@ use windows::{
             WindowsAndMessaging::GetClientRect,
         },
     },
-    core::{Interface, PWSTR},
+    core::{Interface, HSTRING, PWSTR},
 };
 use wry::{
     NewWindowResponse, PageLoadEvent, Rect, Theme, WebView, WebViewBuilder,
@@ -58,6 +58,8 @@ pub enum Ev {
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
+    /// Reader mode extract came back: (tab, page url, JSON or "null").
+    Reader(u64, String, String),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
     AriaAdded(String, String),
@@ -108,6 +110,8 @@ pub enum Action {
     History,
     Bookmarks,
     DevTools,
+    Reader,
+    DarkSite,
 }
 
 pub struct Ctx {
@@ -133,6 +137,10 @@ pub struct Ctx {
     pub aria_on: Cell<bool>,
     /// URLs aria2 refused; WebView2 downloads these itself.
     pub bypass: RefCell<std::collections::HashSet<String>>,
+    /// Dark Reader script for new documents, when dark pages are on.
+    pub dark_js: RefCell<Option<Rc<str>>>,
+    /// Per tab: the id WebView2 gave the injected Dark Reader script.
+    pub dark_ids: Rc<RefCell<HashMap<u64, String>>>,
 }
 
 impl Ctx {
@@ -259,7 +267,12 @@ fn build_tab_in(
                 Err(_) => NewWindowResponse::Deny,
             }
         });
-    if let Some(u) = url {
+    // Dark pages: the script must be in place before the first document, so that
+    // navigation waits for WebView2 to confirm it (set_dark starts it).
+    let dark_first = !isolated && ctx.dark_js.borrow().is_some();
+    if let Some(u) = url
+        && !dark_first
+    {
         b = b.with_url(u);
     }
     let wv = b.build_as_child(&*ctx.window)?;
@@ -274,6 +287,11 @@ fn build_tab_in(
     // Password saving is per profile. The agent's profile never saves passwords.
     set_passwords(&wv, ctx.passwords.get() && !isolated);
     hook_keys(&wv, ctx.proxy.clone());
+    // A new view has no scripts yet; forget any id an older view of this tab had.
+    ctx.dark_ids.borrow_mut().remove(&id);
+    if !isolated {
+        set_dark(ctx, &wv, id, false, url.filter(|_| dark_first).map(str::to_string));
+    }
     if let Some(f) = ctx.on_built.borrow().as_ref() {
         f(&wv);
     }
@@ -467,6 +485,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
     const RIGHT: u32 = 0x27;
     const F5: u32 = 0x74;
     const F6: u32 = 0x75;
+    const F9: u32 = 0x78;
     const F11: u32 = 0x7A;
     const F12: u32 = 0x7B;
     const ESC: u32 = 0x1B;
@@ -490,6 +509,8 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (false, false, false, F11) => Fullscreen,
         (true, false, false, COMMA) => Settings,
         (false, false, false, F12) => DevTools,
+        (false, false, false, F9) => Reader,
+        (false, true, false, F9) => DarkSite,
         (false, true, false, ESC) => Control,
         (true, false, false, v) if v == k('J') => Downloads,
         (true, false, false, v) if v == k('D') => Bookmark,
@@ -737,6 +758,60 @@ pub fn user_agent(wv: &WebView) -> String {
         let Ok(s2) = wv.webview().Settings().and_then(|s| s.cast::<ICoreWebView2Settings2>()) else { return String::new() };
         let mut p = PWSTR::null();
         if s2.UserAgent(&mut p).is_ok() { take(p) } else { String::new() }
+    }
+}
+
+// --------------------------------------------------------------- dark pages
+
+/// Put this page's Dark Reader in line with `ctx.dark_js`: take the old script off,
+/// add the current one for every future document. `now` also redoes the page showing.
+/// `then`: a URL to open once the script is in (a page built for it, not yet navigated).
+pub fn set_dark(ctx: &Ctx, wv: &WebView, tab: u64, now: bool, then: Option<String>) {
+    let core = wv.webview();
+    let old = ctx.dark_ids.borrow_mut().remove(&tab);
+    unsafe {
+        if let Some(old) = old.filter(|s| !s.is_empty()) {
+            let _ = core.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(old));
+        }
+        let js = ctx.dark_js.borrow().clone();
+        match js {
+            Some(js) => {
+                // Mark pending; the id arrives later.
+                ctx.dark_ids.borrow_mut().insert(tab, String::new());
+                let ids = ctx.dark_ids.clone();
+                let c = core.clone();
+                let _ = core.AddScriptToExecuteOnDocumentCreated(
+                    &HSTRING::from(&*js),
+                    &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |hr, sid| {
+                        if let Some(u) = &then {
+                            let _ = c.Navigate(&HSTRING::from(u.as_str()));
+                        }
+                        if hr.is_ok() {
+                            let mut m = ids.borrow_mut();
+                            match m.get_mut(&tab) {
+                                Some(slot) if slot.is_empty() => *slot = sid,
+                                // Switched off (or replaced) before the id came back.
+                                _ => {
+                                    let _ = c.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(sid));
+                                }
+                            }
+                        }
+                        Ok(())
+                    })),
+                );
+                if now {
+                    let _ = wv.evaluate_script(&js);
+                }
+            }
+            None => {
+                if now {
+                    let _ = wv.evaluate_script(crate::pagekit::DARK_OFF);
+                }
+                if let Some(u) = then {
+                    let _ = wv.load_url(&u);
+                }
+            }
+        }
     }
 }
 

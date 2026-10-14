@@ -11,6 +11,7 @@ mod chrome;
 mod engine;
 mod library;
 mod monitor;
+mod pagekit;
 mod store;
 
 use std::{
@@ -81,6 +82,8 @@ struct Tab {
     trimmed: bool,
     /// Opened by an AI agent. Marked in the sidebar, never saved in the session.
     agent: bool,
+    /// Showing reader view of this URL.
+    reader: Option<String>,
     view: Option<WebView>,
     hidden_at: Option<Instant>,
 }
@@ -101,6 +104,7 @@ impl Tab {
             suspended: false,
             trimmed: false,
             agent: false,
+            reader: None,
             view: None,
             hidden_at: None,
         }
@@ -217,6 +221,8 @@ fn main() {
         perms: RefCell::new(HashMap::new()),
         aria_on: Cell::new(false),
         bypass: RefCell::new(Default::default()),
+        dark_js: RefCell::new(None),
+        dark_ids: Rc::new(RefCell::new(HashMap::new())),
     });
 
     let blocker = blocker::Blocker::start(store::data_dir());
@@ -288,6 +294,7 @@ fn main() {
     app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
     app.apply_backdrop();
     app.apply_limits(None);
+    app.refresh_dark();
     app.restore(session);
     app.flush();
     app.shown = true;
@@ -364,6 +371,11 @@ fn main() {
 }
 
 // ------------------------------------------------------------------- helpers
+
+/// "https://a.b.c/x" -> "a.b.c"
+fn host_of(url: &str) -> String {
+    url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).map(|h| h.rsplit('@').next().unwrap_or(h)).unwrap_or("").to_string()
+}
 
 fn resolve_dark(s: &Settings, os: WinTheme) -> bool {
     match s.theme.as_str() {
@@ -691,6 +703,7 @@ impl App {
                         muted: t.muted,
                         status: t.status(),
                         agent: t.agent,
+                        reader: t.reader.is_some(),
                     })
                     .collect(),
                 active: self.active,
@@ -906,10 +919,84 @@ impl App {
             monitor::unwatch(None, w, true);
         }
         t.view = None;
+        t.reader = None;
         t.suspended = false;
         t.trimmed = false;
         t.loading = false;
         t.audio = false;
+    }
+
+    // ---------------------------------------------------------- page kit
+
+    /// Reader view on, or back to the page.
+    fn toggle_reader(&mut self, i: usize) {
+        let t = &mut self.tabs[i];
+        let Some(v) = &t.view else { return };
+        if let Some(orig) = t.reader.take() {
+            let _ = v.load_url(&orig);
+            self.push();
+            return;
+        }
+        if !t.url.starts_with("http") {
+            return;
+        }
+        let (id, url, proxy) = (t.id, t.url.clone(), self.ctx.proxy.clone());
+        let _ = v.evaluate_script_with_callback(&pagekit::extract_script(), move |out| {
+            let _ = proxy.send_event(Ev::Reader(id, url.clone(), out));
+        });
+    }
+
+    fn show_reader(&mut self, id: u64, url: &str, out: &str) {
+        let Some(i) = self.idx(id) else { return };
+        let Ok(article) = serde_json::from_str::<Value>(out) else { return };
+        // The page moved on while Readability worked, or there is no article.
+        if article.is_null() || self.tabs[i].url != url {
+            return;
+        }
+        let th = chrome::theme::Theme::new(&self.settings.palette, self.ctx.dark.get(), &self.settings.accent);
+        let st = pagekit::Style { dark: th.dark, bg: th.bg.hex(), text: th.text.hex(), dim: th.dim.hex(), accent: th.accent.hex() };
+        let html = pagekit::render(&article, url, &st);
+        let t = &mut self.tabs[i];
+        if let Some(v) = &t.view
+            && v.load_html(&html).is_ok()
+        {
+            t.reader = Some(url.to_string());
+            self.push();
+        }
+    }
+
+    /// The Dark Reader script for the current settings, pushed to every page.
+    fn refresh_dark(&mut self) {
+        let on = self.settings.dark_pages && self.ctx.dark.get();
+        let js = on.then(|| {
+            let th = chrome::theme::Theme::new(&self.settings.palette, true, &self.settings.accent);
+            let look = pagekit::Look { bg: th.bg.hex(), text: th.text.hex() };
+            Rc::<str>::from(pagekit::dark_script(&look, &self.settings.dark_skip))
+        });
+        self.ctx.dark_js.replace(js);
+        for t in self.tabs.iter().filter(|t| !t.agent) {
+            if let Some(v) = &t.view {
+                engine::set_dark(&self.ctx, v, t.id, true, None);
+            }
+        }
+    }
+
+    /// Shift+F9: this site keeps its own colors, or gets darkened again.
+    fn toggle_dark_site(&mut self, i: usize) {
+        let h = host_of(&self.tabs[i].url);
+        if h.is_empty() {
+            return;
+        }
+        let mut s = self.settings.clone();
+        if !s.dark_pages {
+            s.dark_pages = true;
+            s.dark_skip.retain(|x| *x != h);
+        } else if let Some(k) = s.dark_skip.iter().position(|x| *x == h) {
+            s.dark_skip.remove(k);
+        } else {
+            s.dark_skip.push(h);
+        }
+        self.apply_settings(s);
     }
 
     fn navigate(&mut self, raw: &str) {
@@ -1098,6 +1185,7 @@ impl App {
             let _ = v.set_theme(theme);
         }
         self.apply_backdrop();
+        self.refresh_dark();
     }
 
     fn apply_settings(&mut self, mut new: Settings) {
@@ -1128,6 +1216,13 @@ impl App {
                 }
             }
         }
+        if old.dark_pages != self.settings.dark_pages
+            || old.dark_skip != self.settings.dark_skip
+            || old.palette != self.settings.palette
+            || old.accent != self.settings.accent
+        {
+            self.refresh_dark();
+        }
         if old.agent != self.settings.agent || old.agent_port != self.settings.agent_port {
             self.agent.set(self.settings.agent, self.settings.agent_port, &self.ctx.proxy);
         }
@@ -1157,6 +1252,13 @@ impl App {
             }
             Ev::Url(id, u) => {
                 if let Some(i) = self.idx(id) {
+                    // Reader view is a page made from a string; the tab keeps the real URL.
+                    if self.tabs[i].reader.is_some() {
+                        if !u.starts_with("http") {
+                            return;
+                        }
+                        self.tabs[i].reader = None;
+                    }
                     // Agents browse off the record.
                     if !self.tabs[i].agent {
                         self.library.visit(&u, &self.tabs[i].title);
@@ -1176,6 +1278,7 @@ impl App {
             }
             Ev::Favicon(id, f) => {
                 if let Some(i) = self.idx(id)
+                    && self.tabs[i].reader.is_none()
                     && self.tabs[i].favicon != f
                 {
                     self.tabs[i].favicon = f;
@@ -1298,6 +1401,7 @@ impl App {
                 }
                 self.push();
             }
+            Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
             Ev::Redirect(id, url) => {
                 if let Some(i) = self.idx(id)
                     && let Some(v) = &self.tabs[i].view
@@ -1405,6 +1509,8 @@ impl App {
                 Some(v) => v.open_devtools(),
                 None => {}
             },
+            Action::Reader => self.toggle_reader(i),
+            Action::DarkSite => self.toggle_dark_site(i),
         }
     }
 
@@ -1438,6 +1544,16 @@ impl App {
                     self.tabs.insert(at, t);
                     self.dirty = true;
                     self.push();
+                }
+            }
+            "reader" => {
+                if let Some(i) = self.idx(id) {
+                    self.toggle_reader(i);
+                }
+            }
+            "darksite" => {
+                if let Some(i) = self.idx(id) {
+                    self.toggle_dark_site(i);
                 }
             }
             "mute" => {
