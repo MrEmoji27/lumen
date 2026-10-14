@@ -293,7 +293,7 @@ menu.addEventListener('click', e => {
   closeMenu();
 });
 document.addEventListener('pointerdown', e => { if (!menu.hidden && !menu.contains(e.target)) closeMenu(); }, true);
-window.addEventListener('blur', closeMenu);
+window.addEventListener('blur', () => { closeMenu(); if (editing) addr.blur(); });
 
 // ---------------------------------------------------------------- omnibox
 const addr = $('#addr'), sugg = $('#sugg');
@@ -303,6 +303,8 @@ function omniIdle() {
   const t = active();
   const url = t ? t.url : '';
   attr('data-secure', url.startsWith('https://'));
+  // Focus went to the page (tab closed, Ctrl+Tab...) while we were editing: stop editing.
+  if (editing && !document.hasFocus()) addr.blur();
   if (editing) return;
   const v = !t || t.status === 'new' ? '' : host(url) || url;
   if (addr.value !== v) addr.value = v;
@@ -664,6 +666,8 @@ function buildControl() {
         <div class="ctl"><input type="range" id="lim-net" min="0" max="${NET_STEPS.length - 1}" step="1"><span class="val" id="lim-net-v"></span><button class="tog" data-lim="net_limit" role="switch" aria-label="Network limit"></button></div></div>
       <div class="opt"><div class="lab"><b>Graphics in browser process</b><small>About 100 MB less memory. A graphics driver crash then restarts the whole browser. Applies after restart.</small></div>
         <div class="ctl"><button class="tog" data-lim="gpu_in_process" role="switch" aria-label="Graphics in browser process"></button></div></div>
+      <div class="opt"><div class="lab"><b>Share processes within a site</b><small>Tabs of the same site share one process. Far fewer processes, less memory; one heavy tab can slow its siblings. Applies after restart.</small></div>
+        <div class="ctl"><button class="tog" data-lim="share_processes" role="switch" aria-label="Share processes within a site"></button></div></div>
     </div>`;
   $('#ctl-done').onclick = () => send({ t: 'panel', open: false });
   ctlEl.querySelectorAll('[data-lim]').forEach(b => b.addEventListener('click', () => setOpt(b.dataset.lim, !S.settings[b.dataset.lim])));

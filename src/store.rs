@@ -3,10 +3,14 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+/// Where everything lives. LUMEN_DATA points tests at a throwaway folder,
+/// so they never touch the real profile, settings or session.
 pub fn data_dir() -> PathBuf {
-    let dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Lumen");
+    let dir = std::env::var_os("LUMEN_DATA").map(PathBuf::from).unwrap_or_else(|| {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Lumen")
+    });
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -56,6 +60,9 @@ pub struct Settings {
     pub shortcuts: Vec<Shortcut>,
     /// Run GPU work inside the browser process. About 100 MB less. Applies on restart.
     pub gpu_in_process: bool,
+    /// Tabs of the same site share one renderer process. Fewer processes, less memory.
+    /// Applies on restart.
+    pub share_processes: bool,
     /// Soft RAM limit: over it, the oldest hidden tabs are unloaded.
     pub ram_limit: bool,
     pub ram_limit_mb: u32,
@@ -90,6 +97,7 @@ impl Default for Settings {
             adblock: true,
             show_memory: true,
             gpu_in_process: true,
+            share_processes: true,
             ram_limit: false,
             ram_limit_mb: 2048,
             cpu_limit: false,

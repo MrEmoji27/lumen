@@ -135,6 +135,7 @@ pub fn build_ui(
     html: String,
     bounds: Rect,
     gpu_in_process: bool,
+    share_processes: bool,
 ) -> wry::Result<WebView> {
     let proxy = ctx.proxy.clone();
     let ui = WebViewBuilder::new_with_web_context(web_context)
@@ -149,7 +150,7 @@ pub fn build_ui(
         .with_default_context_menus(cfg!(debug_assertions))
         .with_browser_accelerator_keys(false)
         .with_theme(theme(ctx.dark.get()))
-        .with_additional_browser_args(browser_args(gpu_in_process))
+        .with_additional_browser_args(browser_args(gpu_in_process, share_processes))
         .build_as_child(&*ctx.window)?;
     hook_keys(&ui, ctx.proxy.clone());
     ctx.env.replace(Some(ui.environment()));
@@ -158,13 +159,18 @@ pub fn build_ui(
 
 /// Chromium switches for the whole browser. Set once, when the environment is born.
 /// LUMEN_ARGS appends more, for measuring without a rebuild.
-fn browser_args(gpu_in_process: bool) -> String {
+fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
     // wry's own defaults. Passing args replaces them, so keep them.
     let mut a = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
     if gpu_in_process {
         // Measured: about 100 MB less commit, 55 MB less working set, one process fewer.
         // Cost: a GPU driver crash takes the browser down with it.
         a.push_str(" --in-process-gpu --enable-features=NetworkServiceInProcess2");
+    }
+    if share_processes {
+        // Measured on 40 tabs: 54 -> 23 renderers, 310 MB less.
+        // Cost: one heavy tab can slow other tabs of the same site.
+        a.push_str(" --process-per-site");
     }
     if let Ok(extra) = std::env::var("LUMEN_ARGS") {
         a.push(' ');

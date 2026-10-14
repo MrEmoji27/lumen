@@ -190,7 +190,7 @@ fn main() {
     }
 
     let mut web_context = WebContext::new(Some(store::data_dir().join("WebView2")));
-    let ui = engine::build_ui(&ctx, &mut web_context, ui_html(), full_rect(&ctx), settings.gpu_in_process).expect("ui webview");
+    let ui = engine::build_ui(&ctx, &mut web_context, ui_html(), full_rect(&ctx), settings.gpu_in_process, settings.share_processes).expect("ui webview");
     engine::set_tracking(&ui, &settings.tracking);
 
     let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
