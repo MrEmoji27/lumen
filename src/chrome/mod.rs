@@ -1338,6 +1338,7 @@ impl Inner {
                     items.push((7, "Add to new tab page".into()));
                 }
                 if t.url.starts_with("http") && (t.status == "live" || t.status == "asleep") {
+                    items.push((10, "Save video".into()));
                     items.push((8, if t.reader { "Exit reader view\tF9".into() } else { "Reader view\tF9".into() }));
                     let h = host(&t.url);
                     let skipped = s.settings.dark_skip.iter().any(|x| *x == h);
@@ -1365,6 +1366,7 @@ impl Inner {
                     5 => "closeOthers",
                     6 => "close",
                     8 => "reader",
+                    10 => "video",
                     9 => "darksite",
                     7 => {
                         let mut st = s.settings.clone();

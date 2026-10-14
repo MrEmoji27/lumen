@@ -467,6 +467,7 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
         let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
         let status = match d.state {
             "done" => format!("Done · {}", fmt_bytes(d.received)),
+            "failed" if !d.note.is_empty() => format!("Failed · {}", d.note),
             "failed" => "Failed".to_string(),
             "paused" => format!("Paused · {} of {}", fmt_bytes(d.received), fmt_bytes(d.total)),
             _ if d.total > 0 => {
@@ -479,6 +480,7 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
                 }
                 s
             }
+            _ if !d.note.is_empty() => d.note.clone(),
             _ => fmt_bytes(d.received),
         };
         let host = super::host(&d.url);

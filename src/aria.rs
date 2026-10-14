@@ -356,7 +356,7 @@ fn sha(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-fn sha_of_file(path: &Path) -> Option<String> {
+pub(crate) fn sha_of_file(path: &Path) -> Option<String> {
     let mut f = fs::File::open(path).ok()?;
     let mut h = Sha256::new();
     let mut buf = [0u8; 64 * 1024];

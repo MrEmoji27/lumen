@@ -58,6 +58,8 @@ pub enum Ev {
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
+    /// A video grab moved: (download id, what happened).
+    Video(u64, crate::video::Up),
     /// Reader mode extract came back: (tab, page url, JSON or "null").
     Reader(u64, String, String),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).

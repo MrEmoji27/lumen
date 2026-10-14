@@ -12,6 +12,7 @@ mod engine;
 mod library;
 mod monitor;
 mod pagekit;
+mod video;
 mod store;
 
 use std::{
@@ -173,6 +174,8 @@ struct App {
     aria: std::sync::Arc<aria::Aria>,
     aria_ids: HashMap<String, u64>,
     aria_poll: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Video grabs: download id -> (page url, user agent, running yt-dlp).
+    videos: HashMap<u64, (String, String, video::Slot)>,
 }
 
 fn main() {
@@ -281,6 +284,7 @@ fn main() {
         aria: aria::Aria::start(&store::data_dir(), &dirs::download_dir().unwrap_or_else(store::data_dir)),
         aria_ids: HashMap::new(),
         aria_poll: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        videos: HashMap::new(),
     };
     {
         // One small thread polls aria2 while it has work, and sleeps otherwise.
@@ -375,6 +379,16 @@ fn main() {
 }
 
 // ------------------------------------------------------------------- helpers
+
+/// yt-dlp part files are "name.f<format>.<ext>". Audio parts are m4a/webm audio.
+fn part_kind(file: &str) -> Option<&'static str> {
+    let (stem, ext) = file.rsplit_once('.')?;
+    let fmt = stem.rsplit_once(".f")?.1;
+    if fmt.is_empty() || !fmt.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(if matches!(ext, "m4a" | "opus" | "mp3" | "aac") { "audio" } else { "video" })
+}
 
 /// "https://a.b.c/x" -> "a.b.c"
 fn host_of(url: &str) -> String {
@@ -930,6 +944,99 @@ impl App {
         t.audio = false;
     }
 
+    // ---------------------------------------------------------- video
+
+    /// Save the video on this tab's page (yt-dlp), into Downloads.
+    fn save_video(&mut self, i: usize) {
+        let t = &self.tabs[i];
+        let url = t.reader.clone().unwrap_or_else(|| t.url.clone());
+        if !url.starts_with("http") {
+            return;
+        }
+        let id = (2u64 << 40) + self.videos.len() as u64;
+        let title = if t.title.is_empty() { host_of(&url) } else { t.title.clone() };
+        let ua = t.view.as_ref().map(engine::user_agent).unwrap_or_default();
+        self.downloads.insert(
+            0,
+            engine::Dl { id, url: url.clone(), path: format!("{title}.mp4"), received: 0, total: 0, state: "progress", speed: 0, note: "starting".into() },
+        );
+        self.videos.insert(id, (url, ua, Default::default()));
+        self.run_video(id);
+        self.push();
+    }
+
+    fn run_video(&self, id: u64) {
+        let Some((url, ua, slot)) = self.videos.get(&id).cloned() else { return };
+        let tools = store::data_dir().join("tools");
+        let out = dirs::download_dir().unwrap_or_else(store::data_dir);
+        let proxy = self.ctx.proxy.clone();
+        std::thread::Builder::new()
+            .name("lumen-video".into())
+            .spawn(move || {
+                video::grab(&tools, &out, &url, &ua, &slot, |u| {
+                    let _ = proxy.send_event(Ev::Video(id, u));
+                })
+            })
+            .ok();
+    }
+
+    fn on_video(&mut self, id: u64, up: video::Up) {
+        let Some(d) = self.downloads.iter_mut().find(|d| d.id == id) else { return };
+        if d.state != "progress" {
+            return;
+        }
+        match up {
+            video::Up::Note(n) => d.note = n,
+            video::Up::Progress { done, total, speed, file } => {
+                d.received = done as i64;
+                d.total = total as i64;
+                d.speed = speed;
+                // Video and audio come as separate parts ("x.f399.mp4"); say which.
+                d.note = match part_kind(&file) {
+                    Some(k) => k.to_string(),
+                    None => String::new(),
+                };
+            }
+            video::Up::Done(f) => {
+                d.path = f;
+                d.state = "done";
+                d.speed = 0;
+                d.note.clear();
+                d.received = std::fs::metadata(&d.path).map(|m| m.len() as i64).unwrap_or(d.received);
+            }
+            video::Up::Failed(e) => {
+                d.state = "failed";
+                d.speed = 0;
+                d.note = e;
+            }
+        }
+        self.push();
+    }
+
+    /// Pause stops yt-dlp (it keeps its .part files); resume runs it again and it carries on.
+    fn video_control(&mut self, id: u64, a: &str) {
+        let Some((_, _, slot)) = self.videos.get(&id) else { return };
+        video::stop(slot);
+        let Some(d) = self.downloads.iter_mut().find(|d| d.id == id) else { return };
+        match a {
+            "pause" => {
+                d.state = "paused";
+                d.speed = 0;
+            }
+            "resume" => {
+                d.state = "progress";
+                d.note = "resuming".into();
+                self.run_video(id);
+            }
+            _ => {
+                d.state = "failed";
+                d.speed = 0;
+                d.note = "cancelled".into();
+            }
+        }
+        self.push();
+    }
+
     // ---------------------------------------------------------- page kit
 
     /// Reader view on, or back to the page.
@@ -1407,6 +1514,7 @@ impl App {
                 self.push();
             }
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
+            Ev::Video(id, up) => self.on_video(id, up),
             Ev::Redirect(id, url) => {
                 if let Some(i) = self.idx(id)
                     && let Some(v) = &self.tabs[i].view
@@ -1556,6 +1664,11 @@ impl App {
                     self.toggle_reader(i);
                 }
             }
+            "video" => {
+                if let Some(i) = self.idx(id) {
+                    self.save_video(i);
+                }
+            }
             "darksite" => {
                 if let Some(i) = self.idx(id) {
                     self.toggle_dark_site(i);
@@ -1659,6 +1772,7 @@ impl App {
             "dl" => {
                 let a = m["a"].as_str().unwrap_or("");
                 match a {
+                    "pause" | "resume" | "cancel" if self.videos.contains_key(&id) => self.video_control(id, a),
                     "pause" | "resume" | "cancel" => match self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
                         Some(gid) => {
                             let aria = self.aria.clone();
