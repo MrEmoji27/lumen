@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en" data-palette="ember" data-theme="dark" data-anim="on" data-side="left">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumen</title>
+<style>/*__FONTS__*/ /*__CSS__*/</style>
+</head>
+<body>
+<div id="app">
+  <div id="rz" aria-hidden="true">
+    <b data-d="n"></b><b data-d="s"></b><b data-d="e"></b><b data-d="w"></b>
+    <b data-d="ne"></b><b data-d="nw"></b><b data-d="se"></b><b data-d="sw"></b>
+  </div>
+
+  <aside id="sidebar">
+    <div class="sb-top" data-drag>
+      <div class="navs">
+        <button class="ib" id="b-back" data-icon="back" aria-label="Back" disabled></button>
+        <button class="ib" id="b-fwd" data-icon="fwd" aria-label="Forward" disabled></button>
+        <button class="ib" id="b-reload" data-icon="reload" aria-label="Reload"></button>
+      </div>
+      <div class="wins">
+        <button class="ib" data-win="min" data-icon="min" aria-label="Minimize"></button>
+        <button class="ib" data-win="max" data-icon="max" aria-label="Maximize"></button>
+        <button class="ib win-x" data-win="close" data-icon="close" aria-label="Close"></button>
+      </div>
+    </div>
+
+    <div class="omni-box">
+      <div class="omni" id="omni">
+        <span class="omni-ico i" id="omni-ico" data-icon="search"></span>
+        <input id="omni-in" type="text" spellcheck="false" autocomplete="off"
+               aria-label="Address and search bar" role="combobox" aria-expanded="false"
+               aria-controls="omni-list" aria-autocomplete="list">
+      </div>
+      <div class="omni-list" id="omni-list" role="listbox" aria-label="Suggestions" hidden></div>
+    </div>
+
+    <div class="pins" id="pins" hidden></div>
+
+    <div class="tabs" id="tabs" role="tablist" aria-label="Open tabs"></div>
+
+    <button class="newrow" id="b-new">
+      <span class="i" data-icon="plus"></span><span class="newrow-t">New tab</span>
+    </button>
+
+    <div class="foot">
+      <span class="mem" id="mem"></span>
+      <button class="ib" id="b-set" data-icon="gear" aria-label="Settings"></button>
+    </div>
+
+    <div class="menu" id="menu" role="menu" hidden></div>
+  </aside>
+
+  <main id="stage">
+    <section class="ntp" id="ntp" hidden>
+      <div class="ntp-bg" id="ntp-bg" aria-hidden="true"></div>
+      <div class="ntp-in">
+        <header class="ntp-head">
+          <div class="clock" id="clock" aria-live="off">
+            <span class="ck-h">10:</span><em class="ck-m">42</em><span class="ck-ap">PM</span>
+          </div>
+          <p class="greet" id="greet">Good evening</p>
+          <p class="date" id="date"></p>
+        </header>
+        <div class="ntp-q">
+          <span class="i" data-icon="search"></span>
+          <input id="ntp-in" type="text" placeholder="Search the web" spellcheck="false"
+                 autocomplete="off" aria-label="Search the web">
+        </div>
+        <nav class="scs" id="scs" aria-label="Shortcuts"></nav>
+      </div>
+    </section>
+
+    <section class="set" id="settings" hidden>
+      <div class="set-nav" id="set-nav" role="tablist" aria-label="Settings sections"></div>
+      <div class="set-main">
+        <header class="set-head">
+          <h2 id="set-title"></h2>
+          <button class="ib" id="set-close" data-icon="close" aria-label="Close settings"></button>
+        </header>
+        <div class="set-scroll" id="set-scroll"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>/*__JS__*/</script>
+</body>
+</html>

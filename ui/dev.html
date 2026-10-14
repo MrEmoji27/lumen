@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en" data-palette="ember" data-theme="dark" data-anim="on" data-side="left">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumen — dev preview</title>
+<style>
+@font-face{ font-family:"Instrument Sans"; src:url("fonts/sans.woff2") format("woff2"); font-weight:400 700; font-style:normal; font-display:swap }
+@font-face{ font-family:"Instrument Serif"; src:url("fonts/serif.woff2") format("woff2"); font-weight:400; font-style:normal; font-display:swap }
+@font-face{ font-family:"Instrument Serif"; src:url("fonts/serif-italic.woff2") format("woff2"); font-weight:400; font-style:italic; font-display:swap }
+</style>
+<link rel="stylesheet" href="app.css">
+<style>
+/* dev-only: stand in for the Mica backdrop, a fake page, and the harness bar */
+html,body{ height:100% }
+body{
+  background:
+    radial-gradient(120% 90% at 12% 8%, oklch(0.42 0.05 250 / .55), transparent 60%),
+    radial-gradient(100% 80% at 88% 12%, oklch(0.45 0.07 60 / .45), transparent 55%),
+    radial-gradient(90% 90% at 70% 92%, oklch(0.35 0.05 160 / .5), transparent 60%),
+    linear-gradient(160deg, oklch(0.30 0.02 260), oklch(0.24 0.02 60));
+  background-attachment: fixed;
+}
+body::after{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
+  background-image: repeating-linear-gradient(0deg, oklch(1 0 0 / .02) 0 1px, transparent 1px 3px);
+}
+#app{ background: transparent }
+.devpage{
+  position:fixed; z-index:0; display:none; border-radius:10px; overflow:hidden;
+  background: linear-gradient(180deg, oklch(0.24 0.012 60), oklch(0.19 0.014 250));
+  box-shadow: inset 0 0 0 1px oklch(1 0 0 / .06);
+}
+.devpage .in{ padding:34px 40px; color:oklch(0.9 0.01 60) }
+.devpage .tag{
+  font:500 10px/1 system-ui,sans-serif; letter-spacing:.18em; text-transform:uppercase;
+  color:oklch(0.72 0.05 250); margin-bottom:16px
+}
+.devpage .h{ font:700 22px/1.2 Georgia,serif; margin-bottom:14px }
+.devpage .l{ height:9px; border-radius:5px; background:oklch(1 0 0 / .07); margin-bottom:9px }
+.devbar{
+  position:fixed; z-index:100; right:14px; bottom:14px; width:262px; padding:10px 11px 9px;
+  border-radius:12px; background:oklch(0.17 0.012 260 / .92); color:oklch(0.93 0.005 60);
+  border:1px dashed oklch(1 0 0 / .18); font:400 11px/1.4 system-ui,sans-serif;
+  box-shadow:0 18px 40px -18px oklch(0 0 0 / .6);
+}
+.devbar h4{ font:600 10px/1 system-ui,sans-serif; letter-spacing:.16em; text-transform:uppercase;
+  color:oklch(0.62 0.02 250); margin-bottom:8px }
+.devbar .btns{ display:flex; flex-wrap:wrap; gap:5px }
+.devbar button{
+  font:500 11px/1 system-ui,sans-serif; padding:6px 8px; border-radius:6px; cursor:pointer;
+  background:oklch(1 0 0 / .07); color:inherit; border:1px solid oklch(1 0 0 / .08);
+}
+.devbar button:hover{ background:oklch(1 0 0 / .14) }
+.devbar button[aria-pressed="true"]{ background:oklch(0.72 0.12 60 / .35); border-color:oklch(0.72 0.12 60 / .5) }
+.devbar .log{
+  margin-top:8px; padding-top:7px; border-top:1px solid oklch(1 0 0 / .1);
+  color:oklch(0.66 0.015 250); font:400 10px/1.35 ui-monospace,Consolas,monospace;
+  max-height:44px; overflow:hidden; word-break:break-all
+}
+</style>
+</head>
+<body>
+<div class="devpage" id="devpage" aria-hidden="true">
+  <div class="in">
+    <div class="tag">page · Rust covers this exact rect</div>
+    <div class="h">A page is showing</div>
+    <div class="l" style="width:88%"></div><div class="l" style="width:96%"></div>
+    <div class="l" style="width:74%"></div><div class="l" style="width:91%"></div>
+    <div class="l" style="width:52%"></div>
+  </div>
+</div>
+
+<div id="app">
+  <div id="rz" aria-hidden="true">
+    <b data-d="n"></b><b data-d="s"></b><b data-d="e"></b><b data-d="w"></b>
+    <b data-d="ne"></b><b data-d="nw"></b><b data-d="se"></b><b data-d="sw"></b>
+  </div>
+
+  <aside id="sidebar">
+    <div class="sb-top" data-drag>
+      <div class="navs">
+        <button class="ib" id="b-back" data-icon="back" aria-label="Back" disabled></button>
+        <button class="ib" id="b-fwd" data-icon="fwd" aria-label="Forward" disabled></button>
+        <button class="ib" id="b-reload" data-icon="reload" aria-label="Reload"></button>
+      </div>
+      <div class="wins">
+        <button class="ib" data-win="min" data-icon="min" aria-label="Minimize"></button>
+        <button class="ib" data-win="max" data-icon="max" aria-label="Maximize"></button>
+        <button class="ib win-x" data-win="close" data-icon="close" aria-label="Close"></button>
+      </div>
+    </div>
+
+    <div class="omni-box">
+      <div class="omni" id="omni">
+        <span class="omni-ico i" id="omni-ico" data-icon="search"></span>
+        <input id="omni-in" type="text" spellcheck="false" autocomplete="off"
+               aria-label="Address and search bar" role="combobox" aria-expanded="false"
+               aria-controls="omni-list" aria-autocomplete="list">
+      </div>
+      <div class="omni-list" id="omni-list" role="listbox" aria-label="Suggestions" hidden></div>
+    </div>
+
+    <div class="pins" id="pins" hidden></div>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Open tabs"></div>
+
+    <button class="newrow" id="b-new">
+      <span class="i" data-icon="plus"></span><span class="newrow-t">New tab</span>
+    </button>
+
+    <div class="foot">
+      <span class="mem" id="mem"></span>
+      <button class="ib" id="b-set" data-icon="gear" aria-label="Settings"></button>
+    </div>
+
+    <div class="menu" id="menu" role="menu" hidden></div>
+  </aside>
+
+  <main id="stage">
+    <section class="ntp" id="ntp" hidden>
+      <div class="ntp-bg" id="ntp-bg" aria-hidden="true"></div>
+      <div class="ntp-in">
+        <header class="ntp-head">
+          <div class="clock" id="clock" aria-live="off">
+            <span class="ck-h">10:</span><em class="ck-m">42</em><span class="ck-ap">PM</span>
+          </div>
+          <p class="greet" id="greet">Good evening</p>
+          <p class="date" id="date"></p>
+        </header>
+        <div class="ntp-q">
+          <span class="i" data-icon="search"></span>
+          <input id="ntp-in" type="text" placeholder="Search the web" spellcheck="false"
+                 autocomplete="off" aria-label="Search the web">
+        </div>
+        <nav class="scs" id="scs" aria-label="Shortcuts"></nav>
+      </div>
+    </section>
+
+    <section class="set" id="settings" hidden>
+      <div class="set-nav" id="set-nav" role="tablist" aria-label="Settings sections"></div>
+      <div class="set-main">
+        <header class="set-head">
+          <h2 id="set-title"></h2>
+          <button class="ib" id="set-close" data-icon="close" aria-label="Close settings"></button>
+        </header>
+        <div class="set-scroll" id="set-scroll"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="devbar">
+  <h4>dev harness · fake ipc</h4>
+  <div class="btns">
+    <button id="d-ntp">New tab page</button>
+    <button id="d-set">Settings</button>
+    <button id="d-compact">Compact</button>
+    <button id="d-dark">Light</button>
+    <button id="d-side">Right side</button>
+    <button id="d-back">Backdrop</button>
+  </div>
+  <div class="log" id="d-log">no messages yet</div>
+</div>
+
+<script>
+/* Stand-in for the Rust shell. Same message protocol, no window. */
+(function () {
+  'use strict';
+  var id = 100;
+  var BG = ['mica', 'acrylic', 'tabbed', 'solid'];
+  var state = {
+    active: 21,
+    dark: true, maximized: false, fullscreen: false, panel: 'none', peek: false,
+    mem: { bytes: 327155712, procs: 7 },
+    settings: {
+      palette: 'ember', accent: '', backdrop: 'mica', theme: 'dark', sidebar_side: 'left',
+      sidebar_width: 264, compact: false, gap: 8, radius: 10, animations: true,
+      search: 'https://duckduckgo.com/?q=%s', wallpaper: '', sleep_after_min: 5,
+      discard_after_min: 30, tracking: 'balanced', show_memory: true, adblock: true,
+      shortcuts: [
+        { title: 'YouTube', url: 'https://www.youtube.com' },
+        { title: 'GitHub', url: 'https://github.com' },
+        { title: 'Reddit', url: 'https://www.reddit.com' },
+        { title: 'Gmail', url: 'https://mail.google.com' },
+        { title: 'Wikipedia', url: 'https://en.wikipedia.org' }
+      ]
+    },
+    tabs: [
+      { id: 21, title: 'New tab', url: '', favicon: '', loading: false, canBack: false,
+        canFwd: false, pinned: false, audio: false, muted: false, status: 'new' },
+      { id: 5, title: 'YouTube', url: 'https://www.youtube.com/', favicon: '', loading: false,
+        canBack: true, canFwd: false, pinned: false, audio: true, muted: false, status: 'live' },
+      { id: 8, title: 'anomalyco/lumen: a browser with taste', url: 'https://github.com/anomalyco/lumen',
+        favicon: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="4" fill="%23333"/><text x="8" y="11.5" font-size="9" font-family="sans-serif" fill="%23fff" text-anchor="middle">G</text></svg>',
+        loading: false, canBack: true, canFwd: true, pinned: false, audio: false, muted: false, status: 'live' },
+      { id: 11, title: 'The Verge — the new thing nobody asked for', url: 'https://www.theverge.com/2026/10/14/ai-hardware',
+        favicon: '', loading: true, canBack: false, canFwd: false, pinned: false, audio: false,
+        muted: false, status: 'live' },
+      { id: 14, title: 'Rust Standard Library Documentation', url: 'https://doc.rust-lang.org/std/',
+        favicon: '', loading: false, canBack: true, canFwd: false, pinned: false, audio: false,
+        muted: false, status: 'asleep' },
+      { id: 2, title: 'Gmail', url: 'https://mail.google.com/', favicon: '', loading: false,
+        canBack: false, canFwd: false, pinned: true, audio: false, muted: false, status: 'live' }
+    ]
+  };
+  function push() { window.lumen && window.lumen.state(state); }
+  function log(s) {
+    var el = document.getElementById('d-log');
+    if (el) el.textContent = s;
+  }
+  window.ipc = {
+    postMessage: function (body) {
+      var m;
+      try { m = JSON.parse(body); } catch (e) { return; }
+      log(body.length > 120 ? body.slice(0, 120) + '…' : body);
+      var t = m.t, i, idx;
+      switch (t) {
+        case 'ready': push(); break;
+        case 'nav': state.tabs.push({ id: ++id, title: m.url, url: m.url, favicon: '',
+          loading: true, canBack: false, canFwd: false, pinned: false, audio: false,
+          muted: false, status: 'live' }); state.active = id; push(); break;
+        case 'newtab': state.tabs.push({ id: ++id, title: 'New tab', url: '', favicon: '',
+          loading: false, canBack: false, canFwd: false, pinned: false, audio: false,
+          muted: false, status: 'new' }); state.active = id; push(); break;
+        case 'activate': state.active = m.id; push(); break;
+        case 'close': state.tabs = state.tabs.filter(function (x) { return x.id !== m.id; });
+          if (state.active === m.id) state.active = state.tabs.length ? state.tabs[0].id : 0;
+          push(); break;
+        case 'pin': idx = state.tabs.findIndex(function (x) { return x.id === m.id; });
+          if (idx >= 0) state.tabs[idx].pinned = !state.tabs[idx].pinned; push(); break;
+        case 'mute': idx = state.tabs.findIndex(function (x) { return x.id === m.id; });
+          if (idx >= 0) state.tabs[idx].muted = !state.tabs[idx].muted; push(); break;
+        case 'sleep': idx = state.tabs.findIndex(function (x) { return x.id === m.id; });
+          if (idx >= 0) state.tabs[idx].status = state.tabs[idx].status === 'live' ? 'asleep' : 'live';
+          push(); break;
+        case 'duplicate': idx = state.tabs.findIndex(function (x) { return x.id === m.id; });
+          if (idx >= 0) { var c = Object.assign({}, state.tabs[idx]); c.id = ++id; state.tabs.splice(idx + 1, 0, c); }
+          push(); break;
+        case 'closeOthers': state.tabs = state.tabs.filter(function (x) { return x.id === m.id || x.pinned; });
+          push(); break;
+        case 'move': i = state.tabs.findIndex(function (x) { return x.id === m.id; });
+          if (i >= 0) { var mv = state.tabs.splice(i, 1)[0];
+            state.tabs.splice(Math.max(0, Math.min(m.to, state.tabs.length)), 0, mv); }
+          push(); break;
+        case 'back': case 'fwd': case 'reload': case 'reopen': case 'devtools':
+          idx = state.tabs.findIndex(function (x) { return x.id === state.active; });
+          if (idx >= 0 && t === 'reload') state.tabs[idx].loading = !state.tabs[idx].loading;
+          push(); break;
+        case 'win': if (m.a === 'max') { state.maximized = !state.maximized; }
+          if (m.a === 'min') log('win min'); push(); break;
+        case 'panel': state.panel = m.open ? 'settings' : 'none'; push(); break;
+        case 'peek': state.peek = m.on; push(); break;
+        case 'settings':
+          state.settings = m.v;
+          state.dark = state.settings.theme === 'system' ? state.dark :
+            state.settings.theme === 'light' ? false : true;
+          push(); break;
+        default: break;
+      }
+    }
+  };
+  window.dev = {
+    state: state, push: push,
+    flipNtp: function () {
+      var cur = state.tabs.filter(function (x) { return x.status === 'new'; })[0];
+      if (cur && state.active === cur.id) state.active = 5; else if (cur) state.active = cur.id;
+      else { state.tabs.push({ id: ++id, title: 'New tab', url: '', favicon: '', loading: false,
+        canBack: false, canFwd: false, pinned: false, audio: false, muted: false, status: 'new' });
+        state.active = id; }
+      push();
+    },
+    flipSet: function () { state.panel = state.panel === 'settings' ? 'none' : 'settings'; push(); },
+    flipCompact: function () { state.settings.compact = !state.settings.compact; push(); },
+    flipDark: function () {
+      state.dark = !state.dark;
+      state.settings.theme = state.dark ? 'dark' : 'light';
+      push();
+    },
+    flipSide: function () {
+      state.settings.sidebar_side = state.settings.sidebar_side === 'left' ? 'right' : 'left';
+      push();
+    },
+    flipBackdrop: function () {
+      var i = BG.indexOf(state.settings.backdrop);
+      state.settings.backdrop = BG[(i + 1) % BG.length];
+      push();
+    }
+  };
+})();
+</script>
+<script src="app.js"></script>
+<script>
+/* boot the preview once app.js has published window.lumen */
+(function () {
+  'use strict';
+  var pg = document.getElementById('devpage');
+  var stage = document.getElementById('stage');
+  function syncPage() {
+    var r = stage.getBoundingClientRect();
+    pg.style.left = r.left + 'px'; pg.style.top = r.top + 'px';
+    pg.style.width = r.width + 'px'; pg.style.height = r.height + 'px';
+    pg.style.borderRadius = getComputedStyle(document.documentElement)
+      .getPropertyValue('--radius') || '10px';
+    var st = window.dev.state;
+    var live = st.tabs.filter(function (x) { return x.id === st.active; })[0];
+    var show = live && live.status !== 'new' && st.panel !== 'settings';
+    pg.style.display = show ? '' : 'none';
+  }
+  new ResizeObserver(syncPage).observe(stage);
+  setInterval(syncPage, 400);
+
+  var btn = {
+    'd-ntp': 'flipNtp', 'd-set': 'flipSet', 'd-compact': 'flipCompact',
+    'd-dark': 'flipDark', 'd-side': 'flipSide', 'd-back': 'flipBackdrop'
+  };
+  function press(id) {
+    var fn = window.dev[btn[id]];
+    if (fn) fn();
+    syncPage();
+    labels();
+  }
+  Object.keys(btn).forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('click', function () { press(id); });
+  });
+  function labels() {
+    var st = window.dev.state;
+    document.getElementById('d-dark').textContent = st.dark ? 'Light' : 'Dark';
+    document.getElementById('d-compact').setAttribute('aria-pressed', String(!!st.settings.compact));
+    document.getElementById('d-set').setAttribute('aria-pressed', String(st.panel === 'settings'));
+    document.getElementById('d-side').textContent =
+      st.settings.sidebar_side === 'right' ? 'Left side' : 'Right side';
+    document.getElementById('d-back').textContent = st.settings.backdrop;
+  }
+  window.addEventListener('resize', syncPage);
+  var old = window.lumen.state;
+  window.lumen.state = function (s) { old(s); syncPage(); labels(); };
+  window.dev.push();
+  labels();
+})();
+</script>
+</body>
+</html>

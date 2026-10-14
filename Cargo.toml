@@ -1,0 +1,34 @@
+[package]
+name = "lumen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+adblock = "0.13"
+base64 = "0.23"
+dirs = "7.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tao = "0.37"
+ureq = "3"
+webview2-com = "0.39"
+window-vibrancy = "0.8"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+wry = { version = "0.57", features = ["devtools"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
