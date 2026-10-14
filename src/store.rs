@@ -56,6 +56,8 @@ pub struct Settings {
     pub tracking: String,
     /// Block ads and trackers at the network layer.
     pub adblock: bool,
+    /// Hide ad leftovers and cookie banners (cosmetic rules).
+    pub cosmetic: bool,
     pub show_memory: bool,
     pub shortcuts: Vec<Shortcut>,
     /// Run GPU work inside the browser process. About 100 MB less. Applies on restart.
@@ -117,6 +119,7 @@ impl Default for Settings {
             share_processes: true,
             save_passwords: true,
             accelerate_downloads: true,
+            cosmetic: true,
             dark_pages: false,
             dark_skip: Vec::new(),
             ui_font: "segoe".into(),

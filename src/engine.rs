@@ -139,6 +139,8 @@ pub struct Ctx {
     pub bypass: RefCell<std::collections::HashSet<String>>,
     /// Dark Reader script for new documents, when dark pages are on.
     pub dark_js: RefCell<Option<Rc<str>>>,
+    /// Tracking parameters a filter list removes (set by the blocker).
+    pub rewrite: RefCell<Option<Rc<dyn Fn(&str) -> Option<String>>>>,
     /// Per tab: the id WebView2 gave the injected Dark Reader script.
     pub dark_ids: Rc<RefCell<HashMap<u64, String>>>,
 }
@@ -243,6 +245,7 @@ fn build_tab_in(
         .with_visible(false)
         .with_devtools(true)
         .with_hotkeys_zoom(true)
+        .with_initialization_script(crate::blocker::COSMETIC_JS)
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_document_title_changed_handler(move |t| {
@@ -281,7 +284,7 @@ fn build_tab_in(
         ctx.env.replace(Some(wv.environment()));
         set_tracking(&wv, &ctx.tracking.borrow());
     }
-    hook_page(&wv, id, ctx.proxy.clone());
+    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone());
     hook_downloads(ctx, &wv, id);
     hook_permissions(ctx, &wv, id, isolated);
     // Password saving is per profile. The agent's profile never saves passwords.
@@ -310,7 +313,7 @@ fn content_bounds_now(ctx: &Ctx) -> Rect {
 
 // ------------------------------------------------------------------- hooks
 
-fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
+fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<Rc<dyn Fn(&str) -> Option<String>>>) {
     let core = wv.webview();
     let mut token = 0i64;
     unsafe {
@@ -327,7 +330,10 @@ fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
                 }
                 let mut u = PWSTR::null();
                 args.Uri(&mut u)?;
-                if let Some(clean) = clean_url(&take(u)) {
+                let u = take(u);
+                let clean = clean_url(&u);
+                let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u)));
+                if let Some(clean) = listed.or(clean) {
                     args.SetCancel(true)?;
                     let _ = p.send_event(Ev::Redirect(id, clean));
                 }

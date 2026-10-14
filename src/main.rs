@@ -222,12 +222,16 @@ fn main() {
         aria_on: Cell::new(false),
         bypass: RefCell::new(Default::default()),
         dark_js: RefCell::new(None),
+        rewrite: RefCell::new(None),
         dark_ids: Rc::new(RefCell::new(HashMap::new())),
     });
 
     let blocker = blocker::Blocker::start(store::data_dir());
     blocker.set_enabled(settings.adblock);
+    blocker.set_cosmetic(settings.cosmetic);
     {
+        let b = blocker.clone();
+        ctx.rewrite.replace(Some(Rc::new(move |u: &str| b.rewrite(u))));
         let b = blocker.clone();
         ctx.on_built.replace(Some(Box::new(move |wv: &WebView| b.attach(wv))));
     }
@@ -1207,6 +1211,7 @@ impl App {
             self.rounded = None;
         }
         self.blocker.set_enabled(self.settings.adblock);
+        self.blocker.set_cosmetic(self.settings.cosmetic);
         self.apply_limits(Some(&old));
         if old.save_passwords != self.settings.save_passwords {
             self.ctx.passwords.set(self.settings.save_passwords);

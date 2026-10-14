@@ -124,6 +124,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("Search", vec![Engine]),
         ("Performance", vec![
             Toggle("adblock", "Block ads and trackers", "Stops them before they load. Saves memory and data."),
+            Toggle("cosmetic", "Hide cookie banners and ad leftovers", "Filter-list hiding rules, applied as plain CSS."),
             Toggle("accelerate_downloads", "Accelerate downloads", "aria2 splits files into up to 16 connections, resumes, and queues. Falls back to the built-in downloader when a site refuses it."),
             Seg("tracking", "Tracking prevention", "", &[("off", "Off"), ("basic", "Basic"), ("balanced", "Balanced"), ("strict", "Strict")]),
             Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),

@@ -5,6 +5,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     rc::Rc,
@@ -14,7 +15,7 @@ use std::{
 };
 
 use webview2_com::{
-    Microsoft::Web::WebView2::Win32::*,
+    ExecuteScriptCompletedHandler, Microsoft::Web::WebView2::Win32::*, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler,
 };
 use windows::{
@@ -29,7 +30,33 @@ const LISTS: &[(&str, &str)] = &[
     ("easyprivacy.txt", "https://easylist.to/easylist/easyprivacy.txt"),
     ("pgl.txt", "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext"),
     ("ublock.txt", "https://ublockorigin.github.io/uAssets/filters/filters.txt"),
+    // Cookie banners: EasyList Cookie and uBlock's own. Mostly hiding rules.
+    ("cookies-easylist.txt", "https://secure.fanboy.co.nz/fanboy-cookiemonster.txt"),
+    ("cookies-ublock.txt", "https://ublockorigin.github.io/uAssets/filters/annoyances-cookies.txt"),
+    // Tracking parameters ($removeparam), the ClearURLs job done by a list.
+    ("privacy-ublock.txt", "https://ublockorigin.github.io/uAssets/filters/privacy.txt"),
 ];
+
+/// In every top-level page. Asks Lumen for the page's hiding rules at once, then sends the
+/// class names and ids it sees (new ones only, batched) so generic rules can match them.
+/// Lumen answers by calling `__lumenCos(css)`.
+pub const COSMETIC_JS: &str = r#"(()=>{if(window!==window.top)return;const W=window.chrome&&window.chrome.webview;if(!W)return;
+let st=null;const put=t=>{try{if(!st)st=document.createElement('style');if(!st.isConnected)(document.head||document.documentElement).appendChild(st);st.textContent+=t}catch(e){}};
+try{Object.defineProperty(window,'__lumenCos',{value:put})}catch(e){return}
+const sc=new Set(),si=new Set();let qc=[],qi=[],tm=0;
+const add=el=>{if(el.nodeType!==1)return;const id=el.id;if(id&&typeof id==='string'&&!si.has(id)){si.add(id);qi.push(id)}const cl=el.classList;if(cl)for(const c of cl)if(!sc.has(c)){sc.add(c);qc.push(c)}};
+const flush=()=>{tm=0;if(!qc.length&&!qi.length)return;W.postMessage({lumen:'cos',c:qc.splice(0,3000),i:qi.splice(0,3000)});if(qc.length||qi.length)tm=setTimeout(flush,50)};
+W.postMessage({lumen:'cos',first:1,c:[],i:[]});
+const scan=()=>{for(const el of document.querySelectorAll('[id],[class]'))add(el);flush();
+new MutationObserver(ms=>{for(const m of ms){if(m.type==='attributes'){add(m.target);continue}for(const n of m.addedNodes){if(n.nodeType!==1)continue;add(n);for(const e of n.querySelectorAll('[id],[class]'))add(e)}}if(!tm)tm=setTimeout(flush,300)}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['class','id']})};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',scan,{once:true});else scan()})();"#;
+
+/// What one page was told on its first ask: its exceptions and whether generic rules apply.
+#[derive(Default)]
+struct PageCos {
+    exceptions: HashSet<String>,
+    generichide: bool,
+}
 const ENGINE_FILE: &str = "engine.dat";
 /// Four days. Older than that and the list is a rumour.
 const MAX_AGE: Duration = Duration::from_secs(4 * 24 * 60 * 60);
@@ -38,6 +65,8 @@ const NET_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct Blocker {
     dir: PathBuf,
     on: Cell<bool>,
+    /// Hide what slipped through, and cookie banners (cosmetic rules).
+    cosmetic: Cell<bool>,
     blocked: Cell<u64>,
     /// `adblock::Engine` refuses to cross threads, so it is born here, on the
     /// UI thread, from bytes baked by the background thread.
@@ -54,6 +83,7 @@ impl Blocker {
         Rc::new(Blocker {
             dir: data_dir,
             on: Cell::new(true),
+            cosmetic: Cell::new(true),
             blocked: Cell::new(0),
             engine: RefCell::new(None),
             rx: RefCell::new(rx),
@@ -63,6 +93,59 @@ impl Blocker {
     /// Turn blocking on/off at runtime.
     pub fn set_enabled(&self, on: bool) {
         self.on.set(on);
+    }
+
+    pub fn set_cosmetic(&self, on: bool) {
+        self.cosmetic.set(on);
+    }
+
+    /// The URL with tracking parameters removed by `$removeparam` rules, if any were.
+    pub fn rewrite(&self, url: &str) -> Option<String> {
+        if !self.on.get() || !url.starts_with("http") || !url.contains('?') {
+            return None;
+        }
+        self.pump();
+        let slot = self.engine.borrow();
+        let engine = slot.as_ref()?;
+        let req = adblock::request::Request::new(url, url, "document", "GET").ok()?;
+        engine.check_network_request(&req).rewritten_url.filter(|u| u != url)
+    }
+
+    /// CSS for one page. First call: the site's own rules. Every call: generic rules that
+    /// match the class names and ids the page reported. One rule per selector, so a selector
+    /// the browser cannot parse only loses itself.
+    fn cosmetic_css(&self, url: &str, st: &mut PageCos, first: bool, classes: &[String], ids: &[String]) -> String {
+        if !self.on.get() || !self.cosmetic.get() || !url.starts_with("http") {
+            return String::new();
+        }
+        self.pump();
+        let slot = self.engine.borrow();
+        let Some(engine) = slot.as_ref() else { return String::new() };
+        let mut css = String::new();
+        let hide = |sel: &str, css: &mut String| {
+            css.push_str(sel);
+            css.push_str("{display:none!important}\n");
+        };
+        if first {
+            let res = engine.url_cosmetic_resources(url);
+            for sel in &res.hide_selectors {
+                hide(sel, &mut css);
+            }
+            for action in &res.procedural_actions {
+                if let Ok(f) = serde_json::from_str::<adblock::cosmetic_filter_cache::ProceduralOrActionFilter>(action)
+                    && let Some((sel, style)) = f.as_css()
+                {
+                    css.push_str(&format!("{sel}{{{style}}}\n"));
+                }
+            }
+            *st = PageCos { exceptions: res.exceptions, generichide: res.generichide };
+        }
+        if !st.generichide && (!classes.is_empty() || !ids.is_empty()) {
+            for sel in engine.hidden_class_id_selectors(classes, ids, &st.exceptions) {
+                hide(&sel, &mut css);
+            }
+        }
+        css
     }
 
     /// Total requests blocked since start.
@@ -94,8 +177,36 @@ impl Blocker {
             if !hooked {
                 return;
             }
-            let page = core.clone();
+            // Cosmetic rules: the page script asks, this answers with CSS.
+            let w2 = Rc::downgrade(self);
+            let state = Rc::new(RefCell::new(PageCos::default()));
             let mut token = 0i64;
+            let _ = core.add_WebMessageReceived(
+                &WebMessageReceivedEventHandler::create(Box::new(move |sender, args| {
+                    let (Some(b), Some(args), Some(sender)) = (w2.upgrade(), args, sender) else { return Ok(()) };
+                    let mut p = PWSTR::null();
+                    if args.WebMessageAsJson(&mut p).is_err() {
+                        return Ok(());
+                    }
+                    let Ok(msg) = serde_json::from_str::<serde_json::Value>(&take(p)) else { return Ok(()) };
+                    if msg["lumen"] != "cos" {
+                        return Ok(());
+                    }
+                    let mut src = PWSTR::null();
+                    args.Source(&mut src)?;
+                    let list = |k: &str| -> Vec<String> {
+                        msg[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).take(3000).collect()).unwrap_or_default()
+                    };
+                    let css = b.cosmetic_css(&take(src), &mut state.borrow_mut(), msg["first"] == 1, &list("c"), &list("i"));
+                    if !css.is_empty() {
+                        let js = format!("window.__lumenCos&&window.__lumenCos({})", serde_json::to_string(&css).unwrap_or_default());
+                        let _ = sender.ExecuteScript(&HSTRING::from(js), &ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(()))));
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            );
+            let page = core.clone();
             let _ = core.add_WebResourceRequested(
                 &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                     let Some(b) = weak.upgrade() else { return Ok(()) };
@@ -390,6 +501,19 @@ mod tests {
         assert!(!cache_is_fresh(&[None], now, MAX_AGE));
         assert!(!cache_is_fresh(&[Some(now), None], now, MAX_AGE));
         assert!(!cache_is_fresh(&[], now, MAX_AGE));
+    }
+
+    #[test]
+    fn cosmetic_rules_reach_the_page() {
+        let e = engine(&["example.com##.cookie-wall", "##.ad-banner", "example.com#@#.ad-banner", "||x.com^$removeparam=ref"]);
+        let res = e.url_cosmetic_resources("https://example.com/a");
+        assert!(res.hide_selectors.contains(".cookie-wall"));
+        let generic = e.hidden_class_id_selectors(["ad-banner"], [] as [&str; 0], &HashSet::new());
+        assert_eq!(generic, vec![".ad-banner".to_string()]);
+        // The site said: not here.
+        assert!(e.hidden_class_id_selectors(["ad-banner"], [] as [&str; 0], &res.exceptions).is_empty());
+        let req = adblock::request::Request::new("https://x.com/p?ref=tw&id=1", "https://x.com/p?ref=tw&id=1", "document", "GET").unwrap();
+        assert_eq!(e.check_network_request(&req).rewritten_url.as_deref(), Some("https://x.com/p?id=1"));
     }
 
     #[test]
