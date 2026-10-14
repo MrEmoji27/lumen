@@ -65,6 +65,10 @@ pub struct Settings {
     pub share_processes: bool,
     /// Offer to save passwords and fill them in (WebView2's own, encrypted by Windows).
     pub save_passwords: bool,
+    /// Interface font: "segoe" | "instrument" | "figtree" | "atkinson".
+    pub ui_font: String,
+    /// Display font for the clock and page titles: "instrument" | "fraunces" | "newsreader".
+    pub display_font: String,
     /// Let AI agents browse through the built-in MCP server on localhost.
     pub agent: bool,
     pub agent_port: u32,
@@ -106,6 +110,8 @@ impl Default for Settings {
             gpu_in_process: true,
             share_processes: true,
             save_passwords: true,
+            ui_font: "segoe".into(),
+            display_font: "instrument".into(),
             agent: false,
             agent_port: 47615,
             agent_shared_profile: false,

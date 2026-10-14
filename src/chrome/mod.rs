@@ -465,6 +465,7 @@ impl Inner {
     }
 
     fn apply(&mut self, s: UiState) {
+        self.gfx.set_families(&s.settings.ui_font, &s.settings.display_font);
         let key = format!("{}|{}|{}", s.settings.palette, s.dark, s.settings.accent);
         if key != self.theme_key {
             self.theme_key = key;

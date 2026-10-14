@@ -5,7 +5,7 @@ use std::{cell::RefCell, collections::HashMap};
 
 use windows::{
     Win32::{
-        Foundation::{GENERIC_READ, HWND},
+        Foundation::HWND,
         Graphics::{
             Direct2D::{Common::*, *},
             DirectWrite::*,
@@ -14,7 +14,7 @@ use windows::{
         },
         System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
     },
-    core::{HSTRING, Interface, PCWSTR, w},
+    core::{HSTRING, Interface, w},
 };
 use windows_numerics::Vector2;
 
@@ -94,7 +94,12 @@ pub struct Gfx {
     d2d: ID2D1Factory,
     dw: IDWriteFactory5,
     wic: Option<IWICImagingFactory>,
-    serif: Option<IDWriteFontCollection1>,
+    /// Every bundled font, unpacked from WOFF2 into one in-memory collection.
+    bundled: Option<IDWriteFontCollection1>,
+    ui_family: String,
+    serif_family: String,
+    /// Family names as DirectWrite sees them in the bundle (font files name themselves oddly).
+    families: Vec<String>,
     target: Option<ID2D1HwndRenderTarget>,
     brush: Option<ID2D1SolidColorBrush>,
     round: Option<ID2D1StrokeStyle>,
@@ -129,13 +134,29 @@ impl Gfx {
                     None,
                 )
                 .ok();
-            let serif = load_woff2(&dw, include_bytes!("../../ui/fonts/serif.woff2"), include_bytes!("../../ui/fonts/serif-italic.woff2"));
+            let bundled = load_woff2(
+                &dw,
+                &[
+                    include_bytes!("../../ui/fonts/serif.woff2"),
+                    include_bytes!("../../ui/fonts/serif-italic.woff2"),
+                    include_bytes!("../../ui/fonts/sans-instrument.woff2"),
+                    include_bytes!("../../ui/fonts/sans-figtree.woff2"),
+                    include_bytes!("../../ui/fonts/sans-atkinson.woff2"),
+                    include_bytes!("../../ui/fonts/serif-fraunces.woff2"),
+                    include_bytes!("../../ui/fonts/serif-fraunces-italic.woff2"),
+                    include_bytes!("../../ui/fonts/serif-newsreader.woff2"),
+                    include_bytes!("../../ui/fonts/serif-newsreader-italic.woff2"),
+                ],
+            );
             Ok(Gfx {
                 hwnd,
                 d2d,
                 dw,
                 wic,
-                serif,
+                families: family_names(bundled.as_ref()),
+                bundled,
+                ui_family: SYSTEM_UI.into(),
+                serif_family: "Instrument Serif".into(),
                 target: None,
                 brush: None,
                 round,
@@ -317,22 +338,54 @@ impl Gfx {
 
     // ------------------------------------------------------------- text
 
+    /// Choose the interface and display families by setting key. Clears cached formats on change.
+    pub fn set_families(&mut self, ui: &str, display: &str) {
+        // Match by keyword against the names the bundle really has.
+        let find = |word: &str, fallback: &str| -> String {
+            self.families.iter().find(|f| f.contains(word)).cloned().unwrap_or_else(|| fallback.to_string())
+        };
+        let ui = match ui {
+            "instrument" => find("Instrument Sans", SYSTEM_UI),
+            "figtree" => find("Figtree", SYSTEM_UI),
+            "atkinson" => find("Atkinson", SYSTEM_UI),
+            _ => SYSTEM_UI.to_string(),
+        };
+        let serif = match display {
+            "fraunces" => find("Fraunces", "Instrument Serif"),
+            "newsreader" => find("Newsreader", "Instrument Serif"),
+            _ => find("Instrument Serif", "Georgia"),
+        };
+        let (ui, serif) = (ui.as_str(), serif.as_str());
+        if ui != self.ui_family || serif != self.serif_family {
+            self.ui_family = ui.into();
+            self.serif_family = serif.into();
+            self.formats.borrow_mut().clear();
+            self.ellipsis.borrow_mut().clear();
+        }
+    }
+
     fn format(&self, f: Font) -> Option<IDWriteTextFormat> {
         if let Some(x) = self.formats.borrow().get(&f) {
             return Some(x.clone());
         }
         unsafe {
-            let (family, coll): (PCWSTR, Option<IDWriteFontCollection>) = match f.face {
-                Face::Ui => (w!("Segoe UI Variable Text"), None),
-                Face::Serif => match &self.serif {
-                    Some(c) => (w!("Instrument Serif"), c.cast().ok()),
-                    None => (w!("Georgia"), None),
+            // System font from the system collection; anything else from the bundle.
+            let bundled = || self.bundled.as_ref().and_then(|c| c.cast::<IDWriteFontCollection>().ok());
+            let (family, coll): (HSTRING, Option<IDWriteFontCollection>) = match f.face {
+                Face::Ui if self.ui_family == SYSTEM_UI => (HSTRING::from(SYSTEM_UI), None),
+                Face::Ui => match bundled() {
+                    Some(c) => (HSTRING::from(self.ui_family.as_str()), Some(c)),
+                    None => (HSTRING::from(SYSTEM_UI), None),
+                },
+                Face::Serif => match bundled() {
+                    Some(c) => (HSTRING::from(self.serif_family.as_str()), Some(c)),
+                    None => (HSTRING::from("Georgia"), None),
                 },
             };
             let fmt = self
                 .dw
                 .CreateTextFormat(
-                    family,
+                    &family,
                     coll.as_ref(),
                     DWRITE_FONT_WEIGHT(f.weight as i32),
                     if f.italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL },
@@ -510,13 +563,36 @@ impl Gfx {
     }
 }
 
+const SYSTEM_UI: &str = "Segoe UI Variable Text";
+
+/// Every family name in a collection, in its first listed language.
+fn family_names(c: Option<&IDWriteFontCollection1>) -> Vec<String> {
+    let Some(c) = c else { return Vec::new() };
+    let mut out = Vec::new();
+    unsafe {
+        for i in 0..c.GetFontFamilyCount() {
+            let Ok(fam) = c.GetFontFamily(i) else { continue };
+            let Ok(names) = fam.GetFamilyNames() else { continue };
+            let Ok(len) = names.GetStringLength(0) else { continue };
+            let mut buf = vec![0u16; len as usize + 1];
+            if names.GetString(0, &mut buf).is_ok() {
+                out.push(String::from_utf16_lossy(&buf[..len as usize]));
+            }
+        }
+    }
+    if cfg!(debug_assertions) {
+        let _ = std::fs::write(crate::store::data_dir().join("fonts.log"), out.join("\n"));
+    }
+    out
+}
+
 /// Unpack WOFF2 fonts into an in-memory collection DirectWrite can use.
-fn load_woff2(dw: &IDWriteFactory5, regular: &[u8], italic: &[u8]) -> Option<IDWriteFontCollection1> {
+fn load_woff2(dw: &IDWriteFactory5, files: &[&[u8]]) -> Option<IDWriteFontCollection1> {
     unsafe {
         let loader = dw.CreateInMemoryFontFileLoader().ok()?;
         dw.RegisterFontFileLoader(&loader).ok()?;
         let builder: IDWriteFontSetBuilder1 = dw.CreateFontSetBuilder().ok()?.cast().ok()?;
-        for data in [regular, italic] {
+        for data in files {
             let Ok(stream) = dw.UnpackFontFile(DWRITE_CONTAINER_TYPE_WOFF2, data.as_ptr() as _, data.len() as u32) else { continue };
             let Ok(size) = stream.GetFileSize() else { continue };
             let mut ptr = std::ptr::null_mut();
@@ -535,8 +611,3 @@ fn load_woff2(dw: &IDWriteFactory5, regular: &[u8], italic: &[u8]) -> Option<IDW
     }
 }
 
-/// Keep the compiler quiet about helpers only some builds use.
-#[allow(dead_code)]
-fn _unused(_: HSTRING) {
-    let _ = GENERIC_READ;
-}
