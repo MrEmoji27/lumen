@@ -940,10 +940,12 @@ impl Inner {
             return;
         }
         let mut right = r.right() - 6.0;
+        let mut badge_x = f32::MAX;
         if t.agent {
             let b = R::new(right - (if show_x { 50.0 } else { 24.0 }), r.y + 9.0, 22.0, 14.0);
             self.gfx.round(b, 4.0, th.accent.alpha(0.22));
             self.gfx.text("AI", b, Font::ui(9.0, 650).align(Align::Center), th.accent);
+            badge_x = b.x;
             if !show_x {
                 right = b.x - 2.0;
             }
@@ -966,6 +968,8 @@ impl Inner {
             self.hit(b, Hit::TabSnd(t.id));
             right = b.x - 2.0;
         }
+        // The title stops before the AI badge, wherever the buttons put it.
+        right = right.min(badge_x - 4.0);
         let title = if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {
