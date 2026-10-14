@@ -86,6 +86,10 @@ pub struct UiState {
     pub agent_busy: bool,
     pub agent_endpoint: String,
     pub agent_cmd: String,
+    /// A site waiting for a permission answer: (request id, origin, what).
+    pub prompt: Option<(u64, String, &'static str)>,
+    /// Remembered answers: (origin, what, allowed).
+    pub rules: Vec<(String, String, bool)>,
 }
 
 impl UiState {
@@ -119,6 +123,8 @@ pub enum Hit {
     Mem,
     DlFooter,
     AgentStop,
+    PermAllow(u64),
+    PermBlock(u64),
     Sugg(usize),
     Shortcut(usize),
     NtpSearch,
@@ -828,6 +834,29 @@ impl Inner {
             }
         }
 
+        // A site asking for something: a card above the footer. The page covers
+        // everything else, so the sidebar is where the question lives.
+        if let Some((pid, origin, kind)) = &s.prompt {
+            let card = if compact { R::new(sb.x + 4.0, sb.h - 150.0, sb.w - 8.0, 106.0) } else { R::new(sb.x + 8.0, sb.h - 150.0, sb.w - 16.0, 106.0) };
+            self.gfx.round(R::new(card.x, card.y + 3.0, card.w, card.h), 10.0, th.shade.alpha(0.5));
+            self.gfx.round(card, 10.0, th.raise);
+            self.gfx.round_stroke(card, 10.0, th.accent.alpha(0.5), 1.0);
+            let site = host(origin);
+            self.gfx.text(&site, R::new(card.x + 12.0, card.y + 8.0, card.w - 24.0, 20.0), Font::ui(12.5, 600), th.text);
+            self.gfx.text(&format!("wants your {kind}"), R::new(card.x + 12.0, card.y + 28.0, card.w - 24.0, 20.0), Font::ui(12.5, 400), th.dim);
+            let bw = (card.w - 30.0) / 2.0;
+            let block = R::new(card.x + 10.0, card.bottom() - 40.0, bw, 30.0);
+            let allow = R::new(block.right() + 10.0, block.y, bw, 30.0);
+            let hb = self.is_hover(&Hit::PermBlock(*pid));
+            let ha = self.is_hover(&Hit::PermAllow(*pid));
+            self.gfx.round(block, 8.0, if hb { th.press } else { th.bg });
+            self.gfx.text("Block", block, Font::ui(12.5, 500).align(Align::Center), th.text);
+            self.gfx.round(allow, 8.0, if ha { th.accent } else { th.accent.alpha(0.85) });
+            self.gfx.text("Allow", allow, Font::ui(12.5, 600).align(Align::Center), th.bg);
+            self.hit(block, Hit::PermBlock(*pid));
+            self.hit(allow, Hit::PermAllow(*pid));
+        }
+
         // Footer: memory readout and settings.
         let fy = sb.h - 38.0;
         let gear = if compact { R::new(sb.x + (sb.w - 28.0) / 2.0, fy + 2.0, 28.0, 28.0) } else { R::new(sb.right() - 8.0 - 28.0, fy + 2.0, 28.0, 28.0) };
@@ -1160,6 +1189,8 @@ impl Inner {
                 send(p, json!({"t": "panel", "open": open, "which": "downloads"}));
             }
             Hit::AgentStop => send(p, json!({"t": "agentStop"})),
+            Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
+            Hit::PermBlock(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": false})),
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {
                     send(p, json!({"t": "nav", "url": sc.url}));

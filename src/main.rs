@@ -154,6 +154,9 @@ struct App {
     agent_seen: Option<Instant>,
     /// Modifier keys as the main window last saw them.
     mods: ModifiersState,
+    /// Remembered permission answers, and requests waiting for the user.
+    rules: store::Rules,
+    prompts: Vec<(u64, u64, String, &'static str)>,
 }
 
 fn main() {
@@ -199,6 +202,7 @@ fn main() {
         tracking: RefCell::new(settings.tracking.clone()),
         downloads: RefCell::new(HashMap::new()),
         passwords: Cell::new(settings.save_passwords),
+        perms: RefCell::new(HashMap::new()),
     });
 
     let blocker = blocker::Blocker::start(store::data_dir());
@@ -247,6 +251,8 @@ fn main() {
         agent: agent::Agent::new(&store::data_dir()),
         agent_seen: None,
         mods: ModifiersState::empty(),
+        rules: store::load_rules(),
+        prompts: Vec::new(),
     };
     app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
     app.apply_backdrop();
@@ -348,11 +354,46 @@ fn logical_size(ctx: &Ctx) -> (f64, f64) {
     (s.width as f64 / f, s.height as f64 / f)
 }
 
-/// Omnibox text in, URL out. Looks like an address: go there. Else: search.
+/// Site searches, after DuckDuckGo's !bangs. `!yt cats` searches YouTube.
+const BANGS: &[(&str, &str)] = &[
+    ("g", "https://www.google.com/search?q=%s"),
+    ("ddg", "https://duckduckgo.com/?q=%s"),
+    ("b", "https://search.brave.com/search?q=%s"),
+    ("yt", "https://www.youtube.com/results?search_query=%s"),
+    ("w", "https://en.wikipedia.org/w/index.php?search=%s"),
+    ("gh", "https://github.com/search?q=%s"),
+    ("r", "https://www.reddit.com/search/?q=%s"),
+    ("a", "https://www.amazon.com/s?k=%s"),
+    ("m", "https://www.google.com/maps/search/%s"),
+    ("so", "https://stackoverflow.com/search?q=%s"),
+    ("mdn", "https://developer.mozilla.org/en-US/search?q=%s"),
+    ("rs", "https://docs.rs/releases/search?query=%s"),
+    ("crates", "https://crates.io/search?q=%s"),
+    ("npm", "https://www.npmjs.com/search?q=%s"),
+    ("x", "https://x.com/search?q=%s"),
+    ("i", "https://www.google.com/search?tbm=isch&q=%s"),
+    ("tr", "https://translate.google.com/?sl=auto&tl=en&text=%s"),
+];
+
+/// A known bang anywhere in the text, and the words around it.
+fn bang(s: &str) -> Option<String> {
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let (pos, url) = words.iter().enumerate().find_map(|(i, w)| {
+        let name = w.strip_prefix('!')?.to_ascii_lowercase();
+        BANGS.iter().find(|(b, _)| *b == name).map(|(_, u)| (i, *u))
+    })?;
+    let q: Vec<&str> = words.iter().enumerate().filter(|(i, _)| *i != pos).map(|(_, w)| *w).collect();
+    Some(url.replace("%s", &url_encode(&q.join(" "))))
+}
+
+/// Omnibox text in, URL out. A bang: that site. Looks like an address: go there. Else: search.
 fn resolve_input(raw: &str, search: &str) -> Option<String> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
+    }
+    if let Some(u) = bang(s) {
+        return Some(u);
     }
     let lower = s.to_ascii_lowercase();
     const SCHEMES: [&str; 7] = ["http://", "https://", "file:", "about:", "data:", "view-source:", "edge://"];
@@ -610,6 +651,17 @@ impl App {
                     })
                     .collect(),
                 agent_busy: self.agent_seen.is_some(),
+                prompt: self
+                    .prompts
+                    .iter()
+                    .find(|p| p.1 == self.active)
+                    .or(self.prompts.first())
+                    .map(|p| (p.0, p.2.clone(), p.3)),
+                rules: self
+                    .rules
+                    .iter()
+                    .flat_map(|(o, r)| r.iter().map(move |(k, a)| (o.clone(), k.clone(), *a)))
+                    .collect(),
                 agent_endpoint: self.agent.endpoint(self.settings.agent_port),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
             };
@@ -729,6 +781,11 @@ impl App {
     fn close(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
         let t = self.tabs.remove(i);
+        // Requests from a closed tab go unanswered by the user; let WebView2 refuse them.
+        for (pid, _, _, _) in self.prompts.iter().filter(|p| p.1 == id) {
+            engine::answer_permission(&self.ctx, *pid, None);
+        }
+        self.prompts.retain(|p| p.1 != id);
         if let Some(w) = self.watches.remove(&id) {
             monitor::unwatch(None, w, true);
         }
@@ -1074,6 +1131,23 @@ impl App {
                 self.push();
             }
             Ev::Agent(call) => self.on_agent(call),
+            Ev::Permission { pid, tab, origin, kind } => {
+                match self.rules.get(&origin).and_then(|r| r.get(kind)).copied() {
+                    Some(allow) => engine::answer_permission(&self.ctx, pid, Some(allow)),
+                    None => {
+                        self.prompts.push((pid, tab, origin, kind));
+                        self.push();
+                    }
+                }
+            }
+            Ev::Redirect(id, url) => {
+                if let Some(i) = self.idx(id)
+                    && let Some(v) = &self.tabs[i].view
+                {
+                    let _ = v.load_url(&url);
+                    self.tabs[i].url = url;
+                }
+            }
             Ev::Popup(id, parent) => {
                 let agent = self.idx(parent).is_some_and(|i| self.tabs[i].agent);
                 let found = {
@@ -1308,6 +1382,28 @@ impl App {
                     }
                     _ => {}
                 }
+            }
+            "perm" => {
+                let pid = m["pid"].as_u64().unwrap_or(0);
+                let allow = m["allow"].as_bool().unwrap_or(false);
+                if let Some(k) = self.prompts.iter().position(|p| p.0 == pid) {
+                    let (_, _, origin, kind) = self.prompts.remove(k);
+                    self.rules.entry(origin).or_default().insert(kind.to_string(), allow);
+                    store::save_rules(&self.rules);
+                }
+                engine::answer_permission(&self.ctx, pid, Some(allow));
+                self.push();
+            }
+            "permReset" => {
+                let (origin, kind) = (m["origin"].as_str().unwrap_or(""), m["kind"].as_str().unwrap_or(""));
+                if let Some(r) = self.rules.get_mut(origin) {
+                    r.remove(kind);
+                    if r.is_empty() {
+                        self.rules.remove(origin);
+                    }
+                }
+                store::save_rules(&self.rules);
+                self.push();
             }
             "clearPasswords" => {
                 if let Some(v) = self.tabs.iter().filter(|t| !t.agent).find_map(|t| t.view.as_ref()) {

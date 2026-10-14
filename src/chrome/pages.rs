@@ -29,6 +29,7 @@ pub enum PageHit {
     CopyAgent,
     Dl(&'static str, u64),
     DlClear,
+    PermReset(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -66,6 +67,7 @@ enum Item {
     Keys,
     Button(&'static str, &'static str, &'static str, PageHit),
     AgentSetup,
+    SitePerms,
 }
 
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
@@ -119,6 +121,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("save_passwords", "Offer to save passwords", "Saved by WebView2, encrypted by Windows with your sign-in. Fills them in next time."),
             Button("Saved passwords", "WebView2 cannot list them. You can wipe them all.", "Clear all", PageHit::ClearPasswords),
         ]),
+        ("Site permissions", vec![SitePerms]),
         ("AI agent", vec![
             Toggle("agent", "Let AI agents browse", "A local MCP server. Agents open their own tabs, marked AI, and you can stop them any time."),
             Toggle("agent_shared_profile", "Agents use my profile", "Off: agent tabs have their own cookies and logins. On: they act as you."),
@@ -371,6 +374,24 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
                 draw_button(i, right, r.y + 27.0, "Copy setup command", PageHit::CopyAgent);
             }
             54.0
+        }
+        Item::SitePerms => {
+            if s.rules.is_empty() {
+                i.gfx.text("No answers remembered yet. When a site asks for your camera, location or similar, the sidebar asks you.", R::new(r.x, r.y, r.w, 36.0), Font::ui(12.5, 400), th.faint);
+                return 40.0;
+            }
+            let mut y = r.y;
+            for (n, (origin, kind, allow)) in s.rules.iter().enumerate() {
+                i.gfx.text(&super::host(origin), R::new(r.x, y, r.w * 0.45, 40.0), Font::ui(13.0, 500), th.text);
+                i.gfx.text(&format!("{kind} · {}", if *allow { "Allowed" } else { "Blocked" }), R::new(r.x + r.w * 0.45, y, r.w * 0.35, 40.0), Font::ui(12.5, 400), if *allow { th.dim } else { th.faint });
+                let br = R::new(right - 60.0, y + 8.0, 60.0, 24.0);
+                let h = Hit::Page(PageHit::PermReset(n));
+                i.gfx.text("Reset", br, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
+                i.hit(br, h);
+                i.gfx.line(r.x, y + 40.0, right, y + 40.0, th.line, 1.0);
+                y += 41.0;
+            }
+            y - r.y
         }
         Item::Keys => {
             let mut y = r.y;
@@ -715,6 +736,11 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::CopyAgent => super::copy_text(i.hwnd_raw(), &s.agent_cmd),
         PageHit::Dl(a, id) => send(&i.proxy, json!({"t": "dl", "a": a, "id": id})),
         PageHit::DlClear => send(&i.proxy, json!({"t": "dl", "a": "clear"})),
+        PageHit::PermReset(n) => {
+            if let Some((origin, kind, _)) = s.rules.get(n) {
+                send(&i.proxy, json!({"t": "permReset", "origin": origin, "kind": kind}));
+            }
+        }
     }
 }
 

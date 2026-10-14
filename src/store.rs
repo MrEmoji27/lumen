@@ -206,6 +206,17 @@ pub fn save_settings(s: &Settings) {
     save("settings.json", s);
 }
 
+/// Remembered site permissions: origin -> permission -> allowed.
+pub type Rules = std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>;
+
+pub fn load_rules() -> Rules {
+    load("permissions.json")
+}
+
+pub fn save_rules(r: &Rules) {
+    save("permissions.json", r);
+}
+
 pub fn load_session() -> Session {
     load("session.json")
 }

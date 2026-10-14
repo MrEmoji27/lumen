@@ -13,7 +13,7 @@ use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler, CapturePreviewCompletedHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
-    StateChangedEventHandler,
+    NavigationStartingEventHandler, PermissionRequestedEventHandler, StateChangedEventHandler,
     FaviconChangedEventHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
     SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
@@ -54,6 +54,10 @@ pub enum Ev {
     /// New popup tab, and the tab that opened it.
     Popup(u64, u64),
     Download(Dl),
+    /// A site asks for a permission. Answer with `answer_permission(pid, ..)`.
+    Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
+    /// A navigation was stopped to drop tracking parameters; load this instead.
+    Redirect(u64, String),
     /// A request from the agent thread, answered through its channel.
     Agent(crate::agent::Call),
     Suspended(u64, bool),
@@ -111,6 +115,8 @@ pub struct Ctx {
     /// Live download operations, by Lumen's download id.
     pub downloads: RefCell<HashMap<u64, ICoreWebView2DownloadOperation>>,
     pub passwords: Cell<bool>,
+    /// Permission requests waiting for the user.
+    pub perms: RefCell<HashMap<u64, (ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2Deferral)>>,
 }
 
 impl Ctx {
@@ -248,6 +254,7 @@ fn build_tab_in(
     }
     hook_page(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv);
+    hook_permissions(ctx, &wv, id, isolated);
     // Password saving is per profile. The agent's profile never saves passwords.
     set_passwords(&wv, ctx.passwords.get() && !isolated);
     hook_keys(&wv, ctx.proxy.clone());
@@ -273,6 +280,28 @@ fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     let core = wv.webview();
     let mut token = 0i64;
     unsafe {
+        // Links carry tracking tags (utm_*, fbclid, gclid...). Stop, strip, go.
+        // Server redirects are left alone, or a site that adds them back would loop.
+        let p = proxy.clone();
+        let _ = core.add_NavigationStarting(
+            &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut redirected = Default::default();
+                let _ = args.IsRedirected(&mut redirected);
+                if redirected.as_bool() {
+                    return Ok(());
+                }
+                let mut u = PWSTR::null();
+                args.Uri(&mut u)?;
+                if let Some(clean) = clean_url(&take(u)) {
+                    args.SetCancel(true)?;
+                    let _ = p.send_event(Ev::Redirect(id, clean));
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+
         let p = proxy.clone();
         let _ = core.add_SourceChanged(
             &SourceChangedEventHandler::create(Box::new(move |w, _| {
@@ -530,6 +559,136 @@ pub fn dl_control(ctx: &Ctx, id: u64, action: &str) {
             "cancel" => op.Cancel(),
             _ => Ok(()),
         };
+    }
+}
+
+// ------------------------------------------------------------- permissions
+
+static NEXT_PERM: AtomicU64 = AtomicU64::new(1);
+
+fn perm_name(k: COREWEBVIEW2_PERMISSION_KIND) -> &'static str {
+    match k {
+        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE => "microphone",
+        COREWEBVIEW2_PERMISSION_KIND_CAMERA => "camera",
+        COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION => "location",
+        COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS => "notifications",
+        COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS => "motion sensors",
+        COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ => "clipboard",
+        COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS => "multiple downloads",
+        COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE => "files",
+        COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY => "autoplay",
+        COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS => "fonts",
+        COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES => "MIDI devices",
+        COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT => "window placement",
+        _ => "something",
+    }
+}
+
+/// scheme://host[:port] of a URL.
+pub fn origin_of(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => format!("{scheme}://{}", rest.split(['/', '?', '#']).next().unwrap_or("")),
+        None => url.to_string(),
+    }
+}
+
+/// Sites ask; Lumen decides. The request waits (deferral) until the main loop answers.
+/// Agent tabs in their own profile get no permissions at all.
+fn hook_permissions(ctx: &Rc<Ctx>, wv: &WebView, id: u64, isolated: bool) {
+    let ctx = ctx.clone();
+    let mut token = 0i64;
+    unsafe {
+        let _ = wv.webview().add_PermissionRequested(
+            &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                if isolated {
+                    args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+                    return Ok(());
+                }
+                let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                args.PermissionKind(&mut kind)?;
+                let mut u = PWSTR::null();
+                args.Uri(&mut u)?;
+                let deferral = args.GetDeferral()?;
+                let pid = NEXT_PERM.fetch_add(1, Ordering::Relaxed);
+                ctx.perms.borrow_mut().insert(pid, (args.clone(), deferral));
+                let _ = ctx.proxy.send_event(Ev::Permission { pid, tab: id, origin: origin_of(&take(u)), kind: perm_name(kind) });
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+/// Some(true) allow, Some(false) block, None let WebView2 decide (it blocks by default).
+pub fn answer_permission(ctx: &Ctx, pid: u64, allow: Option<bool>) {
+    let Some((args, deferral)) = ctx.perms.borrow_mut().remove(&pid) else { return };
+    unsafe {
+        let _ = args.SetState(match allow {
+            Some(true) => COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+            Some(false) => COREWEBVIEW2_PERMISSION_STATE_DENY,
+            None => COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
+        });
+        let _ = deferral.Complete();
+    }
+}
+
+// ---------------------------------------------------------- tracking params
+
+/// Query keys that only exist to follow you around.
+const TRACKERS: &[&str] = &[
+    "fbclid", "gclid", "gclsrc", "dclid", "gbraid", "wbraid", "msclkid", "mc_cid", "mc_eid", "igshid", "yclid",
+    "twclid", "ttclid", "li_fat_id", "_hsenc", "_hsmi", "mkt_tok", "oly_anon_id", "oly_enc_id", "vero_id", "wickedid",
+];
+
+/// The URL without tracking parameters, or None if it had none.
+pub fn clean_url(url: &str) -> Option<String> {
+    if !url.starts_with("http") {
+        return None;
+    }
+    let (head, frag) = match url.split_once('#') {
+        Some((h, f)) => (h, Some(f)),
+        None => (url, None),
+    };
+    let (base, query) = head.split_once('?')?;
+    let keep: Vec<&str> = query
+        .split('&')
+        .filter(|kv| {
+            let k = kv.split('=').next().unwrap_or("").to_ascii_lowercase();
+            !(k.starts_with("utm_") || TRACKERS.contains(&k.as_str()))
+        })
+        .collect();
+    if keep.len() == query.split('&').count() {
+        return None;
+    }
+    let mut out = base.to_string();
+    if !keep.is_empty() {
+        out.push('?');
+        out.push_str(&keep.join("&"));
+    }
+    if let Some(f) = frag {
+        out.push('#');
+        out.push_str(f);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_url, origin_of};
+
+    #[test]
+    fn strips_trackers_only() {
+        assert_eq!(clean_url("https://a.com/x?utm_source=t&id=5&fbclid=z#top").as_deref(), Some("https://a.com/x?id=5#top"));
+        assert_eq!(clean_url("https://a.com/x?gclid=1").as_deref(), Some("https://a.com/x"));
+        assert_eq!(clean_url("https://a.com/x?id=5"), None);
+        assert_eq!(clean_url("https://a.com/x"), None);
+        assert_eq!(clean_url("data:text/html,?utm_source=x"), None);
+    }
+
+    #[test]
+    fn origins() {
+        assert_eq!(origin_of("https://meet.example.com:8443/room?x=1"), "https://meet.example.com:8443");
     }
 }
 
