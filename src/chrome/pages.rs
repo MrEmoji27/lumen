@@ -121,6 +121,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("Search", vec![Engine]),
         ("Performance", vec![
             Toggle("adblock", "Block ads and trackers", "Stops them before they load. Saves memory and data."),
+            Toggle("accelerate_downloads", "Accelerate downloads", "aria2 splits files into up to 16 connections, resumes, and queues. Falls back to the built-in downloader when a site refuses it."),
             Seg("tracking", "Tracking prevention", "", &[("off", "Off"), ("basic", "Basic"), ("balanced", "Balanced"), ("strict", "Strict")]),
             Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),
             Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
@@ -464,7 +465,16 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
             "done" => format!("Done · {}", fmt_bytes(d.received)),
             "failed" => "Failed".to_string(),
             "paused" => format!("Paused · {} of {}", fmt_bytes(d.received), fmt_bytes(d.total)),
-            _ if d.total > 0 => format!("{} of {} · {}%", fmt_bytes(d.received), fmt_bytes(d.total), (pct * 100.0) as u32),
+            _ if d.total > 0 => {
+                let mut s = format!("{} of {} · {}%", fmt_bytes(d.received), fmt_bytes(d.total), (pct * 100.0) as u32);
+                if d.speed > 0 {
+                    s.push_str(&format!(" · {}/s", fmt_bytes(d.speed as i64)));
+                }
+                if !d.note.is_empty() {
+                    s.push_str(&format!(" · {}", d.note));
+                }
+                s
+            }
             _ => fmt_bytes(d.received),
         };
         let host = super::host(&d.url);

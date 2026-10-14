@@ -58,6 +58,11 @@ pub enum Ev {
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
+    /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
+    Handoff(u64, String, String, String),
+    AriaAdded(String, String),
+    AriaFailed(u64, String),
+    AriaJobs(Vec<crate::aria::Job>),
     /// A request from the agent thread, answered through its channel.
     Agent(crate::agent::Call),
     Suspended(u64, bool),
@@ -75,6 +80,10 @@ pub struct Dl {
     pub total: i64,
     /// "progress" | "done" | "failed" | "paused"
     pub state: &'static str,
+    /// Bytes per second, when known (aria2).
+    pub speed: u64,
+    /// A short extra, e.g. "16 connections".
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +129,10 @@ pub struct Ctx {
     pub passwords: Cell<bool>,
     /// Permission requests waiting for the user.
     pub perms: RefCell<HashMap<u64, (ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2Deferral)>>,
+    /// aria2 is up and the setting is on: http(s) downloads go to it.
+    pub aria_on: Cell<bool>,
+    /// URLs aria2 refused; WebView2 downloads these itself.
+    pub bypass: RefCell<std::collections::HashSet<String>>,
 }
 
 impl Ctx {
@@ -256,7 +269,7 @@ fn build_tab_in(
         set_tracking(&wv, &ctx.tracking.borrow());
     }
     hook_page(&wv, id, ctx.proxy.clone());
-    hook_downloads(ctx, &wv);
+    hook_downloads(ctx, &wv, id);
     hook_permissions(ctx, &wv, id, isolated);
     // Password saving is per profile. The agent's profile never saves passwords.
     set_passwords(&wv, ctx.passwords.get() && !isolated);
@@ -509,21 +522,41 @@ fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64) -> Dl {
             COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED => "failed",
             _ => "progress",
         };
-        Dl { id, url: take(uri), path: take(path), received: got, total, state }
+        Dl { id, url: take(uri), path: take(path), received: got, total, state, speed: 0, note: String::new() }
     }
 }
 
 /// Downloads come to Lumen. WebView2's own flyout stays hidden; the Downloads page shows them.
-fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView) {
+fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64) {
     let Ok(c4) = wv.webview().cast::<ICoreWebView2_4>() else { return };
     let ctx = ctx.clone();
     let mut token = 0i64;
     unsafe {
         let _ = c4.add_DownloadStarting(
-            &DownloadStartingEventHandler::create(Box::new(move |_, args| {
+            &DownloadStartingEventHandler::create(Box::new(move |sender, args| {
                 let Some(args) = args else { return Ok(()) };
                 args.SetHandled(true)?;
                 let op = args.DownloadOperation()?;
+                // aria2 takes plain http(s) downloads: more connections, resume, queue.
+                let mut u = PWSTR::null();
+                let _ = op.Uri(&mut u);
+                let url = take(u);
+                if ctx.aria_on.get() && url.starts_with("http") && !ctx.bypass.borrow_mut().remove(&url) {
+                    let mut p = PWSTR::null();
+                    let _ = args.ResultFilePath(&mut p);
+                    let path = take(p);
+                    let name = path.rsplit(['\\', '/']).next().unwrap_or("").to_string();
+                    let page = sender
+                        .map(|w| {
+                            let mut s = PWSTR::null();
+                            let _ = w.Source(&mut s);
+                            take(s)
+                        })
+                        .unwrap_or_default();
+                    args.SetCancel(true)?;
+                    let _ = ctx.proxy.send_event(Ev::Handoff(tab, url, page, name));
+                    return Ok(());
+                }
                 let id = NEXT_DL.fetch_add(1, Ordering::Relaxed);
                 let mut t = 0i64;
                 let p = ctx.proxy.clone();
@@ -695,6 +728,15 @@ mod tests {
     #[test]
     fn origins() {
         assert_eq!(origin_of("https://meet.example.com:8443/room?x=1"), "https://meet.example.com:8443");
+    }
+}
+
+/// The page's User-Agent string, so aria2 looks like the browser to the server.
+pub fn user_agent(wv: &WebView) -> String {
+    unsafe {
+        let Ok(s2) = wv.webview().Settings().and_then(|s| s.cast::<ICoreWebView2Settings2>()) else { return String::new() };
+        let mut p = PWSTR::null();
+        if s2.UserAgent(&mut p).is_ok() { take(p) } else { String::new() }
     }
 }
 

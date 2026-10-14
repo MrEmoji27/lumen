@@ -165,6 +165,10 @@ struct App {
     prompts: Vec<(u64, u64, String, &'static str)>,
     /// History and bookmarks.
     library: library::Library,
+    /// aria2 and its jobs: gid -> download id in the list.
+    aria: std::sync::Arc<aria::Aria>,
+    aria_ids: HashMap<String, u64>,
+    aria_poll: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn main() {
@@ -211,6 +215,8 @@ fn main() {
         downloads: RefCell::new(HashMap::new()),
         passwords: Cell::new(settings.save_passwords),
         perms: RefCell::new(HashMap::new()),
+        aria_on: Cell::new(false),
+        bypass: RefCell::new(Default::default()),
     });
 
     let blocker = blocker::Blocker::start(store::data_dir());
@@ -262,7 +268,23 @@ fn main() {
         rules: store::load_rules(),
         prompts: Vec::new(),
         library: library::Library::load(&store::data_dir()),
+        aria: aria::Aria::start(&store::data_dir(), &dirs::download_dir().unwrap_or_else(store::data_dir)),
+        aria_ids: HashMap::new(),
+        aria_poll: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
+    {
+        // One small thread polls aria2 while it has work, and sleeps otherwise.
+        let (aria, poll, proxy) = (app.aria.clone(), app.aria_poll.clone(), app.ctx.proxy.clone());
+        std::thread::Builder::new()
+            .name("lumen-aria-poll".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(700));
+                if poll.load(std::sync::atomic::Ordering::Relaxed) && proxy.send_event(Ev::AriaJobs(aria.jobs())).is_err() {
+                    break;
+                }
+            })
+            .ok();
+    }
     app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
     app.apply_backdrop();
     app.apply_limits(None);
@@ -692,6 +714,8 @@ impl App {
                         received: d.received,
                         total: d.total,
                         state: d.state,
+                        speed: d.speed,
+                        note: d.note.clone(),
                     })
                     .collect(),
                 agent_busy: self.agent_seen.is_some(),
@@ -1209,6 +1233,71 @@ impl App {
                     }
                 }
             }
+            Ev::Handoff(tab, url, page, name) => {
+                let mut headers = Vec::new();
+                if let Some(v) = self.idx(tab).and_then(|i| self.tabs[i].view.as_ref()) {
+                    if let Ok(cookies) = v.cookies_for_url(&url) {
+                        let c: Vec<String> = cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect();
+                        if !c.is_empty() {
+                            headers.push(format!("Cookie: {}", c.join("; ")));
+                        }
+                    }
+                    let ua = engine::user_agent(v);
+                    if !ua.is_empty() {
+                        headers.push(format!("User-Agent: {ua}"));
+                    }
+                }
+                if !page.is_empty() {
+                    headers.push(format!("Referer: {page}"));
+                }
+                let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
+                std::thread::spawn(move || {
+                    let name = (!name.is_empty()).then_some(name);
+                    let _ = match aria.add(&url, &headers, name.as_deref()) {
+                        Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, url)),
+                        Err(_) => proxy.send_event(Ev::AriaFailed(tab, url)),
+                    };
+                });
+            }
+            Ev::AriaAdded(gid, _url) => {
+                let id = (1u64 << 40) + self.aria_ids.len() as u64;
+                self.aria_ids.insert(gid, id);
+                self.aria_poll.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ev::AriaFailed(tab, url) => {
+                // aria2 said no (auth, odd server): let WebView2 download it after all.
+                self.ctx.bypass.borrow_mut().insert(url.clone());
+                if let Some(v) = self.idx(tab).and_then(|i| self.tabs[i].view.as_ref()) {
+                    let _ = v.load_url(&url);
+                }
+            }
+            Ev::AriaJobs(jobs) => {
+                let mut busy = false;
+                for j in jobs {
+                    let Some(&id) = self.aria_ids.get(&j.gid) else { continue };
+                    let state = match j.status {
+                        "active" | "waiting" => "progress",
+                        "paused" => "paused",
+                        "complete" => "done",
+                        _ => "failed",
+                    };
+                    busy |= state == "progress";
+                    let note = match j.status {
+                        "active" => format!("{} connections", j.connections),
+                        "waiting" => "queued".to_string(),
+                        _ => String::new(),
+                    };
+                    let d = engine::Dl { id, url: j.url, path: j.path, received: j.done as i64, total: j.total as i64, state, speed: j.speed, note };
+                    match self.downloads.iter_mut().find(|x| x.id == id) {
+                        Some(x) => *x = d,
+                        None => self.downloads.insert(0, d),
+                    }
+                }
+                if !busy && !self.downloads.iter().any(|d| d.state == "paused" && d.id >= 1 << 40) {
+                    self.aria_poll.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                self.push();
+            }
             Ev::Redirect(id, url) => {
                 if let Some(i) = self.idx(id)
                     && let Some(v) = &self.tabs[i].view
@@ -1449,7 +1538,21 @@ impl App {
             "dl" => {
                 let a = m["a"].as_str().unwrap_or("");
                 match a {
-                    "pause" | "resume" | "cancel" => engine::dl_control(&self.ctx, id, a),
+                    "pause" | "resume" | "cancel" => match self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
+                        Some(gid) => {
+                            let aria = self.aria.clone();
+                            let act = a.to_string();
+                            self.aria_poll.store(true, std::sync::atomic::Ordering::Relaxed);
+                            std::thread::spawn(move || {
+                                let _ = match act.as_str() {
+                                    "pause" => aria.pause(&gid),
+                                    "resume" => aria.resume(&gid),
+                                    _ => aria.remove(&gid),
+                                };
+                            });
+                        }
+                        None => engine::dl_control(&self.ctx, id, a),
+                    },
                     "open" | "folder" => {
                         if let Some(d) = self.downloads.iter().find(|d| d.id == id) {
                             open_path(&d.path, a == "folder");
@@ -1571,6 +1674,7 @@ impl App {
             }
         }
         self.enforce_ram(now);
+        self.ctx.aria_on.set(self.settings.accelerate_downloads && self.aria.ready());
         self.library.flush();
         if self.agent_seen.is_some_and(|t| now - t > Duration::from_secs(6)) {
             self.agent_seen = None;

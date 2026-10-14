@@ -65,6 +65,8 @@ pub struct Settings {
     pub share_processes: bool,
     /// Offer to save passwords and fill them in (WebView2's own, encrypted by Windows).
     pub save_passwords: bool,
+    /// Hand http(s) downloads to aria2: many connections per file, resume, queue.
+    pub accelerate_downloads: bool,
     /// Interface font: "segoe" | "instrument" | "figtree" | "atkinson".
     pub ui_font: String,
     /// Display font for the clock and page titles: "instrument" | "fraunces" | "newsreader".
@@ -110,6 +112,7 @@ impl Default for Settings {
             gpu_in_process: true,
             share_processes: true,
             save_passwords: true,
+            accelerate_downloads: true,
             ui_font: "segoe".into(),
             display_font: "instrument".into(),
             agent: false,

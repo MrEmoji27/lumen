@@ -65,6 +65,8 @@ pub struct UiDl {
     pub received: i64,
     pub total: i64,
     pub state: &'static str,
+    pub speed: u64,
+    pub note: String,
 }
 
 #[derive(Clone, Debug)]
