@@ -1,0 +1,4 @@
+# Many worktrees build at once and disk is tight: no debug info in dev builds.
+[profile.dev]
+debug = 0
+
