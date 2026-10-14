@@ -15,13 +15,13 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Shortcut {
     pub title: String,
     pub url: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Settings format. Old files lack it and read as 0, which triggers the migration.

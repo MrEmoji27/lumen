@@ -1228,6 +1228,7 @@ dependencies = [
  "webview2-com",
  "window-vibrancy",
  "windows",
+ "windows-numerics",
  "wry",
 ]
 

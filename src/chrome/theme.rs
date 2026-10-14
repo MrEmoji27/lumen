@@ -1,0 +1,124 @@
+//! Colors. A palette is a hue, a neutral chroma and an accent; surfaces are derived.
+//! Same numbers the CSS used, computed here with the OKLCH formulas.
+
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Color(pub f32, pub f32, pub f32, pub f32);
+
+impl Color {
+    pub fn d2d(self) -> D2D1_COLOR_F {
+        D2D1_COLOR_F { r: self.0, g: self.1, b: self.2, a: self.3 }
+    }
+    pub fn alpha(self, a: f32) -> Color {
+        Color(self.0, self.1, self.2, self.3 * a)
+    }
+    pub fn mix(self, o: Color, t: f32) -> Color {
+        let m = |a: f32, b: f32| a + (b - a) * t;
+        Color(m(self.0, o.0), m(self.1, o.1), m(self.2, o.2), m(self.3, o.3))
+    }
+    /// 0x00BBGGRR, for GDI (the edit boxes).
+    pub fn colorref(self) -> u32 {
+        let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        c(self.0) | (c(self.1) << 8) | (c(self.2) << 16)
+    }
+    pub fn rgb8(self) -> (u8, u8, u8) {
+        let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        (c(self.0), c(self.1), c(self.2))
+    }
+    pub fn hex(self) -> String {
+        let (r, g, b) = self.rgb8();
+        format!("#{r:02x}{g:02x}{b:02x}")
+    }
+    pub fn from_hex(s: &str) -> Option<Color> {
+        let s = s.trim().trim_start_matches('#');
+        if s.len() != 6 {
+            return None;
+        }
+        let v = u32::from_str_radix(s, 16).ok()?;
+        let f = |x: u32| (x & 0xff) as f32 / 255.0;
+        Some(Color(f(v >> 16), f(v >> 8), f(v), 1.0))
+    }
+}
+
+/// OKLCH to sRGB. l 0..1, c chroma, h degrees.
+pub fn oklch(l: f32, c: f32, h: f32) -> Color {
+    let (a, b) = (c * h.to_radians().cos(), c * h.to_radians().sin());
+    let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
+    let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
+    let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
+    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let r = 4.076_741_7 * l3 - 3.307_711_6 * m3 + 0.230_969_94 * s3;
+    let g = -1.268_438 * l3 + 2.609_757_4 * m3 - 0.341_319_38 * s3;
+    let bl = -0.004_196_086_3 * l3 - 0.703_418_6 * m3 + 1.707_614_7 * s3;
+    let gamma = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+    };
+    Color(gamma(r), gamma(g), gamma(bl), 1.0)
+}
+
+pub const PALETTES: [(&str, &str); 5] =
+    [("graphite", "Graphite"), ("sand", "Sand"), ("slate", "Slate"), ("moss", "Moss"), ("rose", "Rose")];
+
+/// (hue, neutral chroma, accent l, accent c, accent h)
+fn palette(name: &str) -> (f32, f32, f32, f32, f32) {
+    match name {
+        "sand" => (70.0, 0.012, 0.72, 0.13, 48.0),
+        "slate" => (245.0, 0.016, 0.75, 0.10, 250.0),
+        "moss" => (150.0, 0.012, 0.76, 0.10, 145.0),
+        "rose" => (10.0, 0.012, 0.73, 0.12, 15.0),
+        _ => (260.0, 0.005, 0.78, 0.12, 68.0),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Theme {
+    pub dark: bool,
+    pub bg: Color,
+    pub raise: Color,
+    pub hover: Color,
+    pub press: Color,
+    pub line: Color,
+    pub text: Color,
+    pub dim: Color,
+    pub faint: Color,
+    pub accent: Color,
+    pub acc_soft: Color,
+    pub shade: Color,
+    pub danger: Color,
+}
+
+impl Theme {
+    pub fn new(palette_name: &str, dark: bool, accent_hex: &str) -> Theme {
+        let (h, c, al, ac, ah) = palette(palette_name);
+        let k = |l: f32, cm: f32| oklch(l, c * cm, h);
+        let accent = Color::from_hex(accent_hex).unwrap_or_else(|| oklch(al, ac, ah));
+        let (bg, raise, hover, press, line, text, dim, faint) = if dark {
+            (k(0.185, 1.0), k(0.225, 1.2), k(0.245, 1.2), k(0.28, 1.3), k(0.27, 1.2), k(0.94, 0.5), k(0.72, 0.8), k(0.52, 1.0))
+        } else {
+            (k(0.955, 1.0), k(0.988, 0.5), k(0.918, 1.0), k(0.89, 1.0), k(0.9, 1.0), k(0.22, 1.0), k(0.46, 1.0), k(0.62, 1.0))
+        };
+        Theme {
+            dark,
+            bg,
+            raise,
+            hover,
+            press,
+            line,
+            text,
+            dim,
+            faint,
+            accent,
+            acc_soft: bg.mix(accent, 0.35),
+            shade: Color(0.0, 0.0, 0.0, if dark { 0.45 } else { 0.14 }),
+            danger: oklch(0.58, 0.2, 27.0),
+        }
+    }
+
+    /// The swatch for a palette: its tile color and accent dot.
+    pub fn swatch(name: &str) -> (Color, Color) {
+        let (h, c, al, ac, ah) = palette(name);
+        (oklch(0.3, c * 3.0, h), oklch(al, ac, ah))
+    }
+}

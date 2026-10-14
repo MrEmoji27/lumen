@@ -39,7 +39,9 @@ Debug builds also write `debug.log` there.
 
 ## How it works
 
-One window. One UI page. Web pages sit on top of it.
+One window. The chrome (sidebar, new tab page, settings, Control) is native: Direct2D and
+DirectWrite in one child window, real Windows edit boxes and menus. No webview runs until a
+page needs one. Idle with a new tab: 18 MB, one process.
 
 - `src/main.rs` owns tabs, layout, the session, and who sleeps.
 - `src/engine.rs` is the only file that talks to WebView2. Swap it to change engines.
@@ -47,7 +49,8 @@ One window. One UI page. Web pages sit on top of it.
   Peter Lowe, uBlock filters. About 2 microseconds a request. Matcher cached to disk.
 - `src/monitor.rs` measures each tab and holds the limiters.
 - `src/store.rs` is settings and session, JSON, written atomically.
-- `ui/` is the sidebar, address bar, new tab page and settings. Plain HTML, CSS, JS.
+- `src/chrome/` is the native UI: `mod.rs` (window, input, sidebar, address bar, new tab),
+  `pages.rs` (settings and Control), `gfx.rs` (drawing), `theme.rs` (palettes).
 
 Memory rules:
 

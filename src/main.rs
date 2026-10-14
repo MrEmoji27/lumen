@@ -5,6 +5,7 @@
 //! Rust decides who lives, who sleeps, and when the UI hears about it.
 
 mod blocker;
+mod chrome;
 mod engine;
 mod monitor;
 mod store;
@@ -16,7 +17,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::Engine as _;
 use serde_json::{Value, json};
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
@@ -25,7 +25,8 @@ use tao::{
     platform::windows::{IconExtWindows, WindowBuilderExtWindows, WindowExtWindows},
     window::{Fullscreen, Icon, ResizeDirection, Theme as WinTheme, WindowBuilder},
 };
-use wry::{MemoryUsageLevel, Rect, WebContext, WebView, WebViewExtWindows};
+use windows::Win32::Foundation::HWND;
+use wry::{MemoryUsageLevel, Rect, WebView, WebViewExtWindows};
 
 use engine::{Action, Ctx, Ev};
 use store::{SavedTab, Session, Settings};
@@ -104,8 +105,7 @@ impl Tab {
 
 struct App {
     ctx: Rc<Ctx>,
-    ui: WebView,
-    _web_context: WebContext,
+    chrome: chrome::Chrome,
     blocker: Rc<blocker::Blocker>,
     tabs: Vec<Tab>,
     active: u64,
@@ -180,6 +180,9 @@ fn main() {
         popups: RefCell::new(Vec::new()),
         dark: Cell::new(dark),
         on_built: RefCell::new(None),
+        web_context: RefCell::new(wry::WebContext::new(Some(store::data_dir().join("WebView2")))),
+        args: engine::browser_args(settings.gpu_in_process, settings.share_processes),
+        tracking: RefCell::new(settings.tracking.clone()),
     });
 
     let blocker = blocker::Blocker::start(store::data_dir());
@@ -189,15 +192,13 @@ fn main() {
         ctx.on_built.replace(Some(Box::new(move |wv: &WebView| b.attach(wv))));
     }
 
-    let mut web_context = WebContext::new(Some(store::data_dir().join("WebView2")));
-    let ui = engine::build_ui(&ctx, &mut web_context, ui_html(), full_rect(&ctx), settings.gpu_in_process, settings.share_processes).expect("ui webview");
-    engine::set_tracking(&ui, &settings.tracking);
+    // The browser chrome: a native child window. No webview until a page needs one.
+    let chrome = chrome::Chrome::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
 
     let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     let mut app = App {
         ctx,
-        ui,
-        _web_context: web_context,
+        chrome,
         blocker,
         tabs: Vec::new(),
         active: 0,
@@ -207,7 +208,7 @@ fn main() {
         peek: false,
         page_fs: false,
         user_fs: false,
-        ui_ready: false,
+        ui_ready: true,
         ui_dirty: false,
         fav_queue: Vec::new(),
         bg,
@@ -230,6 +231,11 @@ fn main() {
     app.apply_backdrop();
     app.apply_limits(None);
     app.restore(session);
+    app.flush();
+    app.shown = true;
+    app.ctx.window.set_visible(true);
+    app.layout();
+    app.focus_page();
 
     event_loop.run(move |event, _, cf| {
         match event {
@@ -285,46 +291,6 @@ fn main() {
     });
 }
 
-// ------------------------------------------------------------------- ui page
-
-fn ui_html() -> String {
-    let (html, css, js) = ui_sources();
-    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
-    let face = |family: &str, style: &str, weight: &str, data: &[u8]| {
-        format!(
-            "@font-face{{font-family:'{family}';font-style:{style};font-weight:{weight};font-display:block;\
-             src:url(data:font/woff2;base64,{}) format('woff2')}}",
-            b64(data)
-        )
-    };
-    let fonts = [
-        face("Instrument Sans", "normal", "400 700", include_bytes!("../ui/fonts/sans.woff2")),
-        face("Instrument Serif", "normal", "400", include_bytes!("../ui/fonts/serif.woff2")),
-        face("Instrument Serif", "italic", "400", include_bytes!("../ui/fonts/serif-italic.woff2")),
-    ]
-    .concat();
-    html.replace("/*__FONTS__*/", &fonts)
-        .replace("/*__CSS__*/", &css)
-        .replace("/*__JS__*/", &js)
-}
-
-/// Debug builds read ui/ from disk at start, so UI edits need no recompile.
-#[cfg(debug_assertions)]
-fn ui_sources() -> (String, String, String) {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
-    let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_default();
-    (read("index.html"), read("app.css"), read("app.js"))
-}
-
-#[cfg(not(debug_assertions))]
-fn ui_sources() -> (String, String, String) {
-    (
-        include_str!("../ui/index.html").into(),
-        include_str!("../ui/app.css").into(),
-        include_str!("../ui/app.js").into(),
-    )
-}
-
 // ------------------------------------------------------------------- helpers
 
 fn resolve_dark(s: &Settings, os: WinTheme) -> bool {
@@ -346,11 +312,6 @@ fn logical_size(ctx: &Ctx) -> (f64, f64) {
     let s = ctx.window.inner_size();
     let f = ctx.window.scale_factor();
     (s.width as f64 / f, s.height as f64 / f)
-}
-
-fn full_rect(ctx: &Ctx) -> Rect {
-    let (w, h) = logical_size(ctx);
-    logical_rect(0.0, 0.0, w, h)
 }
 
 /// Omnibox text in, URL out. Looks like an address: go there. Else: search.
@@ -473,17 +434,17 @@ impl App {
     fn layout(&mut self) {
         let (w, h) = logical_size(&self.ctx);
         let fs = self.fullscreen();
-        let _ = self.ui.set_visible(!fs);
+        self.chrome.set_visible(!fs);
         if !fs {
             let side = self.sidebar_w();
-            let r = if self.ui_full() {
-                logical_rect(0.0, 0.0, w, h)
+            let (x, cw) = if self.ui_full() {
+                (0.0, w)
             } else if self.settings.sidebar_side == "right" {
-                logical_rect(w - side, 0.0, side, h)
+                (w - side, side)
             } else {
-                logical_rect(0.0, 0.0, side, h)
+                (0.0, side)
             };
-            let _ = self.ui.set_bounds(r);
+            self.chrome.set_bounds(x, 0.0, cw, h);
         }
         let (x, y, sw, sh) = self.stage();
         let scale = self.ctx.window.scale_factor();
@@ -507,9 +468,7 @@ impl App {
             Some(v) if self.panel == Panel::None => {
                 let _ = v.focus();
             }
-            _ => {
-                let _ = self.ui.focus();
-            }
+            _ => self.chrome.focus(),
         }
     }
 
@@ -524,45 +483,49 @@ impl App {
         }
         if self.ui_dirty {
             self.ui_dirty = false;
-            let (w, h) = logical_size(&self.ctx);
             let (sx, sy, sw, sh) = self.stage();
-            let tabs: Vec<Value> = self
-                .tabs
-                .iter()
-                .map(|t| {
-                    json!({
-                        "id": t.id, "title": t.title, "url": t.url,
-                        "loading": t.loading && t.view.is_some(), "canBack": t.back, "canFwd": t.fwd,
-                        "pinned": t.pinned, "audio": t.audio, "muted": t.muted, "status": t.status(),
+            // Chrome coordinates: full mode starts at the window origin; strip mode is the sidebar only.
+            let off = if !self.ui_full() && self.settings.sidebar_side == "right" { logical_size(&self.ctx).0 - self.sidebar_w() } else { 0.0 };
+            let state = chrome::UiState {
+                tabs: self
+                    .tabs
+                    .iter()
+                    .map(|t| chrome::UiTab {
+                        id: t.id,
+                        title: t.title.clone(),
+                        url: t.url.clone(),
+                        loading: t.loading && t.view.is_some(),
+                        back: t.back,
+                        fwd: t.fwd,
+                        pinned: t.pinned,
+                        audio: t.audio,
+                        muted: t.muted,
+                        status: t.status(),
                     })
-                })
-                .collect();
-            let state = json!({
-                "tabs": tabs,
-                "active": self.active,
-                "settings": self.settings,
-                "dark": self.ctx.dark.get(),
-                "maximized": self.ctx.window.is_maximized(),
-                "fullscreen": self.fullscreen(),
-                "panel": self.panel.name(),
-                "cpuCap": self.job.is_some(),
-                "peek": self.peek,
-                "frame": if self.ui_full() { "full" } else { "strip" },
-                "win": [w, h],
-                "stage": [sx, sy, sw, sh],
-                "mem": self.mem.map(|(b, p)| json!({"bytes": b, "procs": p})),
-                "blocked": self.blocker.blocked(),
-            });
-            let _ = self.ui.evaluate_script(&format!("window.lumen&&lumen.state({state})"));
-        }
-        if !self.fav_queue.is_empty() {
-            let mut js = String::new();
-            for id in std::mem::take(&mut self.fav_queue) {
-                if let Some(i) = self.idx(id) {
-                    js.push_str(&format!("lumen.fav({id},{});", Value::String(self.tabs[i].favicon.clone())));
-                }
+                    .collect(),
+                active: self.active,
+                settings: self.settings.clone(),
+                dark: self.ctx.dark.get(),
+                maximized: self.ctx.window.is_maximized(),
+                panel: self.panel.name(),
+                peek: self.peek,
+                full: self.ui_full(),
+                stage: ((sx - off) as f32, sy as f32, sw as f32, sh as f32),
+                mem: self.mem,
+                blocked: self.blocker.blocked(),
+                cpu_cap: self.job.is_some(),
+            };
+            self.chrome.set_state(state);
+            let bg = self.chrome.bg();
+            if bg != self.bg {
+                self.bg = bg;
+                self.apply_backdrop();
             }
-            let _ = self.ui.evaluate_script(&format!("if(window.lumen){{{js}}}"));
+        }
+        for id in std::mem::take(&mut self.fav_queue) {
+            if let Some(i) = self.idx(id) {
+                self.chrome.set_fav(id, &self.tabs[i].favicon);
+            }
         }
     }
 
@@ -800,7 +763,6 @@ impl App {
                 owner.insert(f, t.id);
             }
         }
-        let ui_frame = monitor::frame_id(&self.ui);
         let mut tabs: HashMap<u64, (f64, f64)> = HashMap::new();
         let (mut ui, mut core, mut total) = ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
         let mut next_cpu = HashMap::new();
@@ -822,7 +784,8 @@ impl App {
                     e.0 += mem / n;
                     e.1 += cpu / n;
                 }
-            } else if ui_frame.is_some_and(|f| p.frames.contains(&f)) {
+            } else if p.kind == "host" {
+                // Lumen itself: the native chrome lives here.
                 ui = (ui.0 + mem, ui.1 + cpu);
             } else {
                 core = (core.0 + mem, core.1 + cpu);
@@ -847,7 +810,7 @@ impl App {
             "core": {"mem": core.0, "cpu": core.1, "parts": parts},
             "total": {"mem": total.0, "cpu": total.1, "net": net_total as f64 / secs, "procs": procs.len()},
         });
-        let _ = self.ui.evaluate_script(&format!("window.lumen&&lumen.usage&&lumen.usage({report})"));
+        self.chrome.usage(report);
     }
 
     /// CPU cap and bandwidth cap. The RAM limit is enforced in tick().
@@ -876,36 +839,19 @@ impl App {
 
     // ------------------------------------------------------------ settings
 
-    /// Solid: an ordinary opaque window, the cheapest thing Windows can draw.
-    /// Glass: DWM backdrop through black client pixels and a transparent UI.
+    /// The window behind the page gaps takes the sidebar's color.
+    /// The native chrome is solid; an opaque window is the cheapest thing Windows draws.
     fn apply_backdrop(&self) {
-        let w = &*self.ctx.window;
-        let dark = self.ctx.dark.get();
-        let _ = window_vibrancy::clear_mica(w);
-        let _ = window_vibrancy::clear_acrylic(w);
-        let _ = window_vibrancy::clear_tabbed(w);
-        let glass = match self.settings.backdrop.as_str() {
-            "mica" => window_vibrancy::apply_mica(w, Some(dark)).is_ok(),
-            "tabbed" => window_vibrancy::apply_tabbed(w, Some(dark)).is_ok(),
-            "acrylic" => window_vibrancy::apply_acrylic(w, Some((0, 0, 0, 0))).is_ok(),
-            _ => false,
-        };
         let (r, g, b) = self.bg;
-        if glass {
-            w.set_background_color(Some((0, 0, 0, 255)));
-            let _ = self.ui.set_background_color((0, 0, 0, 0));
-        } else {
-            w.set_background_color(Some((r, g, b, 255)));
-            let _ = self.ui.set_background_color((r, g, b, 255));
-        }
-        engine::set_glass(w.hwnd(), glass);
+        let w = &*self.ctx.window;
+        w.set_background_color(Some((r, g, b, 255)));
+        engine::set_glass(w.hwnd(), false);
     }
 
     fn retheme(&mut self) {
         let dark = resolve_dark(&self.settings, self.ctx.window.theme());
         self.ctx.dark.set(dark);
         let theme = engine::theme(dark);
-        let _ = self.ui.set_theme(theme);
         for v in self.tabs.iter().filter_map(|t| t.view.as_ref()) {
             let _ = v.set_theme(theme);
         }
@@ -921,7 +867,11 @@ impl App {
             self.apply_backdrop();
         }
         if old.tracking != self.settings.tracking {
-            engine::set_tracking(&self.ui, &self.settings.tracking);
+            self.ctx.tracking.replace(self.settings.tracking.clone());
+            // Tracking prevention is per profile; any page reaches it.
+            if let Some(v) = self.tabs.iter().find_map(|t| t.view.as_ref()) {
+                engine::set_tracking(v, &self.settings.tracking);
+            }
         }
         if old.radius != self.settings.radius {
             self.rounded = None;
@@ -1048,8 +998,7 @@ impl App {
                 self.activate(id);
             }
             Action::Omnibox => {
-                let _ = self.ui.focus();
-                let _ = self.ui.evaluate_script("window.lumen&&lumen.focusOmnibox()");
+                self.chrome.focus_omnibox();
             }
             Action::Reload => match &self.tabs[i].view {
                 Some(v) => {
@@ -1086,7 +1035,7 @@ impl App {
             }
             Action::DevTools => match &self.tabs[i].view {
                 Some(v) => v.open_devtools(),
-                None => self.ui.open_devtools(),
+                None => {}
             },
         }
     }
@@ -1104,15 +1053,6 @@ impl App {
                     self.ctx.window.set_visible(true);
                     self.layout();
                     self.focus_page();
-                }
-            }
-            "bg" => {
-                let c = &m["rgb"];
-                let px = |k: usize| c[k].as_u64().unwrap_or(0).min(255) as u8;
-                let bg = (px(0), px(1), px(2));
-                if bg != self.bg {
-                    self.bg = bg;
-                    self.apply_backdrop();
                 }
             }
             "nav" => self.navigate(m["url"].as_str().unwrap_or("")),

@@ -83,6 +83,10 @@ pub struct Ctx {
     pub dark: Cell<bool>,
     /// Runs on every page right after it is built. Popups included.
     pub on_built: RefCell<Option<Box<dyn Fn(&WebView)>>>,
+    /// The first page creates the WebView2 environment with these.
+    pub web_context: RefCell<wry::WebContext>,
+    pub args: String,
+    pub tracking: RefCell<String>,
 }
 
 impl Ctx {
@@ -128,38 +132,9 @@ fn page_bg(dark: bool) -> (u8, u8, u8, u8) {
 
 // ---------------------------------------------------------------- building
 
-/// The browser UI. Transparent, full window, sits under the page.
-pub fn build_ui(
-    ctx: &Rc<Ctx>,
-    web_context: &mut wry::WebContext,
-    html: String,
-    bounds: Rect,
-    gpu_in_process: bool,
-    share_processes: bool,
-) -> wry::Result<WebView> {
-    let proxy = ctx.proxy.clone();
-    let ui = WebViewBuilder::new_with_web_context(web_context)
-        .with_html(html)
-        .with_transparent(true)
-        .with_bounds(bounds)
-        .with_ipc_handler(move |req| {
-            let _ = proxy.send_event(Ev::Ui(req.body().clone()));
-        })
-        .with_hotkeys_zoom(false)
-        .with_devtools(cfg!(debug_assertions))
-        .with_default_context_menus(cfg!(debug_assertions))
-        .with_browser_accelerator_keys(false)
-        .with_theme(theme(ctx.dark.get()))
-        .with_additional_browser_args(browser_args(gpu_in_process, share_processes))
-        .build_as_child(&*ctx.window)?;
-    hook_keys(&ui, ctx.proxy.clone());
-    ctx.env.replace(Some(ui.environment()));
-    Ok(ui)
-}
-
 /// Chromium switches for the whole browser. Set once, when the environment is born.
 /// LUMEN_ARGS appends more, for measuring without a rebuild.
-fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
+pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
     // wry's own defaults. Passing args replaces them, so keep them.
     let mut a = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
     if gpu_in_process {
@@ -182,7 +157,7 @@ fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
 /// One page. All pages share the UI's environment, so one browser process,
 /// one GPU process, one network process for the whole app.
 pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect) -> wry::Result<WebView> {
-    let env = ctx.env.borrow().clone().expect("ui webview builds first");
+    let env = ctx.env.borrow().clone();
     build_tab_in(ctx, id, url, bounds, env)
 }
 
@@ -191,15 +166,22 @@ fn build_tab_in(
     id: u64,
     url: Option<&str>,
     bounds: Rect,
-    env: ICoreWebView2Environment,
+    env: Option<ICoreWebView2Environment>,
 ) -> wry::Result<WebView> {
     let dark = ctx.dark.get();
     let p_title = ctx.proxy.clone();
     let p_load = ctx.proxy.clone();
     let popup_ctx = ctx.clone();
 
-    let mut b = WebViewBuilder::new()
-        .with_environment(env)
+    // No environment yet: this page is the first, and it makes one for everyone.
+    let first = env.is_none();
+    let mut wc = first.then(|| ctx.web_context.borrow_mut());
+    let base = match (env, wc.as_mut()) {
+        (Some(env), _) => WebViewBuilder::new().with_environment(env),
+        (None, Some(wc)) => WebViewBuilder::new_with_web_context(wc).with_additional_browser_args(ctx.args.clone()),
+        (None, None) => unreachable!(),
+    };
+    let mut b = base
         .with_bounds(bounds)
         .with_visible(false)
         .with_devtools(true)
@@ -218,7 +200,7 @@ fn build_tab_in(
             let ctx = &popup_ctx;
             let new_id = ctx.alloc_id();
             let bounds = content_bounds_now(ctx);
-            match build_tab_in(ctx, new_id, None, bounds, features.opener.environment.clone()) {
+            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone())) {
                 Ok(wv) => {
                     let core = wv.webview();
                     ctx.popups.borrow_mut().push((new_id, wv));
@@ -232,6 +214,11 @@ fn build_tab_in(
         b = b.with_url(u);
     }
     let wv = b.build_as_child(&*ctx.window)?;
+    drop(wc);
+    if first {
+        ctx.env.replace(Some(wv.environment()));
+        set_tracking(&wv, &ctx.tracking.borrow());
+    }
     hook_page(&wv, id, ctx.proxy.clone());
     hook_keys(&wv, ctx.proxy.clone());
     if let Some(f) = ctx.on_built.borrow().as_ref() {
@@ -398,7 +385,7 @@ fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
     }
 }
 
-fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
+pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
     use Action::*;
     const TAB: u32 = 0x09;
     const LEFT: u32 = 0x25;
