@@ -20,11 +20,14 @@ pub struct Shortcut {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Named palette from the UI ("ember", "paper", "moss", "ink", "dune").
+    /// Settings format. Old files lack it and read as 0, which triggers the migration.
+    #[serde(default)]
+    pub version: u32,
+    /// Named palette from the UI ("graphite", "sand", "slate", "moss", "rose").
     pub palette: String,
     /// Accent color override. Empty means palette default.
     pub accent: String,
-    /// "mica" | "acrylic" | "tabbed" | "solid"
+    /// "solid" | "mica" | "acrylic". Solid is the fastest.
     pub backdrop: String,
     /// "dark" | "light" | "system". Also drives prefers-color-scheme in pages.
     pub theme: String,
@@ -57,12 +60,13 @@ impl Default for Settings {
     fn default() -> Self {
         let s = |t: &str, u: &str| Shortcut { title: t.into(), url: u.into() };
         Self {
-            palette: "ember".into(),
+            version: SETTINGS_VERSION,
+            palette: "graphite".into(),
             accent: String::new(),
-            backdrop: "mica".into(),
+            backdrop: "solid".into(),
             theme: "dark".into(),
             sidebar_side: "left".into(),
-            sidebar_width: 264,
+            sidebar_width: 240,
             compact: false,
             gap: 8,
             radius: 10,
@@ -85,12 +89,26 @@ impl Default for Settings {
     }
 }
 
+const SETTINGS_VERSION: u32 = 2;
+
 impl Settings {
+    /// Version 2 is the minimal redesign. Old look values were defaults, not choices.
+    fn migrate(&mut self) {
+        if self.version < 2 {
+            let d = Settings::default();
+            self.palette = d.palette;
+            self.backdrop = d.backdrop;
+            self.sidebar_width = d.sidebar_width;
+            self.accent.clear();
+        }
+        self.version = SETTINGS_VERSION;
+    }
+
     /// Keep values inside sane bounds. A bad file must not break the browser.
     pub fn clamp(&mut self) {
-        self.sidebar_width = self.sidebar_width.clamp(200, 420);
-        self.gap = self.gap.clamp(6, 32);
-        self.radius = self.radius.clamp(0, 24);
+        self.sidebar_width = self.sidebar_width.clamp(180, 400);
+        self.gap = self.gap.clamp(0, 32);
+        self.radius = self.radius.clamp(0, 20);
         self.sleep_after_min = self.sleep_after_min.clamp(1, 240);
         self.discard_after_min = self.discard_after_min.clamp(self.sleep_after_min, 1440);
         if !self.search.contains("%s") {
@@ -138,6 +156,7 @@ fn save<T: Serialize>(name: &str, value: &T) {
 
 pub fn load_settings() -> Settings {
     let mut s: Settings = load("settings.json");
+    s.migrate();
     s.clamp();
     s
 }

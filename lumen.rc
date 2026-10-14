@@ -1,0 +1,2 @@
+#define IDI_LUMEN 1
+IDI_LUMEN ICON "assets/lumen.ico"

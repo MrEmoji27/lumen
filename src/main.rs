@@ -1,11 +1,12 @@
 #![windows_subsystem = "windows"]
 
 //! Lumen. A small browser shell.
-//! One window. One UI page. Pages on top. Rust decides who lives and who sleeps.
+//! One window. A slim UI page for the sidebar. Pages beside it.
+//! Rust decides who lives, who sleeps, and when the UI hears about it.
 
+mod blocker;
 mod engine;
 mod store;
-mod blocker;
 
 use std::{
     cell::{Cell, RefCell},
@@ -19,16 +20,19 @@ use tao::{
     dpi::{LogicalPosition, LogicalSize},
     event::{Event, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
-    platform::windows::{WindowBuilderExtWindows, WindowExtWindows},
-    window::{Fullscreen, ResizeDirection, Theme as WinTheme, WindowBuilder},
+    platform::windows::{IconExtWindows, WindowBuilderExtWindows, WindowExtWindows},
+    window::{Fullscreen, Icon, ResizeDirection, Theme as WinTheme, WindowBuilder},
 };
-use wry::{Rect, WebContext, WebView, WebViewExtWindows};
+use wry::{MemoryUsageLevel, Rect, WebContext, WebView, WebViewExtWindows};
 
 use engine::{Action, Ctx, Ev};
 use store::{SavedTab, Session, Settings};
 
 const TICK: Duration = Duration::from_secs(3);
+/// A hidden tab keeps its caches this long, so flipping back is instant.
+const TRIM_AFTER: Duration = Duration::from_secs(60);
 const MAX_CLOSED: usize = 25;
+const COMPACT_W: f64 = 56.0;
 
 struct Tab {
     id: u64,
@@ -42,6 +46,7 @@ struct Tab {
     audio: bool,
     muted: bool,
     suspended: bool,
+    trimmed: bool,
     view: Option<WebView>,
     hidden_at: Option<Instant>,
 }
@@ -60,6 +65,7 @@ impl Tab {
             audio: false,
             muted: false,
             suspended: false,
+            trimmed: false,
             view: None,
             hidden_at: None,
         }
@@ -89,6 +95,15 @@ struct App {
     page_fs: bool,
     user_fs: bool,
     ui_ready: bool,
+    /// Something changed. The UI hears once per frame, not once per event.
+    ui_dirty: bool,
+    /// Favicons are big. They travel alone, only when they change.
+    fav_queue: Vec<u64>,
+    /// Sidebar color reported by the UI. Paints the gaps around the page.
+    bg: (u8, u8, u8),
+    /// Last page size that got rounded corners. Skip the work when nothing moved.
+    rounded: Option<(u64, u32, u32)>,
+    was_max: bool,
     shown: bool,
     dirty: bool,
     mem: Option<(u64, u32)>,
@@ -109,11 +124,13 @@ fn main() {
     };
     let window = WindowBuilder::new()
         .with_title("Lumen")
+        // Icon resource 1, baked in by build.rs from assets/lumen.ico.
+        .with_window_icon(Icon::from_resource(1, None).ok())
         .with_decorations(false)
-        .with_transparent(true)
-        // DWM draws the backdrop through black client pixels of an extended frame.
-        // Without this the client stays white and the glass never shows.
-        .with_background_color((0, 0, 0, 0))
+        // Opaque window. Glass mode gets its backdrop from the extended DWM frame and
+        // black client pixels, not from window transparency, which costs a composite.
+        .with_transparent(false)
+        .with_background_color((0, 0, 0, 255))
         .with_undecorated_shadow(true)
         .with_visible(false)
         .with_inner_size(LogicalSize::new(w, h))
@@ -144,6 +161,7 @@ fn main() {
     let ui = engine::build_ui(&ctx, &mut web_context, ui_html(), full_rect(&ctx)).expect("ui webview");
     engine::set_tracking(&ui, &settings.tracking);
 
+    let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     let mut app = App {
         ctx,
         ui,
@@ -158,6 +176,11 @@ fn main() {
         page_fs: false,
         user_fs: false,
         ui_ready: false,
+        ui_dirty: false,
+        fav_queue: Vec::new(),
+        bg,
+        rounded: None,
+        was_max: session.maximized,
         shown: false,
         dirty: false,
         mem: None,
@@ -176,16 +199,22 @@ fn main() {
                     if size.width == 0 || size.height == 0 {
                         // Minimized. Nobody is looking. Trim the active page too.
                         if let Some(v) = app.active_tab().and_then(|t| t.view.as_ref()) {
-                            let _ = v.set_memory_usage_level(wry::MemoryUsageLevel::Low);
+                            let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
                         }
                     } else {
                         app.layout();
-                        app.reveal();
-                        app.push();
+                        let max = app.ctx.window.is_maximized();
+                        if max != app.was_max {
+                            app.was_max = max;
+                            app.push();
+                        }
                     }
                 }
-                WindowEvent::ScaleFactorChanged { .. } => app.layout(),
-                // Alt+Tab lands focus on the bare window. Hand it to the page, or keys go nowhere.
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    app.rounded = None;
+                    app.layout();
+                }
+                // Alt+Tab lands focus on the bare window. Hand it on, or keys go nowhere.
                 WindowEvent::Focused(true) => app.focus_page(),
                 WindowEvent::ThemeChanged(_) if app.settings.theme == "system" => {
                     app.retheme();
@@ -195,6 +224,7 @@ fn main() {
                 _ => {}
             },
             Event::UserEvent(ev) => app.on_event(ev),
+            Event::MainEventsCleared => app.flush(),
             _ => {}
         }
         if app.exit {
@@ -293,10 +323,11 @@ fn resolve_input(raw: &str, search: &str) -> Option<String> {
         if host_only == "localhost" || host_only.parse::<std::net::Ipv4Addr>().is_ok() {
             return Some(format!("http://{s}"));
         }
-        if let Some((_, tld)) = host_only.rsplit_once('.') {
-            if tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()) {
-                return Some(format!("https://{s}"));
-            }
+        if let Some((_, tld)) = host_only.rsplit_once('.')
+            && tld.len() >= 2
+            && tld.chars().all(|c| c.is_ascii_alphabetic())
+        {
+            return Some(format!("https://{s}"));
         }
     }
     Some(search.replace("%s", &url_encode(s)))
@@ -322,7 +353,11 @@ fn debug_log(ev: &Ev) {
         let cut = (0..=160).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
         line.truncate(cut);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(store::data_dir().join("debug.log")) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(store::data_dir().join("debug.log"))
+    {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -360,32 +395,61 @@ impl App {
         self.page_fs || self.user_fs
     }
 
-    /// The page rectangle. ui/app.js computes the same numbers. Keep them in step.
-    fn stage(&self) -> Rect {
+    fn pinned_count(&self) -> usize {
+        self.tabs.iter().filter(|t| t.pinned).count()
+    }
+
+    fn sidebar_w(&self) -> f64 {
+        if self.settings.compact && !self.peek { COMPACT_W } else { self.settings.sidebar_width as f64 }
+    }
+
+    /// The UI needs the whole window only for the new tab page and settings.
+    /// The rest of the time it is a strip. A small surface is a fast surface.
+    fn ui_full(&self) -> bool {
+        self.panel || self.active_tab().is_some_and(|t| t.status() == "new")
+    }
+
+    /// The page rectangle, in window coordinates.
+    fn stage(&self) -> (f64, f64, f64, f64) {
         let (w, h) = logical_size(&self.ctx);
         if self.fullscreen() {
-            return logical_rect(0.0, 0.0, w, h);
+            return (0.0, 0.0, w, h);
         }
-        let s = &self.settings;
-        let side = if s.compact && !self.peek { 68.0 } else { s.sidebar_width as f64 };
-        let g = s.gap as f64;
-        let x = if s.sidebar_side == "right" { g } else { side };
-        logical_rect(x, g, w - side - g, h - 2.0 * g)
+        let side = self.sidebar_w();
+        let g = self.settings.gap as f64;
+        let x = if self.settings.sidebar_side == "right" { g } else { side };
+        (x, g, (w - side - g).max(1.0), (h - 2.0 * g).max(1.0))
     }
 
-    fn layout(&self) {
-        let _ = self.ui.set_bounds(full_rect(&self.ctx));
-        if let Some(v) = self.active_tab().and_then(|t| t.view.as_ref()) {
-            let _ = v.set_bounds(self.stage());
-            let r = if self.fullscreen() { 0.0 } else { self.settings.radius as f64 };
-            engine::round_corners(v, (r * self.ctx.window.scale_factor()).round() as i32);
+    fn layout(&mut self) {
+        let (w, h) = logical_size(&self.ctx);
+        let fs = self.fullscreen();
+        let _ = self.ui.set_visible(!fs);
+        if !fs {
+            let side = self.sidebar_w();
+            let r = if self.ui_full() {
+                logical_rect(0.0, 0.0, w, h)
+            } else if self.settings.sidebar_side == "right" {
+                logical_rect(w - side, 0.0, side, h)
+            } else {
+                logical_rect(0.0, 0.0, side, h)
+            };
+            let _ = self.ui.set_bounds(r);
         }
-    }
-
-    /// Show the active page unless the settings panel covers the stage.
-    fn reveal(&self) {
-        if let Some(v) = self.active_tab().and_then(|t| t.view.as_ref()) {
-            engine::set_hidden(v, self.panel);
+        let (x, y, sw, sh) = self.stage();
+        let scale = self.ctx.window.scale_factor();
+        let radius = if fs { 0 } else { (self.settings.radius as f64 * scale).round() as i32 };
+        let i = self.active_idx();
+        if let Some(t) = self.tabs.get(i)
+            && let Some(v) = &t.view
+        {
+            let _ = v.set_bounds(logical_rect(x, y, sw, sh));
+            // The corner clip is a region rebuild and a repaint. Only when size changed.
+            let key = (t.id, (sw * scale) as u32, (sh * scale) as u32 + radius as u32);
+            if self.rounded != Some(key) {
+                self.rounded = Some(key);
+                engine::round_corners(v, radius);
+            }
         }
     }
 
@@ -400,52 +464,79 @@ impl App {
         }
     }
 
-    fn push(&self) {
+    /// Mark the UI stale. The real send happens once, after the event burst.
+    fn push(&mut self) {
+        self.ui_dirty = true;
+    }
+
+    fn flush(&mut self) {
         if !self.ui_ready {
             return;
         }
-        let tabs: Vec<Value> = self
-            .tabs
-            .iter()
-            .map(|t| {
-                json!({
-                    "id": t.id, "title": t.title, "url": t.url, "favicon": t.favicon,
-                    "loading": t.loading && t.view.is_some(), "canBack": t.back, "canFwd": t.fwd,
-                    "pinned": t.pinned, "audio": t.audio, "muted": t.muted, "status": t.status(),
+        if self.ui_dirty {
+            self.ui_dirty = false;
+            let (w, h) = logical_size(&self.ctx);
+            let (sx, sy, sw, sh) = self.stage();
+            let tabs: Vec<Value> = self
+                .tabs
+                .iter()
+                .map(|t| {
+                    json!({
+                        "id": t.id, "title": t.title, "url": t.url,
+                        "loading": t.loading && t.view.is_some(), "canBack": t.back, "canFwd": t.fwd,
+                        "pinned": t.pinned, "audio": t.audio, "muted": t.muted, "status": t.status(),
+                    })
                 })
-            })
-            .collect();
-        let state = json!({
-            "tabs": tabs,
-            "active": self.active,
-            "settings": self.settings,
-            "dark": self.ctx.dark.get(),
-            "maximized": self.ctx.window.is_maximized(),
-            "fullscreen": self.fullscreen(),
-            "panel": if self.panel { "settings" } else { "none" },
-            "peek": self.peek,
-            "mem": self.mem.map(|(b, p)| json!({"bytes": b, "procs": p})),
-            "blocked": self.blocker.blocked(),
-        });
-        let _ = self.ui.evaluate_script(&format!("window.lumen&&lumen.state({state})"));
+                .collect();
+            let state = json!({
+                "tabs": tabs,
+                "active": self.active,
+                "settings": self.settings,
+                "dark": self.ctx.dark.get(),
+                "maximized": self.ctx.window.is_maximized(),
+                "fullscreen": self.fullscreen(),
+                "panel": self.panel,
+                "peek": self.peek,
+                "frame": if self.ui_full() { "full" } else { "strip" },
+                "win": [w, h],
+                "stage": [sx, sy, sw, sh],
+                "mem": self.mem.map(|(b, p)| json!({"bytes": b, "procs": p})),
+                "blocked": self.blocker.blocked(),
+            });
+            let _ = self.ui.evaluate_script(&format!("window.lumen&&lumen.state({state})"));
+        }
+        if !self.fav_queue.is_empty() {
+            let mut js = String::new();
+            for id in std::mem::take(&mut self.fav_queue) {
+                if let Some(i) = self.idx(id) {
+                    js.push_str(&format!("lumen.fav({id},{});", Value::String(self.tabs[i].favicon.clone())));
+                }
+            }
+            let _ = self.ui.evaluate_script(&format!("if(window.lumen){{{js}}}"));
+        }
     }
 
     // ---------------------------------------------------------------- tabs
 
     fn restore(&mut self, session: Session) {
-        for saved in session.tabs {
+        let mut active = None;
+        for (i, saved) in session.tabs.into_iter().enumerate() {
             let mut t = Tab::new(self.ctx.alloc_id(), saved.url);
             t.title = saved.title;
             t.favicon = saved.favicon;
             t.pinned = saved.pinned;
+            if i == session.active {
+                active = Some(t.id);
+            }
             self.tabs.push(t);
         }
+        // Pinned tabs live at the front. The UI groups them; the order must agree.
+        self.tabs.sort_by_key(|t| !t.pinned);
         if self.tabs.is_empty() {
             self.tabs.push(Tab::new(self.ctx.alloc_id(), String::new()));
         }
         // Only the active tab gets a page. The rest stay "off" until clicked.
-        let i = session.active.min(self.tabs.len() - 1);
-        let id = self.tabs[i].id;
+        let id = active.filter(|id| self.idx(*id).is_some()).unwrap_or(self.tabs[0].id);
         self.activate(id);
     }
 
@@ -453,35 +544,43 @@ impl App {
         if self.tabs[i].view.is_some() || self.tabs[i].url.is_empty() {
             return;
         }
-        let stage = self.stage();
+        let (x, y, w, h) = self.stage();
         let t = &mut self.tabs[i];
-        if let Ok(v) = engine::build_tab(&self.ctx, t.id, Some(&t.url), stage) {
+        if let Ok(v) = engine::build_tab(&self.ctx, t.id, Some(&t.url), logical_rect(x, y, w, h)) {
             if t.muted {
                 engine::set_muted(&v, true);
             }
             t.view = Some(v);
             t.suspended = false;
+            t.trimmed = false;
         }
     }
 
     fn activate(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
-        if id != self.active {
-            if let Some(prev) = self.idx(self.active) {
-                let p = &mut self.tabs[prev];
-                if let Some(v) = &p.view {
-                    engine::set_hidden(v, true);
-                }
-                p.hidden_at = Some(Instant::now());
-            }
-            self.active = id;
-        }
+        let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
+        self.active = id;
         self.panel = false;
-        self.tabs[i].hidden_at = None;
         self.ensure_view(i);
-        self.tabs[i].suspended = false;
+        // Show the new page first, then hide the old. No flash of empty stage between.
         self.layout();
-        self.reveal();
+        let t = &mut self.tabs[i];
+        t.hidden_at = None;
+        t.suspended = false;
+        if let Some(v) = &t.view {
+            if t.trimmed {
+                let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
+                t.trimmed = false;
+            }
+            let _ = v.set_visible(true);
+        }
+        if let Some(p) = prev {
+            let p = &mut self.tabs[p];
+            if let Some(v) = &p.view {
+                let _ = v.set_visible(false);
+            }
+            p.hidden_at = Some(Instant::now());
+        }
         self.focus_page();
         self.dirty = true;
         self.push();
@@ -490,8 +589,9 @@ impl App {
     fn new_tab(&mut self, url: Option<String>, after: Option<usize>) -> u64 {
         let id = self.ctx.alloc_id();
         let t = Tab::new(id, url.unwrap_or_default());
+        let floor = self.pinned_count();
         match after {
-            Some(i) if i < self.tabs.len() => self.tabs.insert(i + 1, t),
+            Some(i) if i < self.tabs.len() => self.tabs.insert((i + 1).max(floor), t),
             _ => self.tabs.push(t),
         }
         self.activate(id);
@@ -530,6 +630,7 @@ impl App {
         }
         t.view = None;
         t.suspended = false;
+        t.trimmed = false;
         t.loading = false;
         t.audio = false;
     }
@@ -537,16 +638,18 @@ impl App {
     fn navigate(&mut self, raw: &str) {
         let Some(url) = resolve_input(raw, &self.settings.search) else { return };
         let i = self.active_idx();
+        self.panel = false;
         if let Some(v) = &self.tabs[i].view {
             let _ = v.load_url(&url);
             self.tabs[i].url = url;
         } else {
             self.tabs[i].url = url;
             self.ensure_view(i);
-            self.layout();
+            if let Some(v) = &self.tabs[i].view {
+                let _ = v.set_visible(true);
+            }
         }
-        self.panel = false;
-        self.reveal();
+        self.layout();
         self.focus_page();
         self.dirty = true;
         self.push();
@@ -559,28 +662,49 @@ impl App {
         self.activate(id);
     }
 
+    fn set_panel(&mut self, open: bool) {
+        self.panel = open;
+        if let Some(v) = self.active_tab().and_then(|t| t.view.as_ref()) {
+            let _ = v.set_visible(!open);
+        }
+        self.layout();
+        self.focus_page();
+        self.push();
+    }
+
     fn set_fullscreen(&mut self) {
         let on = self.fullscreen();
         self.ctx.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
+        self.rounded = None;
         self.layout();
         self.push();
     }
 
     // ------------------------------------------------------------ settings
 
+    /// Solid: an ordinary opaque window, the cheapest thing Windows can draw.
+    /// Glass: DWM backdrop through black client pixels and a transparent UI.
     fn apply_backdrop(&self) {
         let w = &*self.ctx.window;
         let dark = self.ctx.dark.get();
         let _ = window_vibrancy::clear_mica(w);
         let _ = window_vibrancy::clear_acrylic(w);
         let _ = window_vibrancy::clear_tabbed(w);
-        let _ = match self.settings.backdrop.as_str() {
-            "mica" => window_vibrancy::apply_mica(w, Some(dark)),
-            "tabbed" => window_vibrancy::apply_tabbed(w, Some(dark)),
-            "acrylic" => window_vibrancy::apply_acrylic(w, Some(if dark { (20, 18, 16, 120) } else { (240, 236, 230, 120) })),
-            _ => Ok(()),
+        let glass = match self.settings.backdrop.as_str() {
+            "mica" => window_vibrancy::apply_mica(w, Some(dark)).is_ok(),
+            "tabbed" => window_vibrancy::apply_tabbed(w, Some(dark)).is_ok(),
+            "acrylic" => window_vibrancy::apply_acrylic(w, Some((0, 0, 0, 0))).is_ok(),
+            _ => false,
         };
-        engine::extend_frame(w.hwnd(), self.settings.backdrop != "solid");
+        let (r, g, b) = self.bg;
+        if glass {
+            w.set_background_color(Some((0, 0, 0, 255)));
+            let _ = self.ui.set_background_color((0, 0, 0, 0));
+        } else {
+            w.set_background_color(Some((r, g, b, 255)));
+            let _ = self.ui.set_background_color((r, g, b, 255));
+        }
+        engine::set_glass(w.hwnd(), glass);
     }
 
     fn retheme(&mut self) {
@@ -602,10 +726,13 @@ impl App {
         } else if old.backdrop != self.settings.backdrop {
             self.apply_backdrop();
         }
-        self.blocker.set_enabled(self.settings.adblock);
         if old.tracking != self.settings.tracking {
             engine::set_tracking(&self.ui, &self.settings.tracking);
         }
+        if old.radius != self.settings.radius {
+            self.rounded = None;
+        }
+        self.blocker.set_enabled(self.settings.adblock);
         store::save_settings(&self.settings);
         self.layout();
         self.push();
@@ -617,48 +744,60 @@ impl App {
         if cfg!(debug_assertions) {
             debug_log(&ev);
         }
-        let tab = |app: &mut App, id: u64| app.idx(id);
         match ev {
             Ev::Ui(msg) => self.on_ui(&msg),
             Ev::Key(a) => self.on_key(a),
             Ev::Title(id, t) => {
-                if let Some(i) = tab(self, id) {
+                if let Some(i) = self.idx(id) {
                     self.tabs[i].title = t;
                     self.dirty = true;
+                    self.push();
                 }
             }
             Ev::Url(id, u) => {
-                if let Some(i) = tab(self, id) {
+                if let Some(i) = self.idx(id) {
                     self.tabs[i].url = u;
                     self.dirty = true;
+                    self.push();
                 }
             }
             Ev::Loading(id, on) => {
-                if let Some(i) = tab(self, id) {
+                if let Some(i) = self.idx(id)
+                    && self.tabs[i].loading != on
+                {
                     self.tabs[i].loading = on;
+                    self.push();
                 }
             }
             Ev::Favicon(id, f) => {
-                if let Some(i) = tab(self, id) {
+                if let Some(i) = self.idx(id)
+                    && self.tabs[i].favicon != f
+                {
                     self.tabs[i].favicon = f;
+                    self.fav_queue.push(id);
                     self.dirty = true;
                 }
             }
             Ev::Nav(id, b, f) => {
-                if let Some(i) = tab(self, id) {
+                if let Some(i) = self.idx(id)
+                    && (self.tabs[i].back, self.tabs[i].fwd) != (b, f)
+                {
                     self.tabs[i].back = b;
                     self.tabs[i].fwd = f;
+                    self.push();
                 }
             }
             Ev::Audio(id, on) => {
-                if let Some(i) = tab(self, id) {
+                if let Some(i) = self.idx(id) {
                     self.tabs[i].audio = on;
+                    self.push();
                 }
             }
             Ev::Suspended(id, ok) => {
-                if let Some(i) = tab(self, id) {
+                if let Some(i) = self.idx(id) {
                     // Only count it if the tab is still hidden. User may have clicked back.
                     self.tabs[i].suspended = ok && id != self.active;
+                    self.push();
                 }
             }
             Ev::FullScreen(id, on) => {
@@ -666,9 +805,8 @@ impl App {
                     self.page_fs = on;
                     self.set_fullscreen();
                 }
-                return;
             }
-            Ev::CloseMe(id) => return self.close(id),
+            Ev::CloseMe(id) => self.close(id),
             Ev::Popup(id) => {
                 let found = {
                     let mut p = self.ctx.popups.borrow_mut();
@@ -678,14 +816,12 @@ impl App {
                     let mut t = Tab::new(id, String::new());
                     t.view = Some(v);
                     t.title = "Loading…".into();
-                    let at = self.active_idx();
-                    self.tabs.insert((at + 1).min(self.tabs.len()), t);
+                    let at = (self.active_idx() + 1).max(self.pinned_count()).min(self.tabs.len());
+                    self.tabs.insert(at, t);
                     self.activate(id);
                 }
-                return;
             }
         }
-        self.push();
     }
 
     fn on_key(&mut self, a: Action) {
@@ -743,12 +879,7 @@ impl App {
                 self.user_fs = !self.user_fs;
                 self.set_fullscreen();
             }
-            Action::Settings => {
-                self.panel = !self.panel;
-                self.reveal();
-                self.focus_page();
-                self.push();
-            }
+            Action::Settings => self.set_panel(!self.panel),
             Action::DevTools => match &self.tabs[i].view {
                 Some(v) => v.open_devtools(),
                 None => self.ui.open_devtools(),
@@ -759,16 +890,25 @@ impl App {
     fn on_ui(&mut self, raw: &str) {
         let Ok(m) = serde_json::from_str::<Value>(raw) else { return };
         let id = m["id"].as_u64().unwrap_or(0);
-        let w = &self.ctx.window;
         match m["t"].as_str().unwrap_or("") {
             "ready" => {
                 self.ui_ready = true;
+                self.fav_queue = self.tabs.iter().filter(|t| !t.favicon.is_empty()).map(|t| t.id).collect();
                 self.push();
                 if !self.shown {
                     self.shown = true;
-                    w.set_visible(true);
+                    self.ctx.window.set_visible(true);
                     self.layout();
                     self.focus_page();
+                }
+            }
+            "bg" => {
+                let c = &m["rgb"];
+                let px = |k: usize| c[k].as_u64().unwrap_or(0).min(255) as u8;
+                let bg = (px(0), px(1), px(2));
+                if bg != self.bg {
+                    self.bg = bg;
+                    self.apply_backdrop();
                 }
             }
             "nav" => self.navigate(m["url"].as_str().unwrap_or("")),
@@ -779,7 +919,11 @@ impl App {
             "close" => self.close(id),
             "pin" => {
                 if let Some(i) = self.idx(id) {
-                    self.tabs[i].pinned = !self.tabs[i].pinned;
+                    let mut t = self.tabs.remove(i);
+                    t.pinned = !t.pinned;
+                    // Pinned: end of the pinned block. Unpinned: first after it.
+                    let at = self.pinned_count();
+                    self.tabs.insert(at, t);
                     self.dirty = true;
                     self.push();
                 }
@@ -820,8 +964,11 @@ impl App {
             }
             "move" => {
                 if let Some(i) = self.idx(id) {
-                    let to = (m["to"].as_u64().unwrap_or(0) as usize).min(self.tabs.len() - 1);
                     let t = self.tabs.remove(i);
+                    // Stay inside your own group: pinned with pinned, the rest with the rest.
+                    let pins = self.pinned_count();
+                    let (lo, hi) = if t.pinned { (0, pins) } else { (pins, self.tabs.len()) };
+                    let to = (m["to"].as_u64().unwrap_or(0) as usize).clamp(lo, hi);
                     self.tabs.insert(to, t);
                     self.dirty = true;
                     self.push();
@@ -830,20 +977,28 @@ impl App {
             "back" => self.on_key(Action::Back),
             "fwd" => self.on_key(Action::Forward),
             "reload" => self.on_key(Action::Reload),
+            "stop" => {
+                if let Some(v) = self.active_tab().and_then(|t| t.view.as_ref()) {
+                    let _ = v.evaluate_script("window.stop()");
+                }
+            }
             "reopen" => self.on_key(Action::Reopen),
             "devtools" => self.on_key(Action::DevTools),
-            "win" => match m["a"].as_str().unwrap_or("") {
-                "min" => w.set_minimized(true),
-                "max" => w.set_maximized(!w.is_maximized()),
-                "close" => self.exit = true,
-                _ => {}
-            },
+            "win" => {
+                let w = &self.ctx.window;
+                match m["a"].as_str().unwrap_or("") {
+                    "min" => w.set_minimized(true),
+                    "max" => w.set_maximized(!w.is_maximized()),
+                    "close" => self.exit = true,
+                    _ => {}
+                }
+            }
             "drag" => {
-                let _ = w.drag_window();
+                let _ = self.ctx.window.drag_window();
             }
             "resize" => {
                 if let Some(d) = resize_dir(m["d"].as_str().unwrap_or("")) {
-                    let _ = w.drag_resize_window(d);
+                    let _ = self.ctx.window.drag_resize_window(d);
                 }
             }
             "settings" => {
@@ -851,14 +1006,7 @@ impl App {
                     self.apply_settings(s);
                 }
             }
-            "panel" => {
-                self.panel = m["open"].as_bool().unwrap_or(false);
-                self.reveal();
-                if !self.panel {
-                    self.focus_page();
-                }
-                self.push();
-            }
+            "panel" => self.set_panel(m["open"].as_bool().unwrap_or(false)),
             "peek" => {
                 self.peek = m["on"].as_bool().unwrap_or(false);
                 self.layout();
@@ -871,16 +1019,15 @@ impl App {
 
     // ---------------------------------------------------------------- tick
 
-    /// Every few seconds: put hidden tabs to sleep, read memory, save.
+    /// Every few seconds: trim, freeze and discard hidden tabs, read memory, save.
     fn tick(&mut self) {
         let now = Instant::now();
         self.next_tick = now + TICK;
 
         let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
         let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
-        let mut changed = false;
         for i in 0..self.tabs.len() {
-            let t = &self.tabs[i];
+            let t = &mut self.tabs[i];
             if t.id == self.active || t.view.is_none() || t.audio {
                 continue;
             }
@@ -888,22 +1035,27 @@ impl App {
             let idle = now - at;
             if idle >= discard && !t.pinned {
                 self.discard(i);
-                changed = true;
+                self.push();
             } else if idle >= sleep && !t.suspended {
                 if let Some(v) = &t.view {
                     engine::try_suspend(v, t.id, self.ctx.proxy.clone());
                 }
+            } else if idle >= TRIM_AFTER && !t.trimmed {
+                if let Some(v) = &t.view {
+                    let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
+                }
+                t.trimmed = true;
             }
         }
 
-        if self.settings.show_memory {
-            if let Some(env) = self.ctx.env.borrow().as_ref() {
-                let m = engine::memory(env);
-                // Only redraw when it moved by more than 1 MB.
-                if self.mem.is_none_or(|(b, _)| b.abs_diff(m.0) > 1 << 20) {
-                    self.mem = Some(m);
-                    changed = true;
-                }
+        if self.settings.show_memory
+            && let Some(env) = self.ctx.env.borrow().as_ref()
+        {
+            let m = engine::memory(env);
+            // Only redraw when it moved by more than 1 MB.
+            if self.mem.is_none_or(|(b, _)| b.abs_diff(m.0) > 1 << 20) {
+                self.mem = Some(m);
+                self.ui_dirty = true;
             }
         }
 
@@ -916,30 +1068,23 @@ impl App {
         if self.dirty {
             self.save_session();
         }
-        if changed {
-            self.push();
-        }
     }
 
     fn save_session(&mut self) {
         self.dirty = false;
         let (width, height) = logical_size(&self.ctx);
         let maximized = self.ctx.window.is_maximized();
+        let keep: Vec<&Tab> = self.tabs.iter().filter(|t| !t.url.is_empty() || t.id == self.active).collect();
         let s = Session {
-            tabs: self
-                .tabs
+            tabs: keep
                 .iter()
-                .filter(|t| !t.url.is_empty() || t.id == self.active)
                 .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
                 .collect(),
-            active: 0,
+            active: keep.iter().position(|t| t.id == self.active).unwrap_or(0),
             width: if maximized || self.fullscreen() { 0.0 } else { width },
             height: if maximized || self.fullscreen() { 0.0 } else { height },
             maximized,
         };
-        let active = s.tabs.iter().zip(self.tabs.iter().filter(|t| !t.url.is_empty() || t.id == self.active))
-            .position(|(_, t)| t.id == self.active)
-            .unwrap_or(0);
-        store::save_session(&Session { active, ..s });
+        store::save_session(&s);
     }
 }

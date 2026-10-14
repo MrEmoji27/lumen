@@ -1,706 +1,314 @@
-/* ============================================================ Lumen chrome
-   All chrome styling. Rust inlines this file into index.html at build.
-   No frameworks. No network. Plain CSS.
-   ========================================================================= */
+/* Lumen UI. Quiet surfaces, one accent, nothing that costs a repaint it does not earn. */
 
-/* ---------------------------------------------------------------- tokens */
+/* ---------------------------------------------------------------- palettes
+   A palette is a hue, a neutral chroma, and an accent. Surfaces are derived. */
 :root{
-  /* palette neutral tint (overridden per palette below) */
-  --h: 58; --nc: .016;
-  /* palette accent */
-  --ah: 52; --ac: .155;
-
-  /* geometry, written by JS from settings */
-  --sb-w: 264px;
-  --gap: 8px;
-  --radius: 10px;
-  --dur: 180ms;
-  --dur-l: 320ms;
-  --ease: cubic-bezier(.22, 1, .36, 1);      /* ease-out-quint */
-  --ease-ex: cubic-bezier(.16, 1, .3, 1);    /* ease-out-expo */
-
-  --sans: "Instrument Sans", system-ui, "Segoe UI", sans-serif;
-  --serif: "Instrument Serif", Georgia, "Times New Roman", serif;
-
-  --tile: 30px;
-  --row: 34px;
+  --h: 260; --c: .005; --acc: oklch(.78 .12 68);
+  --sw: 240px; --radius: 10px;
+  --sans: "Instrument Sans", "Segoe UI Variable Text", system-ui, sans-serif;
+  --serif: "Instrument Serif", Georgia, serif;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+  color-scheme: dark;
 }
+[data-palette="graphite"]{ --h: 260; --c: .005; --acc: oklch(.78 .12 68); }
+[data-palette="sand"] { --h: 70;  --c: .012; --acc: oklch(.72 .13 48); }
+[data-palette="slate"]{ --h: 245; --c: .016; --acc: oklch(.75 .1 250); }
+[data-palette="moss"] { --h: 150; --c: .012; --acc: oklch(.76 .1 145); }
+[data-palette="rose"] { --h: 10;  --c: .012; --acc: oklch(.73 .12 15); }
 
-[data-anim="off"]{ --dur: 1ms; --dur-l: 1ms; }
-@media (prefers-reduced-motion: reduce){
-  :root{ --dur: 1ms; --dur-l: 1ms; }
-}
-
-/* palettes: neutral hue/chroma, accent hue/chroma */
-[data-palette="ember"]{ --h: 58;  --nc: .017; --ah: 50;  --ac: .155 }
-[data-palette="paper"]{ --h: 92;  --nc: .021; --ah: 258; --ac: .140 }
-[data-palette="moss"] { --h: 150; --nc: .019; --ah: 152; --ac: .105 }
-[data-palette="ink"]  { --h: 262; --nc: .021; --ah: 28;  --ac: .160 }
-[data-palette="dune"] { --h: 78;  --nc: .025; --ah: 38;  --ac: .145 }
-
-/* themes: dark and light, neutrals always tinted by the palette hue */
 [data-theme="dark"]{
-  --bg:      oklch(0.163 calc(var(--nc) * 1.5) var(--h));
-  --panel:   oklch(0.205 calc(var(--nc) * 1.3) var(--h));
-  --panel-2: oklch(0.250 calc(var(--nc) * 1.3) var(--h));
-  --text:    oklch(0.935 calc(var(--nc) * .8) var(--h));
-  --text-2:  oklch(0.760 calc(var(--nc) * .7) var(--h));
-  --text-3:  oklch(0.575 calc(var(--nc) * .6) var(--h));
-  --line:    oklch(0.440 calc(var(--nc) * .6) var(--h) / .42);
-  --line-2:  oklch(0.560 calc(var(--nc) * .6) var(--h) / .22);
-  --accent:  oklch(0.775 calc(var(--ac) * .95) var(--ah));
-  --a-ink:   oklch(0.190 calc(var(--nc) * 2) var(--h));
-  --warm:    oklch(0.62 .16 25);
+  --bg:    oklch(.185 var(--c) var(--h));
+  --raise: oklch(.225 calc(var(--c) * 1.2) var(--h));
+  --hover: oklch(.245 calc(var(--c) * 1.2) var(--h));
+  --press: oklch(.28 calc(var(--c) * 1.3) var(--h));
+  --line:  oklch(.27 calc(var(--c) * 1.2) var(--h));
+  --text:  oklch(.94 calc(var(--c) * .5) var(--h));
+  --dim:   oklch(.72 calc(var(--c) * .8) var(--h));
+  --faint: oklch(.52 var(--c) var(--h));
+  --shade: oklch(.1 var(--c) var(--h) / .5);
 }
 [data-theme="light"]{
-  --bg:      oklch(0.964 calc(var(--nc) * 1.1) var(--h));
-  --panel:   oklch(0.995 calc(var(--nc) * .8) var(--h));
-  --panel-2: oklch(0.925 calc(var(--nc) * 1.1) var(--h));
-  --text:    oklch(0.285 calc(var(--nc) * 1.6) var(--h));
-  --text-2:  oklch(0.450 calc(var(--nc) * 1.3) var(--h));
-  --text-3:  oklch(0.620 calc(var(--nc) * 1.0) var(--h));
-  --line:    oklch(0.560 calc(var(--nc) * .8) var(--h) / .30);
-  --line-2:  oklch(0.560 calc(var(--nc) * .8) var(--h) / .18);
-  --accent:  oklch(0.545 var(--ac) var(--ah));
-  --a-ink:   oklch(0.990 calc(var(--nc) * .5) var(--h));
-  --warm:    oklch(0.55 .17 25);
+  --bg:    oklch(.955 var(--c) var(--h));
+  --raise: oklch(.988 calc(var(--c) * .5) var(--h));
+  --hover: oklch(.918 var(--c) var(--h));
+  --press: oklch(.89 var(--c) var(--h));
+  --line:  oklch(.9 var(--c) var(--h));
+  --text:  oklch(.22 var(--c) var(--h));
+  --dim:   oklch(.46 var(--c) var(--h));
+  --faint: oklch(.62 var(--c) var(--h));
+  --shade: oklch(.3 var(--c) var(--h) / .16);
+  color-scheme: light;
 }
-
-/* accent derived tones. Color-mix keeps overrides in sync. */
 :root{
-  --a-soft:   color-mix(in oklab, var(--accent) 20%, var(--panel));
-  --a-softer: color-mix(in oklab, var(--accent) 11%, var(--panel));
-  --a-hover:  color-mix(in oklab, var(--accent) 84%, var(--text));
-  --a-ring:   color-mix(in oklab, var(--accent) 34%, transparent);
-  --tint:     color-mix(in oklab, var(--accent) 13%, var(--bg));
+  --accent: var(--user-acc, var(--acc));
+  --acc-soft: color-mix(in oklab, var(--accent) 22%, transparent);
 }
 
-/* backdrop: Mica shows through the sidebar unless the user asked for solid */
-[data-backdrop="mica"]   { --sb-alpha: 44%; }
-[data-backdrop="acrylic"]{ --sb-alpha: 30%; }
-[data-backdrop="tabbed"] { --sb-alpha: 58%; }
-[data-backdrop="solid"]  { --sb-alpha: 100%; }
-
-/* ------------------------------------------------------------------ reset */
-*, *::before, *::after{ box-sizing: border-box; margin: 0; padding: 0 }
+/* ------------------------------------------------------------------ base */
+*,*::before,*::after{ box-sizing: border-box; margin: 0; padding: 0 }
 html, body{ height: 100%; overflow: hidden }
 body{
-  font: 400 13px/1.45 var(--sans);
+  font: 450 13px/1.4 var(--sans);
   color: var(--text);
-  background: transparent;
+  background: var(--bg);
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
   user-select: none;
   cursor: default;
-  overscroll-behavior: none;
-  letter-spacing: -0.005em;
 }
-button, input, select{ font: inherit; color: inherit; letter-spacing: inherit }
-button{ background: none; border: 0; padding: 0; cursor: default; text-align: left }
-input{ background: none; border: 0; user-select: text }
-:focus{ outline: none }
-:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 5px }
+[data-glass] body{ background: transparent }
+button, input{ font: inherit; color: inherit; background: none; border: 0; outline: 0 }
+a{ color: inherit; text-decoration: none }
+input{ user-select: text; cursor: text }
+input::placeholder{ color: var(--faint) }
 [hidden]{ display: none !important }
-svg{ display: block }
-.i{ display: inline-flex; width: 16px; height: 16px; flex: 0 0 auto }
-.i svg{ width: 16px; height: 16px }
-.i, button, .tab, .pin{ -webkit-tap-highlight-color: transparent }
+svg{ display: block; width: 16px; height: 16px }
+/* Inputs draw their own focus. Everything else gets the ring on keyboard focus. */
+:focus-visible:not(input){ outline: 2px solid var(--accent); outline-offset: -2px }
 
-/* ------------------------------------------------------------- structure */
-#app{ position: fixed; inset: 0; z-index: 1 }
-#sidebar{
-  position: absolute; top: 0; left: 0; height: 100%; width: var(--sb-w);
-  display: flex; flex-direction: column; z-index: 2;
-  background: color-mix(in oklab, var(--bg) var(--sb-alpha), transparent);
-  border-inline-end: 1px solid var(--line-2);
-}
-[data-backdrop="solid"] #sidebar{ background: var(--bg) }
-#stage{
-  position: absolute; z-index: 1; overflow: hidden;
-  background: var(--bg);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius);
-}
-[data-fs] #stage{ border: 0; border-radius: 0 }
-
-/* window resize edges */
-#rz{ position: fixed; inset: 0; z-index: 60; pointer-events: none }
-#rz b{ position: absolute; pointer-events: auto }
-#rz [data-d="n"]{ top: 0; left: 8px; right: 8px; height: 6px; cursor: ns-resize }
-#rz [data-d="s"]{ bottom: 0; left: 8px; right: 8px; height: 6px; cursor: ns-resize }
-#rz [data-d="e"]{ right: 0; top: 8px; bottom: 8px; width: 6px; cursor: ew-resize }
-#rz [data-d="w"]{ left: 0; top: 8px; bottom: 8px; width: 6px; cursor: ew-resize }
-#rz [data-d="ne"]{ top: 0; right: 0; width: 13px; height: 13px; cursor: nesw-resize }
-#rz [data-d="nw"]{ top: 0; left: 0; width: 13px; height: 13px; cursor: nwse-resize }
-#rz [data-d="se"]{ bottom: 0; right: 0; width: 13px; height: 13px; cursor: nwse-resize }
-#rz [data-d="sw"]{ bottom: 0; left: 0; width: 13px; height: 13px; cursor: nesw-resize }
-#rz[data-off]{ display: none }
-
-/* ------------------------------------------------------------ icon button */
 .ib{
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 26px; height: 26px; border-radius: 7px; color: var(--text-2);
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
-              opacity var(--dur) var(--ease);
+  width: 28px; height: 28px; border-radius: 7px;
+  display: grid; place-items: center;
+  color: var(--dim);
 }
-.ib svg{ width: 16px; height: 16px; flex: 0 0 auto }
-.fav .st svg{ width: 8px; height: 8px }
-.pin .t-aud svg{ width: 10px; height: 10px }
-.ib:hover{ background: var(--panel-2); color: var(--text) }
-.ib:active{ background: var(--a-soft) }
-.ib[disabled]{ opacity: .3; pointer-events: none }
-.ib.win-x:hover{ background: var(--warm); color: var(--a-ink) }
+.ib:hover{ background: var(--hover); color: var(--text) }
+.ib:active{ background: var(--press) }
+.ib:disabled{ color: var(--faint); opacity: .45; background: none }
 
-/* ------------------------------------------------------------- top row */
-.sb-top{
-  flex: 0 0 auto; height: 36px; display: flex; align-items: center;
-  justify-content: space-between; padding: 0 8px; gap: 4px;
-}
-.sb-top .navs, .sb-top .wins{ display: flex; align-items: center; gap: 2px }
-[data-side="right"] .sb-top{ flex-direction: row-reverse }
-.sb-top::before{
-  content: ""; position: absolute; inset: 0 0 auto 0; height: 36px; z-index: -1;
-  background: linear-gradient(to bottom, color-mix(in oklab, var(--bg) 22%, transparent), transparent);
-}
-#sidebar{ isolation: isolate }
+/* Top edge resize grip. Other edges are native. */
+#rz{ position: fixed; inset: 0 0 auto 0; height: 4px; z-index: 50; cursor: n-resize }
+[data-max] #rz{ display: none }
 
-/* --------------------------------------------------------------- omnibox */
-.omni-box{ flex: 0 0 auto; padding: 2px 8px 0; position: relative }
-.omni{
-  position: relative; display: flex; align-items: center; gap: 7px;
-  height: 32px; padding: 0 9px; border-radius: calc(var(--radius) * .7 + 2px);
-  background: color-mix(in oklab, var(--panel) 72%, transparent);
-  border: 1px solid var(--line-2);
-  color: var(--text-2);
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease),
-              box-shadow var(--dur) var(--ease);
+/* --------------------------------------------------------------- sidebar */
+#sb{
+  position: fixed; top: 0; bottom: 0; left: 0; width: var(--sw);
+  display: flex; flex-direction: column;
+  padding: 6px 8px 6px;
+  contain: strict;
 }
-[data-backdrop="solid"] .omni{ background: var(--panel) }
-.omni:hover{ border-color: var(--line) }
-.omni:focus-within{
-  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
-  box-shadow: 0 0 0 3px var(--a-ring);
-  color: var(--text);
-}
-.omni-ico{ color: var(--text-3) }
-.omni:focus-within .omni-ico{ color: var(--accent) }
-#omni-in{
-  flex: 1 1 auto; min-width: 0; height: 100%; font-size: 13px; color: var(--text);
-  caret-color: var(--accent);
-}
-#omni-in::placeholder{ color: var(--text-3) }
-.omni.insecure .omni-ico{ color: var(--text-3) }
+[data-side="right"] #sb{ left: auto; right: 0 }
+[data-glass] #sb{ background: color-mix(in oklab, var(--bg) 50%, transparent) }
 
-/* compact: the omnibox folds into a single search tile */
-[data-compact] .omni-box{ padding-inline: 10px; display: flex; justify-content: center }
-[data-compact] .omni{
-  width: 40px; padding: 0; justify-content: center; gap: 0; cursor: text;
-}
-[data-compact] #omni-in{
-  position: absolute; inset: 0; width: 100%; padding: 0; opacity: 0;
-  font-size: 13px;
-}
-[data-compact][data-peek] .omni{ width: auto; padding: 0 9px; gap: 7px; justify-content: flex-start }
-[data-compact][data-peek] #omni-in{ position: static; opacity: 1; pointer-events: auto }
+#top{ display: flex; align-items: center; justify-content: space-between; height: 34px; flex: none }
+#top .nav, #top .win{ display: flex; gap: 1px }
+#close:hover{ background: oklch(.58 .2 27); color: oklch(.98 0 0) }
+[data-side="right"] #top{ flex-direction: row-reverse }
+[data-side="right"] #top .win{ flex-direction: row-reverse }
 
-/* the rail cannot fit six buttons in one row, so the two groups stack */
-[data-compact] .sb-top{
-  height: 54px; flex-direction: column-reverse; gap: 1px; padding: 0 6px;
-}
-[data-compact] .sb-top::before{ height: 54px }
-[data-compact] .sb-top .navs, [data-compact] .sb-top .wins{
-  width: 100%; justify-content: center; gap: 1px;
-}
-[data-compact] .sb-top .ib{ width: 19px; height: 19px; border-radius: 6px }
-[data-compact] .sb-top .ib svg{ width: 13px; height: 13px }
-
-/* suggestion dropdown, always inside the sidebar */
-.omni-list{
-  position: absolute; left: 8px; right: 8px; top: calc(100% + 5px); z-index: 30;
-  max-height: min(340px, 52vh); overflow-y: auto; overscroll-behavior: contain;
-  padding: 4px; border-radius: calc(var(--radius) * .7 + 2px);
-  background: color-mix(in oklab, var(--panel) 94%, transparent);
-  border: 1px solid var(--line);
-  box-shadow: 0 18px 40px -18px oklch(0 0 0 / .55);
-  animation: pop var(--dur) var(--ease) both;
-}
-@keyframes pop{ from{ opacity: 0; transform: translateY(-4px) } }
-.ol-item{
-  display: flex; align-items: center; gap: 8px; padding: 6px 7px;
-  border-radius: 7px; color: var(--text-2);
-}
-.ol-item .i{ color: var(--text-3) }
-.ol-item .ol-main{ flex: 1 1 auto; min-width: 0 }
-.ol-item .ol-t{
-  display: block; font-size: 12.5px; color: var(--text);
+#omni{ position: relative; margin: 6px 0 10px; flex: none }
+#omni .lead{ position: absolute; left: 10px; top: 9px; color: var(--faint); pointer-events: none }
+#addr{
+  width: 100%; height: 34px; padding: 0 10px 0 32px;
+  border-radius: 9px; background: var(--raise);
+  font-size: 13px; letter-spacing: -.003em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ol-item .ol-s{
-  display: block; font-size: 11px; color: var(--text-3);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.ol-item[aria-selected="true"]{ background: var(--a-softer); color: var(--text) }
-.ol-item[aria-selected="true"] .i{ color: var(--accent) }
-.ol-empty{ padding: 8px; font-size: 12px; color: var(--text-3) }
+#addr:hover{ background: var(--hover) }
+#addr:focus{ background: var(--raise); box-shadow: 0 0 0 1.5px var(--acc-soft) }
+[data-secure] #omni .lead{ color: var(--dim) }
 
-/* ---------------------------------------------------------- pinned tiles */
-.pins{
-  flex: 0 0 auto; max-height: 104px; overflow-y: auto; overscroll-behavior: contain;
-  display: flex; flex-wrap: wrap; align-content: center; justify-content: center;
-  gap: 4px; padding: 9px 8px 0;
+#sugg{
+  position: absolute; z-index: 20; left: 0; right: 0; top: 40px;
+  padding: 4px; border-radius: 10px;
+  background: var(--raise); box-shadow: 0 8px 24px var(--shade), 0 0 0 1px var(--line);
+  animation: pop .12s var(--ease);
 }
-.pins::-webkit-scrollbar, .tabs::-webkit-scrollbar, .set-scroll::-webkit-scrollbar,
-.omni-list::-webkit-scrollbar{ width: 8px }
-.pins::-webkit-scrollbar-thumb, .tabs::-webkit-scrollbar-thumb,
-.set-scroll::-webkit-scrollbar-thumb, .omni-list::-webkit-scrollbar-thumb{
-  background: var(--line); border-radius: 99px; border: 2px solid transparent;
-  background-clip: content-box;
-}
-.pins::-webkit-scrollbar-track, .tabs::-webkit-scrollbar-track,
-.set-scroll::-webkit-scrollbar-track, .omni-list::-webkit-scrollbar-track{ background: none }
+.sg{ display: flex; align-items: center; gap: 9px; height: 30px; padding: 0 8px; border-radius: 7px; color: var(--dim) }
+.sg svg{ flex: none; color: var(--faint) }
+.sg b{ font-weight: 450; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.sg small{ font-size: 11.5px; color: var(--faint); flex: none }
+.sg.on{ background: var(--hover) }
 
-/* -------------------------------------------------------------- tab rows */
-.tabs{
-  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  padding: 8px 8px 2px; display: flex; flex-direction: column; gap: 1px;
-}
-.tab, .pin{
-  position: relative; display: flex; align-items: center; gap: 8px;
-  height: var(--row); padding: 0 6px; border-radius: 8px; color: var(--text-2);
-  flex: 0 0 auto;
-}
-.pin{ justify-content: center; padding: 0; width: var(--tile); height: var(--tile);
-     flex: 0 0 var(--tile); border-radius: 8px }
-.tab:hover, .pin:hover{ background: var(--panel-2); color: var(--text) }
-.tab[aria-selected="true"]{ background: var(--a-softer); color: var(--text) }
-.tab.dragging, .pin.dragging{ opacity: .55; background: var(--a-soft) }
+/* ------------------------------------------------------------------ tabs */
+#list{ flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; margin: 0 -4px; padding: 0 4px; scrollbar-width: none }
+#list::-webkit-scrollbar{ display: none }
 
-/* pinned tiles are favicon only: never spill the title, close lives in the menu */
-.pin .t-body, .pin .t-title, .pin .t-x{ display: none }
-.pin .t-trail{ display: contents }
-.pin .t-aud{
-  position: absolute; right: -3px; bottom: -3px; width: 13px; height: 13px;
-  border-radius: 50%; background: var(--panel); opacity: 1; pointer-events: auto;
-}
-.pin .t-aud[data-on="0"]{ display: none }
-.tab::before, .pin::before{
-  content: ""; position: absolute; inset-block: 8px; inset-inline-start: 0;
-  width: 2px; border-radius: 2px; background: var(--accent);
-  opacity: 0; transform: scaleY(.4); transform-origin: center;
-  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
-}
-.tab[aria-selected="true"]::before, .pin[aria-selected="true"]::before{ opacity: 1; transform: none }
+#pins{ display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 4px }
+#pins:not(:empty){ margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line) }
 
-/* favicon + monogram chip */
-.fav{
-  position: relative; width: 16px; height: 16px; flex: 0 0 auto;
-  display: flex; align-items: center; justify-content: center;
+.row, .tab{
+  display: flex; align-items: center; gap: 9px;
+  height: 32px; padding: 0 6px 0 9px; border-radius: 8px;
+  color: var(--dim); width: 100%; text-align: left;
+  contain: layout paint;
 }
-.fav img{
-  width: 16px; height: 16px; border-radius: 3px; opacity: 0;
-  transition: opacity var(--dur) var(--ease);
-}
-.fav img.ok{ opacity: 1 }
-.fav .mono{
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  border-radius: 4px; font-size: 9.5px; font-weight: 600; line-height: 1;
-  color: var(--a-ink); background: var(--mono-bg, var(--a-soft));
-  letter-spacing: 0;
-}
-.fav img.ok + .mono{ display: none }
-.fav .st{
-  position: absolute; right: -4px; bottom: -4px; width: 11px; height: 11px;
-  border-radius: 50%; display: none; align-items: center; justify-content: center;
-  background: var(--panel); color: var(--text-3); font-size: 8px;
-}
-.fav .st .i{ width: 8px; height: 8px }
-.tab[data-st="asleep"] .st, .tab[data-st="off"] .st,
-.pin[data-st="asleep"] .st, .pin[data-st="off"] .st{ display: flex }
+.tab + .tab{ margin-top: 1px }
+.row:hover, .tab:hover{ background: var(--hover); color: var(--text) }
+.tab.active{ background: var(--raise); color: var(--text) }
+[data-theme="light"] .tab.active{ box-shadow: 0 1px 2px var(--shade) }
+.tab.dragging{ position: relative; z-index: 5; background: var(--press); opacity: .92 }
 
-.t-body{ flex: 1 1 auto; min-width: 0 }
-.t-title{
-  display: block; font-size: 12.5px; line-height: 1.3; color: inherit;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+.title{ flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis }
+.fav{ position: relative; width: 16px; height: 16px; flex: none; display: grid; place-items: center }
+.fav img{ width: 16px; height: 16px; display: none; border-radius: 3px }
+.has-fav .fav img{ display: block }
+.has-fav .fav .mono{ display: none }
+.mono{
+  width: 16px; height: 16px; border-radius: 5px; display: grid; place-items: center;
+  font: 650 9.5px/1 var(--sans); font-style: normal;
+  background: color-mix(in oklab, var(--accent) 30%, var(--press)); color: var(--text);
 }
-.tab[data-st="asleep"] .t-title, .tab[data-st="off"] .t-title,
-.tab[data-st="asleep"], .tab[data-st="off"],
-.pin[data-st="asleep"], .pin[data-st="off"]{ color: var(--text-3) }
-.tab[data-st="asleep"] .fav, .tab[data-st="off"] .fav{ opacity: .55 }
+.spin{ display: none }
+.tab.loading .fav > :not(.spin){ visibility: hidden }
+.tab.loading .spin{
+  display: block; position: absolute; inset: 1px; border-radius: 50%;
+  border: 1.5px solid var(--line); border-top-color: var(--accent);
+  animation: spin .7s linear infinite;
+}
+.tab.sleep .fav, .tab.sleep .title{ opacity: .5 }
 
-.t-trail{ flex: 0 0 auto; display: flex; align-items: center; gap: 1px }
-.t-x, .t-aud{ opacity: 0; width: 22px; height: 22px; border-radius: 6px; pointer-events: none }
-.tab:hover .t-x, .tab:focus-within .t-x, .pin:hover .t-x, .pin:focus-within .t-x{ opacity: 1; pointer-events: auto }
-.t-aud{ color: var(--accent) }
-.t-aud[data-on="1"]{ opacity: 1; pointer-events: auto }
-.t-aud[data-muted="1"]{ color: var(--text-3) }
+.tab .x, .tab .snd{ width: 22px; height: 22px; border-radius: 6px; display: none; place-items: center; flex: none; color: var(--dim) }
+.tab .x svg, .tab .snd svg{ width: 14px; height: 14px }
+.tab:hover .x, .tab.active .x{ display: grid }
+.tab.has-snd .snd{ display: grid }
+.tab .x:hover, .tab .snd:hover{ background: var(--press); color: var(--text) }
 
-/* the moving accent line on a loading tab */
-.t-load{
-  position: absolute; inset-inline: 7px; bottom: 2px; height: 1.5px;
-  border-radius: 2px; overflow: hidden; background: var(--line-2); display: none;
-}
-.tab[data-loading="1"] .t-load{ display: block }
-.t-load::after{
-  content: ""; position: absolute; inset-block: 0; width: 38%;
-  border-radius: 2px; background: var(--accent);
-  animation: slide 1.15s var(--ease) infinite;
-}
-@keyframes slide{
-  0%{ transform: translateX(-105%) } 100%{ transform: translateX(300%) }
-}
+/* Pinned: icon tiles. */
+.tab.pin{ justify-content: center; padding: 0; height: 34px; gap: 0 }
+.tab.pin .title, .tab.pin .x{ display: none !important }
+.tab.pin .snd{ position: absolute; right: 1px; top: 1px; width: 14px; height: 14px; border-radius: 4px; background: var(--bg) }
+.tab.pin .snd svg{ width: 10px; height: 10px }
+.tab.pin{ position: relative; background: var(--raise) }
+.tab.pin:hover{ background: var(--hover) }
+.tab.pin.active{ background: var(--press) }
 
-/* compact: favicon rail */
-[data-compact] .tabs{ padding-inline: 10px; gap: 4px; align-items: center }
-[data-compact] .tab{ width: 30px; padding: 0; justify-content: center }
-[data-compact] .t-body, [data-compact] .t-title{ display: none }
-[data-compact] .t-trail{ position: static }
-[data-compact] .t-x{ display: none }
-[data-compact] .tab:hover .t-x{ display: none }
-[data-compact] .tab .t-aud{
-  position: absolute; right: -3px; bottom: -3px; width: 13px; height: 13px;
-  border-radius: 50%; background: var(--panel);
-}
-[data-compact] .tab .t-aud[data-on="1"]{ opacity: 1; pointer-events: auto }
-[data-compact] .tab .t-aud[data-on="0"]{ opacity: 0; pointer-events: none }
-[data-compact] .pins{ gap: 4px; padding-inline: 10px }
-[data-compact] .pin{ width: 30px; height: 30px; flex-basis: 30px }
+#newtab{ margin-top: 4px; color: var(--faint) }
+#newtab .fav svg{ width: 15px; height: 15px }
+#newtab:hover{ color: var(--text) }
 
-/* ------------------------------------------------------------ new tab row */
-.newrow{
-  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
-  margin: 4px 8px 0; height: 30px; padding: 0 7px; border-radius: 8px;
-  color: var(--text-2); border: 1px dashed var(--line);
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
-              border-color var(--dur) var(--ease);
-}
-.newrow:hover{ background: var(--a-softer); color: var(--text); border-color: var(--accent) }
-.newrow .i{ color: var(--text-3) }
-.newrow:hover .i{ color: var(--accent) }
-.newrow-t{ font-size: 12.5px }
-[data-compact] .newrow{ justify-content: center; padding: 0; margin-inline: 10px }
-[data-compact] .newrow-t{ display: none }
+#foot{ display: flex; align-items: center; justify-content: space-between; height: 32px; flex: none; padding-left: 4px }
+#mem{ font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 
-/* ---------------------------------------------------------------- footer */
-.foot{
-  flex: 0 0 auto; height: 32px; display: flex; align-items: center;
-  justify-content: space-between; gap: 6px; padding: 0 8px;
+/* Context menu, inside the sidebar. Pages cover everything else. */
+#menu{
+  position: absolute; z-index: 30; left: 8px; right: 8px;
+  padding: 4px; border-radius: 10px;
+  background: var(--raise); box-shadow: 0 10px 28px var(--shade), 0 0 0 1px var(--line);
+  animation: pop .12s var(--ease);
 }
-.mem{
-  font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-[data-compact] .mem{ display: none }
-[data-compact] .foot{ justify-content: center }
+#menu button{ display: flex; align-items: center; justify-content: space-between; width: 100%; height: 30px; padding: 0 10px; border-radius: 7px; color: var(--text) }
+#menu button:hover{ background: var(--hover) }
+#menu button.danger:hover{ background: color-mix(in oklab, oklch(.6 .19 27) 25%, var(--hover)) }
+#menu hr{ border: 0; height: 1px; background: var(--line); margin: 4px 6px }
+#menu kbd{ font: 11px var(--sans); color: var(--faint) }
 
-/* ----------------------------------------------------------- tab context menu */
-.menu{
-  position: absolute; z-index: 40; min-width: 178px; max-height: calc(100% - 14px);
-  overflow-y: auto; padding: 4px; border-radius: 10px;
-  background: color-mix(in oklab, var(--panel) 96%, transparent);
-  border: 1px solid var(--line);
-  box-shadow: 0 20px 44px -20px oklch(0 0 0 / .6);
-  animation: pop var(--dur) var(--ease) both;
-}
-.menu-item{
-  display: flex; align-items: center; gap: 9px; width: 100%;
-  padding: 7px 9px; border-radius: 7px; font-size: 12.5px; color: var(--text-2);
-}
-.menu-item .i{ color: var(--text-3) }
-.menu-item:hover, .menu-item[aria-selected="true"]{ background: var(--a-softer); color: var(--text) }
-.menu-item:hover .i, .menu-item[aria-selected="true"] .i{ color: var(--accent) }
-.menu-item .chk{ margin-inline-start: auto; color: var(--accent); opacity: 0 }
-.menu-item[aria-checked="true"] .chk{ opacity: 1 }
-.menu-sep{ height: 1px; margin: 4px 6px; background: var(--line-2) }
+/* --------------------------------------------------------------- compact */
+[data-compact] #sb{ padding: 6px 6px }
+[data-compact] #top{ flex-direction: column; height: auto; gap: 2px; align-items: center }
+[data-compact] #top .nav{ display: none }
+[data-compact] #top .win{ flex-direction: column }
+[data-compact] #addr{ width: 34px; padding: 0; color: transparent; cursor: pointer; margin: 0 auto; display: block }
+[data-compact] #addr::placeholder{ color: transparent }
+[data-compact] #omni .lead{ left: 50%; transform: translateX(-50%) }
+[data-compact] .tab, [data-compact] .row{ justify-content: center; padding: 0; gap: 0 }
+[data-compact] .title, [data-compact] .tab .x, [data-compact] .tab .snd{ display: none !important }
+[data-compact] #pins{ grid-template-columns: 1fr }
+[data-compact] #foot{ justify-content: center; padding: 0 }
+[data-compact] #mem{ display: none }
 
-/* ============================================================== new tab page */
-.ntp{ position: absolute; inset: 0; display: flex; flex-direction: column; overflow: hidden }
-.ntp-bg{
-  position: absolute; inset: 0; background-size: cover; background-position: center;
-  opacity: 0; transition: opacity var(--dur-l) var(--ease);
+/* ----------------------------------------------------------------- stage */
+#stage{
+  position: fixed; overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--raise);
 }
-.ntp-bg.on{ opacity: 1 }
-.ntp-in{
-  position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 26px;
-  padding: clamp(26px, 7vh, 60px) clamp(26px, 6vw, 62px);
-  background: linear-gradient(to bottom,
-    color-mix(in oklab, var(--bg) 72%, transparent),
-    color-mix(in oklab, var(--bg) 88%, transparent));
-}
-/* auto margins centre the block without the scroll-clipping bug of justify-content */
-.ntp-in > *:first-child{ margin-top: auto }
-.ntp-in > *:last-child{ margin-bottom: auto }
-.ntp-bg.on + .ntp-in{
-  background: linear-gradient(to bottom,
-    color-mix(in oklab, var(--bg) 62%, transparent),
-    color-mix(in oklab, var(--bg) 86%, transparent));
-}
-.ntp-in > *{ flex: 0 0 auto }
+[data-frame="strip"] #stage{ display: none }
+[data-theme="light"] #stage{ box-shadow: 0 0 0 1px var(--line) }
 
-/* one orchestrated entrance, staggered by --d */
-.ntp.show .anim{ animation: rise var(--dur-l) var(--ease-ex) both; animation-delay: var(--d, 0ms) }
-@keyframes rise{ from{ opacity: 0; transform: translateY(10px) } }
-.ntp:not(.show) .anim{ opacity: 0 }
+/* New tab page */
+#ntp{ position: absolute; inset: 0; display: grid; place-items: center; background-size: cover; background-position: center }
+#ntp.wall::before{ content: ""; position: absolute; inset: 0; background: linear-gradient(to bottom, oklch(0 0 0 / .15), oklch(0 0 0 / .5)) }
+.ntp-in{ position: relative; width: min(560px, 82%); margin-top: -6vh }
+.clock{ font: 400 clamp(64px, 9vw, 104px)/1 var(--serif); letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums }
+.clock .colon{ color: var(--faint); margin: 0 .02em }
+.clock #mm{ font-style: italic }
+.date{ margin: 10px 0 30px 2px; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint) }
+#ntp-form{ position: relative }
+#ntp-form .lead{ position: absolute; left: 16px; top: 15px; color: var(--faint) }
+#ntp-q{
+  width: 100%; height: 46px; padding: 0 16px 0 42px; border-radius: 12px;
+  background: var(--bg); font-size: 15px;
+  box-shadow: 0 0 0 1px var(--line);
+}
+#ntp-q:focus{ box-shadow: 0 0 0 1.5px var(--acc-soft), 0 0 0 1px var(--line) }
+.wall #ntp-q{ background: color-mix(in oklab, var(--bg) 82%, transparent) }
+.wall .clock, .wall .date{ color: oklch(.97 0 0) }
 
-.ntp-head{ display: flex; flex-direction: column; gap: 2px }
-.clock{
-  font: 400 clamp(56px, 11vh, 92px)/1 var(--serif);
-  letter-spacing: -0.02em; color: var(--text);
-  display: flex; align-items: baseline; gap: .1em;
+.sc{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 18px }
+.chip{
+  position: relative; display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 12px 0 8px; border-radius: 9px; color: var(--dim);
 }
-.clock .ck-m{ font-style: italic; color: var(--accent) }
-.clock .ck-ap{
-  font: 500 11px/1 var(--sans); letter-spacing: .16em; text-transform: uppercase;
-  color: var(--text-3); margin-inline-start: .3em;
-}
-.greet{ font-size: 14.5px; color: var(--text-2); margin-top: 6px }
-.date{
-  font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
-  color: var(--text-3); margin-top: 4px;
-}
+.chip:hover{ background: var(--hover); color: var(--text) }
+.chip .rm{ display: none; position: absolute; right: -4px; top: -4px; width: 16px; height: 16px; border-radius: 50%; background: var(--press); color: var(--text); place-items: center }
+.chip .rm svg{ width: 10px; height: 10px }
+.chip:hover .rm{ display: grid }
+.chip.add{ color: var(--faint); padding: 0 10px }
+.chip.add svg{ width: 14px; height: 14px }
+.sc-form{ display: flex; gap: 6px; width: 100% }
+.sc-form input{ flex: 1; height: 32px; padding: 0 10px; border-radius: 8px; background: var(--bg); box-shadow: 0 0 0 1px var(--line) }
+.sc-form input:focus{ box-shadow: 0 0 0 1.5px var(--accent) }
 
-.ntp-q{
-  display: flex; align-items: center; gap: 11px; max-width: 540px; height: 46px;
-  padding: 0 15px; border-radius: calc(var(--radius) + 6px);
-  background: color-mix(in oklab, var(--panel) 88%, transparent);
-  border: 1px solid var(--line-2);
-  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
-}
-.ntp-q:focus-within{
-  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
-  box-shadow: 0 0 0 3px var(--a-ring);
-}
-.ntp-q .i{ color: var(--text-3) }
-.ntp-q:focus-within .i{ color: var(--accent) }
-.ntp-q input{ flex: 1 1 auto; min-width: 0; font-size: 14.5px; height: 100%; caret-color: var(--accent) }
-.ntp-q input::placeholder{ color: var(--text-3) }
+[data-anim] #ntp:not([hidden]) .ntp-in > *{ animation: rise .42s var(--ease) both }
+[data-anim] #ntp:not([hidden]) .ntp-in > :nth-child(2){ animation-delay: .04s }
+[data-anim] #ntp:not([hidden]) .ntp-in > :nth-child(3){ animation-delay: .08s }
+[data-anim] #ntp:not([hidden]) .ntp-in > :nth-child(4){ animation-delay: .12s }
 
-/* shortcuts: a list of text links, not a grid of cards */
-.scs{ display: flex; flex-direction: column; max-width: 560px }
-.sc{
-  display: flex; align-items: center; gap: 12px; height: 34px;
-  padding: 0 4px; border-bottom: 1px solid var(--line-2); color: var(--text-2);
-  transition: background var(--dur) var(--ease);
-}
-.sc:last-child{ border-bottom: 0 }
-.sc-main{
-  flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 10px;
-  color: var(--text); text-decoration: none; cursor: default;
-}
-.sc-main .n{
-  font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  border-bottom: 1px solid transparent; transition: border-color var(--dur) var(--ease);
-}
-.sc:hover .sc-main .n{ border-bottom-color: color-mix(in oklab, var(--accent) 60%, transparent) }
-.sc-main .u{
-  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto;
-}
-.sc-x{ opacity: 0; width: 22px; height: 22px; border-radius: 6px; color: var(--text-3) }
-.sc:hover .sc-x, .sc:focus-within .sc-x{ opacity: 1 }
-.sc-x:hover{ background: var(--warm); color: var(--a-ink) }
-.sc-add{
-  display: flex; align-items: center; gap: 9px; height: 32px; margin-top: 4px;
-  padding: 0 4px; color: var(--text-3); font-size: 12.5px;
-}
-.sc-add:hover{ color: var(--accent) }
-.sc-form{ display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap }
-.sc-form input{
-  height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px;
-  background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text);
-  caret-color: var(--accent);
-}
-.sc-form input:focus{ outline: none; border-color: color-mix(in oklab, var(--accent) 55%, transparent) }
-.sc-form .f-t{ width: 150px }
-.sc-form .f-u{ flex: 1 1 180px; min-width: 140px }
-.sc-form .go{
-  height: 30px; padding: 0 13px; border-radius: 8px; font-size: 12.5px;
-  background: var(--accent); color: var(--a-ink);
-}
-.sc-form .no{ height: 30px; padding: 0 10px; color: var(--text-3); font-size: 12.5px }
+/* -------------------------------------------------------------- settings */
+#set{ position: absolute; inset: 0; display: grid; grid-template-columns: 180px 1fr }
+[data-anim] #set:not([hidden]){ animation: fade .16s var(--ease) }
+.set-nav{ padding: 22px 12px; display: flex; flex-direction: column; gap: 1px; border-right: 1px solid var(--line) }
+.set-nav h1{ font: 400 26px/1 var(--serif); padding: 4px 10px 18px }
+.set-nav button{ height: 30px; padding: 0 10px; border-radius: 7px; text-align: left; color: var(--dim) }
+.set-nav button:hover{ background: var(--hover); color: var(--text) }
+.set-nav button.on{ background: var(--hover); color: var(--text) }
+.set-nav .close{ margin-top: auto; color: var(--faint) }
+.set-body{ overflow-y: auto; padding: 22px 40px 60px; scrollbar-width: thin }
+.set-sec{ max-width: 620px; padding-top: 6px }
+.set-sec + .set-sec{ margin-top: 30px }
+.set-sec h2{ font: 400 22px/1.1 var(--serif); margin-bottom: 10px }
+.opt{ display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 54px; padding: 10px 0; border-bottom: 1px solid var(--line) }
+.opt:last-child{ border-bottom: 0 }
+.opt .lab{ min-width: 0 }
+.opt .lab b{ display: block; font-weight: 500; color: var(--text) }
+.opt .lab small{ display: block; margin-top: 2px; font-size: 12px; color: var(--faint) }
+.ctl{ flex: none; display: flex; align-items: center; gap: 10px }
 
-/* ============================================================ settings panel */
-.set{
-  position: absolute; inset: 0; display: grid; grid-template-columns: 176px 1fr;
-  grid-template-rows: minmax(0, 1fr); background: var(--bg);
-}
-.set-nav{
-  display: flex; flex-direction: column; gap: 1px; padding: 18px 12px;
-  border-inline-end: 1px solid var(--line-2); overflow-y: auto;
-}
-.set-nav h3{
-  font: 400 10.5px/1 var(--sans); letter-spacing: .16em; text-transform: uppercase;
-  color: var(--text-3); padding: 0 8px 10px;
-}
-.set-nav button{
-  display: flex; align-items: center; gap: 9px; padding: 8px 9px; border-radius: 8px;
-  font: 400 15px/1.2 var(--serif); color: var(--text-2); position: relative;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
-}
-.set-nav button:hover{ background: var(--panel-2); color: var(--text) }
-.set-nav button[aria-selected="true"]{ color: var(--text); background: var(--a-softer) }
-.set-nav button[aria-selected="true"]::before{
-  content: ""; position: absolute; inset-block: 7px; inset-inline-start: 0; width: 2px;
-  border-radius: 2px; background: var(--accent);
-}
-.set-main{ display: flex; flex-direction: column; min-width: 0; min-height: 0 }
-.set-head{
-  flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; padding: 20px 26px 12px;
-}
-.set-head h2{ font: 400 22px/1 var(--serif); color: var(--text) }
-.set-scroll{
-  flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 26px 40px;
-  max-width: 780px;
-}
-.set-scroll .anim{ animation: rise var(--dur-l) var(--ease-ex) both; animation-delay: var(--d, 0ms) }
-.grp{ display: flex; flex-direction: column; gap: 2px; margin-bottom: 26px }
-.grp-t{
-  font: 400 10.5px/1 var(--sans); letter-spacing: .16em; text-transform: uppercase;
-  color: var(--text-3); padding: 0 2px 8px;
-}
-.row{
-  display: flex; align-items: center; gap: 14px; min-height: 44px;
-  padding: 7px 2px; border-bottom: 1px solid var(--line-2);
-}
-.row:last-child{ border-bottom: 0 }
-.row-l{ flex: 1 1 auto; min-width: 0 }
-.row-l .k{ display: block; font-size: 13px; color: var(--text) }
-.row-l .h{ display: block; font-size: 11.5px; color: var(--text-3); margin-top: 2px }
-.row-c{ flex: 0 0 auto; display: flex; align-items: center; gap: 8px }
-.row.stack{ flex-direction: column; align-items: stretch; gap: 10px }
-
-/* palette swatches */
-.sws{ display: flex; gap: 8px }
-.sw{ width: 30px; height: 30px; border-radius: 50%; padding: 2px; border: 1px solid var(--line) }
-.sw i{
-  display: block; width: 100%; height: 100%; border-radius: 50%;
-  background: linear-gradient(135deg, var(--sw-a) 0 50%, var(--sw-b) 50% 100%);
-}
-.sw:hover{ border-color: var(--text-3) }
-.sw[aria-checked="true"]{ border-color: var(--accent); box-shadow: 0 0 0 3px var(--a-ring) }
-
-/* accent */
-.acc{ display: flex; align-items: center; gap: 8px }
-.acc input[type="color"]{
-  width: 34px; height: 26px; padding: 0; border: 1px solid var(--line-2);
-  border-radius: 7px; background: var(--panel); cursor: default;
-}
-.acc input[type="color"]::-webkit-color-swatch-wrapper{ padding: 3px }
-.acc input[type="color"]::-webkit-color-swatch{ border: 0; border-radius: 4px }
-.acc .rst{
-  height: 26px; padding: 0 9px; border-radius: 7px; font-size: 12px;
-  color: var(--text-2); border: 1px solid var(--line-2);
-}
-.acc .rst:hover{ background: var(--panel-2); color: var(--text) }
-.acc .rst[disabled]{ opacity: .4; pointer-events: none }
-
-/* segmented control */
-.seg{ display: flex; padding: 2px; gap: 2px; border-radius: 9px; background: var(--panel-2) }
-.seg button{
-  padding: 5px 11px; border-radius: 7px; font-size: 12px; color: var(--text-2);
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
-}
+.seg{ display: inline-flex; padding: 2px; border-radius: 9px; background: var(--bg) }
+.seg button{ height: 26px; padding: 0 11px; border-radius: 7px; color: var(--dim) }
 .seg button:hover{ color: var(--text) }
-.seg button[aria-checked="true"]{ background: var(--accent); color: var(--a-ink) }
+.seg button.on{ background: var(--press); color: var(--text) }
 
-/* radio rows with their own explanation */
-.radios{ display: flex; flex-direction: column; gap: 2px }
-.radio{
-  display: flex; align-items: flex-start; gap: 11px; padding: 9px 8px;
-  border-radius: 9px; transition: background var(--dur) var(--ease);
-}
-.radio:hover{ background: var(--panel-2) }
-.radio .dot{
-  flex: 0 0 auto; width: 15px; height: 15px; margin-top: 2px; border-radius: 50%;
-  border: 1.5px solid var(--text-3); position: relative;
-}
-.radio[aria-checked="true"] .dot{ border-color: var(--accent) }
-.radio[aria-checked="true"] .dot::after{
-  content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--accent);
-}
-.radio .t{ flex: 1 1 auto; min-width: 0 }
-.radio .t b{ display: block; font: 400 13.5px/1.3 var(--sans); font-weight: 500; color: var(--text) }
-.radio .t span{ display: block; font-size: 11.5px; color: var(--text-3); margin-top: 2px }
-.radio .t code{
-  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 10.5px;
-  color: var(--text-2);
-}
+.tog{ position: relative; width: 34px; height: 20px; border-radius: 10px; background: var(--press) }
+.tog::after{ content: ""; position: absolute; left: 3px; top: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--dim); transition: transform .14s var(--ease) }
+.tog.on{ background: var(--accent) }
+.tog.on::after{ transform: translateX(14px); background: var(--bg) }
 
-/* toggle switch */
-.sw2{
-  flex: 0 0 auto; width: 36px; height: 20px; border-radius: 99px;
-  background: var(--line); position: relative; transition: background var(--dur) var(--ease);
-}
-.sw2 i{
-  position: absolute; top: 2.5px; left: 2.5px; width: 15px; height: 15px;
-  border-radius: 50%; background: var(--bg);
-  transition: transform var(--dur) var(--ease);
-}
-.sw2[aria-checked="true"]{ background: var(--accent) }
-.sw2[aria-checked="true"] i{ transform: translateX(16px) }
-.sw2[disabled]{ opacity: .45; pointer-events: none }
+input[type="range"]{ -webkit-appearance: none; width: 150px; height: 20px; background: none; cursor: pointer }
+input[type="range"]::-webkit-slider-runnable-track{ height: 4px; border-radius: 2px; background: linear-gradient(to right, var(--accent) var(--p, 50%), var(--press) var(--p, 50%)) }
+input[type="range"]::-webkit-slider-thumb{ -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%; background: var(--text) }
+.val{ width: 52px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12px }
 
-/* sliders */
-.rng{ display: flex; align-items: center; gap: 11px }
-.rng input[type="range"]{
-  -webkit-appearance: none; appearance: none; width: 168px; height: 16px; background: none;
-}
-.rng input[type="range"]::-webkit-slider-runnable-track{
-  height: 3px; border-radius: 2px; background: var(--line);
-}
-.rng input[type="range"]::-webkit-slider-thumb{
-  -webkit-appearance: none; width: 13px; height: 13px; margin-top: -5px;
-  border-radius: 50%; background: var(--accent); border: 0;
-}
-.rng input[type="range"]:focus-visible::-webkit-slider-thumb{ box-shadow: 0 0 0 3px var(--a-ring) }
-.rng output{
-  font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums;
-  min-width: 62px; text-align: end;
-}
+.sw{ display: flex; gap: 8px }
+/* Each swatch carries its own data-palette, so these resolve to that palette. */
+.sw button{ width: 28px; height: 28px; border-radius: 50%; position: relative; background: oklch(.3 calc(var(--c) * 3) var(--h)); box-shadow: inset 0 0 0 1px var(--line) }
+.sw button::after{ content: ""; position: absolute; inset: 8px; border-radius: 50%; background: var(--acc) }
+.sw button.on{ box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--text) }
 
-/* text fields */
-.txt{
-  height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px;
-  background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text);
-  caret-color: var(--accent); min-width: 0;
-}
-.txt:focus{ outline: none; border-color: color-mix(in oklab, var(--accent) 55%, transparent) }
-.txt.w{ width: 260px }
+.txt{ width: 260px; height: 30px; padding: 0 10px; border-radius: 8px; background: var(--bg); box-shadow: 0 0 0 1px var(--line) }
+.txt:focus{ box-shadow: 0 0 0 1.5px var(--accent) }
+.color{ position: relative; width: 28px; height: 28px; border-radius: 8px; overflow: hidden; box-shadow: inset 0 0 0 1px var(--line); background: var(--accent) }
+.color input{ position: absolute; inset: 0; opacity: 0; cursor: pointer }
+.link{ color: var(--faint); font-size: 12px }
+.link:hover{ color: var(--text) }
 
-/* shortcut editor */
-.sce{ display: flex; flex-direction: column; gap: 6px }
-.sce-row{ display: flex; align-items: center; gap: 8px }
-.sce-row .txt{ flex: 1 1 auto }
-.sce-row .txt.n{ flex: 0 0 130px }
-.sce-row .ib{ flex: 0 0 auto }
-.sce-add{
-  align-self: flex-start; display: flex; align-items: center; gap: 8px;
-  height: 30px; padding: 0 12px; border-radius: 8px; font-size: 12.5px;
-  color: var(--text-2); border: 1px dashed var(--line);
-}
-.sce-add:hover{ background: var(--a-softer); color: var(--text); border-color: var(--accent) }
-.empty{ font-size: 12px; color: var(--text-3); padding: 4px 2px }
+.keys{ display: grid; grid-template-columns: 1fr auto; gap: 0 24px }
+.keys div{ padding: 9px 0; border-bottom: 1px solid var(--line); color: var(--dim) }
+.keys kbd{ font: 12px var(--sans); color: var(--text); padding: 9px 0; border-bottom: 1px solid var(--line); text-align: right }
 
-/* keys list */
-.keys{ display: flex; flex-direction: column }
-.key{ display: flex; align-items: center; gap: 14px; min-height: 38px; border-bottom: 1px solid var(--line-2) }
-.key:last-child{ border-bottom: 0 }
-.key .d{ flex: 1 1 auto; font-size: 12.5px; color: var(--text-2) }
-.key .c{ flex: 0 0 auto; display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end }
-kbd{
-  font: 500 11px/1 var(--sans); padding: 4px 6px; border-radius: 5px; color: var(--text);
-  background: var(--panel-2); border: 1px solid var(--line-2); white-space: nowrap;
-}
-
-/* --------------------------------------------------------------- narrow */
-@media (max-width: 560px){
-  .set{ grid-template-columns: 1fr; grid-template-rows: auto 1fr }
-  .set-nav{ flex-direction: row; overflow-x: auto; border-inline-end: 0; border-block-end: 1px solid var(--line-2) }
-  .set-nav h3{ display: none }
-  .set-head, .set-scroll{ padding-inline: 16px }
-}
-@media (max-width: 380px){
-  .row{ flex-wrap: wrap }
-  .rng input[type="range"]{ width: 120px }
-}
+/* ---------------------------------------------------------------- motion */
+@keyframes spin{ to{ transform: rotate(360deg) } }
+@keyframes pop{ from{ opacity: 0; transform: translateY(-3px) } }
+@keyframes rise{ from{ opacity: 0; transform: translateY(8px) } }
+@keyframes fade{ from{ opacity: 0 } }
+:root:not([data-anim]) *{ animation: none !important; transition: none !important }
+@media (prefers-reduced-motion: reduce){ *{ animation: none !important; transition: none !important } }

@@ -31,7 +31,7 @@ use windows::{
     core::{Interface, PWSTR},
 };
 use wry::{
-    MemoryUsageLevel, NewWindowResponse, PageLoadEvent, Rect, Theme, WebView, WebViewBuilder,
+    NewWindowResponse, PageLoadEvent, Rect, Theme, WebView, WebViewBuilder,
     WebViewBuilderExtWindows, WebViewExtWindows,
 };
 
@@ -408,12 +408,6 @@ fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
 
 // ------------------------------------------------------------ memory knobs
 
-/// Hidden pages: no paint, lower priority, trimmed caches.
-pub fn set_hidden(wv: &WebView, hidden: bool) {
-    let _ = wv.set_visible(!hidden);
-    let _ = wv.set_memory_usage_level(if hidden { MemoryUsageLevel::Low } else { MemoryUsageLevel::Normal });
-}
-
 /// Freeze a hidden page. Scripts stop, memory is trimmed hard.
 /// WebView2 resumes it by itself when shown again.
 pub fn try_suspend(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
@@ -454,14 +448,23 @@ pub fn set_tracking(wv: &WebView, level: &str) {
     }
 }
 
-/// A frameless window has no glass. Stretch the DWM frame over the whole
-/// client area so Mica/Acrylic paints behind the transparent UI. `on=false` undoes it.
-pub fn extend_frame(hwnd: isize, on: bool) {
-    use windows::Win32::{Graphics::Dwm::DwmExtendFrameIntoClientArea, UI::Controls::MARGINS};
+/// Glass on: DWM backdrop through black client pixels, frame stretched over the client.
+/// Glass off: a plain opaque window. Cheapest thing Windows can draw.
+pub fn set_glass(hwnd: isize, on: bool) {
+    use windows::Win32::{
+        Graphics::{
+            Dwm::DwmExtendFrameIntoClientArea,
+            Gdi::{RDW_ERASE, RDW_ERASENOW, RDW_INVALIDATE, RedrawWindow},
+        },
+        UI::Controls::MARGINS,
+    };
+    let hwnd = HWND(hwnd as _);
     let m = if on { -1 } else { 0 };
     let margins = MARGINS { cxLeftWidth: m, cxRightWidth: m, cyTopHeight: m, cyBottomHeight: m };
     unsafe {
-        let _ = DwmExtendFrameIntoClientArea(HWND(hwnd as _), &margins);
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        // Erase now: tao repaints the background color only on erase, never on its own.
+        let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_ERASENOW);
     }
 }
 
