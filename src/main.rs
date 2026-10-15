@@ -16,6 +16,7 @@ mod pagekit;
 mod recall;
 mod video;
 mod store;
+mod sponsorblock;
 
 use std::{
     cell::{Cell, RefCell},
@@ -1538,10 +1539,11 @@ impl App {
         let tools = store::data_dir().join("tools");
         let out = store::download_dir();
         let proxy = self.ctx.proxy.clone();
+        let sponsorblock = self.settings.sponsorblock;
         std::thread::Builder::new()
             .name("lumen-video".into())
             .spawn(move || {
-                video::grab(&tools, &out, &url, &ua, &slot, |u| {
+                video::grab(&tools, &out, &url, &ua, &slot, sponsorblock, |u| {
                     let _ = proxy.send_event(Ev::Video(id, u));
                 })
             })
@@ -1959,6 +1961,22 @@ impl App {
                             return;
                         }
                         self.tabs[i].reader = None;
+                    }
+                    // SponsorBlock: on a YouTube watch page, fetch segments and
+                    // inject the skip script. One background fetch per video load.
+                    if self.settings.sponsorblock && sponsorblock::is_youtube_watch(&u) {
+                        if let Some(vid) = sponsorblock::video_id(&u) {
+                            if self.tabs[i].view.is_some() && !self.tabs[i].agent && !self.tabs[i].private {
+                                let tab_id = self.tabs[i].id;
+                                let proxy = self.ctx.proxy.clone();
+                                std::thread::spawn(move || {
+                                    let segs = sponsorblock::fetch_segments(&vid);
+                                    let json = serde_json::json!(segs.iter().map(|s| [s.start, s.end]).collect::<Vec<_>>());
+                                    let script = sponsorblock::init_script(&json.to_string());
+                                    let _ = proxy.send_event(Ev::SponsorBlock(tab_id, script));
+                                });
+                            }
+                        }
                     }
                     // Agents browse off the record, and so do private tabs.
                     if !self.off_record(&self.tabs[i]) {
@@ -2412,6 +2430,13 @@ impl App {
                 self.push();
             }
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
+            Ev::SponsorBlock(id, script) => {
+                if let Some(i) = self.idx(id) {
+                    if let Some(v) = &self.tabs[i].view {
+                        let _ = v.evaluate_script(&script);
+                    }
+                }
+            }
             Ev::Video(id, up) => self.on_video(id, up),
             Ev::ShowMe => self.show_me(),
             Ev::Orphan(id) => {

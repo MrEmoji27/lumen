@@ -66,6 +66,8 @@ pub struct Settings {
     pub tracking: String,
     /// Block ads and trackers at the network layer.
     pub adblock: bool,
+    /// Skip sponsor segments on YouTube (SponsorBlock).
+    pub sponsorblock: bool,
     /// Hide ad leftovers and cookie banners (cosmetic rules).
     pub cosmetic: bool,
     pub show_memory: bool,
@@ -135,6 +137,7 @@ impl Default for Settings {
             discard_after_min: 30,
             tracking: "balanced".into(),
             adblock: true,
+            sponsorblock: true,
             show_memory: true,
             gpu_in_process: true,
             share_processes: true,

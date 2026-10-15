@@ -89,6 +89,8 @@ pub enum Ev {
     Video(u64, crate::video::Up),
     /// Reader mode extract came back: (tab, page url, JSON or "null").
     Reader(u64, String, String),
+    /// SponsorBlock init script for this tab: (tab id, script).
+    SponsorBlock(u64, String),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
     /// aria2 took a download; `Added` says how it was started.
