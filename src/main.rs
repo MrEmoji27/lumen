@@ -12,6 +12,7 @@ mod blocker;
 mod chrome;
 mod engine;
 mod glance;
+mod journal;
 mod kdbx;
 mod library;
 mod monitor;
@@ -238,6 +239,12 @@ struct App {
     next_tick: Instant,
     /// When the sidebar memory readout next wants a fresh number.
     next_mem: Instant,
+    /// When the journal's next `sample` is due. Not a deadline of its own: it is
+    /// checked on the memory read the loop already makes, so an idle Lumen never
+    /// wakes for the journal and the journal never adds a timer.
+    journal_at: Instant,
+    /// The window is minimized. Nobody is looking: the journal stands still.
+    minimized: bool,
     exit: bool,
     /// The browser tree's Job Object. The CPU cap lives here.
     job: Option<monitor::Job>,
@@ -398,6 +405,9 @@ fn main() {
     let job = monitor::Job::adopt_self();
     let mut settings = store::load_settings();
     let session = store::load_session();
+    // The journal opens before anything else runs, so a run that never gets a
+    // window up still says hello. Also the one place old journals are cleaned.
+    journal::start(&settings, restored_tabs(&session));
 
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
     let (w, h) = if session.width >= 720.0 && session.height >= 480.0 {
@@ -515,6 +525,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         born: Instant::now(),
         next_tick: Instant::now() + TICK,
         next_mem: Instant::now() + MEM_TICK,
+        journal_at: Instant::now() + journal::period(),
+        minimized: false,
         exit: false,
         job,
         next_sample: None,
@@ -628,6 +640,11 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     }
 
     event_loop.run(move |event, _, cf| {
+        // The journal's wake count: one atomic add per loop turn, and only while
+        // there is something to watch. An idle Lumen counts nothing.
+        if matches!(&event, Event::NewEvents(_)) && app.journal_busy() {
+            journal::wake();
+        }
         // Servo works off its own clock: give it a turn whenever the loop wakes.
         #[cfg(feature = "servo")]
         if let Some(e) = &app.servo {
@@ -639,7 +656,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 if app.next_sample.is_some_and(|t| t <= now) {
                     app.sample();
                 }
-                if app.settings.show_memory && app.next_mem <= now {
+                if app.next_mem <= now && app.watches_memory() {
                     app.read_memory(now);
                 }
                 if app.tick_due(now) {
@@ -650,10 +667,12 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 WindowEvent::Resized(size) => {
                     if size.width == 0 || size.height == 0 {
                         // Minimized. Nobody is looking. Trim the active page too.
+                        app.minimized = true;
                         if let Some(v) = app.active_tab().and_then(|t| t.view.as_ref()) {
                             let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
                         }
                     } else {
+                        app.minimized = false;
                         app.layout();
                         let max = app.ctx.window.is_maximized();
                         if max != app.was_max {
@@ -707,6 +726,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             app.clear_on_exit();
             app.save_session();
             app.upnp.release();
+            // The journal's goodbye: a run with this line is a run that ended.
+            journal::stop(true, app.born.elapsed());
             *cf = ControlFlow::Exit;
         } else {
             *cf = ControlFlow::WaitUntil(app.next_wake(Instant::now()));
@@ -729,6 +750,8 @@ fn install_panic_hook() {
         let why = info.payload().downcast_ref::<String>().cloned().unwrap_or(what);
         let at = info.location().map_or_else(String::new, |l| format!("{}:{}", l.file().rsplit(['\\', '/']).next().unwrap_or(l.file()), l.line()));
         let _ = write_crash(&format!("{why}  at {at}"));
+        // The journal is the one place the next session reads without a console.
+        journal::panic(&format!("{why}  at {at}"));
         // The session on disk goes back to what we last had. It is the user's tabs.
         if let Ok(g) = LAST_SESSION.lock()
             && let Some(s) = g.as_ref()
@@ -969,6 +992,15 @@ fn debug_log(ev: &Ev) {
 /// trace; an empty new tab page is only worth keeping while it is the active one.
 fn keepable(tabs: &[Tab], active: u64) -> Vec<&Tab> {
     tabs.iter().filter(|t| !t.agent && !t.private && (!t.url.is_empty() || t.id == active)).collect()
+}
+
+/// How many tabs the session is bringing back, for the journal's `start` line.
+fn restored_tabs(session: &Session) -> usize {
+    if session.workspaces.is_empty() {
+        session.tabs.len()
+    } else {
+        session.workspaces.iter().map(|w| w.tabs.len()).sum()
+    }
 }
 
 /// Whether this tab runs in Servo. Always false in a build without the feature.
@@ -1618,6 +1650,7 @@ impl App {
         let other = self.tabs[(self.active_idx() + 1) % n].id;
         let left = self.active;
         self.set_split(left, other);
+        journal::feature("split", false);
     }
 
     /// The tab menu's "Split with next tab", on any tab: it shares the stage with
@@ -1634,6 +1667,7 @@ impl App {
         }
         let other = self.tabs[(i + 1) % n].id;
         self.set_split(id, other);
+        journal::feature("split", false);
     }
 
     fn new_tab(&mut self, url: Option<String>, after: Option<usize>) -> u64 {
@@ -1658,6 +1692,8 @@ impl App {
         t.workspace = self.active_workspace;
         self.tabs.push(t);
         self.activate(id);
+        // The opening itself is not private: one line, no content.
+        journal::feature("private_tab", false);
         id
     }
 
@@ -1848,6 +1884,7 @@ impl App {
         self.stash_workspace();
         self.drop_all_tabs();
         self.load_workspace(to);
+        journal::feature("workspace_switch", false);
     }
 
     // ---------------------------------------------------------------- glance
@@ -1866,6 +1903,7 @@ impl App {
         if !headless() {
             let _ = v.focus();
         }
+        journal::feature("glance", self.active_tab().is_some_and(|t| t.private));
         self.glance = Some((id, url.to_string(), v));
         self.chrome.set_glance(true);
         self.layout();
@@ -2104,6 +2142,7 @@ impl App {
             },
         );
         self.videos.insert(id, (url, ua, Default::default()));
+        journal::feature("save_video", private);
         self.run_video(id);
         self.push();
     }
@@ -2151,6 +2190,7 @@ impl App {
                 d.speed = 0;
                 d.note.clear();
                 d.received = std::fs::metadata(&d.path).map(|m| m.len() as i64).unwrap_or(d.received);
+                journal::download(id, "video", "done", d.received, d.private);
             }
             video::Up::Failed(e) => {
                 self.dl_dirty = true;
@@ -2159,6 +2199,8 @@ impl App {
                 }
                 d.state = "failed";
                 d.speed = 0;
+                journal::download(id, "video", "failed", d.received, d.private);
+                journal::error("video", &e);
                 d.note = e;
             }
         }
@@ -2241,7 +2283,8 @@ impl App {
             return;
         }
         let Some(v) = &t.view else { return };
-        let (id, proxy) = (t.id, self.ctx.proxy.clone());
+        let (id, proxy, private) = (t.id, self.ctx.proxy.clone(), t.private);
+        journal::feature("read_aloud", private);
         let _ = v.evaluate_script_with_callback(&aloud::prep_script(), move |out| {
             let _ = proxy.send_event(Ev::AloudPrep(id, out));
         });
@@ -2271,6 +2314,7 @@ impl App {
         if let Some(view) = &self.tabs[i].view {
             let _ = view.evaluate_script(&js);
         }
+        journal::feature("kdbx_fill", self.tabs[i].private);
         self.vault_seen = Instant::now();
     }
 
@@ -2289,6 +2333,7 @@ impl App {
             && v.load_html(&html).is_ok()
         {
             t.reader = Some(url.to_string());
+            journal::feature("reader", t.private);
             self.push();
         }
     }
@@ -2324,6 +2369,7 @@ impl App {
         } else {
             s.dark_skip.push(h);
         }
+        journal::feature("dark_site", self.tabs[i].private);
         self.apply_settings(s);
     }
 
@@ -2579,6 +2625,9 @@ impl App {
         if old.agent != self.settings.agent || old.agent_port != self.settings.agent_port {
             self.agent.set(self.settings.agent, self.settings.agent_port, &self.ctx.proxy);
         }
+        if old.journal != self.settings.journal {
+            journal::set_enabled(self.settings.journal);
+        }
         if old.download_limit_kbps != self.settings.download_limit_kbps {
             self.aria.set_speed_limit(self.settings.download_limit_kbps as u64 * 1024);
         }
@@ -2742,6 +2791,12 @@ impl App {
                     self.push();
                 }
             }
+            // The journal's timing of a page. A private tab is not in it.
+            Ev::NavStart(id, url) => {
+                let (agent, private) = self.idx(id).map_or((false, true), |i| (self.tabs[i].agent, self.tabs[i].private));
+                journal::nav_started(id, &url, agent, private, self.blocked_count());
+            }
+            Ev::NavDone(id, ok, err, http) => journal::nav_done(id, ok, err, http, self.blocked_count()),
             Ev::Audio(id, on) => {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].audio = on;
@@ -2756,6 +2811,10 @@ impl App {
                 }
             }
             Ev::Crashed(id, browser) => {
+                // The journal wants the death and, later, whether the reload took.
+                let host = self.idx(id).map_or_else(String::new, |i| host_of(&self.tabs[i].url));
+                let private = self.idx(id).is_some_and(|i| self.tabs[i].private);
+                journal::crash(id, if browser { "browser" } else { "renderer" }, &host, private);
                 if browser {
                     // The browser process is gone and every WebView2 object with it.
                     // Dropping them all lets the next tab activation build a fresh
@@ -2860,10 +2919,19 @@ impl App {
             Ev::CloseMe(id) => self.close(id),
             Ev::Usage(procs) => self.on_usage(procs),
             Ev::Download(d) => {
+                journal::download(d.id, d.kind, d.state, d.received, d.private);
                 if matches!(d.state, "done" | "failed") {
                     self.dl_dirty = true;
                     if self.panel != Panel::Downloads {
                         self.dl_unseen = true;
+                    }
+                    // The reason WebView2 gives is usually none, so the row's own
+                    // note, or the host, has to stand in for it.
+                    let was = self.downloads.iter().find(|x| x.id == d.id).map(|x| x.state);
+                    if d.state == "failed" && was.is_none_or(|w| w != "failed") {
+                        let what = if d.name.is_empty() { host_of(&d.url) } else { d.name.clone() };
+                        let why = if d.note.is_empty() { format!("{what} did not finish") } else { d.note.clone() };
+                        journal::error("download", &why);
                     }
                 }
                 match self.downloads.iter_mut().find(|x| x.id == d.id) {
@@ -2993,6 +3061,7 @@ impl App {
                 if tab == 0 && !url.is_empty() {
                     // A manual add (Add link / magnet / torrent) that aria2 refused:
                     // show a failed row. There is no page to fall back to.
+                    journal::error("download", "aria2 refused it");
                     let id = self.next_dl(1);
                     let name = if url.starts_with("magnet:") {
                         magnet_name(&url)
@@ -3161,6 +3230,12 @@ impl App {
                     };
                     let ratio = if j.done > 0 { j.upload_length as f64 / j.done as f64 } else { 0.0 };
                     let kind = if j.name.is_empty() { "file" } else { "torrent" };
+                    // The journal's view of it: one `download` line when it ends,
+                    // and the reason the person was shown when aria2 gives up.
+                    journal::download(id, kind, state, j.done as i64, private);
+                    if state == "failed" && was.is_some_and(|w| w != "failed") && !note.is_empty() {
+                        journal::error("download", &note);
+                    }
                     let d = engine::Dl {
                         id,
                         url: j.url,
@@ -3199,6 +3274,12 @@ impl App {
             }
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
             Ev::SponsorBlock(id, script) => {
+                // Used only when there was something to skip: an empty list is
+                // a page SponsorBlock knows nothing about.
+                if !script.contains("const SEGMENTS = [];") {
+                    let private = self.idx(id).is_some_and(|i| self.tabs[i].private);
+                    journal::feature("sponsorblock_skip", private);
+                }
                 // A page still loading is about to become another document:
                 // hold the script until it is there, or it runs in the old one
                 // and the player never hears of it.
@@ -3276,7 +3357,9 @@ impl App {
                 }
                 Err(e) => {
                     // Wrong password or not a .kdbx: say it where the button was.
-                    self.chrome.flash(format!("Couldn't open that file: {e}"));
+                    let msg = format!("Couldn't open that file: {e}");
+                    journal::error("kdbx", &msg);
+                    self.chrome.flash(msg);
                 }
             },
             Ev::Video(id, up) => self.on_video(id, up),
@@ -3649,6 +3732,7 @@ impl App {
                 // A new, empty workspace; switch into it. Ctrl+Alt+1..4 reaches it.
                 let n = self.workspaces.len();
                 if n < workspaces::MAX_WORKSPACES {
+                    journal::feature("workspace_add", false);
                     self.workspaces.push(workspaces::WorkspaceData::new(&format!("Workspace {}", n + 1)));
                     self.switch_workspace(n);
                 }
@@ -3898,6 +3982,8 @@ impl App {
             }
             "suggest" => {
                 let q = m["q"].as_str().unwrap_or("").to_string();
+                // The journal sees that history was searched, never what for.
+                journal::history_search(&q);
                 let hits = self
                     .library
                     .search(&q, 6)
@@ -4034,6 +4120,7 @@ impl App {
         let id = self.tabs[i].id;
         let target = self.settings.translate_to.clone();
         self.tabs[i].translating = true;
+        journal::feature("translate", self.tabs[i].private);
         self.tr_busy = Some(id);
         self.push();
         // Ask the page what language it is in and what its text is.
@@ -4259,7 +4346,11 @@ impl App {
     /// turn when something waits for it, IDLE_TICK when nothing does.
     fn next_wake(&self, now: Instant) -> Instant {
         let mut at = now + IDLE_TICK;
-        let mem = self.settings.show_memory.then_some(self.next_mem);
+        // The memory read, which the journal's minute rides on. Idle means idle:
+        // neither clock is armed when nothing is on screen and nothing is loading,
+        // so the journal never wakes an idle Lumen.
+        let watch = self.settings.show_memory || (journal::on() && self.journal_busy());
+        let mem = watch.then_some(self.next_mem);
         for t in [self.next_sample, mem].into_iter().flatten() {
             if t < at {
                 at = t;
@@ -4314,6 +4405,8 @@ impl App {
             self.clear_on_exit();
             self.save_session();
             self.upnp.release();
+            // Leaving on purpose, so the journal ends with a clean goodbye.
+            journal::stop(true, self.born.elapsed());
             std::process::exit(0);
         }
         self.next_tick = now + TICK;
@@ -4400,19 +4493,61 @@ impl App {
         }
     }
 
+    /// Something is on screen, or on its way: the journal works only then. Idle
+    /// (hidden or minimized, nothing loading) means it does nothing at all:
+    /// no sample, no write to disk, no wake of its own.
+    fn journal_busy(&self) -> bool {
+        self.tabs.iter().any(|t| t.loading) || (self.shown && !self.minimized)
+    }
+
+    /// Whether the memory clock is worth arming: the sidebar shows it, or the
+    /// journal needs the numbers behind it.
+    fn watches_memory(&self) -> bool {
+        self.settings.show_memory || (journal::on() && self.journal_busy())
+    }
+
+    /// The blocker's running total, for a page's share of it. None when blocking
+    /// is off: there is no count to speak of then.
+    fn blocked_count(&self) -> Option<u64> {
+        self.settings.adblock.then(|| self.blocker.blocked())
+    }
+
+    /// What the journal needs to know about the tabs right now.
+    fn journal_sample(&self) -> journal::Sample {
+        let count = |want: [&'static str; 1]| self.tabs.iter().filter(|t| want.contains(&t.status())).count();
+        journal::Sample {
+            tabs: self.tabs.len(),
+            live: count(["live"]),
+            asleep: count(["asleep"]),
+            // A tab with no page left (unloaded, or waiting to load) is discarded.
+            discarded: count(["off"]),
+            workspaces: self.workspaces.len(),
+            panel: self.panel.name(),
+        }
+    }
+
     /// The sidebar memory readout, on its own slow clock. Reading it walks every
-    /// WebView2 process, so it does not run on the tick.
+    /// WebView2 process, so it does not run on the tick. The journal's minute
+    /// rides on the same walk: one enumeration, two readers, and nothing at all
+    /// while the window is hidden or minimized and no page is loading.
     fn read_memory(&mut self, now: Instant) {
         self.next_mem = now + MEM_TICK;
-        if !self.settings.show_memory {
-            return;
-        }
+        let journal_work = journal::on() && self.journal_busy();
         let env = self.ctx.env.borrow();
         let Some(env) = env.as_ref() else { return };
-        let m = engine::memory(env);
+        let (own, total, procs, cpu) = engine::memory_with_cpu(env, journal_work);
+        if journal_work {
+            // The 60 s line, on the minute, and the write to disk behind it.
+            journal::mem_read(own, total, cpu);
+            if now >= self.journal_at {
+                self.journal_at = now + journal::period();
+                journal::sample(&self.journal_sample());
+            }
+            journal::flush_due();
+        }
         // Only redraw when it moved by more than 1 MB.
-        if self.mem.is_none_or(|(b, _)| b.abs_diff(m.0) > 1 << 20) {
-            self.mem = Some(m);
+        if self.settings.show_memory && self.mem.is_none_or(|(b, _)| b.abs_diff(total) > 1 << 20) {
+            self.mem = Some((total, procs));
             self.ui_dirty = true;
         }
     }
@@ -4425,6 +4560,8 @@ impl App {
         self.agent_last = Instant::now();
         self.push();
         let (reply, who) = (call.reply, call.who);
+        // One line per session, not per call. No tab, no page, no content.
+        journal::agent_session(&who.session, &who.name);
         let shared = self.settings.agent_shared_profile;
         let mine = |app: &App, tab: u64| app.idx(tab).filter(|&i| if app.tabs[i].agent { app.tabs[i].owner == who.session } else { shared });
         let no_tab = |tab: u64| Err(format!("no tab {tab} you may use; browser_tabs lists yours"));

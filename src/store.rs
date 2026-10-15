@@ -116,6 +116,9 @@ pub struct Settings {
     pub agent_port: u32,
     /// Agent tabs use the user's profile (logins, cookies) instead of their own.
     pub agent_shared_profile: bool,
+    /// Keep a local usage journal: speed, memory, crashes and errors, on this PC
+    /// only, hosts instead of URLs. Nothing is ever sent anywhere.
+    pub journal: bool,
     /// Soft RAM limit: over it, the oldest hidden tabs are unloaded.
     pub ram_limit: bool,
     pub ram_limit_mb: u32,
@@ -171,6 +174,7 @@ impl Default for Settings {
             agent: false,
             agent_port: 47615,
             agent_shared_profile: false,
+            journal: true,
             ram_limit: false,
             ram_limit_mb: 2048,
             cpu_limit: false,

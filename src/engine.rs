@@ -13,7 +13,7 @@ use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
-    FocusChangedEventHandler, NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
+    FocusChangedEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
     StateChangedEventHandler,
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
@@ -64,6 +64,10 @@ pub enum Ev {
     Loading(u64, bool),
     Favicon(u64, String),
     Nav(u64, bool, bool),
+    /// A top-level navigation started: (tab, URL). The journal times it.
+    NavStart(u64, String),
+    /// It ended: (tab, ok, WebErrorStatus code, HTTP status). One per top-level page.
+    NavDone(u64, bool, i32, i32),
     Audio(u64, bool),
     FullScreen(u64, bool),
     CloseMe(u64),
@@ -502,6 +506,8 @@ fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<R
                     let _ = p.send_event(Ev::Magnet(id, u));
                     return Ok(());
                 }
+                // The journal times the page from here to NavigationCompleted.
+                let _ = p.send_event(Ev::NavStart(id, u.clone()));
                 let clean = clean_url(&u);
                 let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u)));
                 if let Some(clean) = listed.or(clean) {
@@ -521,6 +527,26 @@ fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<R
                     w.Source(&mut s)?;
                     let _ = p.send_event(Ev::Url(id, take(s)));
                 }
+                Ok(())
+            })),
+            &mut token,
+        );
+
+        // The other end of the journal's timing: whether the page came, and with
+        // what. The second interface carries the HTTP status when there was one.
+        let p = proxy.clone();
+        let _ = core.add_NavigationCompleted(
+            &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut ok = Default::default();
+                let _ = args.IsSuccess(&mut ok);
+                let mut err = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+                let _ = args.WebErrorStatus(&mut err);
+                let mut http = 0i32;
+                if let Ok(second) = args.cast::<ICoreWebView2NavigationCompletedEventArgs2>() {
+                    let _ = second.HttpStatusCode(&mut http);
+                }
+                let _ = p.send_event(Ev::NavDone(id, ok.as_bool(), err.0, http));
                 Ok(())
             })),
             &mut token,
@@ -1311,12 +1337,24 @@ pub fn raise(wv: &WebView) {
 /// Private working set of this app plus every WebView2 process it owns.
 /// Same number Task Manager shows as "Memory".
 pub fn memory(env: &ICoreWebView2Environment) -> (u64, u32) {
-    use crate::monitor::private_ws;
-    let mut total = private_ws(unsafe { GetCurrentProcess() });
+    let (_, total, count, _) = memory_with_cpu(env, false);
+    (total, count)
+}
+
+/// One walk of the process tree, for everyone who needs a number from it:
+/// (this process alone, the whole tree, process count, the tree's CPU time in
+/// 100 ns units). `cpu` costs a `GetProcessTimes` per process, so the callers
+/// that do not need it do not ask: there is no second walk for the journal.
+pub fn memory_with_cpu(env: &ICoreWebView2Environment, cpu: bool) -> (u64, u64, u32, u64) {
+    use crate::monitor::{cpu_time, private_ws};
+    let me = unsafe { GetCurrentProcess() };
+    let own = private_ws(me);
+    let mut total = own;
+    let mut ticks = if cpu { cpu_time(me) } else { 0 };
     let mut count = 1u32;
     unsafe {
         let Ok(list) = env.cast::<ICoreWebView2Environment8>().and_then(|e| e.GetProcessInfos()) else {
-            return (total, count);
+            return (own, total, count, ticks);
         };
         let mut n = 0u32;
         let _ = list.Count(&mut n);
@@ -1328,10 +1366,13 @@ pub fn memory(env: &ICoreWebView2Environment) -> (u64, u32) {
             }
             if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32) {
                 total += private_ws(h);
+                if cpu {
+                    ticks += cpu_time(h);
+                }
                 count += 1;
                 let _ = CloseHandle(h);
             }
         }
     }
-    (total, count)
+    (own, total, count, ticks)
 }

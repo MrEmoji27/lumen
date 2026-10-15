@@ -98,8 +98,9 @@ pub fn private_ws(h: HANDLE) -> u64 {
     if ok.is_ok() { c.PrivateWorkingSetSize as u64 } else { 0 }
 }
 
-/// Total CPU time, kernel plus user, in 100 ns units.
-fn cpu_time(h: HANDLE) -> u64 {
+/// Total CPU time, kernel plus user, in 100 ns units. Also read by the journal's
+/// shared memory walk, so the tree's CPU costs no second enumeration.
+pub fn cpu_time(h: HANDLE) -> u64 {
     let (mut a, mut b, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     if unsafe { GetProcessTimes(h, &mut a, &mut b, &mut k, &mut u) }.is_err() {
         return 0;

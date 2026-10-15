@@ -151,3 +151,47 @@ a `settings.json` in the data folder with `{"agent": true, "agent_port":
 476xx}`, then `lumen-agent download url=... wait=true` with the same
 `LUMEN_DATA`. Kill the Lumen you started, delete the folders. The speed
 script this used lived in `%TEMP%` and was not checked in.
+
+## Journal
+
+The usage journal (`docs/briefs/journal.md`) has to cost nothing: no thread,
+no timer, no deadline of its own, no second process walk. It rides on the
+memory read the sidebar already makes, buffers lines in one 64 KB string, and
+touches the disk at most once a minute. When Lumen is idle (window hidden or
+minimized and nothing loading) it does nothing at all.
+
+What is measured here is that promise, not a feature: journal on against
+journal off, same binary, same machine. Debug builds, the same way the
+numbers above were taken; `tools\measure.ps1` wanted release and this pass
+was about a difference, not an absolute.
+
+| scenario | window | journal off | journal on |
+|---|---|---|---|
+| idle, new tab | 2 min | 18.2 MB, 0.03% cpu | 18.2 MB, 0.01% cpu |
+| one Wikipedia tab | 2 min | 109.9–113.5 MB, 0.43–0.74% | 110.6–119.4 MB, 0.43–0.62% |
+| one Wikipedia tab, lumen.exe alone | 2 min | 20.8–21.1 MB | 21.1 MB |
+
+- **Idle: the difference is zero.** With no page ever built there is no
+  WebView2 environment, so the journal never even samples: the day file holds
+  `start` and `exit` and nothing else.
+- **Wikipedia: the spread is the noise, not the journal.** Four runs each:
+  off median 111.8 MB / 0.58% cpu, on median 111.2 MB / 0.54% cpu. Single
+  runs of the *same* configuration swung by 8.8 MB (110.6 to 119.4), so the
+  one-off 119.4 above is page-load timing, not journal cost. Where the
+  journal's memory actually lives, lumen.exe's own private working set, the
+  two are the same 21 MB to a tenth.
+- **Both are inside the brief's bar**: cpu under 0.1 percent apart, private
+  memory under 1 MB apart.
+
+The day file after the wikipedia run (2.5 minutes, one page) was **710 bytes**:
+one `start`, one `nav`, two `sample`, two `wake`, one `ui_slow`, one
+`feature`. An idle day (start and exit) is 200 bytes. A browsing day lands
+around a few hundred KB; the 20 MB cap and the 14-day window are there for
+the day something goes wrong, not for normal use.
+
+Reproduce: set `LUMEN_DATA` to a fresh folder under `%TEMP%` with
+`{"agent": true, "agent_port": 476xx, "journal": true|false}`, start
+`target\debug\lumen.exe --headless`, open
+`https://en.wikipedia.org/wiki/Lighthouse` through `lumen-agent`, wait two
+minutes, and read ws_private and CPU the `windows\measure.ps1` way. The
+script this pass used lived in the session scratchpad and was not checked in.

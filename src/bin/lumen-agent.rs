@@ -151,6 +151,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("mcp") => stdio(),
+        Some("journal") => journal_report(&args[1..]),
         Some(tool) => {
             let tool = tool.to_string();
             once(&tool, &args[1..], if session.is_empty() { "cli".into() } else { format!("cli-{session}") })
@@ -163,6 +164,8 @@ const HELP: &str = "lumen-agent: drive the Lumen browser from any AI agent.
   lumen-agent mcp                      MCP over stdio. Add to an agent, e.g.
                                          claude mcp add lumen -- <path>\\lumen-agent.exe mcp
   lumen-agent tools                    list the tools
+  lumen-agent journal [--days N]        read Lumen's local usage journal and print
+                                         a plain-text report (no Lumen needed)
   lumen-agent <tool> key=value ...     one call, e.g.
                                          lumen-agent browser_open url=example.com
                                          lumen-agent browser_click tab=3 ref=e5
@@ -383,6 +386,314 @@ fn once(tool: &str, rest: &[String], session: String) -> ExitCode {
     if v["result"]["isError"] == true { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
+// ------------------------------------------------------------------ journal
+
+/// `lumen-agent journal [--days N]`: read Lumen's local usage journal and print a
+/// short plain-text report. No Lumen needed, no network, nothing written.
+fn journal_report(args: &[String]) -> ExitCode {
+    let mut days = 14i64;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let value = match a.strip_prefix("--days=") {
+            Some(v) => Some(v.to_string()),
+            None if a == "--days" => it.next().cloned(),
+            None => {
+                eprintln!("lumen-agent: journal takes --days N");
+                return ExitCode::from(1);
+            }
+        };
+        match value.and_then(|v| v.parse::<i64>().ok()) {
+            Some(n) => days = n.clamp(1, 3650),
+            None => {
+                eprintln!("lumen-agent: --days wants a number");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let dir = data_dir().join("journal");
+    if !dir.is_dir() {
+        println!("no journal at {} (Lumen keeps one by default: Settings > Privacy)", dir.display());
+        return ExitCode::SUCCESS;
+    }
+    let days = read_days(&dir, days);
+    if days.is_empty() {
+        println!("nothing in {}", dir.display());
+        return ExitCode::SUCCESS;
+    }
+    print!("{}", report(&days));
+    ExitCode::SUCCESS
+}
+
+/// One day of the journal and its lines.
+struct Day {
+    date: String,
+    lines: Vec<Value>,
+}
+
+/// Days since 1970-01-01 for a civil date. Howard Hinnant's algorithm.
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe as i64 * 365 + (yoe / 4) as i64 - (yoe / 100) as i64 + doy as i64;
+    era as i64 * 146_097 + doe - 719_468
+}
+
+/// "2026-10-15" -> days since the epoch. Anything else is None.
+fn day_of(name: &str) -> Option<i64> {
+    let (y, rest) = name.split_once('-')?;
+    let (m, d) = rest.split_once('-')?;
+    let (y, m, d): (i32, u32, u32) = (y.parse().ok()?, m.parse().ok()?, d.parse().ok()?);
+    ((1..=12).contains(&m) && (1..=31).contains(&d)).then(|| days_from_civil(y, m, d))
+}
+
+/// The day files in `dir`, oldest first, the last `days` of them. A line Lumen
+/// never finished writing is skipped; everything else is ready to read.
+fn read_days(dir: &std::path::Path, days: i64) -> Vec<Day> {
+    let mut files: Vec<(i64, String, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let stamp = name.strip_suffix(".jsonl")?;
+            let day = day_of(stamp)?;
+            Some((day, stamp.to_string(), e.path()))
+        })
+        .collect();
+    files.sort();
+    let newest = files.last().map(|(day, ..)| *day).unwrap_or(0);
+    files
+        .into_iter()
+        .filter(|(day, ..)| newest - day < days)
+        .map(|(_, date, path)| Day {
+            date,
+            lines: std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .collect(),
+        })
+        .collect()
+}
+
+/// The middle number of a list, or 0 for none.
+fn median(v: &mut [f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+}
+
+fn one(v: f64) -> String {
+    format!("{v:.1}")
+}
+
+/// A page time in the unit that reads best: 812 ms, 4.2 s, 1.4 min.
+fn secs(ms: f64) -> String {
+    if ms < 1000.0 {
+        format!("{} ms", ms.round() as u64)
+    } else if ms < 60_000.0 {
+        format!("{} s", one(ms / 1000.0))
+    } else {
+        format!("{} min", one(ms / 60_000.0))
+    }
+}
+
+fn duration(secs: u64) -> String {
+    if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// The whole report: what happened, in the order a person would ask.
+fn report(days: &[Day]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let lines: Vec<&Value> = days.iter().flat_map(|d| d.lines.iter()).collect();
+    let of = |name: &str| -> Vec<&Value> { lines.iter().copied().filter(|v| v["k"] == name).collect() };
+    let num = |v: &Value, key: &str| v[key].as_f64().unwrap_or(0.0);
+
+    let span = match (days.first(), days.last()) {
+        (Some(first), Some(last)) if days.len() > 1 => format!("{} … {}", first.date, last.date),
+        (Some(day), _) => day.date.clone(),
+        _ => String::new(),
+    };
+    let _ = writeln!(out, "Lumen journal — {span} ({} day(s), {} lines)", days.len(), lines.len());
+
+    // Sessions: how it ran, and how it ended.
+    let starts = of("start");
+    let exits = of("exit");
+    let mut uptimes: Vec<f64> = exits.iter().filter_map(|v| v["uptime"].as_u64()).map(|s| s as f64).collect();
+    let total: u64 = uptimes.iter().sum::<f64>() as u64;
+    let _ = writeln!(out, "\nSessions");
+    let _ = writeln!(out, "  {} runs, {} clean exits, {} never said goodbye", starts.len(), exits.len(), of("unclean_exit").len());
+    if !uptimes.is_empty() {
+        let _ = writeln!(out, "  uptime {} in all (median {} per run)", duration(total), duration(median(&mut uptimes) as u64));
+    }
+    let headless = starts.iter().filter(|v| v["headless"] == true).count();
+    let version = starts.iter().filter_map(|v| v["v"].as_str()).next().unwrap_or("");
+    let _ = writeln!(out, "  version {version}, {headless} of them headless");
+    for u in of("unclean_exit") {
+        let log = u["log"].as_array().map(|a| a.len()).unwrap_or(0);
+        let _ = writeln!(out, "  unclean exit after {} (crash.log had {log} newer line(s))", u["from"].as_str().unwrap_or("?"));
+    }
+
+    // Crashes, and whether the reload took. A crash is one line at the time and
+    // a second one when the tab loads again, so the second is not a second crash.
+    let crash_lines = of("crash");
+    let crashes: Vec<&Value> = crash_lines.iter().copied().filter(|v| v["reload"].is_null()).collect();
+    let reloads: Vec<&Value> = crash_lines.iter().copied().filter(|v| v["reload"].is_string()).collect();
+    if !crash_lines.is_empty() {
+        let count = |kind: &str| crashes.iter().filter(|v| v["kind"] == kind).count();
+        let ok = reloads.iter().filter(|v| v["reload"] == "ok").count();
+        let _ = writeln!(out, "\nCrashes");
+        let _ = writeln!(out, "  {} renderer, {} browser process", count("renderer"), count("browser"));
+        if !reloads.is_empty() {
+            let _ = writeln!(out, "  reload after the crash: {} ok, {} failed", ok, reloads.len() - ok);
+        }
+    }
+
+    // Memory and CPU, per day. The medians are of the minute samples.
+    let samples = of("sample");
+    if !samples.is_empty() {
+        let _ = writeln!(out, "\nMemory per day (MB: median / max — lumen is Lumen's own process)");
+        for day in days {
+            let s: Vec<&Value> = day.lines.iter().filter(|v| v["k"] == "sample").collect();
+            if s.is_empty() {
+                continue;
+            }
+            let own: Vec<f64> = s.iter().map(|v| num(v, "lumen")).collect();
+            let all: Vec<f64> = s.iter().map(|v| num(v, "total")).collect();
+            let max = |v: &[f64]| v.iter().copied().fold(0.0, f64::max);
+            let (own_mid, all_mid) = (median(&mut own.clone()), median(&mut all.clone()));
+            let _ = writeln!(
+                out,
+                "  {}  lumen {}/{}  total {}/{}",
+                day.date,
+                one(own_mid),
+                one(max(&own)),
+                one(all_mid),
+                one(max(&all))
+            );
+        }
+        let mut cpu: Vec<f64> = samples.iter().map(|v| num(v, "cpu")).collect();
+        let idle = median(&mut cpu);
+        let busy = cpu.iter().copied().fold(0.0, f64::max);
+        let _ = writeln!(out, "  cpu: median {}% of the machine, worst {}%", one(idle), one(busy));
+    }
+
+    // Pages: the slowest hosts, and the ones that failed.
+    let navs: Vec<&Value> = lines.iter().copied().filter(|v| matches!(v["k"].as_str(), Some("nav" | "slow_nav"))).collect();
+    let host = |v: &Value| v["host"].as_str().unwrap_or("").to_string();
+    if !navs.is_empty() {
+        let mut by_host: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+        let mut errors: std::collections::BTreeMap<String, Vec<i64>> = Default::default();
+        for v in &navs {
+            by_host.entry(host(v)).or_default().push(num(v, "ms"));
+            if v["ok"] == false {
+                errors.entry(host(v)).or_default().push(v["err"].as_i64().unwrap_or(0));
+            }
+        }
+        let mut ranked: Vec<(String, f64, usize)> = by_host
+            .iter()
+            .map(|(h, v)| {
+                let mut v = v.clone();
+                (h.clone(), median(&mut v), v.len())
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let _ = writeln!(out, "\nSlowest hosts (median load time)");
+        for (h, ms, loads) in ranked.iter().take(15) {
+            let bad = errors.get(h).map_or(0, Vec::len);
+            let note = if bad > 0 { format!(", {bad} error(s)") } else { String::new() };
+            let _ = writeln!(out, "  {:>9}  {h}  ({loads} load(s){note})", secs(*ms));
+        }
+        if !errors.is_empty() {
+            let _ = writeln!(out, "\nNav errors by host");
+            let mut listed: Vec<(&String, &Vec<i64>)> = errors.iter().collect();
+            listed.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+            for (h, codes) in listed {
+                let mut codes = codes.clone();
+                codes.sort();
+                let code = codes[codes.len() / 2];
+                let _ = writeln!(out, "  {}  {h}  (error {code})", codes.len());
+            }
+        }
+    }
+
+    // Everything Lumen had to say to the person.
+    let errors = of("error");
+    let panics = of("panic");
+    if !errors.is_empty() || !panics.is_empty() {
+        let _ = writeln!(out, "\nErrors and panics");
+        let mut grouped: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        for v in &errors {
+            *grouped.entry((v["f"].as_str().unwrap_or("").to_string(), v["m"].as_str().unwrap_or("").to_string())).or_default() += 1;
+        }
+        let mut listed: Vec<((String, String), usize)> = grouped.into_iter().collect();
+        listed.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for ((feature, msg), n) in listed.iter().take(20) {
+            let _ = writeln!(out, "  {n:>4}  {feature}: {msg}");
+        }
+        let _ = writeln!(out, "  panics: {}", panics.len());
+    }
+
+    // Frames that stuttered.
+    let slow: Vec<&Value> = of("ui_slow");
+    if !slow.is_empty() {
+        let frames: f64 = slow.iter().map(|v| num(v, "n")).sum();
+        let worst = slow.iter().map(|v| num(v, "worst")).fold(0.0, f64::max);
+        let _ = writeln!(out, "\nui_slow: {} frame(s) over 50 ms over {} minute(s), worst {}", frames as u64, slow.len(), secs(worst));
+    }
+
+    // What got used.
+    let features = of("feature");
+    if !features.is_empty() {
+        let _ = writeln!(out, "\nFeatures");
+        let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+        for v in &features {
+            *counts.entry(v["f"].as_str().unwrap_or("").to_string()).or_default() += 1;
+        }
+        let mut listed: Vec<(&String, &usize)> = counts.iter().collect();
+        listed.sort_by_key(|(name, _)| (*name).clone());
+        let mut row: Vec<String> = listed.iter().map(|(name, n)| format!("{name} {n}")).collect();
+        row.retain(|r| !r.starts_with("download"));
+        let _ = writeln!(out, "  {}", row.join(", "));
+        let downloads: Vec<&&Value> = features.iter().filter(|v| v["f"] == "download").collect();
+        if !downloads.is_empty() {
+            let done = downloads.iter().filter(|v| v["result"] == "done").count();
+            let mut avg: Vec<f64> = downloads.iter().filter_map(|v| v["avg"].as_f64()).collect();
+            let kind = |k: &str| downloads.iter().filter(|v| v["kind"] == k).count();
+            let speed = if avg.is_empty() { String::new() } else { format!(", median {} MB/s", one(median(&mut avg) / 1_048_576.0)) };
+            let _ = writeln!(
+                out,
+                "  download {} ({} done, {} failed; {} file, {} torrent, {} video{speed})",
+                downloads.len(),
+                done,
+                downloads.len() - done,
+                kind("file"),
+                kind("torrent"),
+                kind("video")
+            );
+        }
+    }
+
+    // Idle wakes, which is how a spin shows up.
+    let wakes = of("wake");
+    if !wakes.is_empty() {
+        let mut per: Vec<f64> = wakes.iter().map(|v| num(v, "n")).collect();
+        let worst = per.iter().copied().fold(0.0, f64::max);
+        let _ = writeln!(out, "\nWakes: median {} per minute, most {}", median(&mut per), worst as u64);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,4 +708,79 @@ mod tests {
         assert_eq!(parse_args(&["{\"tab\": 1}".into()]).unwrap(), json!({"tab": 1}));
         assert!(parse_args(&["oops".into()]).is_err());
     }
+
+    /// A fixture the size of a short session, read back the way Lumen wrote it.
+    fn fixture() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lumen-agent-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let start = r#"{"t":1,"k":"start","v":"0.1.0","headless":true,"theme":"dark","compact":false,"dark_pages":false,"blocker":true,"sleep":5,"discard":30,"restored":2}"#;
+        std::fs::write(
+            dir.join("2026-01-01.jsonl"),
+            format!(
+                "{start}\n\
+                 {{\"t\":2,\"k\":\"nav\",\"host\":\"slow.example\",\"ms\":9000,\"ok\":true}}\n\
+                 {{\"t\":3,\"k\":\"nav\",\"host\":\"slow.example\",\"ms\":11000,\"ok\":true}}\n\
+                 {{\"t\":4,\"k\":\"nav\",\"host\":\"bad.example\",\"ms\":300,\"ok\":false,\"err\":6}}\n\
+                 {{\"t\":5,\"k\":\"sample\",\"lumen\":80.0,\"total\":400.0,\"cpu\":0.5,\"tabs\":2,\"live\":1,\"asleep\":1,\"discarded\":0,\"ws\":1,\"panel\":\"none\"}}\n\
+                 {{\"t\":6,\"k\":\"error\",\"f\":\"download\",\"m\":\"aria2 refused it\"}}\n\
+                 {{\"t\":7,\"k\":\"wake\",\"n\":12}}\n\
+                 {{\"t\":8,\"k\":\"exit\",\"clean\":true,\"uptime\":3600}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("2026-01-02.jsonl"),
+            format!(
+                "{start}\n\
+                 {{\"t\":10,\"k\":\"crash\",\"kind\":\"renderer\",\"host\":\"bad.example\"}}\n\
+                 {{\"t\":11,\"k\":\"crash\",\"kind\":\"renderer\",\"host\":\"bad.example\",\"reload\":\"ok\"}}\n\
+                 {{\"t\":12,\"k\":\"panic\",\"m\":\"index out of bounds  at chrome/mod.rs:1\"}}\n\
+                 {{\"t\":13,\"k\":\"feature\",\"f\":\"reader\"}}\n\
+                 {{\"t\":14,\"k\":\"feature\",\"f\":\"download\",\"kind\":\"file\",\"result\":\"done\",\"ms\":12000,\"avg\":1048576}}\n\
+                 {{\"t\":15,\"k\":\"nav\",\"host\":\"slow.example\",\"ms\":10000,\"ok\":true}}\n\
+                 {{\"t\":16,\"k\":\"ui_slow\",\"n\":3,\"worst\":120.0}}\n\
+                 {{\"t\":17,\"k\":\"truncated\n"
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_report_reads_a_small_fixture() {
+        let dir = fixture();
+        let days = read_days(&dir, 14);
+        assert_eq!(days.len(), 2, "both days are read");
+        // The half-written last line was left where it was.
+        assert_eq!(days[1].lines.len(), 8, "{:?}", days[1].lines);
+        // --days takes the newest only.
+        assert_eq!(read_days(&dir, 1).len(), 1);
+        let text = report(&days);
+        for want in [
+            "2 runs",
+            "clean exits, 0 never said goodbye",
+            "1 renderer, 0 browser",
+            "reload after the crash: 1 ok, 0 failed",
+            "slow.example",
+            "bad.example",
+            "error 6",
+            "1  download: aria2 refused it",
+            "panics: 1",
+            "reader 1",
+            "download 1 (1 done, 0 failed; 1 file, 0 torrent, 0 video",
+            "ui_slow: 3 frame(s)",
+            "Wakes: median 12 per minute",
+            "total 400.0",
+        ] {
+            assert!(text.contains(want), "{want:?} is missing from:\n{text}");
+        }
+        // The slowest host is first among the pages that were timed, and its
+        // median is the middle of 9 s, 10 s and 11 s.
+        let ranked = text.find("Slowest hosts").unwrap();
+        let slow = text[ranked..].find("slow.example").unwrap();
+        assert!(slow < text[ranked..].len());
+        assert!(text.contains("10.0 s"), "the median of 9 s, 10 s and 11 s: {text}");
+    }
+
 }

@@ -1996,7 +1996,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
                 let _hdc: HDC = BeginPaint(hwnd, &mut ps);
+                let drawn = Instant::now();
                 i.paint();
+                // The journal's `ui_slow`: one atomic add when a frame stuttered.
+                crate::journal::frame(drawn.elapsed().as_secs_f64() * 1000.0);
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
