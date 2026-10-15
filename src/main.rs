@@ -437,7 +437,7 @@ fn main() {
     // headless run can prove a private tab leaves no trace in session.json. The
     // private tab gets a url of its own: its Nav line in the log is the proof the
     // InPrivate page built.
-    if std::env::var_os("LUMEN_TEST_PRIVATE").is_some() {
+    if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_PRIVATE").is_some() {
         app.new_tab(Some("https://example.com/".into()), None);
         let id = app.new_private_tab();
         if let Some(i) = app.idx(id) {
@@ -2296,6 +2296,10 @@ impl App {
                 let since = m["since"].as_u64();
                 self.library.clear_history(since);
                 self.recall.clear(since);
+                // WebView2 keeps a history of its own in the profile; it goes too.
+                if let Some(v) = self.plain_view() {
+                    engine::clear_data(v, since, false);
+                }
                 self.push();
             }
             "clearData" => {
@@ -2690,8 +2694,12 @@ impl App {
         self.library.clear_history(None);
         self.recall.clear(None);
         self.library.flush();
-        let done = self.plain_view().is_some_and(|v| engine::clear_data(v, None, false));
-        store::set_clear_history_pending(!done);
+        // WebView2 finishes the wipe on its own time and Lumen is closing, so ask now
+        // and again at the next start: clearing twice costs nothing, missing it would.
+        if let Some(v) = self.plain_view() {
+            engine::clear_data(v, None, false);
+        }
+        store::set_clear_history_pending(true);
     }
 
     /// A clear-on-exit the last run could not finish, done at the first chance.
