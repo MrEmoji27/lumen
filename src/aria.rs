@@ -786,9 +786,12 @@ mod tests {
         assert_eq!(body["id"], 7);
         assert_eq!(body["method"], "aria2.tellActive");
         assert_eq!(body["params"], json!(["token:s3cret"]));
+        // Compared as JSON, not as text. serde_json keeps object keys in sorted or in
+        // insertion order depending on its preserve_order feature, which some of the
+        // dependency trees Lumen can be built with turn on. The shape is the point.
         assert_eq!(
-            request(1, "k", "aria2.getVersion", &[]).to_string(),
-            r#"{"id":1,"jsonrpc":"2.0","method":"aria2.getVersion","params":["token:k"]}"#
+            request(1, "k", "aria2.getVersion", &[]),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "aria2.getVersion", "params": ["token:k"]})
         );
     }
 

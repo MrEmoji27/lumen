@@ -220,6 +220,26 @@ pub fn pair(src: &str, dst: &str) -> Option<&'static P> {
     PAIRS.iter().find(|p| p.src == src && p.dst == dst)
 }
 
+/// What "Translate pages into" can be set to, as (code, English name): English, plus
+/// every language the registry has a pair from English into. The registry knows a few
+/// languages only as a source (Catalan, Icelandic, Norwegian) — a Norwegian page reads
+/// in English, but there is no English page read in Norwegian — so they are not here.
+pub const TARGETS: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("bg", "Bulgarian"),
+    ("cs", "Czech"),
+    ("de", "German"),
+    ("es", "Spanish"),
+    ("et", "Estonian"),
+    ("fa", "Persian"),
+    ("fr", "French"),
+    ("it", "Italian"),
+    ("nl", "Dutch"),
+    ("pl", "Polish"),
+    ("pt", "Portuguese"),
+    ("ru", "Russian"),
+];
+
 /// The two-letter code in a lang attribute: "es-419", "EN_us" and "en" are
 /// "es", "en", "en". Empty when there is nothing to read.
 pub fn lang_code(raw: &str) -> String {
@@ -683,6 +703,24 @@ mod tests {
         // The pair the tests translate with is really there.
         let p = pair("es", "en").expect("spanish to english");
         assert_eq!(p.files[0].name, "model.esen.intgemm.alphas.bin");
+    }
+
+    /// The settings offer exactly what can really be a target: English and whatever
+    /// the registry has a pair from English into, and nothing else.
+    #[test]
+    fn every_offered_target_has_a_pair() {
+        assert_eq!(TARGETS[0].0, "en", "English is the default and comes first");
+        for (code, name) in TARGETS {
+            assert_eq!(lang_code(code), *code, "{code} is not a code");
+            assert!(!name.is_empty());
+            assert!(PAIRS.iter().any(|p| p.dst == *code), "{code} has no pair into it");
+        }
+        let mut want: Vec<&str> = PAIRS.iter().map(|p| p.dst).collect();
+        want.sort_unstable();
+        want.dedup();
+        let mut have: Vec<&str> = TARGETS.iter().map(|(c, _)| *c).collect();
+        have.sort_unstable();
+        assert_eq!(have, want, "a language Lumen can translate into is missing");
     }
 
     #[test]
