@@ -20,6 +20,7 @@ mod split;
 mod translate;
 mod video;
 mod store;
+mod trackers;
 
 use std::{
     cell::{Cell, RefCell},

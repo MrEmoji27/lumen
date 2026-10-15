@@ -84,3 +84,70 @@ pwsh -NoProfile -File tools\measure.ps1 -Tag after -Scenario three -Stop
 
 Rows land in `docs\perf-data.csv`. Write settings.json before starting
 Lumen, or the agent door is shut and the tool hangs waiting.
+
+## Downloads
+
+aria2 got tuned. HTTP: 64 MB disk cache, `falloc` instead of `none`, gzip
+when offered, async DNS, five concurrent downloads with aria2 sliding the
+count toward whatever moves, 15s to connect and 30 to move, five tries three
+seconds apart, and a 10K/s floor before a crawl is hung up on. The floor is
+safe for torrents: aria2's own help says it never touches BitTorrent. Every
+flag in `src\aria.rs` FLAGS was read in `aria2c.exe --help=#all` for 1.37.0,
+because aria2 drops an option it does not know without a word and the tuning
+would then be a lie.
+
+Torrents: 128 peers (aria2's default is 55; 0 means uncapped and an uncapped
+swarm is how a laptop cooks itself), more peers sought under 1M/s, a DHT
+entry point to shake hands with, and 10s tracker timeouts so a dead tracker
+cannot hold the swarm for a minute.
+
+Trackers: `src\trackers.rs` fetches ngosang's best list once a week on its
+own thread, keeps it in `data\aria2\trackers.txt`, validates every line
+(udp/http/https/wss, under 300 chars, 50 max) and keeps the old file when
+the fetch fails. aria2 gets the cache at startup and a fresh list pushed in
+with `aria2.changeGlobalOption` while Lumen runs.
+
+### Numbers
+
+Headless Lumen, throwaway profile under `%TEMP%`, one 100 MiB pull of
+`https://ash-speed.hetzner.com/100MB.bin`, queued with
+`lumen-agent download url=... wait=true`, timed from the call to its return.
+Before is the master build (a copy of the master checkout's debug binary;
+its `src\` is byte-identical to master). After is this branch. proof.ovh was
+the first choice per the brief and rate-limited 16 connections to 429, so
+the file moved.
+
+| run | before | after |
+|---|---|---|
+| 1 | 21.1 s (4.7 MB/s) | 14.7 s (6.8 MB/s) |
+| 2 | 14.4 s (7.0 MB/s) | 16.2 s (6.2 MB/s) |
+| mean | 17.8 s (5.6 MB/s) | 15.5 s (6.5 MB/s) |
+
+Read that table knowing that two runs of the *same* binary swung by 46%.
+The link is the bottleneck, not the flags. What this tuning buys is not
+peak MB/s on a warm connection: `falloc` lays a big file down at once
+instead of growing it in pieces and paying a seek per write, the disk cache
+turns many small writes into a few large ones, and the timeouts decide how
+fast a dead server is dropped. Those are disk churn and stuck downloads,
+which one healthy 100 MiB pull will never show.
+
+### What was checked live
+
+- `aria::live::every_flag_is_one_aria2_knows`: every flag is in aria2
+  1.37.0's own help. `--ignored`, needs the internet.
+- `aria::live::a_fresh_tracker_list_reaches_a_running_aria2`: on a fresh
+  profile with no cache, the background thread fetched the list, pushed it,
+  and `aria2.getGlobalOption` read back the same 20 trackers that were
+  written to disk.
+- The two runs above: the first start of each fresh profile passed
+  `--bt-tracker=` from the cache, and the one after it got the list at
+  runtime instead.
+- `cargo test` over the whole tree: 80 green, 0 failed, and the four
+  ignored live tests all pass with `cargo test -- --ignored`.
+
+Reproduce the speed check by hand: start `target\debug\lumen.exe --headless`
+with `LUMEN_DATA` and `LUMEN_DOWNLOADS` set to fresh folders under `%TEMP%`,
+a `settings.json` in the data folder with `{"agent": true, "agent_port":
+476xx}`, then `lumen-agent download url=... wait=true` with the same
+`LUMEN_DATA`. Kill the Lumen you started, delete the folders. The speed
+script this used lived in `%TEMP%` and was not checked in.
