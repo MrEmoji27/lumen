@@ -17,6 +17,7 @@ mod recall;
 mod upnp;
 mod video;
 mod store;
+mod trackers;
 
 use std::{
     cell::{Cell, RefCell},

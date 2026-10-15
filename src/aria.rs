@@ -30,6 +30,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
+use crate::trackers;
+
 /// Where the zip comes from. One line, pinned to a release.
 const ZIP_URL: &str =
     "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip";
@@ -52,6 +54,69 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long aria2 gets to open its port after it is spawned.
 const BOOT_TRIES: u32 = 50;
 const BOOT_SLEEP: Duration = Duration::from_millis(100);
+
+/// What aria2 is told at startup, every time. Every line here was read in
+/// `aria2c.exe --help=#all` for 1.37.0: a flag the binary does not know is
+/// dropped without a word, and the tuning would then be a lie.
+const FLAGS: &[&str] = &[
+    "--enable-rpc",
+    // A downloader that listens on the network is a hole.
+    "--rpc-listen-all=false",
+    "--continue=true",
+    // Sixteen wires into one file, in pieces of a megabyte and up: small
+    // pieces keep every wire busy, 1M keeps the bookkeeping sane.
+    "--max-connection-per-server=16",
+    "--split=16",
+    "--min-split-size=1M",
+    // falloc lays a big file down on NTFS at once. `none` would grow it in
+    // pieces and pay a seek per write.
+    "--file-allocation=falloc",
+    "--auto-file-renaming=true",
+    // Five at once, and aria2 slides the count toward whatever moves.
+    "--max-concurrent-downloads=5",
+    "--optimize-concurrent-downloads=true",
+    // 64 MB of finished pieces held in RAM: fewer, larger writes out, and a
+    // hash check never has to read the disk back.
+    "--disk-cache=64M",
+    // HTTP: DNS off the blocking path, gzip when the server offers it.
+    "--async-dns=true",
+    "--http-accept-gzip=true",
+    // A dead server gets 15 seconds to connect and 30 to move, then five
+    // tries three seconds apart before the download is called failed.
+    "--connect-timeout=15",
+    "--timeout=30",
+    "--max-tries=5",
+    "--retry-wait=3",
+    // Hang up on a crawl. aria2's own help says this one never touches
+    // BitTorrent, so a torrent that is only waiting for peers is left alone.
+    "--lowest-speed-limit=10K",
+    "--save-session-interval=10",
+    "--console-log-level=warn",
+    "--summary-interval=0",
+    // BitTorrent: magnet links, DHT, local peer discovery, follow a
+    // finished .torrent into the torrent it names.
+    "--enable-dht=true",
+    "--bt-enable-lpd=true",
+    // These two ports belong to the upnp worker. It rewrites them; we do not.
+    "--follow-torrent=true",
+    "--bt-save-metadata=true",
+    // A torrent a PAGE starts must never join the swarm on its own: born
+    // paused, waiting for the person to press Resume. Person-started torrents
+    // are resumed by the main loop once their metadata is in.
+    "--pause-metadata=true",
+    "--seed-ratio=1.0",
+    // The swarm: 128 peers at a time, four times aria2's own default of 55.
+    // 0 means no cap, and an uncapped swarm is how a laptop cooks itself.
+    // Under 1M/s overall, aria2 goes looking for more of them.
+    "--bt-max-peers=128",
+    "--bt-request-peer-speed-limit=1M",
+    // The DHT has to shake hands with one live node before it finds the rest.
+    "--dht-entry-point=dht.transmissionbt.com:6881",
+    // A tracker that never answers must not hold the swarm hostage for
+    // aria2's default of a minute.
+    "--bt-tracker-connect-timeout=10",
+    "--bt-tracker-timeout=10",
+];
 
 /// One download, as the UI needs to see it.
 #[derive(Clone, Debug)]
@@ -197,6 +262,13 @@ impl Aria {
                     aria.try_speed_limit();
                 }
             });
+        // Trackers are a network errand of their own: once a week, off this
+        // thread, never in the way of a start.
+        let late = aria.clone();
+        let late_data = data_dir.to_path_buf();
+        let _ = thread::Builder::new()
+            .name("lumen-trackers".into())
+            .spawn(move || trackers::refresh(&late_data, &late));
         aria
     }
 
@@ -308,6 +380,18 @@ impl Aria {
         let _ = call(port, &secret, self.id(), "aria2.changeGlobalOption", &[value]);
     }
 
+    /// Hand aria2 a tracker list it has not seen, without restarting it.
+    /// aria2 takes `bt-tracker` as one comma separated string; it answered
+    /// `OK` to that shape on 1.37.0 before this was ever wired up.
+    pub fn set_trackers(&self, joined: &str) {
+        if joined.is_empty() {
+            return;
+        }
+        let Some((port, secret)) = self.line_opt() else { return };
+        let value = json!({"bt-tracker": joined});
+        let _ = call(port, &secret, self.id(), "aria2.changeGlobalOption", &[value]);
+    }
+
     /// Port and secret, or an error if the engine never came up.
     fn line(&self) -> Result<(u16, String), String> {
         self.line_opt().ok_or_else(|| "aria2 is not running".to_string())
@@ -340,27 +424,15 @@ impl Engine {
         let secret = random_hex()?;
         let session = dir.join(SESSION);
         let mut cmd = Command::new(&exe);
+        // Everything that never changes, in one place a test can read. aria2
+        // drops an option it does not know without a word, so the list would
+        // rot silently if nothing held it to the binary it was written for.
+        cmd.args(FLAGS);
         cmd.args([
-            "--enable-rpc",
-            // A downloader that listens on the network is a hole.
-            "--rpc-listen-all=false",
             &format!("--rpc-listen-port={port}"),
             &format!("--rpc-secret={secret}"),
             &format!("--dir={}", download_dir.display()),
-            "--continue=true",
-            "--max-connection-per-server=16",
-            "--split=16",
-            "--min-split-size=1M",
-            "--file-allocation=none",
-            "--auto-file-renaming=true",
-            "--max-concurrent-downloads=4",
             &format!("--save-session={}", session.display()),
-            "--save-session-interval=10",
-            "--console-log-level=warn",
-            "--summary-interval=0",
-            // BitTorrent: magnet links, DHT, local peer discovery, follow a
-            // finished .torrent into the torrent it names.
-            "--enable-dht=true",
             &format!("--dht-file-path={}", dir.join("dht.dat").display()),
             "--bt-enable-lpd=true",
             &format!("--listen-port={bt_port}"),
@@ -375,6 +447,13 @@ impl Engine {
         ]);
         // Stop seeding after an hour, or immediately when the user said no to sharing.
         cmd.arg(if keep_seeding { "--seed-time=60" } else { "--seed-time=0" });
+        // Last week's trackers, straight off disk: reading a file is not I/O
+        // worth fearing. A fresher list arrives on its own thread later and
+        // is pushed in over JSON-RPC, so nothing here waits on the network.
+        let trackers = trackers::startup(data_dir);
+        if !trackers.is_empty() {
+            cmd.arg(format!("--bt-tracker={trackers}"));
+        }
         if session.exists() {
             // Last night's queue comes back.
             cmd.arg(format!("--input-file={}", session.display()));
@@ -877,6 +956,46 @@ mod tests {
     }
 
     #[test]
+    fn the_flag_list_holds_what_this_build_was_tuned_with() {
+        // Every flag the tuning added, plus the ones kept from before. aria2
+        // drops an option it does not know without a word, so a typo here
+        // would look exactly like a tuning that works.
+        for want in [
+            "--min-split-size=1M",
+            "--disk-cache=64M",
+            "--file-allocation=falloc",
+            "--async-dns=true",
+            "--lowest-speed-limit=10K",
+            "--max-tries=5",
+            "--retry-wait=3",
+            "--timeout=30",
+            "--connect-timeout=15",
+            "--max-concurrent-downloads=5",
+            "--optimize-concurrent-downloads=true",
+            "--http-accept-gzip=true",
+            "--bt-max-peers=128",
+            "--bt-request-peer-speed-limit=1M",
+            "--dht-entry-point=dht.transmissionbt.com:6881",
+            "--bt-tracker-connect-timeout=10",
+            "--bt-tracker-timeout=10",
+            "--max-connection-per-server=16",
+            "--split=16",
+        ] {
+            assert!(FLAGS.contains(&want), "{want} is missing from the aria2 flag list");
+        }
+        // The values these replaced must not creep back.
+        assert!(!FLAGS.contains(&"--file-allocation=none"));
+        assert!(!FLAGS.contains(&"--max-concurrent-downloads=4"));
+        // Every entry is one well formed flag, and no flag is said twice:
+        // aria2 would take the last one and nobody would notice.
+        assert!(FLAGS.iter().all(|f| f.starts_with("--") && !f.contains(' ') && !f.is_empty()));
+        let mut sorted: Vec<&str> = FLAGS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), FLAGS.len(), "a flag is in there twice");
+    }
+
+    #[test]
     fn aria_crosses_threads() {
         fn both<T: Send + Sync>() {}
         both::<Aria>();
@@ -1048,5 +1167,70 @@ mod live {
 
         let jobs = aria.jobs();
         assert!(jobs.iter().all(|j| !j.gid.is_empty()), "every job has a gid");
+    }
+
+    /// The runtime tracker push, end to end: a fresh list, a running aria2,
+    /// and the value read back over the same JSON-RPC door Lumen uses.
+    #[test]
+    #[ignore = "downloads aria2 and a tracker list off the internet"]
+    fn a_fresh_tracker_list_reaches_a_running_aria2() {
+        let dir = case("push");
+        let aria = Aria::start(&dir, &dir.join("downloads"), true, 0, 6881);
+        for _ in 0..300 {
+            if aria.ready() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        assert!(aria.ready(), "aria2 never came up");
+        // The background thread fetches the public list on its own once it
+        // sees there is no cache. It does not have to be asked.
+        let mut held = String::new();
+        for _ in 0..60 {
+            {
+                let engine = lock(&aria.engine);
+                if let Some(engine) = engine.as_ref()
+                    && let Ok(answer) = call(engine.port, &engine.secret, 1, "aria2.getGlobalOption", &[])
+                {
+                    held = answer["bt-tracker"].as_str().unwrap_or("").to_string();
+                }
+            }
+            if !held.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        assert!(!held.is_empty(), "aria2 holds no trackers after the background fetch");
+        let trackers: Vec<&str> = held.split(',').collect();
+        assert!(trackers.len() > 1, "the list never made it across: {held}");
+        assert!(trackers.iter().all(|t| t.starts_with("udp://") || t.starts_with("http")), "not a tracker list: {held}");
+        // And the same list is on disk, so the next start does not need a fetch.
+        let cached = crate::trackers::load(&dir.join("aria2"));
+        assert!(!cached.is_empty(), "the list was pushed but never cached");
+        assert_eq!(cached.join(","), held, "what aria2 holds and what is cached are one list");
+    }
+
+    /// Hold every flag to the binary's own help. aria2 drops an option it
+    /// does not know without a word, so this is the only check that says the
+    /// tuning reaches the engine instead of vanishing on the way in.
+    #[test]
+    #[ignore = "downloads aria2 to read its help"]
+    fn every_flag_is_one_aria2_knows() {
+        let dir = case("help");
+        let exe = place_exe(&dir).expect("aria2 came down and its hash was right");
+        let out = Command::new(&exe)
+            .arg("--help=#all")
+            .creation_flags(CREATE_NO_WINDOW.0)
+            .output()
+            .expect("aria2 answered");
+        let help = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(help.contains("--min-split-size"), "aria2 printed no help at all");
+        for flag in FLAGS {
+            let name = flag.split('=').next().unwrap_or(flag);
+            let defined = help.lines().any(|l| {
+                l.contains(&format!("{name}=")) || l.contains(&format!("{name}[")) || l.contains(&format!("{name} "))
+            });
+            assert!(defined, "{name} is not among aria2's own options");
+        }
     }
 }
