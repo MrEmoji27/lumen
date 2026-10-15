@@ -6,6 +6,7 @@
 
 mod aria;
 mod agent;
+mod agentkit;
 mod blocker;
 mod chrome;
 mod engine;
@@ -88,6 +89,9 @@ struct Tab {
     reader: Option<String>,
     /// Opened by a page (window.open, target=_blank).
     popup: bool,
+    /// For agent tabs: the MCP session that owns it, and its client's name.
+    owner: String,
+    owner_name: String,
     view: Option<WebView>,
     hidden_at: Option<Instant>,
 }
@@ -110,6 +114,8 @@ impl Tab {
             agent: false,
             reader: None,
             popup: false,
+            owner: String::new(),
+            owner_name: String::new(),
             view: None,
             hidden_at: None,
         }
@@ -180,6 +186,10 @@ struct App {
     aria_poll: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Page text for searching history by content.
     recall: recall::Recall,
+    /// Console, network and dialog records of agent tabs.
+    agent_logs: agentkit::Logs,
+    /// An agent waiting for the person: (tab, agent name, message, where to say Done).
+    handoff: Option<(u64, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,
     /// What aria2 was given per gid, so a failed download can be tried again.
     aria_meta: HashMap<String, (String, Vec<String>, Option<String>)>,
     /// Next download id for aria2, video and remembered rows. Never reused.
@@ -326,6 +336,8 @@ fn main() {
         dl_seq: 0,
         dl_dirty: false,
         recall: recall::Recall::start(&store::data_dir()),
+        agent_logs: Default::default(),
+        handoff: None,
     };
     {
         // One small thread polls aria2 while it has work, and sleeps otherwise.
@@ -816,6 +828,7 @@ impl App {
                 } else {
                     Vec::new()
                 },
+                handoff: self.handoff.as_ref().map(|h| (h.1.clone(), h.2.clone())),
                 prompt: self
                     .prompts
                     .iter()
@@ -875,9 +888,15 @@ impl App {
         let (x, y, w, h) = self.stage();
         let t = &mut self.tabs[i];
         let isolated = t.agent && !self.settings.agent_shared_profile;
-        if let Ok(v) = engine::build_tab(&self.ctx, t.id, Some(&t.url), logical_rect(x, y, w, h), isolated) {
+        // An agent's page starts blank, so the recording is on before the first request.
+        let first = if t.agent { None } else { Some(t.url.as_str()) };
+        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), isolated) {
             if t.muted {
                 engine::set_muted(&v, true);
+            }
+            if t.agent {
+                agentkit::watch(&v, t.id, &self.agent_logs);
+                let _ = v.load_url(&t.url);
             }
             t.view = Some(v);
             t.suspended = false;
@@ -946,6 +965,12 @@ impl App {
     fn close(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
         let t = self.tabs.remove(i);
+        self.agent_logs.borrow_mut().remove(&id);
+        if self.handoff.as_ref().is_some_and(|h| h.0 == id) {
+            if let Some((_, _, _, r)) = self.handoff.take() {
+                let _ = r.send(Err("the tab was closed".into()));
+            }
+        }
         // Requests from a closed tab go unanswered by the user; let WebView2 refuse them.
         for (pid, _, _, _) in self.prompts.iter().filter(|p| p.1 == id) {
             engine::answer_permission(&self.ctx, *pid, None);
@@ -1743,6 +1768,7 @@ impl App {
             }
             Ev::Popup(id, parent) => {
                 let agent = self.idx(parent).is_some_and(|i| self.tabs[i].agent);
+                let (owner, owner_name) = self.idx(parent).map(|i| (self.tabs[i].owner.clone(), self.tabs[i].owner_name.clone())).unwrap_or_default();
                 let found = {
                     let mut p = self.ctx.popups.borrow_mut();
                     p.iter().position(|(pid, _)| *pid == id).map(|k| p.remove(k).1)
@@ -1750,7 +1776,12 @@ impl App {
                 if let Some(v) = found {
                     let mut t = Tab::new(id, String::new());
                     t.agent = agent;
+                    t.owner = owner;
+                    t.owner_name = owner_name;
                     t.popup = true;
+                    if agent {
+                        agentkit::watch(&v, id, &self.agent_logs);
+                    }
                     t.view = Some(v);
                     t.title = "Loading…".into();
                     let at = (self.active_idx() + 1).max(self.pinned_count()).min(self.tabs.len());
@@ -2086,7 +2117,16 @@ impl App {
                     engine::clear_passwords(v);
                 }
             }
+            "handoffDone" => {
+                if let Some((_, _, _, r)) = self.handoff.take() {
+                    let _ = r.send(Ok(Value::Null));
+                }
+                self.push();
+            }
             "agentStop" => {
+                if let Some((_, _, _, r)) = self.handoff.take() {
+                    let _ = r.send(Err("the person stopped the agents".into()));
+                }
                 // The kill switch: door shut, agent tabs gone.
                 let mut s = self.settings.clone();
                 s.agent = false;
@@ -2165,21 +2205,23 @@ impl App {
         }
     }
 
-    /// One primitive for an agent. Agent tabs only, unless the user shared their profile.
+    /// One primitive for an agent. An agent may use the tabs its session opened, and, if the
+    /// person shared their profile, the person's own tabs. Never another agent's.
     fn on_agent(&mut self, call: agent::Call) {
         use agent::Op;
         self.agent_seen = Some(Instant::now());
         self.push();
-        let reply = call.reply;
+        let (reply, who) = (call.reply, call.who);
         let shared = self.settings.agent_shared_profile;
-        let mine = |app: &App, tab: u64| app.idx(tab).filter(|&i| app.tabs[i].agent || shared);
+        let mine = |app: &App, tab: u64| app.idx(tab).filter(|&i| if app.tabs[i].agent { app.tabs[i].owner == who.session } else { shared });
+        let no_tab = |tab: u64| Err(format!("no tab {tab} you may use; browser_tabs lists yours"));
         match call.op {
             Op::List => {
                 let list: Vec<Value> = self
                     .tabs
                     .iter()
-                    .filter(|t| t.agent || shared)
-                    .map(|t| json!({"tab": t.id, "title": t.title, "url": t.url, "active": t.id == self.active}))
+                    .filter(|t| if t.agent { t.owner == who.session } else { shared })
+                    .map(|t| json!({"tab": t.id, "title": t.title, "url": t.url, "front": t.id == self.active, "yours": t.agent}))
                     .collect();
                 let _ = reply.send(Ok(Value::Array(list)));
             }
@@ -2191,6 +2233,8 @@ impl App {
                 let id = self.ctx.alloc_id();
                 let mut t = Tab::new(id, url);
                 t.agent = true;
+                t.owner = who.session.clone();
+                t.owner_name = who.name.clone();
                 self.tabs.push(t);
                 if activate {
                     self.activate(id);
@@ -2215,18 +2259,26 @@ impl App {
                     let _ = reply.send(Ok(Value::Null));
                 }
                 _ => {
-                    let _ = reply.send(Err(format!("no tab {tab} you may use")));
+                    let _ = reply.send(no_tab(tab));
                 }
             },
-            Op::Back { tab } => {
-                if let Some(v) = mine(self, tab).and_then(|i| self.tabs[i].view.as_ref()) {
-                    let _ = v.go_back();
-                }
+            op @ (Op::Back { .. } | Op::Forward { .. } | Op::Reload { .. }) => {
+                let (tab, js) = match op {
+                    Op::Back { tab } => (tab, "history.back()"),
+                    Op::Forward { tab } => (tab, "history.forward()"),
+                    Op::Reload { tab } => (tab, "location.reload()"),
+                    _ => return,
+                };
+                let Some(v) = mine(self, tab).and_then(|i| self.tabs[i].view.as_ref()) else {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                };
+                let _ = v.evaluate_script(js);
                 let _ = reply.send(Ok(Value::Null));
             }
             Op::Eval { tab, js } => {
                 let Some(i) = mine(self, tab) else {
-                    let _ = reply.send(Err(format!("no tab {tab} you may use")));
+                    let _ = reply.send(no_tab(tab));
                     return;
                 };
                 if self.tabs[i].view.is_none() {
@@ -2248,20 +2300,112 @@ impl App {
                     }
                 }
             }
-            Op::Shot { tab, png } => {
-                match mine(self, tab).and_then(|i| self.tabs[i].view.as_ref()) {
-                    Some(v) => engine::capture(v, png),
+            Op::Cdp { tab, method, params } => {
+                let Some(i) = mine(self, tab) else {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                };
+                if self.tabs[i].view.is_none() {
+                    self.ensure_view(i);
+                }
+                match &self.tabs[i].view {
+                    Some(v) => agentkit::cdp(v, &method, &params, move |r| {
+                        let _ = reply.send(r);
+                    }),
                     None => {
-                        let _ = png.send(Err(format!("no tab {tab} you may use")));
+                        let _ = reply.send(Err("tab has no page".into()));
                     }
+                }
+            }
+            Op::Log { tab, network, clear } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                let mut logs = self.agent_logs.borrow_mut();
+                let Some(log) = logs.get_mut(&tab) else {
+                    let _ = reply.send(Ok(json!([])));
+                    return;
+                };
+                let out = if network {
+                    json!(log.net.iter().map(|n| json!({"method": n.method, "url": n.url, "kind": n.kind, "status": n.status, "failed": n.failed})).collect::<Vec<_>>())
+                } else {
+                    json!(log.console.iter().collect::<Vec<_>>())
+                };
+                if clear {
+                    if network {
+                        log.net.clear();
+                    } else {
+                        log.console.clear();
+                    }
+                }
+                let _ = reply.send(Ok(out));
+            }
+            Op::Dialogs { tab, accept, text } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                let mut logs = self.agent_logs.borrow_mut();
+                let log = logs.entry(tab).or_default();
+                log.accept = accept;
+                log.prompt_text = text;
+                let _ = reply.send(Ok(Value::Null));
+            }
+            Op::Show { tab } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                self.activate(tab);
+                let _ = reply.send(Ok(Value::Null));
+            }
+            Op::Handoff { tab, message } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                // One at a time. A second agent asking waits its turn with an error it can retry.
+                if self.handoff.is_some() {
+                    let _ = reply.send(Err("the person is already helping another agent; try again in a minute".into()));
+                    return;
+                }
+                self.activate(tab);
+                self.handoff = Some((tab, who.name.clone(), message, reply));
+                self.push();
+            }
+            Op::Close { tab } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                self.close(tab);
+                let _ = reply.send(Ok(Value::Null));
+            }
+            Op::End => {
+                let ids: Vec<u64> = self.tabs.iter().filter(|t| t.agent && t.owner == who.session).map(|t| t.id).collect();
+                for id in ids {
+                    self.close(id);
                 }
                 let _ = reply.send(Ok(Value::Null));
             }
-            Op::Close { tab } => {
-                if mine(self, tab).is_some() {
-                    self.close(tab);
+            Op::Download { url, tab } => {
+                if !url.starts_with("http") {
+                    let _ = reply.send(Err("only http(s) URLs".into()));
+                    return;
                 }
+                let tab = tab.filter(|t| mine(self, *t).is_some()).unwrap_or(0);
+                let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
+                let _ = self.ctx.proxy.send_event(Ev::Handoff(tab, url, page, String::new()));
                 let _ = reply.send(Ok(Value::Null));
+            }
+            Op::Downloads => {
+                let list: Vec<Value> = self
+                    .downloads
+                    .iter()
+                    .map(|d| json!({"url": d.url, "path": d.path, "state": d.state, "size": d.received, "total": d.total, "note": d.note}))
+                    .collect();
+                let _ = reply.send(Ok(Value::Array(list)));
             }
         }
     }

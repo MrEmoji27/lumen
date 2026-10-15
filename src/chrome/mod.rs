@@ -92,6 +92,8 @@ pub struct UiState {
     pub agent_cmd: String,
     /// A site waiting for a permission answer: (request id, origin, what).
     pub prompt: Option<(u64, String, &'static str)>,
+    /// An agent waiting for the person: (agent name, message).
+    pub handoff: Option<(String, String)>,
     /// Remembered answers: (origin, what, allowed).
     pub rules: Vec<(String, String, bool)>,
     /// The active page is bookmarked.
@@ -142,6 +144,7 @@ pub enum Hit {
     DlFooter,
     AgentStop,
     PermAllow(u64),
+    HandoffDone,
     PermBlock(u64),
     Star,
     Sugg(usize),
@@ -983,6 +986,21 @@ impl Inner {
             }
         }
 
+        // An agent asking the person to take over: same place, accent card, one button.
+        if let Some((who, msg)) = s.handoff.as_ref().filter(|_| s.prompt.is_none()) {
+            let card = if compact { R::new(sb.x + 4.0, sb.h - 166.0, sb.w - 8.0, 122.0) } else { R::new(sb.x + 8.0, sb.h - 166.0, sb.w - 16.0, 122.0) };
+            self.gfx.round(R::new(card.x, card.y + 3.0, card.w, card.h), 10.0, th.shade.alpha(0.5));
+            self.gfx.round(card, 10.0, th.raise);
+            self.gfx.round_stroke(card, 10.0, th.accent, 1.0);
+            self.gfx.text(&format!("{who} needs you"), R::new(card.x + 12.0, card.y + 8.0, card.w - 24.0, 20.0), Font::ui(12.5, 600), th.accent);
+            self.gfx.text_wrap(msg, R::new(card.x + 12.0, card.y + 30.0, card.w - 24.0, 46.0), Font::ui(12.5, 400), th.text);
+            let done = R::new(card.x + 10.0, card.bottom() - 40.0, card.w - 20.0, 30.0);
+            let h = self.is_hover(&Hit::HandoffDone);
+            self.gfx.round(done, 8.0, if h { th.accent } else { th.accent.alpha(0.85) });
+            self.gfx.text("Done, hand it back", done, Font::ui(12.5, 600).align(Align::Center), th.bg);
+            self.hit(done, Hit::HandoffDone);
+        }
+
         // A site asking for something: a card above the footer. The page covers
         // everything else, so the sidebar is where the question lives.
         if let Some((pid, origin, kind)) = &s.prompt {
@@ -1334,6 +1352,7 @@ impl Inner {
             }
             Hit::AgentStop => send(p, json!({"t": "agentStop"})),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
+            Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => send(p, json!({"t": "bookmark"})),
             Hit::PermBlock(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": false})),
             Hit::Shortcut(i) => {

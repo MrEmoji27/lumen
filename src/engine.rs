@@ -11,7 +11,7 @@ use std::{
 
 use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
-    AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler, CapturePreviewCompletedHandler,
+    AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
     NavigationStartingEventHandler, PermissionRequestedEventHandler, StateChangedEventHandler,
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
@@ -942,49 +942,6 @@ pub fn clear_passwords(wv: &WebView) {
 }
 
 // ------------------------------------------------------------------ capture
-
-/// PNG of what a page shows, for the agent. Answers on `reply`.
-pub fn capture(wv: &WebView, reply: std::sync::mpsc::Sender<Result<Vec<u8>, String>>) {
-    use windows::Win32::{System::Com::STREAM_SEEK_SET, UI::Shell::SHCreateMemStream};
-    unsafe {
-        let Some(stream) = SHCreateMemStream(None) else {
-            let _ = reply.send(Err("no stream".into()));
-            return;
-        };
-        let s2 = stream.clone();
-        let r2 = reply.clone();
-        let res = wv.webview().CapturePreview(
-            COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
-            &stream,
-            &CapturePreviewCompletedHandler::create(Box::new(move |hr| {
-                if hr.is_err() {
-                    let _ = r2.send(Err("capture failed".into()));
-                    return Ok(());
-                }
-                let _ = s2.Seek(0, STREAM_SEEK_SET, None);
-                let _ = r2.send(Ok(read_stream_all(&s2)));
-                Ok(())
-            })),
-        );
-        if res.is_err() {
-            let _ = reply.send(Err("capture failed".into()));
-        }
-    }
-}
-
-fn read_stream_all(stream: &windows::Win32::System::Com::IStream) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let mut n = 0u32;
-        let hr = unsafe { stream.Read(buf.as_mut_ptr() as _, buf.len() as u32, Some(&mut n)) };
-        if hr.is_err() || n == 0 {
-            break;
-        }
-        out.extend_from_slice(&buf[..n as usize]);
-    }
-    out
-}
 
 // ------------------------------------------------------------ memory knobs
 

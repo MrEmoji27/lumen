@@ -432,6 +432,23 @@ impl Gfx {
         };
     }
 
+    /// Text that wraps onto as many lines as fit in r, from the top. Clipped at r's bottom.
+    pub fn text_wrap(&self, s: &str, r: R, f: Font, c: Color) {
+        let Some(fmt) = self.format(f) else { return };
+        let w = wide(s);
+        unsafe {
+            let Ok(layout) = self.dw.CreateTextLayout(&w, &fmt, r.w, r.h) else { return };
+            let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            self.t().DrawTextLayout(
+                windows_numerics::Vector2 { X: r.x, Y: r.y },
+                &layout,
+                self.b(c),
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+        }
+    }
+
     pub fn measure(&self, s: &str, f: Font) -> f32 {
         let Some(fmt) = self.format(f) else { return 0.0 };
         let w = wide(s);
