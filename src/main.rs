@@ -173,6 +173,9 @@ struct App {
     agent: agent::Agent,
     /// Last time an agent did something. Drives the "Agent working" chip.
     agent_seen: Option<Instant>,
+    /// Last time any agent asked for anything. A Lumen started headless for agents
+    /// leaves when they have been quiet a while.
+    agent_last: Instant,
     /// Modifier keys as the main window last saw them.
     mods: ModifiersState,
     /// Remembered permission answers, and requests waiting for the user.
@@ -205,6 +208,12 @@ struct App {
 /// `--headless` or LUMEN_HEADLESS=1.
 pub fn headless() -> bool {
     HEADLESS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How long a headless Lumen waits for agents before it leaves. LUMEN_AGENT_IDLE seconds, default 600.
+fn agent_idle() -> Duration {
+    static D: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *D.get_or_init(|| Duration::from_secs(std::env::var("LUMEN_AGENT_IDLE").ok().and_then(|v| v.parse().ok()).unwrap_or(600)))
 }
 
 static HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -371,6 +380,7 @@ fn main() {
         downloads: Vec::new(),
         agent: agent::Agent::new(&store::data_dir()),
         agent_seen: None,
+        agent_last: Instant::now(),
         mods: ModifiersState::empty(),
         rules: store::load_rules(),
         prompts: Vec::new(),
@@ -2222,6 +2232,12 @@ impl App {
     /// Every few seconds: trim, freeze and discard hidden tabs, read memory, save.
     fn tick(&mut self) {
         let now = Instant::now();
+        // Started headless for agents, never shown to a person, no agent tab left, quiet for
+        // ten minutes: nobody needs this Lumen. lumen-agent starts a new one when asked.
+        if headless() && self.handoff.is_none() && !self.tabs.iter().any(|t| t.agent) && now - self.agent_last > agent_idle() {
+            self.save_session();
+            std::process::exit(0);
+        }
         self.next_tick = now + TICK;
 
         let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
@@ -2285,6 +2301,7 @@ impl App {
     fn on_agent(&mut self, call: agent::Call) {
         use agent::Op;
         self.agent_seen = Some(Instant::now());
+        self.agent_last = Instant::now();
         self.push();
         let (reply, who) = (call.reply, call.who);
         let shared = self.settings.agent_shared_profile;

@@ -157,16 +157,32 @@ const HELP: &str = "lumen-agent: drive the Lumen browser from any AI agent.
 
 Lumen not running? It is started headless: off-screen, silent, out of your way.";
 
+/// Lumen is up right now (no starting it).
+fn running() -> Option<Door> {
+    let door = Door::find().ok()?;
+    matches!(door.post(&json!({"jsonrpc": "2.0", "id": 0, "method": "ping"}), ""), Ok((200, ..))).then_some(door)
+}
+
+/// What Lumen wrote about its tools the last time its agent door opened.
+fn card() -> Option<Value> {
+    std::fs::read_to_string(data_dir().join("agent_tools.json")).ok().and_then(|s| serde_json::from_str(&s).ok())
+}
+
 /// MCP over stdio: one JSON-RPC message per line in, one per line out.
+/// Lumen is started only when a tool is really called; until then the handshake and the
+/// tool list come from agent_tools.json, so opening an agent session costs nothing.
 fn stdio() -> ExitCode {
-    let door = match reach() {
-        Ok(d) => d,
-        Err(e) => {
-            // Still speak MCP, so the client shows the reason instead of a dead server.
-            return serve_error(&e);
+    let mut door = running();
+    let card = card();
+    if door.is_none() && card.is_none() {
+        // Never ran with the agent on: nothing to answer from. Start it now.
+        match reach() {
+            Ok(d) => door = Some(d),
+            Err(e) => return serve_error(&e),
         }
-    };
+    }
     let mut session = String::new();
+    let mut hello: Option<Value> = None;
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -175,6 +191,49 @@ fn stdio() -> ExitCode {
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+        let method = msg["method"].as_str().unwrap_or("");
+        if door.is_none() {
+            let id = msg.get("id").cloned();
+            let local = match (method, &card, id) {
+                ("initialize", Some(c), Some(id)) => {
+                    hello = Some(msg.clone());
+                    Some(json!({"jsonrpc": "2.0", "id": id, "result": {
+                        "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "lumen", "version": c["version"].as_str().unwrap_or("")},
+                        "instructions": c["instructions"]}}))
+                }
+                ("tools/list", Some(c), Some(id)) => Some(json!({"jsonrpc": "2.0", "id": id, "result": {"tools": c["tools"]}})),
+                ("ping", _, Some(id)) => Some(json!({"jsonrpc": "2.0", "id": id, "result": {}})),
+                (m, _, None) if m.starts_with("notifications/") => Some(Value::Null),
+                _ => None,
+            };
+            if let Some(reply) = local {
+                if !reply.is_null() && (writeln!(out, "{reply}").is_err() || out.flush().is_err()) {
+                    break;
+                }
+                continue;
+            }
+            // A real call: now Lumen is needed. Start it, and open the session properly.
+            match reach() {
+                Ok(d) => {
+                    if let Some(h) = &hello
+                        && let Ok((200, sid, _)) = d.post(h, "")
+                    {
+                        session = sid;
+                    }
+                    door = Some(d);
+                }
+                Err(e) => {
+                    let r = error_for(&msg, &e);
+                    if !r.is_empty() && (writeln!(out, "{r}").is_err() || out.flush().is_err()) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+        let Some(door) = door.as_ref() else { continue };
         let reply = match door.post(&msg, &session) {
             Ok((200, sid, body)) => {
                 if !sid.is_empty() {
@@ -194,8 +253,10 @@ fn stdio() -> ExitCode {
         }
     }
     // The client hung up: its tabs go too.
-    if !session.is_empty() {
-        door.end(&session);
+    if let Some(d) = door.as_ref()
+        && !session.is_empty()
+    {
+        d.end(&session);
     }
     ExitCode::SUCCESS
 }

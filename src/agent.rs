@@ -116,6 +116,12 @@ impl Agent {
     /// Turn the door on or off. The listener starts once and stays; off means it refuses.
     pub fn set(&mut self, on: bool, port: u32, proxy: &EventLoopProxy<Ev>) {
         self.on.store(on, Ordering::SeqCst);
+        if on {
+            // lumen-agent answers the MCP handshake from this file while Lumen is not running,
+            // so an agent's session can start without starting a browser.
+            let card = json!({"tools": tools(), "instructions": INSTRUCTIONS, "version": env!("CARGO_PKG_VERSION")});
+            let _ = std::fs::write(crate::store::data_dir().join("agent_tools.json"), card.to_string());
+        }
         if on && self.port.is_none() {
             self.port = Some(port);
             let shared = Arc::new(Shared {
