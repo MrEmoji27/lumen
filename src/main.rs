@@ -7,6 +7,7 @@
 mod aria;
 mod agent;
 mod agentkit;
+mod aloud;
 mod blocker;
 mod chrome;
 mod engine;
@@ -145,6 +146,14 @@ impl Tab {
     }
 }
 
+/// A reader-view article being read aloud: which tab, where each sentence
+/// starts and ends in the page's text, and whether the voice is running.
+struct Aloud {
+    tab: u64,
+    ranges: Vec<(usize, usize)>,
+    playing: bool,
+}
+
 struct App {
     ctx: Rc<Ctx>,
     chrome: chrome::Chrome,
@@ -243,6 +252,8 @@ struct App {
     /// "Clear history on exit" owed a WebView2 clear it could not make in time.
     /// Done at the next start, as soon as a page exists to ask.
     clear_pending: bool,
+    /// Read aloud: the reader-view tab being spoken, if any.
+    aloud: Option<Aloud>,
 }
 
 /// Headless: a real Lumen whose window lives off-screen, never takes focus, has no taskbar
@@ -451,6 +462,7 @@ fn main() {
         agent_logs: Default::default(),
         handoff: None,
         clear_pending: false,
+        aloud: None,
     };
     {
         // One small thread asks aria2 about its jobs. It sleeps on a condvar
@@ -1084,6 +1096,14 @@ impl App {
                 dl_unseen: self.dl_unseen,
                 agent_busy: self.agent_seen.is_some(),
                 bookmarked: self.active_tab().is_some_and(|t| !t.url.is_empty() && self.library.is_bookmarked(&t.url)),
+                listen: match self.tabs.iter().find(|t| t.id == self.active) {
+                    Some(t) if t.reader.is_some() && !t.agent => match &self.aloud {
+                        Some(a) if a.tab == t.id && a.playing => "playing",
+                        Some(a) if a.tab == t.id => "paused",
+                        _ => "ready",
+                    },
+                    _ => "",
+                },
                 history: if self.panel == Panel::History {
                     self.library
                         .recent("", 0, 400)
@@ -1194,6 +1214,10 @@ impl App {
 
     fn activate(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
+        // A voice follows the tab it was reading; leaving that tab stops it.
+        if self.aloud.as_ref().is_some_and(|a| a.tab != id) {
+            self.listen_stop();
+        }
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
         self.leave_panel();
@@ -1276,6 +1300,9 @@ impl App {
 
     fn close(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
+        if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
+            self.listen_stop();
+        }
         let t = self.tabs.remove(i);
         self.agent_logs.borrow_mut().remove(&id);
         if self.handoff.as_ref().is_some_and(|h| h.0 == id) {
@@ -1619,20 +1646,71 @@ impl App {
 
     /// Reader view on, or back to the page.
     fn toggle_reader(&mut self, i: usize) {
-        let t = &mut self.tabs[i];
-        let Some(v) = &t.view else { return };
-        if let Some(orig) = t.reader.take() {
-            let _ = v.load_url(&orig);
+        let id = self.tabs[i].id;
+        if let Some(orig) = self.tabs[i].reader.take() {
+            if let Some(v) = &self.tabs[i].view {
+                let _ = v.load_url(&orig);
+            }
+            // Out of reader view: the reading goes with it.
+            if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
+                self.listen_stop();
+            }
             self.push();
             return;
         }
-        if !t.url.starts_with("http") {
+        if !self.tabs[i].url.starts_with("http") {
             return;
         }
+        let t = &self.tabs[i];
+        let Some(v) = &t.view else { return };
         let (id, url, proxy) = (t.id, t.url.clone(), self.ctx.proxy.clone());
         let _ = v.evaluate_script_with_callback(&pagekit::extract_script(), move |out| {
             let _ = proxy.send_event(Ev::Reader(id, url.clone(), out));
         });
+    }
+
+    /// F7 or the chip: start, pause, or resume — whichever fits where it stands.
+    fn listen_toggle(&mut self) {
+        match self.aloud.as_mut() {
+            Some(a) if a.playing => {
+                aloud::pause();
+                a.playing = false;
+            }
+            Some(a) => {
+                aloud::resume();
+                a.playing = true;
+            }
+            None => self.listen_start(),
+        }
+        self.push();
+    }
+
+    /// Reading starts from the article on screen: split it into sentences in
+    /// the page, then hand the list to the speaker thread.
+    fn listen_start(&mut self) {
+        let i = self.active_idx();
+        let t = &self.tabs[i];
+        if t.reader.is_none() || t.agent {
+            return;
+        }
+        let Some(v) = &t.view else { return };
+        let (id, proxy) = (t.id, self.ctx.proxy.clone());
+        let _ = v.evaluate_script_with_callback(&aloud::prep_script(), move |out| {
+            let _ = proxy.send_event(Ev::AloudPrep(id, out));
+        });
+    }
+
+    /// Stop speaking and wipe the highlight. Called on tab switch, navigation,
+    /// reader exit, close — anywhere the page under the voice is going away.
+    fn listen_stop(&mut self) {
+        let Some(a) = self.aloud.take() else { return };
+        aloud::stop();
+        if let Some(i) = self.idx(a.tab)
+            && let Some(v) = &self.tabs[i].view
+        {
+            let _ = v.evaluate_script(&aloud::highlight_script(None));
+        }
+        self.push();
     }
 
     fn show_reader(&mut self, id: u64, url: &str, out: &str) {
@@ -1961,6 +2039,11 @@ impl App {
                             return;
                         }
                         self.tabs[i].reader = None;
+                        // The reader page is gone; so is the reading.
+                        let id = self.tabs[i].id;
+                        if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
+                            self.listen_stop();
+                        }
                     }
                     // SponsorBlock: on a YouTube watch page, fetch segments and
                     // inject the skip script. One background fetch per video load.
@@ -2437,6 +2520,51 @@ impl App {
                     }
                 }
             }
+            Ev::AloudPrep(id, out) => {
+                let Ok(rows) = serde_json::from_str::<Vec<(usize, usize, String)>>(&out) else { return };
+                if rows.is_empty() {
+                    return;
+                }
+                let ranges: Vec<(usize, usize)> = rows.iter().map(|r| (r.0, r.1)).collect();
+                let texts: Vec<String> = rows.into_iter().map(|r| r.2).collect();
+                let (tab, proxy) = (id, self.ctx.proxy.clone());
+                let back = proxy.clone();
+                let ok = aloud::speak(
+                    texts,
+                    move |n| {
+                        let _ = proxy.send_event(Ev::AloudLine(tab, n));
+                    },
+                    move || {
+                        let _ = back.send_event(Ev::AloudLine(tab, usize::MAX));
+                    },
+                );
+                if ok {
+                    self.aloud = Some(Aloud {
+                        tab,
+                        ranges,
+                        playing: true,
+                    });
+                    self.push();
+                }
+            }
+            Ev::AloudLine(tab, n) => {
+                if !self.aloud.as_ref().is_some_and(|a| a.tab == tab) {
+                    return;
+                }
+                let Some(i) = self.idx(tab) else { return };
+                if n == usize::MAX {
+                    // Spoken through: no state left, no highlight left.
+                    self.aloud = None;
+                    if let Some(v) = &self.tabs[i].view {
+                        let _ = v.evaluate_script(&aloud::highlight_script(None));
+                    }
+                } else if self.aloud.as_ref().is_some_and(|a| a.ranges.get(n).is_some())
+                    && let Some(v) = &self.tabs[i].view
+                {
+                    let _ = v.evaluate_script(&aloud::highlight_script(Some(n)));
+                }
+                self.push();
+            }
             Ev::Video(id, up) => self.on_video(id, up),
             Ev::ShowMe => self.show_me(),
             Ev::Orphan(id) => {
@@ -2586,6 +2714,7 @@ impl App {
                 None => {}
             },
             Action::Reader => self.toggle_reader(i),
+            Action::Listen => self.listen_toggle(),
             Action::DarkSite => self.toggle_dark_site(i),
         }
     }
@@ -2891,6 +3020,8 @@ impl App {
                 }
             }
             "bookmark" => self.toggle_bookmark(),
+            "listen" => self.listen_toggle(),
+            "listenStop" => self.listen_stop(),
             "unbookmark" => {
                 self.library.unbookmark(m["url"].as_str().unwrap_or(""));
                 // Written now, not on a later tick: a bookmark is worth a write.

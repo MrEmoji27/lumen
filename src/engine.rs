@@ -91,6 +91,10 @@ pub enum Ev {
     Reader(u64, String, String),
     /// SponsorBlock init script for this tab: (tab id, script).
     SponsorBlock(u64, String),
+    /// Read aloud: the article's sentences came back: (tab, JSON [[a,b,"text"],..]).
+    AloudPrep(u64, String),
+    /// Read aloud: (tab, sentence index; usize::MAX means "spoken through").
+    AloudLine(u64, usize),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
     /// aria2 took a download; `Added` says how it was started.
@@ -163,6 +167,7 @@ pub enum Action {
     Bookmarks,
     DevTools,
     Reader,
+    Listen,
     DarkSite,
 }
 
@@ -621,6 +626,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
     const RIGHT: u32 = 0x27;
     const F5: u32 = 0x74;
     const F6: u32 = 0x75;
+    const F7: u32 = 0x76;
     const F9: u32 = 0x78;
     const F11: u32 = 0x7A;
     const F12: u32 = 0x7B;
@@ -647,6 +653,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, false, false, COMMA) => Settings,
         (false, false, false, F12) => DevTools,
         (false, false, false, F9) => Reader,
+        (false, false, false, F7) => Listen,
         (false, true, false, F9) => DarkSite,
         (false, true, false, ESC) => Control,
         (true, false, false, v) if v == k('J') => Downloads,

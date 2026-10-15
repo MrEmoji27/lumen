@@ -95,7 +95,7 @@ const ENGINES: [(&str, &str); 5] = [
     ("Bing", "https://www.bing.com/search?q=%s"),
     ("Startpage", "https://www.startpage.com/do/search?q=%s"),
 ];
-const KEYS: [(&str, &str); 20] = [
+const KEYS: [(&str, &str); 21] = [
     ("New tab", "Ctrl+T"),
     ("New private tab", "Ctrl+Shift+N"),
     ("Reopen closed tab", "Ctrl+Shift+T"),
@@ -114,6 +114,7 @@ const KEYS: [(&str, &str); 20] = [
     ("History / bookmarks", "Ctrl+H / Ctrl+Shift+O"),
     ("Downloads", "Ctrl+J"),
     ("Reader view", "F9"),
+    ("Read aloud in reader view", "F7"),
     ("Darken this site / keep its colors", "Shift+F9"),
     ("Developer tools", "F12"),
 ];

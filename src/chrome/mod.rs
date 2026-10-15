@@ -107,6 +107,8 @@ pub struct UiState {
     pub rules: Vec<(String, String, bool)>,
     /// The active page is bookmarked.
     pub bookmarked: bool,
+    /// Read aloud in reader view: "" | "ready" | "playing" | "paused".
+    pub listen: &'static str,
     /// Filled only while the History page is open.
     pub history: Vec<UiVisit>,
     /// Filled only while the Bookmarks page is open: (url, title).
@@ -158,6 +160,8 @@ pub enum Hit {
     HandoffDone,
     PermBlock(u64),
     Star,
+    Listen,
+    ListenStop,
     Sugg(usize),
     Shortcut(usize),
     NtpSearch,
@@ -886,8 +890,34 @@ impl Inner {
             self.hit(r, Hit::Star);
         }
 
+        // Read aloud in reader view: one chip under the address bar. The tab
+        // list steps down so the chip has a row of its own.
+        let chip = !compact && !s.listen.is_empty();
+        if chip {
+            let label = match s.listen {
+                "playing" => "Pause",
+                "paused" => "Resume",
+                _ => "Listen",
+            };
+            let w = (self.gfx.measure(label, Font::ui(12.5, 600)) + 44.0).min(sb.w - 16.0);
+            let r = R::new(sb.x + 8.0, 84.0, w, 28.0);
+            let hov = self.is_hover(&Hit::Listen);
+            self.gfx.round(r, 8.0, if hov { th.hover } else { th.raise });
+            self.gfx.icon(if s.listen == "playing" { "pause" } else { "play" }, r.x + 10.0, r.y + 6.0, 16.0, th.accent);
+            self.gfx.text(label, R::new(r.x + 32.0, r.y, r.w - 34.0, r.h), Font::ui(12.5, 600), th.text);
+            self.hit(r, Hit::Listen);
+            if s.listen != "ready" {
+                let sw = self.gfx.measure("Stop", Font::ui(12.5, 600)) + 20.0;
+                let sr = R::new(r.right() + 6.0, 84.0, sw, 28.0);
+                let hovs = self.is_hover(&Hit::ListenStop);
+                self.gfx.round(sr, 8.0, if hovs { th.hover } else { th.raise });
+                self.gfx.text("Stop", sr, Font::ui(12.5, 600).align(Align::Center), th.dim);
+                self.hit(sr, Hit::ListenStop);
+            }
+        }
+
         // Tabs.
-        let list_top = if compact { 148.0 } else { 90.0 };
+        let list_top = if compact { 148.0 } else if chip { 122.0 } else { 90.0 };
         let list = R::new(sb.x, list_top, sb.w, sb.h - list_top - 40.0);
         self.gfx.clip(list);
         let mut y = list.y - self.scroll;
@@ -1405,6 +1435,8 @@ impl Inner {
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => send(p, json!({"t": "bookmark"})),
+            Hit::Listen => send(p, json!({"t": "listen"})),
+            Hit::ListenStop => send(p, json!({"t": "listenStop"})),
             Hit::PermBlock(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": false})),
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {
