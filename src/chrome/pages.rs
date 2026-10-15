@@ -583,11 +583,18 @@ fn eta(d: &super::UiDl) -> String {
 }
 
 /// "3 active · 4.2 MB/s down · 310 KB/s up"; empty when nothing is running.
-fn summary(active: usize, down: i64, up: i64) -> String {
+/// While torrents run, appends " · port open" or " · port closed".
+fn summary(active: usize, down: i64, up: i64, upnp_port_open: bool) -> String {
     if active == 0 {
         return String::new();
     }
-    format!("{active} active · {}/s down · {}/s up", fmt_bytes(down), fmt_bytes(up))
+    let mut s = format!("{active} active · {}/s down · {}/s up", fmt_bytes(down), fmt_bytes(up));
+    if upnp_port_open {
+        s.push_str(" · port open");
+    } else {
+        s.push_str(" · port closed");
+    }
+    s
 }
 
 /// The group a row falls in; the page draws them in this order, empty ones hidden.
@@ -750,7 +757,7 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
         let active: Vec<&UiDl> = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused")).collect();
         let down: i64 = active.iter().map(|d| d.speed as i64).sum();
         let up: i64 = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused" | "seeding")).map(|d| d.up as i64).sum();
-        let t = summary(active.len(), down, up);
+        let t = summary(active.len(), down, up, s.upnp_port_open);
         if !t.is_empty() {
             i.gfx.text(&t, R::new(col.x, y, col.w - 160.0, 22.0), Font::ui(12.5, 400), th.faint);
         }
@@ -1325,9 +1332,10 @@ mod tests {
     /// The summary line, exactly as the brief spells it.
     #[test]
     fn summary_counts_and_speeds() {
-        assert_eq!(summary(3, 4_404_019, 317_440), "3 active · 4.2 MB/s down · 310 KB/s up");
+        assert_eq!(summary(3, 4_404_019, 317_440, true), "3 active · 4.2 MB/s down · 310 KB/s up · port open");
+        assert_eq!(summary(3, 4_404_019, 317_440, false), "3 active · 4.2 MB/s down · 310 KB/s up · port closed");
         // Nothing running: no line at all.
-        assert_eq!(summary(0, 0, 0), "");
+        assert_eq!(summary(0, 0, 0, true), "");
     }
 
     /// Every state lands in a group; the page draws them in a fixed order.

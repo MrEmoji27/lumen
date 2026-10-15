@@ -121,6 +121,8 @@ pub struct UiState {
     pub bookmarks: Vec<(String, String)>,
     /// A download ended while the page was closed: a small dot on the footer button.
     pub dl_unseen: bool,
+    /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
+    pub upnp_port_open: bool,
 }
 
 #[derive(Clone, Debug)]

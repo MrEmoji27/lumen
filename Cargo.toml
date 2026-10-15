@@ -17,6 +17,8 @@ adblock = "0.13"
 base64 = "0.23"
 dirs = "7.0.0"
 flate2 = "1.1"
+# UPnP IGD: open the torrent port on the router. Sync API, no TLS needed (attohttpc).
+igd-next = { version = "0.18", features = ["io_sync"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10"

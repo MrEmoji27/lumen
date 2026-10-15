@@ -18,6 +18,7 @@ mod recall;
 mod servo_engine;
 mod split;
 mod translate;
+mod upnp;
 mod video;
 mod store;
 mod trackers;
@@ -248,6 +249,8 @@ struct App {
     aria_adopted: bool,
     /// The aria2 poll thread. Asleep until a download gives it work.
     aria_poll: std::sync::Arc<aria::Poll>,
+    /// UPnP port mapping for the torrent port.
+    upnp: upnp::Upnp,
     /// Page text for searching history by content.
     recall: recall::Recall,
     /// Console, network and dialog records of agent tabs.
@@ -363,7 +366,7 @@ fn main() {
     install_panic_hook();
     // Before WebView2 starts: its processes must be born inside the job.
     let job = monitor::Job::adopt_self();
-    let settings = store::load_settings();
+    let mut settings = store::load_settings();
     let session = store::load_session();
 
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
@@ -442,10 +445,14 @@ fn main() {
     // The split divider: a strip of its own between the two panes.
     let divider = split::Divider::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
 
-    let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
+let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     // Read before the struct literal moves `settings` into the app.
     let keep_seeding = settings.keep_seeding;
     let dl_limit = settings.download_limit_kbps;
+    // Ensure the torrent port is chosen (picks once, saves, returns it).
+    let bt_port = settings.ensure_bt_port();
+    // Start UPnP mapping for the torrent port if enabled.
+    let upnp = upnp::Upnp::start(bt_port, settings.upnp);
     let mut app = App {
         ctx,
         chrome,
@@ -491,10 +498,15 @@ fn main() {
         rules: store::load_rules(),
         prompts: Vec::new(),
         library: library::Library::load(&store::data_dir()),
-        aria: aria::Aria::start(&store::data_dir(), &store::download_dir(), keep_seeding, dl_limit),
+        aria: aria::Aria::start(&store::data_dir(), &store::download_dir(), keep_seeding, dl_limit, bt_port),
         aria_ids: HashMap::new(),
         aria_adopted: false,
         aria_poll: aria::Poll::new(),
+        upnp,
+        recall: recall::Recall::start(&store::data_dir()),
+        agent_logs: Default::default(),
+        handoff: None,
+        aria_meta: HashMap::new(),
         aria_person: HashSet::new(),
         aria_page: HashSet::new(),
         aria_hold: HashMap::new(),
@@ -505,7 +517,6 @@ fn main() {
         tr_pair: None,
         tr_texts: None,
         videos: HashMap::new(),
-        aria_meta: HashMap::new(),
         dl_seq: 0,
         dl_dirty: false,
         dl_unseen: false,
@@ -513,9 +524,6 @@ fn main() {
         test_pending: false,
         test_dl: None,
         test_translate: false,
-        recall: recall::Recall::start(&store::data_dir()),
-        agent_logs: Default::default(),
-        handoff: None,
         clear_pending: false,
     };
     {
@@ -651,6 +659,7 @@ fn main() {
             app.library.flush();
             app.clear_on_exit();
             app.save_session();
+            app.upnp.release();
             *cf = ControlFlow::Exit;
         } else {
             *cf = ControlFlow::WaitUntil(app.next_wake(Instant::now()));
@@ -1291,6 +1300,7 @@ impl App {
                     })
                     .collect(),
                 dl_unseen: self.dl_unseen,
+                upnp_port_open: self.upnp.is_mapped(),
                 agent_busy: self.agent_seen.is_some(),
                 bookmarked: self.active_tab().is_some_and(|t| !t.url.is_empty() && self.library.is_bookmarked(&t.url)),
                 history: if self.panel == Panel::History {
@@ -2746,6 +2756,7 @@ impl App {
                     }
                 }
                 let mut busy = busy_pending;
+                let mut torrent_active = false;
                 for j in jobs {
                     let Some(&id) = self.aria_ids.get(&j.gid) else { continue };
                     // A person-started torrent pause-metadata stopped once its
@@ -2798,6 +2809,7 @@ impl App {
                         j.path.rsplit(['\\', '/']).next().unwrap_or("").to_string()
                     };
                     let ratio = if j.done > 0 { j.upload_length as f64 / j.done as f64 } else { 0.0 };
+                    let kind = if j.name.is_empty() { "file" } else { "torrent" };
                     let d = engine::Dl {
                         id,
                         url: j.url,
@@ -2809,17 +2821,25 @@ impl App {
                         note,
                         private,
                         name,
-                        kind: if j.name.is_empty() { "file" } else { "torrent" },
+                        kind,
                         up: j.upload_speed,
                         peers: j.connections as u64,
                         seeds: j.num_seeders,
                         ratio,
                         files: j.files.max(1),
                     };
+                    if kind == "torrent" && matches!(state, "progress" | "seeding") {
+                        torrent_active = true;
+                    }
                     match self.downloads.iter_mut().find(|x| x.id == id) {
                         Some(x) => *x = d,
                         None => self.downloads.insert(0, d),
                     }
+                }
+                if torrent_active {
+                    self.upnp.torrent_active();
+                } else {
+                    self.upnp.torrent_idle();
                 }
                 if !busy && !self.downloads.iter().any(|d| d.state == "paused" && d.id >= 1 << 40) {
                     self.aria_poll.store(false);
@@ -3718,6 +3738,7 @@ impl App {
             self.library.flush();
             self.clear_on_exit();
             self.save_session();
+            self.upnp.release();
             std::process::exit(0);
         }
         self.next_tick = now + TICK;

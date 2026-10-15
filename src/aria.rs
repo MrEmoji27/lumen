@@ -98,8 +98,6 @@ const FLAGS: &[&str] = &[
     "--enable-dht=true",
     "--bt-enable-lpd=true",
     // These two ports belong to the upnp worker. It rewrites them; we do not.
-    "--listen-port=6881-6999",
-    "--dht-listen-port=6881-6999",
     "--follow-torrent=true",
     "--bt-save-metadata=true",
     // A torrent a PAGE starts must never join the swarm on its own: born
@@ -236,7 +234,13 @@ impl Drop for Engine {
 impl Aria {
     /// Returns at once. The binary is fetched, checked and started on a
     /// background thread; `ready()` is false until that is done.
-    pub fn start(data_dir: &Path, download_dir: &Path, keep_seeding: bool, limit_kbps: u32) -> Arc<Aria> {
+    pub fn start(
+        data_dir: &Path,
+        download_dir: &Path,
+        keep_seeding: bool,
+        limit_kbps: u32,
+        bt_port: u16,
+    ) -> Arc<Aria> {
         let aria = Arc::new(Aria {
             engine: Mutex::new(None),
             urls: Mutex::new(HashMap::new()),
@@ -249,7 +253,7 @@ impl Aria {
         let _ = thread::Builder::new()
             .name("lumen-aria".into())
             .spawn(move || {
-                let Some(engine) = Engine::boot(&data, &dl, keep_seeding) else { return };
+                let Some(engine) = Engine::boot(&data, &dl, keep_seeding, bt_port) else { return };
                 // Lumen may have died while we were downloading. Let the
                 // engine drop and the aria2 process dies with it.
                 if let Some(aria) = weak.upgrade() {
@@ -411,7 +415,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Engine {
     /// Put a verified aria2c.exe on disk, run it, and wait for its port to
     /// answer. None means Lumen downloads files itself.
-    fn boot(data_dir: &Path, download_dir: &Path, keep_seeding: bool) -> Option<Engine> {
+    fn boot(data_dir: &Path, download_dir: &Path, keep_seeding: bool, bt_port: u16) -> Option<Engine> {
         let dir = data_dir.join("aria2");
         fs::create_dir_all(&dir).ok()?;
         fs::create_dir_all(download_dir).ok()?;
@@ -430,6 +434,16 @@ impl Engine {
             &format!("--dir={}", download_dir.display()),
             &format!("--save-session={}", session.display()),
             &format!("--dht-file-path={}", dir.join("dht.dat").display()),
+            "--bt-enable-lpd=true",
+            &format!("--listen-port={bt_port}"),
+            &format!("--dht-listen-port={bt_port}"),
+            "--follow-torrent=true",
+            "--bt-save-metadata=true",
+            // A torrent a PAGE starts must never join the swarm on its own:
+            // born paused, waiting for the person to press Resume. Person-started
+            // torrents are resumed by the main loop once their metadata is in.
+            "--pause-metadata=true",
+            "--seed-ratio=1.0",
         ]);
         // Stop seeding after an hour, or immediately when the user said no to sharing.
         cmd.arg(if keep_seeding { "--seed-time=60" } else { "--seed-time=0" });
@@ -969,9 +983,6 @@ mod tests {
             "--bt-tracker-timeout=10",
             "--max-connection-per-server=16",
             "--split=16",
-            // The upnp worker's two lines, still here, still untouched.
-            "--listen-port=6881-6999",
-            "--dht-listen-port=6881-6999",
         ] {
             assert!(FLAGS.contains(&want), "{want} is missing from the aria2 flag list");
         }
@@ -1120,7 +1131,7 @@ mod live {
     #[ignore = "downloads aria2 and a file off the internet"]
     fn it_downloads_a_file_through_aria2() {
         let dir = case("live");
-        let aria = Aria::start(&dir, &dir.join("downloads"), true, 0);
+        let aria = Aria::start(&dir, &dir.join("downloads"), true, 0, 6881);
         for _ in 0..300 {
             if aria.ready() {
                 break;
@@ -1167,7 +1178,7 @@ mod live {
     #[ignore = "downloads aria2 and a tracker list off the internet"]
     fn a_fresh_tracker_list_reaches_a_running_aria2() {
         let dir = case("push");
-        let aria = Aria::start(&dir, &dir.join("downloads"), true, 0);
+        let aria = Aria::start(&dir, &dir.join("downloads"), true, 0, 6881);
         for _ in 0..300 {
             if aria.ready() {
                 break;
