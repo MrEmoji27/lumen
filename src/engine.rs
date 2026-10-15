@@ -204,6 +204,11 @@ fn page_bg(dark: bool) -> (u8, u8, u8, u8) {
 pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
     // wry's own defaults. Passing args replaces them, so keep them.
     let mut a = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
+    if crate::headless() {
+        // Off-screen is "occluded" to Chromium, which would then stop painting and slow timers.
+        // One --disable-features only: Chromium keeps the last one it sees.
+        a.push_str(",CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --mute-audio");
+    }
     if gpu_in_process {
         // Measured: about 100 MB less commit, 55 MB less working set, one process fewer.
         // Cost: a GPU driver crash takes the browser down with it.

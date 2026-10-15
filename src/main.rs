@@ -190,6 +190,30 @@ struct App {
     videos: HashMap<u64, (String, String, video::Slot)>,
 }
 
+/// Headless: a real Lumen whose window lives off-screen, never takes focus, has no taskbar
+/// button and makes no sound. For tests and for agents working while someone uses the PC.
+/// `--headless` or LUMEN_HEADLESS=1.
+pub fn headless() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LUMEN_HEADLESS").is_some_and(|v| v != "0") || std::env::args().any(|a| a == "--headless"))
+}
+
+/// Show the main window: normally, or, headless, out of sight and without stealing focus.
+fn show_window(w: &tao::window::Window) {
+    if !headless() {
+        w.set_visible(true);
+        return;
+    }
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_BOTTOM, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowPos, ShowWindow};
+    let h = HWND(w.hwnd() as _);
+    unsafe {
+        // Show first: showing puts a window back at its last place. Then move it out of sight.
+        // (-32000 means "minimized" to Windows, so not that.)
+        let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+        let _ = SetWindowPos(h, Some(HWND_BOTTOM), -10000, -10000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+    }
+}
+
 fn main() {
     // Before WebView2 starts: its processes must be born inside the job.
     let job = monitor::Job::adopt_self();
@@ -213,6 +237,7 @@ fn main() {
         .with_background_color((0, 0, 0, 255))
         .with_undecorated_shadow(true)
         .with_visible(false)
+        .with_skip_taskbar(headless())
         .with_inner_size(LogicalSize::new(w, h))
         .with_min_inner_size(LogicalSize::new(720.0, 480.0))
         .with_maximized(session.maximized)
@@ -323,9 +348,11 @@ fn main() {
     app.restore(session);
     app.flush();
     app.shown = true;
-    app.ctx.window.set_visible(true);
+    show_window(&app.ctx.window);
     app.layout();
-    app.focus_page();
+    if !headless() {
+        app.focus_page();
+    }
 
     event_loop.run(move |event, _, cf| {
         match event {
@@ -700,6 +727,10 @@ impl App {
     }
 
     fn focus_page(&self) {
+        // Headless never takes keyboard focus from whatever the person is doing.
+        if headless() {
+            return;
+        }
         match self.active_tab().and_then(|t| t.view.as_ref()) {
             Some(v) if self.panel == Panel::None => {
                 let _ = v.focus();
@@ -1825,9 +1856,11 @@ impl App {
                 self.push();
                 if !self.shown {
                     self.shown = true;
-                    self.ctx.window.set_visible(true);
+                    show_window(&self.ctx.window);
                     self.layout();
-                    self.focus_page();
+                    if !headless() {
+                        self.focus_page();
+                    }
                 }
             }
             "nav" => self.navigate(m["url"].as_str().unwrap_or("")),
@@ -2121,7 +2154,7 @@ impl App {
         // The UI never said ready. Show the window anyway so the user is not stuck.
         if !self.shown && now - self.born > Duration::from_secs(3) {
             self.shown = true;
-            self.ctx.window.set_visible(true);
+            show_window(&self.ctx.window);
         }
 
         if self.dirty {
