@@ -203,6 +203,8 @@ struct App {
     /// aria2 and its jobs: gid -> download id in the list.
     aria: std::sync::Arc<aria::Aria>,
     aria_ids: HashMap<String, u64>,
+    /// Session-restored jobs have been put in the list once.
+    aria_adopted: bool,
     /// The aria2 poll thread. Asleep until a download gives it work.
     aria_poll: std::sync::Arc<aria::Poll>,
     /// Page text for searching history by content.
@@ -217,6 +219,15 @@ struct App {
     dl_seq: u64,
     /// Finished downloads changed; write downloads.json on the next tick.
     dl_dirty: bool,
+    /// A download finished or started seeding while the Downloads page was closed.
+    /// Drives the dot on the footer button until the page is opened.
+    dl_unseen: bool,
+    /// Debug test hook: LUMEN_TEST_MAGNET adds one magnet on the first aria2 tick.
+    test_magnet: bool,
+    /// The test magnet is on its way to aria2; its gid arrives in AriaAdded.
+    test_pending: bool,
+    /// Debug test hook: (gid, when to cancel it). LUMEN_TEST_CANCEL seconds, default 60.
+    test_dl: Option<(String, Instant)>,
     /// Video grabs: download id -> (page url, user agent, running yt-dlp).
     videos: HashMap<u64, (String, String, video::Slot)>,
     /// "Clear history on exit" owed a WebView2 clear it could not make in time.
@@ -368,6 +379,9 @@ fn main() {
     let chrome = chrome::Chrome::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
 
     let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
+    // Read before the struct literal moves `settings` into the app.
+    let keep_seeding = settings.keep_seeding;
+    let dl_limit = settings.download_limit_kbps;
     let mut app = App {
         ctx,
         chrome,
@@ -408,13 +422,18 @@ fn main() {
         rules: store::load_rules(),
         prompts: Vec::new(),
         library: library::Library::load(&store::data_dir()),
-        aria: aria::Aria::start(&store::data_dir(), &dirs::download_dir().unwrap_or_else(store::data_dir)),
+        aria: aria::Aria::start(&store::data_dir(), &store::download_dir(), keep_seeding, dl_limit),
         aria_ids: HashMap::new(),
+        aria_adopted: false,
         aria_poll: aria::Poll::new(),
         videos: HashMap::new(),
         aria_meta: HashMap::new(),
         dl_seq: 0,
         dl_dirty: false,
+        dl_unseen: false,
+        test_magnet: false,
+        test_pending: false,
+        test_dl: None,
         recall: recall::Recall::start(&store::data_dir()),
         agent_logs: Default::default(),
         handoff: None,
@@ -462,6 +481,11 @@ fn main() {
             app.tabs[i].url = "https://private.example/".into();
             app.ensure_view(i);
         }
+    }
+    // Test hook: LUMEN_TEST_MAGNET=1 adds one public-domain torrent magnet on the
+    // first aria2 tick, then cancels it after LUMEN_TEST_CANCEL seconds (default 60).
+    if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_MAGNET").is_some() {
+        app.test_magnet = true;
     }
 
     event_loop.run(move |event, _, cf| {
@@ -665,7 +689,7 @@ fn resolve_input(raw: &str, search: &str) -> Option<String> {
         return Some(u);
     }
     let lower = s.to_ascii_lowercase();
-    const SCHEMES: [&str; 7] = ["http://", "https://", "file:", "about:", "data:", "view-source:", "edge://"];
+    const SCHEMES: [&str; 8] = ["http://", "https://", "file:", "about:", "data:", "view-source:", "edge://", "magnet:"];
     if SCHEMES.iter().any(|p| lower.starts_with(p)) {
         return Some(s.to_string());
     }
@@ -697,6 +721,49 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The `dn=` display name out of a magnet link, percent-decoded. Empty when absent.
+fn magnet_name(url: &str) -> String {
+    let Some(q) = url.split_once("?").map(|(_, q)| q) else { return String::new() };
+    for kv in q.split('&') {
+        if let Some(v) = kv.strip_prefix("dn=") {
+            return percent_decode(v);
+        }
+    }
+    String::new()
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let h = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match h.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Events that fire in a stream (download progress, aria2 polls) would drown the
@@ -964,15 +1031,25 @@ impl App {
                     .iter()
                     .map(|d| chrome::UiDl {
                         id: d.id,
-                        name: d.path.rsplit(['\\', '/']).next().unwrap_or(&d.path).to_string(),
+                        name: if !d.name.is_empty() {
+                            d.name.clone()
+                        } else {
+                            d.path.rsplit(['\\', '/']).next().unwrap_or(&d.path).to_string()
+                        },
                         url: d.url.clone(),
                         received: d.received,
                         total: d.total,
                         state: d.state,
                         speed: d.speed,
                         note: d.note.clone(),
+                        kind: d.kind,
+                        up: d.up,
+                        peers: d.peers,
+                        seeds: d.seeds,
+                        ratio: d.ratio,
                     })
                     .collect(),
+                dl_unseen: self.dl_unseen,
                 agent_busy: self.agent_seen.is_some(),
                 bookmarked: self.active_tab().is_some_and(|t| !t.url.is_empty() && self.library.is_bookmarked(&t.url)),
                 history: if self.panel == Panel::History {
@@ -1259,6 +1336,7 @@ impl App {
         for s in store::load_downloads().into_iter().take(100) {
             let id = self.next_dl(3);
             let state = if s.state == "done" { "done" } else { "failed" };
+            let name = s.path.rsplit(['\\', '/']).next().unwrap_or(&s.path).to_string();
             self.downloads.push(engine::Dl {
                 id,
                 url: s.url,
@@ -1269,6 +1347,13 @@ impl App {
                 speed: 0,
                 note: s.note,
                 private: false,
+                name,
+                kind: "file",
+                up: 0,
+                peers: 0,
+                seeds: 0,
+                ratio: 0.0,
+                files: 1,
             });
         }
     }
@@ -1340,6 +1425,22 @@ impl App {
         });
     }
 
+    /// A magnet link goes straight to aria2. The display name comes from `dn=`
+    /// until the torrent metadata arrives with the real one.
+    fn add_magnet(&mut self, url: &str, private: bool) {
+        let name = magnet_name(url);
+        let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
+        let u = url.to_string();
+        let headers: Vec<String> = Vec::new();
+        std::thread::spawn(move || {
+            let _ = match aria.add(&u, &headers, None) {
+                Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u, headers, Some(name), private)),
+                Err(_) => proxy.send_event(Ev::AriaFailed(0, u)),
+            };
+        });
+        self.aria_poll.store(true);
+    }
+
     // ---------------------------------------------------------- video
 
     /// Save the video on this tab's page (yt-dlp), into Downloads.
@@ -1365,6 +1466,13 @@ impl App {
                 speed: 0,
                 note: "starting".into(),
                 private,
+                name: format!("{title}.mp4"),
+                kind: "video",
+                up: 0,
+                peers: 0,
+                seeds: 0,
+                ratio: 0.0,
+                files: 1,
             },
         );
         self.videos.insert(id, (url, ua, Default::default()));
@@ -1375,7 +1483,7 @@ impl App {
     fn run_video(&self, id: u64) {
         let Some((url, ua, slot)) = self.videos.get(&id).cloned() else { return };
         let tools = store::data_dir().join("tools");
-        let out = dirs::download_dir().unwrap_or_else(store::data_dir);
+        let out = store::download_dir();
         let proxy = self.ctx.proxy.clone();
         std::thread::Builder::new()
             .name("lumen-video".into())
@@ -1406,6 +1514,9 @@ impl App {
             }
             video::Up::Done(f) => {
                 self.dl_dirty = true;
+                if self.panel != Panel::Downloads {
+                    self.dl_unseen = true;
+                }
                 d.path = f;
                 d.state = "done";
                 d.speed = 0;
@@ -1414,6 +1525,9 @@ impl App {
             }
             video::Up::Failed(e) => {
                 self.dl_dirty = true;
+                if self.panel != Panel::Downloads {
+                    self.dl_unseen = true;
+                }
                 d.state = "failed";
                 d.speed = 0;
                 d.note = e;
@@ -1521,6 +1635,11 @@ impl App {
 
     fn navigate(&mut self, raw: &str) {
         let Some(url) = resolve_input(raw, &self.settings.search) else { return };
+        // A magnet link is not a page: hand it to aria2 instead of loading it.
+        if url.starts_with("magnet:") {
+            self.add_magnet(&url, self.active_tab().is_some_and(|t| t.private));
+            return;
+        }
         let i = self.active_idx();
         self.leave_panel();
         if let Some(v) = &self.tabs[i].view {
@@ -1549,6 +1668,10 @@ impl App {
     fn set_panel(&mut self, p: Panel) {
         let was = self.panel;
         self.panel = p;
+        // The page is open now: the dot on the footer button has done its job.
+        if p == Panel::Downloads {
+            self.dl_unseen = false;
+        }
         if was == Panel::Control && p != Panel::Control {
             self.stop_monitor();
         }
@@ -1747,6 +1870,9 @@ impl App {
         if old.agent != self.settings.agent || old.agent_port != self.settings.agent_port {
             self.agent.set(self.settings.agent, self.settings.agent_port, &self.ctx.proxy);
         }
+        if old.download_limit_kbps != self.settings.download_limit_kbps {
+            self.aria.set_speed_limit(self.settings.download_limit_kbps as u64 * 1024);
+        }
         store::save_settings(&self.settings);
         self.layout();
         self.push();
@@ -1906,6 +2032,9 @@ impl App {
             Ev::Download(d) => {
                 if matches!(d.state, "done" | "failed") {
                     self.dl_dirty = true;
+                    if self.panel != Panel::Downloads {
+                        self.dl_unseen = true;
+                    }
                 }
                 match self.downloads.iter_mut().find(|x| x.id == d.id) {
                     Some(x) => *x = d,
@@ -1970,20 +2099,84 @@ impl App {
                 }
             }
             Ev::AriaAdded(gid, url, headers, name, private) => {
-                let id = self.next_dl(1);
-                self.aria_ids.insert(gid.clone(), id);
-                self.aria_meta.insert(gid, (url.clone(), headers, name));
-                self.aria_poll.store(true);
-                if private {
-                    // Show it now, marked private, so it never reaches downloads.json.
-                    self.downloads.insert(
-                        0,
-                        engine::Dl { id, url, path: String::new(), received: 0, total: 0, state: "progress", speed: 0, note: "starting".into(), private },
-                    );
-                    self.push();
+                // The row may already exist if a poll adopted this gid first; keep its id.
+                if !self.aria_ids.contains_key(&gid) {
+                    let id = self.next_dl(1);
+                    self.aria_ids.insert(gid.clone(), id);
+                    if private {
+                        // Show it now, marked private, so it never reaches downloads.json.
+                        self.downloads.insert(
+                            0,
+                            engine::Dl {
+                                id,
+                                url: url.clone(),
+                                path: String::new(),
+                                received: 0,
+                                total: 0,
+                                state: "progress",
+                                speed: 0,
+                                note: "starting".into(),
+                                private,
+                                name: String::new(),
+                                kind: "file",
+                                up: 0,
+                                peers: 0,
+                                seeds: 0,
+                                ratio: 0.0,
+                                files: 1,
+                            },
+                        );
+                        self.push();
+                    }
                 }
+                self.aria_meta.insert(gid.clone(), (url, headers, name));
+                if self.test_pending {
+                    self.test_pending = false;
+                    self.test_dl = Some((gid, Instant::now() + Duration::from_secs(
+                        std::env::var("LUMEN_TEST_CANCEL").ok().and_then(|v| v.parse().ok()).unwrap_or(60),
+                    )));
+                }
+                self.aria_poll.store(true);
             }
             Ev::AriaFailed(tab, url) => {
+                if tab == 0 && !url.is_empty() {
+                    // A manual add (Add link / magnet / torrent) that aria2 refused:
+                    // show a failed row. There is no page to fall back to.
+                    let id = self.next_dl(1);
+                    let name = if url.starts_with("magnet:") {
+                        magnet_name(&url)
+                    } else {
+                        url.rsplit(['/', '?', '#']).next().unwrap_or("").to_string()
+                    };
+                    let name = if name.is_empty() { "download".to_string() } else { name };
+                    self.downloads.insert(
+                        0,
+                        engine::Dl {
+                            id,
+                            url,
+                            path: String::new(),
+                            received: 0,
+                            total: 0,
+                            state: "failed",
+                            speed: 0,
+                            note: "aria2 refused it".into(),
+                            private: false,
+                            name,
+                            kind: "file",
+                            up: 0,
+                            peers: 0,
+                            seeds: 0,
+                            ratio: 0.0,
+                            files: 1,
+                        },
+                    );
+                    self.dl_dirty = true;
+                    if self.panel != Panel::Downloads {
+                        self.dl_unseen = true;
+                    }
+                    self.push();
+                    return;
+                }
                 // aria2 said no (auth, odd server): let WebView2 download it after all.
                 self.ctx.bypass.borrow_mut().insert(url.clone());
                 if let Some(v) = self.idx(tab).and_then(|i| self.tabs[i].view.as_ref()) {
@@ -1991,27 +2184,96 @@ impl App {
                 }
             }
             Ev::AriaJobs(jobs) => {
+                // Adopt-on-start: aria2 restored unfinished downloads from its session
+                // file, but Lumen forgot their gids. Put each one in the list once.
+                if !jobs.is_empty() && !self.aria_adopted {
+                    self.aria_adopted = true;
+                    for j in &jobs {
+                        if self.aria_ids.contains_key(&j.gid) {
+                            continue;
+                        }
+                        let id = self.next_dl(1);
+                        self.aria_ids.insert(j.gid.clone(), id);
+                        let name = if !j.name.is_empty() {
+                            j.name.clone()
+                        } else {
+                            j.path.rsplit(['\\', '/']).next().unwrap_or("").to_string()
+                        };
+                        self.downloads.insert(
+                            0,
+                            engine::Dl {
+                                id,
+                                url: j.url.clone(),
+                                path: j.path.clone(),
+                                received: j.done as i64,
+                                total: j.total as i64,
+                                state: "progress",
+                                speed: j.speed,
+                                note: String::new(),
+                                private: false,
+                                name,
+                                kind: if j.name.is_empty() { "file" } else { "torrent" },
+                                up: 0,
+                                peers: 0,
+                                seeds: 0,
+                                ratio: 0.0,
+                                files: j.files.max(1),
+                            },
+                        );
+                    }
+                }
+                // A finished .torrent file hands its row to the torrent it spawned.
+                let fmap = aria::follow_map(&jobs);
+                for (old, new) in &fmap {
+                    if let Some(&id) = self.aria_ids.get(old)
+                        && !self.aria_ids.contains_key(new)
+                    {
+                        self.aria_ids.remove(old);
+                        self.aria_meta.remove(old);
+                        self.aria_ids.insert(new.clone(), id);
+                    }
+                }
                 let mut busy = false;
                 for j in jobs {
                     let Some(&id) = self.aria_ids.get(&j.gid) else { continue };
                     let state = match j.status {
-                        "active" | "waiting" => "progress",
+                        "active" | "waiting" => {
+                            if j.seeder { "seeding" } else { "progress" }
+                        }
                         "paused" => "paused",
-                        "complete" => "done",
+                        "complete" => {
+                            if j.seeder { "seeding" } else { "done" }
+                        }
                         _ => "failed",
                     };
-                    busy |= state == "progress";
+                    busy |= matches!(state, "progress" | "seeding");
                     let note = match j.status {
+                        "active" if j.seeder => format!("{} peers", j.connections),
                         "active" => format!("{} connections", j.connections),
                         "waiting" => "queued".to_string(),
                         "removed" => "cancelled".to_string(),
                         "error" if !j.error.is_empty() => j.error.trim().trim_end_matches('.').to_string(),
                         _ => String::new(),
                     };
-                    if matches!(state, "done" | "failed") && self.downloads.iter().any(|x| x.id == id && x.state != state) {
-                        self.dl_dirty = true;
+                    let was = self.downloads.iter().find(|x| x.id == id).map(|x| x.state);
+                    if matches!(state, "done" | "failed" | "seeding")
+                        && was.is_some_and(|w| w != state)
+                    {
+                        if state != "seeding" {
+                            self.dl_dirty = true;
+                        }
+                        // Something ended while the page was closed: show the dot.
+                        if self.panel != Panel::Downloads {
+                            self.dl_unseen = true;
+                        }
                     }
                     let private = self.downloads.iter().find(|x| x.id == id).is_some_and(|x| x.private);
+                    let name = if !j.name.is_empty() {
+                        j.name.clone()
+                    } else {
+                        j.path.rsplit(['\\', '/']).next().unwrap_or("").to_string()
+                    };
+                    let ratio = if j.done > 0 { j.upload_length as f64 / j.done as f64 } else { 0.0 };
                     let d = engine::Dl {
                         id,
                         url: j.url,
@@ -2022,6 +2284,13 @@ impl App {
                         speed: j.speed,
                         note,
                         private,
+                        name,
+                        kind: if j.name.is_empty() { "file" } else { "torrent" },
+                        up: j.upload_speed,
+                        peers: j.connections as u64,
+                        seeds: j.num_seeders,
+                        ratio,
+                        files: j.files.max(1),
                     };
                     match self.downloads.iter_mut().find(|x| x.id == id) {
                         Some(x) => *x = d,
@@ -2062,6 +2331,11 @@ impl App {
                     let _ = v.load_url(&url);
                     self.tabs[i].url = url;
                 }
+            }
+            Ev::Magnet(tab, url) => {
+                // A page (or the address bar) asked for a magnet: aria2 takes it.
+                let private = self.idx(tab).is_some_and(|i| self.tabs[i].private);
+                self.add_magnet(&url, private);
             }
             Ev::Popup(id, parent) => {
                 let private = self.idx(parent).is_some_and(|i| self.tabs[i].private);
@@ -2349,7 +2623,9 @@ impl App {
                     },
                     "open" | "folder" => {
                         if let Some(d) = self.downloads.iter().find(|d| d.id == id) {
-                            open_path(&d.path, a == "folder");
+                            // A multi-file torrent has no single thing to open: show it in its folder.
+                            let folder = a == "folder" || (a == "open" && d.kind == "torrent" && d.files > 1);
+                            open_path(&d.path, folder);
                         }
                     }
                     "clear" => {
@@ -2357,6 +2633,75 @@ impl App {
                         for id in gone {
                             self.remove_download(id);
                         }
+                    }
+                    "addUrl" => {
+                        // The chrome read the clipboard and classified it; take it from there.
+                        let url = m["url"].as_str().unwrap_or("").to_string();
+                        if url.starts_with("magnet:") {
+                            let private = self.active_tab().is_some_and(|t| t.private);
+                            self.add_magnet(&url, private);
+                        } else if url.starts_with("http") {
+                            let private = self.active_tab().is_some_and(|t| t.private);
+                            let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
+                            let u = url.clone();
+                            let headers: Vec<String> = Vec::new();
+                            std::thread::spawn(move || {
+                                let _ = match aria.add(&u, &headers, None) {
+                                    Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u, headers, None, private)),
+                                    Err(_) => proxy.send_event(Ev::AriaFailed(0, u)),
+                                };
+                            });
+                            self.aria_poll.store(true);
+                        }
+                    }
+                    "addTorrent" => {
+                        // The chrome opened the file dialog and read the file.
+                        let b64 = m["b64"].as_str().unwrap_or("");
+                        if b64.is_empty() {
+                            return;
+                        }
+                        let private = self.active_tab().is_some_and(|t| t.private);
+                        let b64 = b64.to_string();
+                        let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
+                        std::thread::spawn(move || {
+                            let _ = match aria.add_torrent(&b64, &[]) {
+                                Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, String::new(), Vec::new(), None, private)),
+                                Err(_) => proxy.send_event(Ev::AriaFailed(0, String::new())),
+                            };
+                        });
+                        self.aria_poll.store(true);
+                    }
+                    "openFolder" => open_path(&store::download_dir().to_string_lossy(), false),
+                    "limit" => {
+                        let kbps = m["kbps"].as_u64().unwrap_or(0) as u32;
+                        self.aria.set_speed_limit(kbps as u64 * 1024);
+                        let mut s = self.settings.clone();
+                        s.download_limit_kbps = kbps;
+                        self.apply_settings(s);
+                    }
+                    "stopSeed" => {
+                        // Keep the files, drop the torrent out of aria2.
+                        if let Some(gid) = self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
+                            self.aria_ids.remove(&gid);
+                            self.aria_meta.remove(&gid);
+                            let aria = self.aria.clone();
+                            std::thread::spawn(move || {
+                                let _ = aria.remove(&gid);
+                            });
+                        }
+                        if let Some(d) = self.downloads.iter_mut().find(|d| d.id == id) {
+                            d.state = "done";
+                            d.speed = 0;
+                            d.up = 0;
+                        }
+                        self.dl_dirty = true;
+                        self.push();
+                    }
+                    "note" => {
+                        // The firewall note is dismissed for good.
+                        let mut s = self.settings.clone();
+                        s.torrent_note = false;
+                        self.apply_settings(s);
                     }
                     _ => {}
                 }
@@ -2602,6 +2947,20 @@ impl App {
         }
         if self.dl_dirty {
             self.save_downloads();
+        }
+        // Debug test hook: add one magnet once aria2 is up, cancel it on schedule.
+        if cfg!(debug_assertions) {
+            if self.test_magnet && self.aria.ready() && !self.test_pending && self.test_dl.is_none() {
+                self.test_magnet = false;
+                self.test_pending = true;
+                const MAGNET: &str = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.webtorrent.dev";
+                self.add_magnet(MAGNET, false);
+            }
+            if let Some((gid, _)) = self.test_dl.take_if(|(_, at)| now >= *at) {
+                if let Some(&id) = self.aria_ids.get(&gid) {
+                    self.remove_download(id);
+                }
+            }
         }
     }
 
@@ -2928,7 +3287,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tab, keepable};
+    use super::{Tab, keepable, magnet_name, resolve_input};
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
     #[test]
@@ -2958,5 +3317,24 @@ mod tests {
         private.private = true;
         private.pinned = true;
         assert!(keepable(&[private], 7).is_empty());
+    }
+
+    /// The dn= display name comes out of a magnet link, percent-decoded.
+    #[test]
+    fn magnet_name_reads_dn() {
+        let m = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Ftracker.example%3A1337";
+        assert_eq!(magnet_name(m), "Big Buck Bunny");
+        // No dn= at all: empty, not a crash.
+        assert_eq!(magnet_name("magnet:?xt=urn:btih:abc"), "");
+        assert_eq!(magnet_name("https://example.com/"), "");
+    }
+
+    /// A magnet typed in the address bar reaches the main loop, not the renderer.
+    #[test]
+    fn resolve_input_passes_magnets_through() {
+        let m = "magnet:?xt=urn:btih:abc&dn=x";
+        assert_eq!(resolve_input(m, "https://duckduckgo.com/?q=%s").as_deref(), Some(m));
+        // And an ordinary https URL is still just itself.
+        assert_eq!(resolve_input("https://a.test/", "x").as_deref(), Some("https://a.test/"));
     }
 }

@@ -69,6 +69,47 @@ pub struct Job {
     /// "active" | "waiting" | "paused" | "complete" | "error" | "removed"
     pub status: &'static str,
     pub error: String,
+    /// Torrent name from bittorrent.info.name. Empty for plain files.
+    pub name: String,
+    /// Bytes per second out, right now.
+    pub upload_speed: u64,
+    pub upload_length: u64,
+    pub num_seeders: u64,
+    /// True when the download is complete and seeding.
+    pub seeder: bool,
+    /// Gids aria2 spawned for this one (a .torrent file becomes a torrent).
+    pub followed_by: Vec<String>,
+    /// Number of files (a multi-file torrent opens its folder, not the first file).
+    pub files: usize,
+}
+
+/// Job keys worth asking aria2 for. Request only these so the poll stays small.
+const KEYS: &[&str] = &[
+    "gid",
+    "status",
+    "totalLength",
+    "completedLength",
+    "downloadSpeed",
+    "uploadSpeed",
+    "uploadLength",
+    "connections",
+    "numSeeders",
+    "seeder",
+    "errorMessage",
+    "files",
+    "followedBy",
+    "bittorrent.info.name",
+];
+
+/// gid -> the job it spawned, for every job that has a followedBy.
+pub fn follow_map(jobs: &[Job]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for j in jobs {
+        if let Some(next) = j.followed_by.first() {
+            map.insert(j.gid.clone(), next.clone());
+        }
+    }
+    map
 }
 
 /// The poll thread's switch. A download flips it on; the thread sleeps on a
@@ -105,6 +146,9 @@ pub struct Aria {
     /// gid to the URL we asked for, because a stopped job forgets its own URL.
     urls: Mutex<HashMap<String, String>>,
     ids: AtomicU64,
+    /// Download speed cap in bytes/s (0 = none). Held here so it survives an
+    /// engine that has not booted yet, and is applied the moment it has.
+    limit: AtomicU64,
 }
 
 /// The process, and how to talk to it. One per Lumen run.
@@ -125,11 +169,12 @@ impl Drop for Engine {
 impl Aria {
     /// Returns at once. The binary is fetched, checked and started on a
     /// background thread; `ready()` is false until that is done.
-    pub fn start(data_dir: &Path, download_dir: &Path) -> Arc<Aria> {
+    pub fn start(data_dir: &Path, download_dir: &Path, keep_seeding: bool, limit_kbps: u32) -> Arc<Aria> {
         let aria = Arc::new(Aria {
             engine: Mutex::new(None),
             urls: Mutex::new(HashMap::new()),
             ids: AtomicU64::new(0),
+            limit: AtomicU64::new(limit_kbps as u64 * 1024),
         });
         let weak = Arc::downgrade(&aria);
         let data = data_dir.to_path_buf();
@@ -137,11 +182,13 @@ impl Aria {
         let _ = thread::Builder::new()
             .name("lumen-aria".into())
             .spawn(move || {
-                let Some(engine) = Engine::boot(&data, &dl) else { return };
+                let Some(engine) = Engine::boot(&data, &dl, keep_seeding) else { return };
                 // Lumen may have died while we were downloading. Let the
                 // engine drop and the aria2 process dies with it.
                 if let Some(aria) = weak.upgrade() {
                     *lock(&aria.engine) = Some(engine);
+                    // The speed limit chosen before boot takes effect now.
+                    aria.try_speed_limit();
                 }
             });
         aria
@@ -167,6 +214,27 @@ impl Aria {
         .map(str::to_string)
         .ok_or_else(|| "aria2.addUri said nothing".to_string())?;
         lock(&self.urls).insert(gid.clone(), url.to_string());
+        Ok(gid)
+    }
+
+    /// Queue a base64 .torrent (Open torrent…). Headers travel the same way
+    /// as for a URL, for sites that need a cookie even on the torrent itself.
+    pub fn add_torrent(&self, b64: &str, headers: &[String]) -> Result<String, String> {
+        let (port, secret) = self.line()?;
+        let mut options = serde_json::Map::new();
+        if !headers.is_empty() {
+            options.insert("header".to_string(), json!(headers));
+        }
+        let gid = call(
+            port,
+            &secret,
+            self.id(),
+            "aria2.addTorrent",
+            &[json!(b64), json!([]), Value::Object(options)],
+        )?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "aria2.addTorrent said nothing".to_string())?;
         Ok(gid)
     }
 
@@ -199,10 +267,11 @@ impl Aria {
         let Some((port, secret)) = self.line_opt() else { return Vec::new() };
         let known = lock(&self.urls).clone();
         let mut out: Vec<Job> = Vec::new();
+        let keys = json!(KEYS);
         // Active and waiting come out oldest first; stopped comes out newest first.
-        read_list(port, &secret, self.id(), "aria2.tellActive", &[], true, &known, &mut out);
-        read_list(port, &secret, self.id(), "aria2.tellWaiting", &[json!(0), json!(100)], true, &known, &mut out);
-        read_list(port, &secret, self.id(), "aria2.tellStopped", &[json!(0), json!(100)], false, &known, &mut out);
+        read_list(port, &secret, self.id(), "aria2.tellActive", &[keys.clone()], true, &known, &mut out);
+        read_list(port, &secret, self.id(), "aria2.tellWaiting", &[json!(0), json!(100), keys.clone()], true, &known, &mut out);
+        read_list(port, &secret, self.id(), "aria2.tellStopped", &[json!(0), json!(100), keys], false, &known, &mut out);
         // Rebuild the URL table from what is still alive, so it cannot grow
         // without bound while a browser runs for weeks.
         let mut fresh = HashMap::new();
@@ -217,10 +286,18 @@ impl Aria {
         out
     }
 
-    /// Bytes per second for the whole engine. 0 means no cap.
+    /// Bytes per second for the whole engine. 0 means no cap. Remembered, so it
+    /// survives an engine that has not booted yet and is applied when it does.
     pub fn set_speed_limit(&self, bytes_per_sec: u64) {
+        self.limit.store(bytes_per_sec, Ordering::Relaxed);
+        self.try_speed_limit();
+    }
+
+    /// Push the remembered limit into the engine, if it is up.
+    fn try_speed_limit(&self) {
         let Some((port, secret)) = self.line_opt() else { return };
-        let value = json!({"max-overall-download-limit": bytes_per_sec.to_string()});
+        let bytes = self.limit.load(Ordering::Relaxed);
+        let value = json!({"max-overall-download-limit": bytes.to_string()});
         let _ = call(port, &secret, self.id(), "aria2.changeGlobalOption", &[value]);
     }
 
@@ -247,7 +324,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Engine {
     /// Put a verified aria2c.exe on disk, run it, and wait for its port to
     /// answer. None means Lumen downloads files itself.
-    fn boot(data_dir: &Path, download_dir: &Path) -> Option<Engine> {
+    fn boot(data_dir: &Path, download_dir: &Path, keep_seeding: bool) -> Option<Engine> {
         let dir = data_dir.join("aria2");
         fs::create_dir_all(&dir).ok()?;
         fs::create_dir_all(download_dir).ok()?;
@@ -274,7 +351,19 @@ impl Engine {
             "--save-session-interval=10",
             "--console-log-level=warn",
             "--summary-interval=0",
+            // BitTorrent: magnet links, DHT, local peer discovery, follow a
+            // finished .torrent into the torrent it names.
+            "--enable-dht=true",
+            &format!("--dht-file-path={}", dir.join("dht.dat").display()),
+            "--bt-enable-lpd=true",
+            "--listen-port=6881-6999",
+            "--dht-listen-port=6881-6999",
+            "--follow-torrent=true",
+            "--bt-save-metadata=true",
+            "--seed-ratio=1.0",
         ]);
+        // Stop seeding after an hour, or immediately when the user said no to sharing.
+        cmd.arg(if keep_seeding { "--seed-time=60" } else { "--seed-time=0" });
         if session.exists() {
             // Last night's queue comes back.
             cmd.arg(format!("--input-file={}", session.display()));
@@ -580,6 +669,16 @@ fn job_from(record: &Value, fallback: &str) -> Job {
         connections: num(&record["connections"]) as u32,
         status: map_status(record["status"].as_str().unwrap_or("")),
         error: record["errorMessage"].as_str().unwrap_or_default().to_string(),
+        name: record["bittorrent"]["info"]["name"].as_str().unwrap_or("").to_string(),
+        upload_speed: num(&record["uploadSpeed"]),
+        upload_length: num(&record["uploadLength"]),
+        num_seeders: num(&record["numSeeders"]),
+        seeder: record["seeder"].as_str() == Some("true"),
+        followed_by: record["followedBy"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        files: record["files"].as_array().map(|a| a.len()).unwrap_or(0),
     }
 }
 
@@ -705,6 +804,62 @@ mod tests {
         assert_eq!(value.to_string(), r#"{"max-overall-download-limit":"4096"}"#);
     }
 
+    /// Caught off the wire from aria2 1.37.0 while a torrent was seeding.
+    const TELL_SEEDING: &str = r#"{"bitfield":"ff","bittorrent":{"info":{"name":"bunny"}},
+      "completedLength":"123456","connections":"9","dir":"C:\\dl","downloadSpeed":"0",
+      "errorCode":"0","errorMessage":"","followedBy":["aa11bb22cc33dd44"],
+      "files":[{"completedLength":"123456","index":"1","length":"274000000",
+        "path":"C:\\dl\\bunny\\bunny.mkv","selected":"true","uris":[]}],
+      "gid":"ff00aa11bb22cc33","numSeeders":"7","seeder":"true","status":"active",
+      "totalLength":"274000000","uploadLength":"51800","uploadSpeed":"307200"}"#;
+
+    #[test]
+    fn torrent_fields_come_through() {
+        let job: Value = serde_json::from_str(TELL_SEEDING).expect("the captured reply parses");
+        let j = job_from(&job, "");
+        assert_eq!(j.gid, "ff00aa11bb22cc33");
+        assert_eq!(j.name, "bunny");
+        assert_eq!(j.upload_speed, 307200);
+        assert_eq!(j.upload_length, 51800);
+        assert_eq!(j.num_seeders, 7);
+        assert!(j.seeder);
+        assert_eq!(j.followed_by, vec!["aa11bb22cc33dd44"]);
+        assert_eq!(j.files, 1);
+        // ratio = uploadLength / completedLength.
+        let ratio = j.upload_length as f64 / j.done as f64;
+        assert!((ratio - 51800.0 / 123456.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_plain_file_job_has_no_torrent_fields() {
+        let j = job_from(&sample(), "");
+        assert!(j.name.is_empty());
+        assert_eq!(j.upload_speed, 0);
+        assert_eq!(j.upload_length, 0);
+        assert_eq!(j.num_seeders, 0);
+        assert!(!j.seeder);
+        assert!(j.followed_by.is_empty());
+        assert_eq!(j.files, 1);
+    }
+
+    #[test]
+    fn followed_by_builds_a_remap_table() {
+        let a: Value = json!({"gid": "old", "followedBy": ["new"], "files": []});
+        let b: Value = json!({"gid": "plain", "files": []});
+        let jobs = vec![job_from(&a, ""), job_from(&b, "")];
+        let map = follow_map(&jobs);
+        assert_eq!(map.get("old").map(String::as_str), Some("new"));
+        assert!(!map.contains_key("plain"));
+    }
+
+    #[test]
+    fn the_key_list_covers_what_the_ui_reads() {
+        // The poll asks for exactly these; drop one and a field goes dark.
+        for k in ["bittorrent.info.name", "uploadSpeed", "numSeeders", "seeder", "followedBy", "files"] {
+            assert!(KEYS.contains(&k), "{k} is missing from the aria2 key list");
+        }
+    }
+
     #[test]
     fn aria_crosses_threads() {
         fn both<T: Send + Sync>() {}
@@ -720,7 +875,6 @@ mod tests {
         use flate2::Compression;
         use flate2::write::DeflateEncoder;
 
-        let mut body: Vec<u8> = Vec::new();
         let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
         enc.write_all(payload).unwrap();
         let deflated = enc.finish().unwrap();
@@ -839,7 +993,7 @@ mod live {
     #[ignore = "downloads aria2 and a file off the internet"]
     fn it_downloads_a_file_through_aria2() {
         let dir = case("live");
-        let aria = Aria::start(&dir, &dir.join("downloads"));
+        let aria = Aria::start(&dir, &dir.join("downloads"), true, 0);
         for _ in 0..300 {
             if aria.ready() {
                 break;

@@ -3,11 +3,14 @@
 //! written through serde, so a new setting is one line in a schema.
 
 use serde_json::{Value, json};
-use windows::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
+use windows::Win32::UI::Controls::Dialogs::{
+    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+};
 use windows::Win32::Foundation::COLORREF;
+use windows::core::{PCWSTR, PWSTR};
 
 use super::{
-    Hit, Inner, UiState, send,
+    Hit, Inner, UiDl, UiState, send,
     gfx::{Align, Font, R},
     theme::{Color, PALETTES, Theme},
 };
@@ -29,6 +32,11 @@ pub enum PageHit {
     CopyAgent,
     Dl(&'static str, u64),
     DlClear,
+    DlAddLink,
+    DlTorrentPick,
+    DlOpenFolder,
+    DlLimit,
+    DlNote,
     PermReset(usize),
     Open(String),
     Forget(String),
@@ -58,6 +66,8 @@ pub struct Page {
     sliders: Vec<(&'static str, R, Scale)>,
     sections: Vec<f32>,
     view: R,
+    /// A short-lived line on the Downloads page ("Copy a link or magnet first").
+    flash: Option<(String, std::time::Instant)>,
 }
 
 // ------------------------------------------------------------------ schema
@@ -77,6 +87,7 @@ enum Item {
 
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
 const NET: &[u32] = &[32, 64, 128, 256, 512, 1024, 2048, 5120, 10240, 25600, 51200, 102400];
+const DL_SPEEDS: &[u32] = &[0, 1024, 5120, 10240];
 const ENGINES: [(&str, &str); 5] = [
     ("DuckDuckGo", "https://duckduckgo.com/?q=%s"),
     ("Google", "https://www.google.com/search?q=%s"),
@@ -131,6 +142,8 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("adblock", "Block ads and trackers", "Stops them before they load. Saves memory and data."),
             Toggle("cosmetic", "Hide cookie banners and ad leftovers", "Filter-list hiding rules, applied as plain CSS."),
             Toggle("accelerate_downloads", "Accelerate downloads", "aria2 splits files into up to 16 connections, resumes, and queues. Falls back to the built-in downloader when a site refuses it."),
+            Toggle("keep_seeding", "Share torrents back after they finish", "Until ratio 1.0 or one hour, whichever first. Applies on next start."),
+            Range("download_limit_kbps", "Download speed limit", "Caps aria2, the download engine. 0 is no limit.", Scale::Steps(DL_SPEEDS), "kbps"),
             Seg("tracking", "Tracking prevention", "", &[("off", "Off"), ("basic", "Basic"), ("balanced", "Balanced"), ("strict", "Strict")]),
             Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),
             Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
@@ -204,7 +217,13 @@ fn fmt_value(v: f32, unit: &str) -> String {
             if v >= 1024.0 { format!("{} GB", trim(v / 1024.0)) } else { format!("{} MB", v as u32) }
         }
         "kbps" => {
-            if v >= 1024.0 { format!("{} MB/s", trim(v / 1024.0)) } else { format!("{} KB/s", v as u32) }
+            if v == 0.0 {
+                "No limit".to_string()
+            } else if v >= 1024.0 {
+                format!("{} MB/s", trim(v / 1024.0))
+            } else {
+                format!("{} KB/s", v as u32)
+            }
         }
         "%" => format!("{}%", v as u32),
         u => format!("{} {u}", v as u32),
@@ -522,88 +541,268 @@ fn eta(d: &super::UiDl) -> String {
     }
 }
 
+/// "3 active · 4.2 MB/s down · 310 KB/s up"; empty when nothing is running.
+fn summary(active: usize, down: i64, up: i64) -> String {
+    if active == 0 {
+        return String::new();
+    }
+    format!("{active} active · {}/s down · {}/s up", fmt_bytes(down), fmt_bytes(up))
+}
+
+/// The group a row falls in; the page draws them in this order, empty ones hidden.
+fn group(state: &str) -> &'static str {
+    match state {
+        "progress" | "paused" => "Active",
+        "seeding" => "Seeding",
+        "done" => "Done",
+        _ => "Failed",
+    }
+}
+
+fn group_order() -> [&'static str; 4] {
+    ["Active", "Seeding", "Done", "Failed"]
+}
+
+/// One status line per kind, per the brief: files get connections, torrents get peers.
+fn status_line(d: &UiDl) -> String {
+    let host = super::host(&d.url);
+    let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
+    let mut s = match d.state {
+        "done" => format!("Done · {}", fmt_bytes(d.received)),
+        "failed" if !d.note.is_empty() => format!("Failed · {}", d.note),
+        "failed" => "Failed".to_string(),
+        "seeding" => {
+            let mut s = format!("Seeding · up {}/s", fmt_bytes(d.up as i64));
+            if d.ratio > 0.0 {
+                s.push_str(&format!(" · ratio {:.2}", d.ratio));
+            }
+            if d.peers > 0 {
+                s.push_str(&format!(" · {} peers", d.peers));
+            }
+            s
+        }
+        "paused" => {
+            let mut s = format!("Paused · {} of {}", fmt_bytes(d.received), fmt_bytes(d.total));
+            if !d.note.is_empty() {
+                s.push_str(&format!(" · {}", d.note));
+            }
+            s
+        }
+        _ if d.total > 0 => {
+            let mut s = format!("{} of {} · {}%", fmt_bytes(d.received), fmt_bytes(d.total), (pct * 100.0) as u32);
+            if d.speed > 0 {
+                s.push_str(&format!(" · {}/s", fmt_bytes(d.speed as i64)));
+            }
+            let left = eta(d);
+            if !left.is_empty() {
+                s.push_str(&format!(" · {left}"));
+            }
+            match d.kind {
+                "torrent" => {
+                    if d.peers > 0 || d.seeds > 0 {
+                        s.push_str(&format!(" · {} peers, {} seeds", d.peers, d.seeds));
+                    }
+                    if d.up > 0 {
+                        s.push_str(&format!(" · up {}/s", fmt_bytes(d.up as i64)));
+                    }
+                }
+                _ => {
+                    if d.peers > 0 {
+                        s.push_str(&format!(" · {} connections", d.peers));
+                    }
+                }
+            }
+            if !d.note.is_empty() {
+                s.push_str(&format!(" · {}", d.note));
+            }
+            s
+        }
+        _ if !d.note.is_empty() => d.note.clone(),
+        _ => fmt_bytes(d.received),
+    };
+    if !host.is_empty() {
+        s.push_str(&format!("   {host}"));
+    }
+    s
+}
+
+/// What the clipboard holds: a link aria2 can take, a magnet, or nothing useful.
+fn classify_link(text: &str) -> &'static str {
+    let t = text.trim();
+    if t.starts_with("magnet:?") {
+        "magnet"
+    } else if t.starts_with("http://") || t.starts_with("https://") {
+        "url"
+    } else {
+        "other"
+    }
+}
+
+/// A native open-file dialog for a .torrent; the file's bytes when picked.
+fn pick_torrent(owner: windows::Win32::Foundation::HWND) -> Option<Vec<u8>> {
+    let mut buf = vec![0u16; 32768];
+    let filter: Vec<u16> = "Torrents\0*.torrent\0All files\0*.*\0\0".encode_utf16().collect();
+    let title: Vec<u16> = "Open a torrent file\0".encode_utf16().collect();
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !unsafe { GetOpenFileNameW(&mut ofn) }.as_bool() {
+        return None;
+    }
+    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
+    let path = String::from_utf16_lossy(&buf[..len]);
+    std::fs::read(path).ok()
+}
+
+fn chip_label(kbps: u32) -> &'static str {
+    match kbps {
+        0 => "No limit",
+        1024 => "1 MB/s",
+        5120 => "5 MB/s",
+        _ => "10 MB/s",
+    }
+}
+
+/// A quiet text button in the header row, right-aligned from `x` inwards.
+fn head_action(i: &mut Inner, x: f32, y: f32, label: &str, h: Hit) -> f32 {
+    let th = i.theme;
+    let w = i.gfx.measure(label, Font::ui(12.0, 400));
+    let r = R::new(x - w, y, w, 20.0);
+    i.gfx.text(label, r, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
+    i.hit(r, h);
+    x - w - 18.0
+}
+
 fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let col = R::new(st.x + ((st.w - 760.0) / 2.0).max(40.0), st.y, st.w.min(760.0 + 80.0) - 80.0, st.h);
     i.gfx.clip(st);
     let mut y = st.y + 26.0 - i.page.scroll;
     i.gfx.text("Downloads", R::new(col.x, y, 300.0, 40.0), Font::serif(30.0), th.text);
+    // Actions right of Done, laid out right to left so new ones never collide.
     done_button(i, R::new(col.right() - 90.0, y + 5.0, 90.0, 30.0));
+    let mut x = col.right() - 90.0 - 18.0;
     if s.downloads.iter().any(|d| d.state == "done" || d.state == "failed") {
-        let r = R::new(col.right() - 210.0, y + 10.0, 110.0, 20.0);
-        let h = Hit::Page(PageHit::DlClear);
-        i.gfx.text("Clear finished", r, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
-        i.hit(r, h);
+        x = head_action(i, x, y + 10.0, "Clear finished", Hit::Page(PageHit::DlClear));
     }
-    y += 64.0;
+    x = head_action(i, x, y + 10.0, "Open folder", Hit::Page(PageHit::DlOpenFolder));
+    x = head_action(i, x, y + 10.0, "Open torrent…", Hit::Page(PageHit::DlTorrentPick));
+    head_action(i, x, y + 10.0, "Add link", Hit::Page(PageHit::DlAddLink));
+    y += 52.0;
+
+    // The summary line, or the short-lived "copy a link" note in its place.
+    let mut flash_gone = false;
+    if let Some((msg, at)) = &i.page.flash {
+        if at.elapsed().as_secs_f32() < 3.0 {
+            i.gfx.text(msg, R::new(col.x, y, col.w - 160.0, 22.0), Font::ui(12.5, 400), th.faint);
+        } else {
+            flash_gone = true;
+        }
+    } else {
+        let active: Vec<&UiDl> = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused")).collect();
+        let down: i64 = active.iter().map(|d| d.speed as i64).sum();
+        let up: i64 = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused" | "seeding")).map(|d| d.up as i64).sum();
+        let t = summary(active.len(), down, up);
+        if !t.is_empty() {
+            i.gfx.text(&t, R::new(col.x, y, col.w - 160.0, 22.0), Font::ui(12.5, 400), th.faint);
+        }
+    }
+    if flash_gone {
+        i.page.flash = None;
+    }
+    // The speed-limit chip: what aria2 is capped at, if anything.
+    let chip = chip_label(s.settings.download_limit_kbps);
+    let cw = i.gfx.measure(chip, Font::ui(11.5, 500)) + 16.0;
+    let cr = R::new(col.right() - cw, y - 1.0, cw, 22.0);
+    let ch = Hit::Page(PageHit::DlLimit);
+    i.gfx.round(cr, 11.0, if i.is_hover(&ch) { th.hover } else { th.press });
+    i.gfx.text(chip, cr, Font::ui(11.5, 500).align(Align::Center), th.dim);
+    i.hit(cr, ch);
+    y += 34.0;
+
     if s.downloads.is_empty() {
         i.gfx.text("Nothing yet. Files you download show up here.", R::new(col.x, y, col.w, 30.0), Font::ui(13.0, 400), th.faint);
+        y += 30.0;
     }
-    for d in &s.downloads {
-        let r = R::new(col.x, y, col.w, 64.0);
-        i.gfx.text(&d.name, R::new(r.x, r.y + 10.0, r.w - 220.0, 22.0), Font::ui(13.5, 500), if d.state == "failed" { th.faint } else { th.text });
-        let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
-        let status = match d.state {
-            "done" => format!("Done · {}", fmt_bytes(d.received)),
-            "failed" if !d.note.is_empty() => format!("Failed · {}", d.note),
-            "failed" => "Failed".to_string(),
-            "paused" => format!("Paused · {} of {}", fmt_bytes(d.received), fmt_bytes(d.total)),
-            _ if d.total > 0 => {
-                let mut s = format!("{} of {} · {}%", fmt_bytes(d.received), fmt_bytes(d.total), (pct * 100.0) as u32);
-                if d.speed > 0 {
-                    s.push_str(&format!(" · {}/s", fmt_bytes(d.speed as i64)));
-                }
-                let left = eta(d);
-                if !left.is_empty() {
-                    s.push_str(&format!(" · {left}"));
-                }
-                if !d.note.is_empty() {
-                    s.push_str(&format!(" · {}", d.note));
-                }
-                s
-            }
-            _ if !d.note.is_empty() => d.note.clone(),
-            _ => fmt_bytes(d.received),
-        };
-        let host = super::host(&d.url);
-        i.gfx.text(&format!("{status}   {host}"), R::new(r.x, r.y + 32.0, r.w - 220.0, 18.0), Font::ui(12.0, 400), th.faint);
-        if d.state == "progress" || d.state == "paused" {
-            let bar = R::new(r.x, r.bottom() - 6.0, r.w - 220.0, 3.0);
-            i.gfx.round(bar, 1.5, th.press);
-            i.gfx.round(R::new(bar.x, bar.y, bar.w * pct.min(1.0), 3.0), 1.5, th.accent);
+    for g in group_order() {
+        let rows: Vec<&UiDl> = s.downloads.iter().filter(|d| group(d.state) == g).collect();
+        if rows.is_empty() {
+            continue;
         }
-        let acts: &[(&str, &'static str)] = match d.state {
-            "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
-            "paused" => &[("Resume", "resume"), ("Cancel", "cancel")],
-            "done" => &[("Open", "open"), ("Show in folder", "folder")],
-            "failed" if d.url.starts_with("http") => &[("Retry", "retry")],
-            _ => &[],
-        };
-        // Finished rows can go: a quiet x at the far right.
-        let mut x = r.right();
-        if d.state == "done" || d.state == "failed" {
-            let xr = R::new(x - 26.0, r.y + 21.0, 22.0, 22.0);
-            let h = Hit::Page(PageHit::Dl("remove", d.id));
-            if i.is_hover(&h) {
-                i.gfx.round(xr, 6.0, th.press);
-            }
-            i.gfx.icon("close", xr.x + 4.0, xr.y + 4.0, 14.0, if i.is_hover(&h) { th.text } else { th.faint });
-            i.hit(xr, h);
-            x -= 30.0;
+        y += 8.0;
+        i.gfx.text(&g.to_uppercase(), R::new(col.x, y, col.w, 22.0), Font::ui(11.0, 600), th.faint);
+        y += 26.0;
+        // The firewall note rides under the first header that actually has a torrent.
+        if s.settings.torrent_note && rows.iter().any(|d| d.kind == "torrent") {
+            let msg = "Windows may ask to let aria2 through the firewall; allow it for faster torrents.";
+            let h = Hit::Page(PageHit::DlNote);
+            i.gfx.text(msg, R::new(col.x, y, col.w, 20.0), Font::ui(11.5, 400), if i.is_hover(&h) { th.text } else { th.faint });
+            i.hit(R::new(col.x, y, col.w, 20.0), h);
+            y += 24.0;
         }
-        for (label, a) in acts.iter().rev() {
-            let w = i.gfx.measure(label, Font::ui(12.5, 450)) + 18.0;
-            let br = R::new(x - w, r.y + 18.0, w, 28.0);
-            let h = Hit::Page(PageHit::Dl(a, d.id));
-            if i.is_hover(&h) {
-                i.gfx.round(br, 7.0, th.hover);
+        for d in rows {
+            let r = R::new(col.x, y, col.w, 64.0);
+            let mut tx = r.x;
+            // The kind tag: File / Torrent / Video, small caps, quiet.
+            let kind = match d.kind {
+                "torrent" => "Torrent",
+                "video" => "Video",
+                _ => "File",
+            };
+            let kw = i.gfx.measure(kind, Font::ui(9.5, 700)) + 12.0;
+            let kr = R::new(tx, r.y + 10.0, kw, 16.0);
+            i.gfx.round(kr, 4.0, th.press);
+            i.gfx.text(kind, kr, Font::ui(9.5, 700).align(Align::Center), th.faint);
+            tx += kw + 8.0;
+            i.gfx.text(&d.name, R::new(tx, r.y + 8.0, r.right() - 220.0 - tx, 22.0), Font::ui(13.5, 500), if d.state == "failed" { th.faint } else { th.text });
+            i.gfx.text(&status_line(d), R::new(r.x, r.y + 32.0, r.w - 220.0, 18.0), Font::ui(12.0, 400), th.faint);
+            if d.state == "progress" || d.state == "paused" {
+                let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
+                let bar = R::new(r.x, r.bottom() - 6.0, r.w - 220.0, 3.0);
+                i.gfx.round(bar, 1.5, th.press);
+                i.gfx.round(R::new(bar.x, bar.y, bar.w * pct.min(1.0), 3.0), 1.5, th.accent);
             }
-            i.gfx.text(label, br, Font::ui(12.5, 450).align(Align::Center), th.dim);
-            i.hit(br, h);
-            x -= w + 4.0;
+            let acts: &[(&str, &'static str)] = match d.state {
+                "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
+                "paused" => &[("Resume", "resume"), ("Cancel", "cancel")],
+                "seeding" => &[("Stop seeding", "stopSeed")],
+                "done" => &[("Open", "open"), ("Show in folder", "folder")],
+                "failed" if d.url.starts_with("http") => &[("Retry", "retry")],
+                _ => &[],
+            };
+            // Finished rows can go: a quiet x at the far right.
+            let mut x = r.right();
+            if d.state == "done" || d.state == "failed" {
+                let xr = R::new(x - 26.0, r.y + 21.0, 22.0, 22.0);
+                let h = Hit::Page(PageHit::Dl("remove", d.id));
+                if i.is_hover(&h) {
+                    i.gfx.round(xr, 6.0, th.press);
+                }
+                i.gfx.icon("close", xr.x + 4.0, xr.y + 4.0, 14.0, if i.is_hover(&h) { th.text } else { th.faint });
+                i.hit(xr, h);
+                x -= 30.0;
+            }
+            for (label, a) in acts.iter().rev() {
+                let w = i.gfx.measure(label, Font::ui(12.5, 450)) + 18.0;
+                let br = R::new(x - w, r.y + 18.0, w, 28.0);
+                let h = Hit::Page(PageHit::Dl(a, d.id));
+                if i.is_hover(&h) {
+                    i.gfx.round(br, 7.0, th.hover);
+                }
+                i.gfx.text(label, br, Font::ui(12.5, 450).align(Align::Center), th.dim);
+                i.hit(br, h);
+                x -= w + 4.0;
+            }
+            i.gfx.line(col.x, r.bottom(), col.right(), r.bottom(), th.line, 1.0);
+            y += 65.0;
         }
-        i.gfx.line(col.x, r.bottom(), col.right(), r.bottom(), th.line, 1.0);
-        y += 65.0;
     }
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
@@ -928,6 +1127,45 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::CopyAgent => super::copy_text(i.hwnd_raw(), &s.agent_cmd),
         PageHit::Dl(a, id) => send(&i.proxy, json!({"t": "dl", "a": a, "id": id})),
         PageHit::DlClear => send(&i.proxy, json!({"t": "dl", "a": "clear"})),
+        PageHit::DlOpenFolder => send(&i.proxy, json!({"t": "dl", "a": "openFolder"})),
+        PageHit::DlAddLink => {
+            // The clipboard decides: a link goes to aria2, anything else gets a note.
+            let text = super::read_clipboard(i.hwnd_raw());
+            match classify_link(&text) {
+                "magnet" | "url" => send(&i.proxy, json!({"t": "dl", "a": "addUrl", "url": text})),
+                _ => {
+                    i.page.flash = Some(("Copy a link or magnet first".into(), std::time::Instant::now()));
+                    i.invalidate();
+                }
+            }
+        }
+        PageHit::DlTorrentPick => {
+            if let Some(bytes) = pick_torrent(i.hwnd_raw()) {
+                use base64::Engine as _;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                send(&i.proxy, json!({"t": "dl", "a": "addTorrent", "b64": b64}));
+            }
+        }
+        PageHit::DlLimit => {
+            // The native menu of speeds aria2 accepts as max-overall-download-limit.
+            let (x, y) = i.mouse;
+            let kbps = match i.popup(
+                &[(1, "No limit".into()), (2, "1 MB/s".into()), (3, "5 MB/s".into()), (4, "10 MB/s".into())],
+                x,
+                y,
+            ) {
+                1 => 0,
+                2 => 1024,
+                3 => 5120,
+                4 => 10240,
+                _ => return,
+            };
+            send(&i.proxy, json!({"t": "dl", "a": "limit", "kbps": kbps}));
+        }
+        PageHit::DlNote => {
+            // The firewall line is dismissed for good; it never comes back.
+            set(i, "torrent_note", json!(false));
+        }
         PageHit::Open(url) => send(&i.proxy, json!({"t": "nav", "url": url})),
         PageHit::Forget(url) => send(&i.proxy, json!({"t": "forget", "url": url})),
         PageHit::Unbookmark(url) => send(&i.proxy, json!({"t": "unbookmark", "url": url})),
@@ -1002,7 +1240,26 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, midnight, unix_now};
+    use super::{classify_link, days_from_civil, fmt_bytes, group, midnight, summary, unix_now};
+    use crate::chrome::UiDl;
+
+    fn dl(state: &'static str, kind: &'static str) -> UiDl {
+        UiDl {
+            id: 1,
+            name: "x".into(),
+            url: "https://example.com/f.bin".into(),
+            received: 0,
+            total: 0,
+            state,
+            speed: 0,
+            note: String::new(),
+            kind,
+            up: 0,
+            peers: 0,
+            seeds: 0,
+            ratio: 0.0,
+        }
+    }
 
     #[test]
     fn civil_days_are_the_epoch_count() {
@@ -1022,5 +1279,72 @@ mod tests {
         assert!(now - m < 86_400, "midnight is not within the last day");
         // Local time-of-day at midnight is 00:00, which is what the ranges need.
         assert_eq!((now - m) / 3600, ((now - m) / 3600).min(23));
+    }
+
+    /// The summary line, exactly as the brief spells it.
+    #[test]
+    fn summary_counts_and_speeds() {
+        assert_eq!(summary(3, 4_404_019, 317_440), "3 active · 4.2 MB/s down · 310 KB/s up");
+        // Nothing running: no line at all.
+        assert_eq!(summary(0, 0, 0), "");
+    }
+
+    /// Every state lands in a group; the page draws them in a fixed order.
+    #[test]
+    fn groups_cover_every_state() {
+        assert_eq!(group("progress"), "Active");
+        assert_eq!(group("paused"), "Active");
+        assert_eq!(group("seeding"), "Seeding");
+        assert_eq!(group("done"), "Done");
+        assert_eq!(group("failed"), "Failed");
+    }
+
+    /// Clipboard text is a link, a magnet, or nothing aria2 wants.
+    #[test]
+    fn links_classify_by_scheme() {
+        assert_eq!(classify_link("https://example.com/f.bin"), "url");
+        assert_eq!(classify_link("  http://a.test/x  "), "url");
+        assert_eq!(classify_link("magnet:?xt=urn:btih:abc"), "magnet");
+        assert_eq!(classify_link("hello world"), "other");
+        assert_eq!(classify_link("ftp://a.test/x"), "other");
+        assert_eq!(classify_link(""), "other");
+    }
+
+    /// The seeding and torrent status lines spell out the brief's fields.
+    #[test]
+    fn status_lines_name_peers_and_ratio() {
+        let mut d = dl("seeding", "torrent");
+        d.up = 300 * 1024;
+        d.ratio = 0.42;
+        d.peers = 9;
+        // The host rides along at the end, like every status line on this page.
+        assert_eq!(super::status_line(&d), "Seeding · up 300 KB/s · ratio 0.42 · 9 peers   example.com");
+
+        let mut d = dl("progress", "torrent");
+        d.received = 120 * 1048576;
+        d.total = 1_503_238_553; // 1.4 GiB
+        d.speed = 4308992;
+        d.peers = 23;
+        d.seeds = 7;
+        d.up = 300 * 1024;
+        let s = super::status_line(&d);
+        assert!(s.contains("120.0 MB of 1.40 GB"), "{s}");
+        assert!(s.contains("4.1 MB/s"), "{s}");
+        assert!(s.contains("23 peers, 7 seeds"), "{s}");
+        assert!(s.contains("up 300 KB/s"), "{s}");
+
+        let mut d = dl("progress", "file");
+        d.peers = 16;
+        d.received = 120 * 1048576;
+        d.total = 1_503_238_553;
+        let s = super::status_line(&d);
+        assert!(s.contains("16 connections"), "{s}");
+        assert!(!s.contains("peers"), "{s}");
+    }
+
+    #[test]
+    fn fmt_bytes_rounds_like_the_brief() {
+        assert_eq!(fmt_bytes(4_404_019), "4.2 MB");
+        assert_eq!(fmt_bytes(317_440), "310 KB");
     }
 }

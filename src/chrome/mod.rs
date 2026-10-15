@@ -70,6 +70,14 @@ pub struct UiDl {
     pub state: &'static str,
     pub speed: u64,
     pub note: String,
+    /// "file" | "torrent" | "video"
+    pub kind: &'static str,
+    /// Upload speed, bytes per second.
+    pub up: u64,
+    /// Connected peers (torrents) or connections (files).
+    pub peers: u64,
+    pub seeds: u64,
+    pub ratio: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +111,8 @@ pub struct UiState {
     pub history: Vec<UiVisit>,
     /// Filled only while the Bookmarks page is open: (url, title).
     pub bookmarks: Vec<(String, String)>,
+    /// A download ended while the page was closed: a small dot on the footer button.
+    pub dl_unseen: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1025,29 +1035,46 @@ impl Inner {
             self.hit(allow, Hit::PermAllow(*pid));
         }
 
-        // Footer: memory readout and settings.
+        // Footer: memory readout, downloads and settings. The downloads button is
+        // always there; people should not have to own a live download to find it.
         let fy = sb.h - 38.0;
-        let gear = if compact { R::new(sb.x + (sb.w - 28.0) / 2.0, fy + 2.0, 28.0, 28.0) } else { R::new(sb.right() - 8.0 - 28.0, fy + 2.0, 28.0, 28.0) };
+        let gear = if compact {
+            R::new(sb.x + 28.0, fy + 3.0, 26.0, 26.0)
+        } else {
+            R::new(sb.right() - 8.0 - 28.0, fy + 2.0, 28.0, 28.0)
+        };
         self.button(gear, "sliders", Hit::Gear, true);
-        // Downloads in flight: an arrow with a progress ring, left of the gear.
+        let dl = if compact { R::new(sb.x + 2.0, fy + 3.0, 26.0, 26.0) } else { R::new(gear.x - 30.0, gear.y, 28.0, 28.0) };
+        // Downloads in flight: an arrow with a progress ring. Nothing running: the plain arrow.
         let live: Vec<&UiDl> = s.downloads.iter().filter(|d| d.state == "progress").collect();
-        let mut mem_room = sb.w - 56.0;
-        if !live.is_empty() && !compact {
-            let r = R::new(gear.x - 30.0, gear.y, 28.0, 28.0);
+        let mem_room = sb.w - 56.0 - 30.0;
+        if self.is_hover(&Hit::DlFooter) {
+            self.gfx.round(dl, 7.0, th.hover);
+        }
+        if !live.is_empty() {
             let (got, total): (i64, i64) = live.iter().fold((0, 0), |a, d| (a.0 + d.received, a.1 + d.total.max(0)));
             let p = if total > 0 { got as f32 / total as f32 } else { 0.0 };
-            if self.is_hover(&Hit::DlFooter) {
-                self.gfx.round(r, 7.0, th.hover);
-            }
-            self.gfx.ring(r.x + 14.0, r.y + 14.0, 10.0, 10.0, th.line, 1.5);
+            self.gfx.ring(dl.x + 14.0, dl.y + 14.0, 10.0, 10.0, th.line, 1.5);
             if p > 0.0 {
                 let p = self.anim.get("dl-ring", p.min(1.0), 0.15);
-                self.gfx.arc(r.x + 14.0, r.y + 14.0, 10.0, -90.0, 359.0 * p, th.accent, 2.0);
+                self.gfx.arc(dl.x + 14.0, dl.y + 14.0, 10.0, -90.0, 359.0 * p, th.accent, 2.0);
             }
-            self.gfx.icon("download", r.x + 8.0, r.y + 8.0, 12.0, th.dim);
-            self.hit(r, Hit::DlFooter);
-            mem_room -= 30.0;
         }
+        self.gfx.icon("download", dl.x + (dl.w - 12.0) / 2.0, dl.y + (dl.h - 12.0) / 2.0, 12.0, th.dim);
+        // Count badge for anything still in flight, paused or seeding.
+        let busy_n = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused" | "seeding")).count();
+        if busy_n > 0 {
+            let t = if busy_n > 9 { "9+".to_string() } else { busy_n.to_string() };
+            let d = 13.0;
+            let bx = dl.right() - 5.0 - d;
+            let by = dl.y - 3.0;
+            self.gfx.circle(bx + d / 2.0, by + d / 2.0, d / 2.0, th.accent);
+            self.gfx.text(&t, R::new(bx, by + 0.5, d, d), Font::ui(9.0, 700).align(Align::Center), th.bg);
+        } else if s.dl_unseen {
+            // Something ended while the page was closed: a quiet dot.
+            self.gfx.circle(dl.right() - 4.0, dl.y - 1.0, 3.0, th.accent);
+        }
+        self.hit(dl, Hit::DlFooter);
         if s.agent_busy && !compact {
             let t = "Agent working · Stop";
             let tw = self.gfx.measure(t, Font::ui(11.5, 500)) + 28.0;
@@ -1553,6 +1580,36 @@ pub(crate) fn copy_text(hwnd: HWND, text: &str) {
             }
         }
         let _ = CloseClipboard();
+    }
+}
+
+/// The clipboard's text, for the Add link button. Empty when there is none.
+pub(crate) fn read_clipboard(hwnd: HWND) -> String {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::{
+        DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+        Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+    };
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_err() {
+            return String::new();
+        }
+        let mut out = String::new();
+        if let Ok(h) = GetClipboardData(CF_UNICODETEXT) {
+            let h = HGLOBAL(h.0);
+            let size = GlobalSize(h);
+            let p = GlobalLock(h) as *const u16;
+            if !p.is_null() && size >= 2 {
+                // The clipboard NUL-terminates; do not read past it.
+                let words = (size / 2).saturating_sub(1);
+                let len = (0..words).take_while(|&i| *p.add(i) != 0).count();
+                out = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+                let _ = GlobalUnlock(h);
+            }
+        }
+        let _ = CloseClipboard();
+        out.trim().to_string()
     }
 }
 

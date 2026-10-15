@@ -58,6 +58,8 @@ pub enum Ev {
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
+    /// A magnet link was cancelled out of a page; hand it to aria2.
+    Magnet(u64, String),
     /// Time to read this tab's text for history search: (tab, url it was loading).
     Capture(u64, String),
     /// The text came back: (tab, url, JSON or "null").
@@ -96,7 +98,7 @@ pub struct Dl {
     pub path: String,
     pub received: i64,
     pub total: i64,
-    /// "progress" | "done" | "failed" | "paused"
+    /// "progress" | "done" | "failed" | "paused" | "seeding"
     pub state: &'static str,
     /// Bytes per second, when known (aria2).
     pub speed: u64,
@@ -104,6 +106,20 @@ pub struct Dl {
     pub note: String,
     /// Started by a private tab: works, but leaves no row in downloads.json.
     pub private: bool,
+    /// Display name: torrent name when known, else the file name.
+    pub name: String,
+    /// "file" | "torrent" | "video"
+    pub kind: &'static str,
+    /// Upload speed, bytes per second (aria2 torrents).
+    pub up: u64,
+    /// Connected peers (aria2 torrents) or connections (plain files).
+    pub peers: u64,
+    /// Seeder count (aria2 torrents).
+    pub seeds: u64,
+    /// Uploaded / downloaded. 0 until both sides have bytes.
+    pub ratio: f64,
+    /// Number of files (a multi-file torrent opens its folder).
+    pub files: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -396,6 +412,12 @@ fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<R
                 let mut u = PWSTR::null();
                 args.Uri(&mut u)?;
                 let u = take(u);
+                // A magnet link is not a page: cancel and hand it to aria2.
+                if u.starts_with("magnet:") {
+                    args.SetCancel(true)?;
+                    let _ = p.send_event(Ev::Magnet(id, u));
+                    return Ok(());
+                }
                 let clean = clean_url(&u);
                 let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u)));
                 if let Some(clean) = listed.or(clean) {
@@ -641,7 +663,24 @@ fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64, private: bool) -> Dl {
             COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED => "failed",
             _ => "progress",
         };
-        Dl { id, url: take(uri), path: take(path), received: got, total, state, speed: 0, note: String::new(), private }
+        Dl {
+            id,
+            url: take(uri),
+            path: take(path),
+            received: got,
+            total,
+            state,
+            speed: 0,
+            note: String::new(),
+            private,
+            name: String::new(),
+            kind: "file",
+            up: 0,
+            peers: 0,
+            seeds: 0,
+            ratio: 0.0,
+            files: 1,
+        }
     }
 }
 
