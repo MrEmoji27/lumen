@@ -203,7 +203,7 @@ impl Settings {
     }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedTab {
     pub url: String,
@@ -212,14 +212,29 @@ pub struct SavedTab {
     pub pinned: bool,
 }
 
+/// A named set of tabs. Saved in session.json so workspaces survive a restart.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Workspace {
+    pub name: String,
+    pub tabs: Vec<SavedTab>,
+    /// Index into `tabs` of the active tab in this workspace.
+    pub active: usize,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
+    /// Kept on disk for the old single-workspace format. Populated on save from
+    /// the active workspace so a pre-workspaces build can still read the file.
     pub tabs: Vec<SavedTab>,
     pub active: usize,
     pub width: f64,
     pub height: f64,
     pub maximized: bool,
+    /// New format: one entry per workspace. Empty when the file predates workspaces.
+    pub workspaces: Vec<Workspace>,
+    pub active_workspace: usize,
 }
 
 fn load<T: Default + for<'de> Deserialize<'de>>(name: &str) -> T {

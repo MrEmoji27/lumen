@@ -10,11 +10,13 @@ mod agentkit;
 mod blocker;
 mod chrome;
 mod engine;
+mod glance;
 mod library;
 mod monitor;
 mod pagekit;
 mod recall;
 mod video;
+mod workspaces;
 mod store;
 
 use std::{
@@ -96,6 +98,8 @@ struct Tab {
     reader: Option<String>,
     /// Opened by a page (window.open, target=_blank).
     popup: bool,
+    /// Which workspace this tab belongs to (index into `App::workspaces`).
+    workspace: usize,
     /// InPrivate. Nothing here is written anywhere: no history, no page text,
     /// no session, no download row, no cookies once the last private page goes.
     private: bool,
@@ -125,6 +129,7 @@ impl Tab {
             crashed: false,
             reader: None,
             popup: false,
+            workspace: 0,
             private: false,
             owner: String::new(),
             owner_name: String::new(),
@@ -149,6 +154,11 @@ struct App {
     chrome: chrome::Chrome,
     blocker: Rc<blocker::Blocker>,
     tabs: Vec<Tab>,
+    /// Named tab groups. `tab_ids` for the active workspace mirrors the live Tab IDs.
+    workspaces: Vec<workspaces::WorkspaceData>,
+    active_workspace: usize,
+    /// Shift+clicked links open here: (tab id, url, view). Dropped on Escape.
+    glance: Option<(u64, String, WebView)>,
     active: u64,
     closed: Vec<SavedTab>,
     settings: Settings,
@@ -396,6 +406,9 @@ fn main() {
         chrome,
         blocker,
         tabs: Vec::new(),
+        workspaces: Vec::new(),
+        active_workspace: 0,
+        glance: None,
         active: 0,
         closed: Vec::new(),
         settings,
@@ -546,11 +559,21 @@ fn main() {
                 // Keys typed in that gap land here; handle them instead of losing them.
                 WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                     let m = app.mods;
-                    if let Some(vk) = vk_of(event.physical_key)
-                        && let Some(a) = engine::map_key(vk, m.control_key(), m.shift_key(), m.alt_key())
-                        && (!event.repeat || matches!(a, Action::NextTab | Action::PrevTab))
-                    {
-                        app.on_key(a);
+                    if let Some(vk) = vk_of(event.physical_key) {
+                        // A bare-window glance takes Escape and Enter; the card
+                        // view normally has focus and catches them itself.
+                        if app.glance.is_some() {
+                            match vk {
+                                0x1B if !m.shift_key() => app.close_glance(),
+                                0x0D => app.promote_glance(),
+                                _ => {}
+                            }
+                        }
+                        if let Some(a) = engine::map_key(vk, m.control_key(), m.shift_key(), m.alt_key())
+                            && (!event.repeat || matches!(a, Action::NextTab | Action::PrevTab))
+                        {
+                            app.on_key(a);
+                        }
                     }
                     app.focus_page();
                 }
@@ -997,6 +1020,16 @@ impl App {
                 engine::round_corners(v, radius);
             }
         }
+        // The glance card floats at 80% of the stage, centred, over a dimmed page.
+        if let Some((_, _, v)) = &self.glance {
+            let gw = sw * 0.8;
+            let gh = sh * 0.8;
+            let _ = v.set_bounds(logical_rect(x + (sw - gw) / 2.0, y + (sh - gh) / 2.0, gw, gh));
+            engine::round_corners(v, radius);
+            // Dim over the page, card over the dim: both are sibling windows.
+            self.chrome.set_glance_dim(x, y, sw, sh);
+            engine::raise(v);
+        }
     }
 
     fn focus_page(&self) {
@@ -1113,6 +1146,9 @@ impl App {
                     .flat_map(|(o, r)| r.iter().map(move |(k, a)| (o.clone(), k.clone(), *a)))
                     .collect(),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
+                workspaces: self.workspaces.iter().map(|w| w.name.clone()).collect(),
+                active_workspace: self.active_workspace,
+                glance: self.glance.is_some(),
             };
             self.chrome.set_state(state);
             let bg = self.chrome.bg();
@@ -1131,13 +1167,21 @@ impl App {
     // ---------------------------------------------------------------- tabs
 
     fn restore(&mut self, session: Session) {
+        let (workspaces, active_ws) = workspaces::build_from_session(&session);
+        self.workspaces = workspaces;
+        self.active_workspace = active_ws.min(self.workspaces.len().saturating_sub(1));
+        // Load the active workspace's saved tabs into memory.
+        let ws = self.workspaces[self.active_workspace].clone();
+        let saved = ws.saved;
+        let ws_active = ws.active;
         let mut active = None;
-        for (i, saved) in session.tabs.into_iter().enumerate() {
+        for (i, saved) in saved.into_iter().enumerate() {
             let mut t = Tab::new(self.ctx.alloc_id(), saved.url);
             t.title = saved.title;
             t.favicon = saved.favicon;
             t.pinned = saved.pinned;
-            if i == session.active {
+            t.workspace = self.active_workspace;
+            if i == ws_active {
                 active = Some(t.id);
             }
             self.tabs.push(t);
@@ -1145,7 +1189,16 @@ impl App {
         // Pinned tabs live at the front. The UI groups them; the order must agree.
         self.tabs.sort_by_key(|t| !t.pinned);
         if self.tabs.is_empty() {
-            self.tabs.push(Tab::new(self.ctx.alloc_id(), String::new()));
+            let mut t = Tab::new(self.ctx.alloc_id(), String::new());
+            t.workspace = self.active_workspace;
+            self.tabs.push(t);
+        }
+        // Sync the active workspace's tab_ids with the live IDs.
+        let ids: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
+        if let Some(ws) = self.workspaces.get_mut(self.active_workspace) {
+            ws.tab_ids = ids;
+            ws.saved.clear();
+            ws.active = self.tabs.iter().position(|t| Some(t.id) == active).unwrap_or(0);
         }
         // Only the active tab gets a page. The rest stay "off" until clicked.
         let id = active.filter(|id| self.idx(*id).is_some()).unwrap_or(self.tabs[0].id);
@@ -1231,7 +1284,8 @@ impl App {
 
     fn new_tab(&mut self, url: Option<String>, after: Option<usize>) -> u64 {
         let id = self.ctx.alloc_id();
-        let t = Tab::new(id, url.unwrap_or_default());
+        let mut t = Tab::new(id, url.unwrap_or_default());
+        t.workspace = self.active_workspace;
         let floor = self.pinned_count();
         match after {
             Some(i) if i < self.tabs.len() => self.tabs.insert((i + 1).max(floor), t),
@@ -1247,6 +1301,7 @@ impl App {
         let id = self.ctx.alloc_id();
         let mut t = Tab::new(id, String::new());
         t.private = true;
+        t.workspace = self.active_workspace;
         self.tabs.push(t);
         self.activate(id);
         id
@@ -1326,6 +1381,138 @@ impl App {
         t.trimmed = false;
         t.loading = false;
         t.audio = false;
+    }
+
+    // ---------------------------------------------------------- workspaces
+
+    /// Serialize the live tabs into the active workspace's slot, so the
+    /// workspace can come back later without keeping its views alive.
+    fn stash_workspace(&mut self) {
+        let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
+        let saved: Vec<SavedTab> = keep
+            .iter()
+            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+            .collect();
+        let active_idx = keep.iter().position(|t| t.id == self.active).unwrap_or(0);
+        let ids: Vec<u64> = keep.iter().map(|t| t.id).collect();
+        if let Some(ws) = self.workspaces.get_mut(self.active_workspace) {
+            ws.tab_ids = ids;
+            ws.saved = saved;
+            ws.active = active_idx;
+        }
+    }
+
+    /// Drop every live tab and its view. Hidden workspaces cost no memory.
+    fn drop_all_tabs(&mut self) {
+        while let Some(t) = self.tabs.pop() {
+            self.agent_logs.borrow_mut().remove(&t.id);
+            if let Some(w) = self.watches.remove(&t.id) {
+                monitor::unwatch(None, w, true);
+            }
+            self.prompts.retain(|p| p.1 != t.id);
+            // A person waiting on a handoff from a discarded tab gets their answer back.
+            if self.handoff.as_ref().is_some_and(|h| h.0 == t.id)
+                && let Some((_, _, _, r)) = self.handoff.take()
+            {
+                let _ = r.send(Err("the tab was closed".into()));
+            }
+            drop(t);
+        }
+        // activate() looks the old id up; a dead id must not resolve.
+        self.active = 0;
+    }
+
+    /// Rebuild live tabs for workspace `to` from its saved list and open one.
+    fn load_workspace(&mut self, to: usize) {
+        let ws = self
+            .workspaces
+            .get(to)
+            .cloned()
+            .unwrap_or_else(|| workspaces::WorkspaceData::new(workspaces::DEFAULT_NAME));
+        let mut active = None;
+        for (i, saved) in ws.saved.iter().enumerate() {
+            let mut t = Tab::new(self.ctx.alloc_id(), saved.url.clone());
+            t.title = saved.title.clone();
+            t.favicon = saved.favicon.clone();
+            t.pinned = saved.pinned;
+            t.workspace = to;
+            if i == ws.active {
+                active = Some(t.id);
+            }
+            self.tabs.push(t);
+        }
+        // Pinned tabs live at the front. The UI groups them; the order must agree.
+        self.tabs.sort_by_key(|t| !t.pinned);
+        if self.tabs.is_empty() {
+            let mut t = Tab::new(self.ctx.alloc_id(), String::new());
+            t.workspace = to;
+            self.tabs.push(t);
+        }
+        let ids: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
+        let new_active = self.tabs.iter().position(|t| Some(t.id) == active).unwrap_or(0);
+        if let Some(ws) = self.workspaces.get_mut(to) {
+            ws.tab_ids = ids;
+            ws.saved.clear();
+            ws.active = new_active;
+        }
+        self.active_workspace = to;
+        let id = active.filter(|id| self.idx(*id).is_some()).unwrap_or(self.tabs[0].id);
+        self.activate(id);
+    }
+
+    /// Switch to workspace `to`. The current workspace's tabs are discarded
+    /// (no memory) and the target's are restored.
+    fn switch_workspace(&mut self, to: usize) {
+        let to = to.min(self.workspaces.len().saturating_sub(1));
+        if to == self.active_workspace {
+            return;
+        }
+        self.stash_workspace();
+        self.drop_all_tabs();
+        self.load_workspace(to);
+    }
+
+    // ---------------------------------------------------------------- glance
+
+    /// Shift+click on a link: open it in a floating card over the current page.
+    fn open_glance(&mut self, url: &str) {
+        // One glance at a time. Drop the old one.
+        self.glance = None;
+        let id = self.ctx.alloc_id();
+        let (x, y, w, h) = self.stage();
+        // The card is 80% of the stage, centred; layout sizes the dim to match.
+        let rect = logical_rect(x + w * 0.1, y + h * 0.1, w * 0.8, h * 0.8);
+        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, false, false) else { return };
+        // The card takes Escape and Enter itself while it has focus.
+        glance::hook_keys(&v, self.ctx.proxy.clone());
+        if !headless() {
+            let _ = v.focus();
+        }
+        self.glance = Some((id, url.to_string(), v));
+        self.chrome.set_glance(true);
+        self.layout();
+        self.push();
+    }
+
+    /// Escape: drop the floating card, back to the page below.
+    fn close_glance(&mut self) {
+        if self.glance.take().is_some() {
+            self.chrome.set_glance(false);
+            self.layout();
+            self.dirty = true;
+            self.push();
+            self.focus_page();
+        }
+    }
+
+    /// Enter or the "Open as tab" button: the glance becomes a normal tab.
+    fn promote_glance(&mut self) {
+        let Some((_, url, _v)) = self.glance.take() else { return };
+        self.chrome.set_glance(false);
+        self.new_tab(Some(url), None);
+        self.layout();
+        self.dirty = true;
+        self.push();
     }
 
     /// Someone started lumen.exe while this one runs. Headless becomes a normal window:
@@ -2414,6 +2601,20 @@ impl App {
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
             Ev::Video(id, up) => self.on_video(id, up),
             Ev::ShowMe => self.show_me(),
+            Ev::Glance(id, url) => {
+                if id == self.active {
+                    self.open_glance(&url);
+                } else if let Some((gid, _, v)) = &self.glance
+                    && *gid == id
+                {
+                    // A shift+click inside the card moves the card, not the page.
+                    let _ = v.load_url(&url);
+                }
+            }
+            Ev::GlanceKey(k) => match k {
+                "esc" => self.close_glance(),
+                _ => self.promote_glance(),
+            },
             Ev::Orphan(id) => {
                 // Like Chrome: a tab a page opened just for a download goes away.
                 // A tab the user typed it into goes back to the new tab page.
@@ -2562,6 +2763,11 @@ impl App {
             },
             Action::Reader => self.toggle_reader(i),
             Action::DarkSite => self.toggle_dark_site(i),
+            Action::Workspace(n) => {
+                if n < self.workspaces.len() {
+                    self.switch_workspace(n);
+                }
+            }
         }
     }
 
@@ -2706,6 +2912,112 @@ impl App {
                 };
                 self.set_panel(p);
             }
+            "workspaceSwitch" => {
+                if let Some(n) = m["to"].as_u64() {
+                    self.switch_workspace(n as usize);
+                }
+            }
+            "workspaceAdd" => {
+                // A new, empty workspace; switch into it. Ctrl+Alt+1..4 reaches it.
+                let n = self.workspaces.len();
+                if n < workspaces::MAX_WORKSPACES {
+                    self.workspaces.push(workspaces::WorkspaceData::new(&format!("Workspace {}", n + 1)));
+                    self.switch_workspace(n);
+                }
+            }
+            "workspaceRename" => {
+                let i = m["i"].as_u64().unwrap_or(0) as usize;
+                let name = m["name"].as_str().unwrap_or("").trim().to_string();
+                if let Some(ws) = self.workspaces.get_mut(i) {
+                    if !name.is_empty() {
+                        ws.name = name;
+                    }
+                    self.dirty = true;
+                    self.push();
+                }
+            }
+            "workspaceDuplicate" => {
+                let i = m["i"].as_u64().unwrap_or(0) as usize;
+                // The active workspace's tabs are live; everyone else's are stored.
+                let dup = self.workspaces.get(i).map(|ws| {
+                    let saved = if i == self.active_workspace {
+                        keepable(&self.tabs, self.active)
+                            .iter()
+                            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+                            .collect()
+                    } else {
+                        ws.saved.clone()
+                    };
+                    (format!("{} copy", ws.name), saved)
+                });
+                if let Some((name, saved)) = dup
+                    && self.workspaces.len() < workspaces::MAX_WORKSPACES
+                {
+                    let mut ws = workspaces::WorkspaceData::new(&name);
+                    ws.saved = saved;
+                    self.workspaces.push(ws);
+                    self.dirty = true;
+                    self.push();
+                }
+            }
+            "workspaceClose" => {
+                let i = m["i"].as_u64().unwrap_or(0) as usize;
+                if self.workspaces.len() > 1 && i < self.workspaces.len() {
+                    let was_active = i == self.active_workspace;
+                    self.workspaces.remove(i);
+                    if was_active {
+                        // The closed workspace's live tabs go with it; open the neighbour.
+                        self.active_workspace = self.active_workspace.min(self.workspaces.len() - 1);
+                        self.drop_all_tabs();
+                        self.load_workspace(self.active_workspace);
+                    } else {
+                        if i < self.active_workspace {
+                            self.active_workspace -= 1;
+                        }
+                        // Live tabs all belong to the active workspace; their index moved.
+                        for t in &mut self.tabs {
+                            t.workspace = self.active_workspace;
+                        }
+                        self.dirty = true;
+                        self.push();
+                    }
+                }
+            }
+            "moveTabToWorkspace" => {
+                let to = m["to"].as_u64().map(|n| n as usize).unwrap_or(usize::MAX);
+                if let Some(id) = m["id"].as_u64()
+                    && to < self.workspaces.len()
+                    && to != self.active_workspace
+                    && let Some(i) = self.idx(id)
+                {
+                    // Not closed: it lives on in the other workspace, so no reopen entry.
+                    let t = self.tabs.remove(i);
+                    let saved = SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned };
+                    self.agent_logs.borrow_mut().remove(&t.id);
+                    self.prompts.retain(|p| p.1 != t.id);
+                    if let Some(w) = self.watches.remove(&t.id) {
+                        monitor::unwatch(None, w, true);
+                    }
+                    drop(t);
+                    if let Some(ws) = self.workspaces.get_mut(to) {
+                        ws.saved.push(saved);
+                    }
+                    if id == self.active {
+                        if self.tabs.is_empty() {
+                            self.new_tab(None, None);
+                        } else {
+                            let next = self.tabs[i.min(self.tabs.len() - 1)].id;
+                            self.active = 0;
+                            self.activate(next);
+                        }
+                    } else {
+                        self.dirty = true;
+                        self.push();
+                    }
+                }
+            }
+            "glanceOpen" => self.promote_glance(),
+            "glanceClose" => self.close_glance(),
             "peek" => {
                 self.peek = m["on"].as_bool().unwrap_or(false);
                 self.layout();
@@ -3407,16 +3719,21 @@ impl App {
         let (width, height) = logical_size(&self.ctx);
         let maximized = self.ctx.window.is_maximized();
         let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
-        let s = Session {
-            tabs: keep
-                .iter()
-                .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
-                .collect(),
-            active: keep.iter().position(|t| t.id == self.active).unwrap_or(0),
-            width: if maximized || self.fullscreen() { 0.0 } else { width },
-            height: if maximized || self.fullscreen() { 0.0 } else { height },
+        let saved: Vec<SavedTab> = keep
+            .iter()
+            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+            .collect();
+        let active_tab_idx = keep.iter().position(|t| t.id == self.active).unwrap_or(0);
+        // to_session stamps the live tabs into the active workspace's slot.
+        let s = workspaces::to_session(
+            &self.workspaces,
+            self.active_workspace,
+            &saved,
+            active_tab_idx,
+            if maximized || self.fullscreen() { 0.0 } else { width },
+            if maximized || self.fullscreen() { 0.0 } else { height },
             maximized,
-        };
+        );
         // Remember it for the panic hook: a panic must not lose these tabs.
         if let Ok(mut g) = LAST_SESSION.lock() {
             *g = Some(s.clone());

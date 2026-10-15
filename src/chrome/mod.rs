@@ -105,6 +105,12 @@ pub struct UiState {
     pub handoff: Option<(String, String)>,
     /// Remembered answers: (origin, what, allowed).
     pub rules: Vec<(String, String, bool)>,
+    /// Workspace names, for the switcher at the top of the sidebar.
+    pub workspaces: Vec<String>,
+    /// Index into `workspaces` of the active one.
+    pub active_workspace: usize,
+    /// A glance card is open over the page.
+    pub glance: bool,
     /// The active page is bookmarked.
     pub bookmarked: bool,
     /// Filled only while the History page is open.
@@ -163,6 +169,12 @@ pub enum Hit {
     NtpSearch,
     /// Page widgets (settings and Control live in pages.rs).
     Page(pages::PageHit),
+    /// Clicked a workspace name in the switcher.
+    Workspace(usize),
+    /// "Open as tab" button on the glance card.
+    GlanceOpen,
+    /// The "+" button next to workspaces to add a new one.
+    WorkspaceAdd,
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +235,10 @@ pub(crate) struct Inner {
     pub(crate) page: pages::Page,
     theme_key: String,
     mouse: (f32, f32),
+    /// Dimmed overlay window shown behind the glance card.
+    glance_dim: Option<HWND>,
+    /// Workspace index being renamed via the omnibox edit, if any.
+    renaming: Option<usize>,
 }
 
 /// The native chrome. Cheap to clone the handle; state lives behind the RefCell.
@@ -305,6 +321,21 @@ impl Chrome {
             )
             .expect("chrome window");
             let edit_style = WINDOW_STYLE(ES_AUTOHSCROLL as u32) | WS_CHILD;
+            // The glance card's dimmed backdrop: a translucent child of the main
+            // window, raised over the page while a card is open.
+            let dim = CreateWindowExW(
+                WS_EX_LAYERED,
+                w!("STATIC"),
+                w!(""),
+                WS_CHILD | WS_CLIPSIBLINGS,
+                0, 0, 1, 1,
+                Some(parent),
+                None,
+                Some(hinst),
+                None,
+            ).unwrap_or_default();
+            let _ = ShowWindow(dim, SW_HIDE);
+            let _ = SetLayeredWindowAttributes(dim, COLORREF(0), 75, LWA_ALPHA);
             let edit = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 w!("EDIT"),
@@ -371,6 +402,8 @@ impl Chrome {
                 page: pages::Page::default(),
                 theme_key: String::new(),
                 mouse: (-1.0, -1.0),
+                glance_dim: Some(dim),
+                renaming: None,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -398,6 +431,40 @@ impl Chrome {
     /// Sidebar color, for the window behind the page gaps.
     pub fn bg(&self) -> (u8, u8, u8) {
         self.inner.try_borrow().map(|i| i.theme.bg.rgb8()).unwrap_or((24, 24, 26))
+    }
+
+    /// Show or reposition the dimmed backdrop behind the glance card,
+    /// covering the page area (logical coords: page origin + size).
+    pub fn set_glance_dim(&self, x: f64, y: f64, w: f64, h: f64) {
+        if let Some(dim) = self.inner.try_borrow().ok().and_then(|i| i.glance_dim) {
+            unsafe {
+                let k = GetDpiForWindow(self.hwnd) as f64 / 96.0;
+                let _ = SetWindowPos(
+                    dim,
+                    Some(HWND_TOP),
+                    (x * k).round() as i32,
+                    (y * k).round() as i32,
+                    (w * k).round().max(1.0) as i32,
+                    (h * k).round().max(1.0) as i32,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+        }
+    }
+
+    /// A glance card opened or closed. The dim overlay follows; the next
+    /// flush repaints the switcher with (or without) its "Open as tab" button.
+    pub fn set_glance(&self, on: bool) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        if let Some(s) = i.state.as_mut() {
+            s.glance = on;
+        }
+        if let Some(dim) = i.glance_dim {
+            unsafe {
+                let _ = ShowWindow(dim, if on { SW_SHOWNA } else { SW_HIDE });
+            }
+        }
+        i.invalidate();
     }
 
     pub fn set_visible(&self, on: bool) {
@@ -587,6 +654,13 @@ impl Inner {
         }
         self.layout_edits();
         self.spin();
+        // The dim overlay is sized by App::layout; here it only follows the flag.
+        let glance = self.state.as_ref().is_some_and(|s| s.glance);
+        if let Some(dim) = self.glance_dim {
+            unsafe {
+                let _ = ShowWindow(dim, if glance { SW_SHOWNA } else { SW_HIDE });
+            }
+        }
         self.invalidate();
     }
 
@@ -632,10 +706,11 @@ impl Inner {
     fn omni_rect(&self) -> R {
         let sb = self.sidebar();
         let s = self.state.as_ref().unwrap();
+        let ws_h = if s.compact() || s.workspaces.is_empty() { 0.0 } else { 32.0 };
         if s.compact() {
-            R::new(sb.x + (sb.w - 36.0) / 2.0, 104.0, 36.0, 34.0)
+            R::new(sb.x + (sb.w - 36.0) / 2.0, 104.0 + ws_h, 36.0, 34.0)
         } else {
-            R::new(sb.x + 8.0, 46.0, sb.w - 16.0, 34.0)
+            R::new(sb.x + 8.0, 46.0 + ws_h, sb.w - 16.0, 34.0)
         }
     }
 
@@ -696,9 +771,24 @@ impl Inner {
             return;
         }
         self.editing = false;
+        self.renaming = None;
         self.sugg.clear();
         if self.state.as_ref().is_some_and(|s| s.settings.compact) {
             send(&self.proxy, json!({"t": "peek", "on": false}));
+        }
+        self.layout_edits();
+        self.invalidate();
+    }
+
+    /// Show the omnibox edit filled with `name` for renaming workspace `idx`.
+    pub fn begin_workspace_rename(&mut self, idx: usize, name: &str) {
+        self.editing = true;
+        self.renaming = Some(idx);
+        self.sugg.clear();
+        unsafe {
+            SetWindowTextW(self.edit, &HSTRING::from(name)).ok();
+            let _ = SetFocus(Some(self.edit));
+            SendMessageW(self.edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
         }
         self.layout_edits();
         self.invalidate();
@@ -852,6 +942,43 @@ impl Inner {
             }
         }
 
+        // Workspace switcher: pill tabs at the top of the sidebar (non-compact).
+        if !compact && !s.workspaces.is_empty() {
+            let ws_y = 40.0;
+            let ws_h = 28.0;
+            let mut wx = sb.x + 8.0;
+            for (i, name) in s.workspaces.iter().enumerate() {
+                let active = i == s.active_workspace;
+                let tw = (self.gfx.measure(name, Font::ui(12.0, 500)) + 20.0).min(sb.w - 16.0 - 28.0);
+                let r = R::new(wx, ws_y, tw.max(44.0), ws_h);
+                if active {
+                    self.gfx.round(r, 8.0, th.accent);
+                    self.gfx.text(name, R::new(r.x + 10.0, r.y + 4.0, r.w - 20.0, r.h), Font::ui(12.0, 500), th.bg);
+                } else {
+                    let hov = self.is_hover(&Hit::Workspace(i));
+                    self.gfx.round(r, 8.0, if hov { th.hover } else { th.shade.alpha(0.4) });
+                    self.gfx.text(name, R::new(r.x + 10.0, r.y + 4.0, r.w - 20.0, r.h), Font::ui(12.0, 500), if hov { th.text } else { th.dim });
+                }
+                self.hit(r, Hit::Workspace(i));
+                wx += tw + 6.0;
+            }
+            // "+" to add a workspace.
+            let add_r = R::new(wx, ws_y, 28.0, ws_h);
+            let ah = self.is_hover(&Hit::WorkspaceAdd);
+            self.gfx.round(add_r, 8.0, if ah { th.hover } else { th.shade.alpha(0.4) });
+            self.gfx.icon("plus", add_r.x + 6.0, add_r.y + 6.0, 16.0, if ah { th.dim } else { th.faint });
+            self.hit(add_r, Hit::WorkspaceAdd);
+            wx += 34.0;
+            // "Open as tab" when a glance is open.
+            if s.glance {
+                let open_r = R::new(wx, ws_y, (self.gfx.measure("Open as tab", Font::ui(12.0, 500)) + 20.0).min(sb.right() - wx - 8.0), ws_h);
+                let oh = self.is_hover(&Hit::GlanceOpen);
+                self.gfx.round(open_r, 8.0, if oh { th.accent } else { th.accent.alpha(0.85) });
+                self.gfx.text("Open as tab", R::new(open_r.x + 10.0, open_r.y + 4.0, open_r.w - 20.0, open_r.h), Font::ui(11.5, 500), th.bg);
+                self.hit(open_r, Hit::GlanceOpen);
+            }
+        }
+
         // Address bar.
         let o = self.omni_rect();
         let hov = self.is_hover(&Hit::Omni);
@@ -886,8 +1013,9 @@ impl Inner {
             self.hit(r, Hit::Star);
         }
 
+        let ws_h = if compact || s.workspaces.is_empty() { 0.0 } else { 32.0 };
         // Tabs.
-        let list_top = if compact { 148.0 } else { 90.0 };
+        let list_top = if compact { 148.0 + ws_h } else { 90.0 + ws_h };
         let list = R::new(sb.x, list_top, sb.w, sb.h - list_top - 40.0);
         self.gfx.clip(list);
         let mut y = list.y - self.scroll;
@@ -1396,6 +1524,9 @@ impl Inner {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "control");
                 send(p, json!({"t": "panel", "open": open, "which": "control"}));
             }
+            Hit::Workspace(i) => send(p, json!({"t": "workspaceSwitch", "to": i})),
+            Hit::WorkspaceAdd => send(p, json!({"t": "workspaceAdd"})),
+            Hit::GlanceOpen => send(p, json!({"t": "glanceOpen"})),
             Hit::Sugg(i) => self.pick(i),
             Hit::DlFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "downloads");
@@ -1451,6 +1582,14 @@ impl Inner {
                     items.push((2, "Duplicate".into()));
                     items.push((7, "Add to new tab page".into()));
                 }
+                // Move to another workspace (skip the active one).
+                if s.workspaces.len() > 1 {
+                    for (wi, name) in s.workspaces.iter().enumerate() {
+                        if wi != s.active_workspace {
+                            items.push((20 + wi as u32, format!("Move to {name}")));
+                        }
+                    }
+                }
                 if t.url.starts_with("http") && (t.status == "live" || t.status == "asleep") {
                     items.push((10, "Save video".into()));
                     items.push((8, if t.reader { "Exit reader view\tF9".into() } else { "Reader view\tF9".into() }));
@@ -1491,10 +1630,41 @@ impl Inner {
                         send(&self.proxy, json!({"t": "settings", "v": st}));
                         return;
                     }
+                    20..=23 => {
+                        let wi = (cmd - 20) as usize;
+                        if wi < s.workspaces.len() && wi != s.active_workspace {
+                            send(&self.proxy, json!({"t": "moveTabToWorkspace", "id": id, "to": wi}));
+                        }
+                        return;
+                    }
                     _ => return,
                 };
                 send(&self.proxy, json!({"t": msg, "id": id}));
             }
+            Hit::Workspace(i) => {
+                let mut items: Vec<(u32, String)> = vec![(1, "Rename".into())];
+                if s.workspaces.len() > 1 {
+                    items.push((0, String::new()));
+                    items.push((2, "Duplicate".into()));
+                    items.push((3, "Close".into()));
+                }
+                items.push((0, String::new()));
+                items.push((4, "New workspace".into()));
+                let cmd = self.popup(&items, x, y);
+                match cmd {
+                    // Rename happens right here in the omnibox edit; Enter sends
+                    // the new name back, Escape drops it.
+                    1 => {
+                        let name = s.workspaces.get(i).map(|n| n.clone()).unwrap_or_default();
+                        self.begin_workspace_rename(i, &name);
+                    }
+                    2 => send(&self.proxy, json!({"t": "workspaceDuplicate", "i": i})),
+                    3 => send(&self.proxy, json!({"t": "workspaceClose", "i": i})),
+                    4 => send(&self.proxy, json!({"t": "workspaceAdd"})),
+                    _ => {}
+                }
+            }
+            Hit::WorkspaceAdd => send(&self.proxy, json!({"t": "workspaceAdd"})),
             Hit::Shortcut(i) => {
                 if self.popup(&[(1, "Remove from new tab page".into())], x, y) == 1 {
                     let mut st = s.settings.clone();
@@ -1540,6 +1710,19 @@ impl Inner {
 
     fn key(&mut self, vk: u32) -> bool {
         let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
+        // When a glance is open, Escape closes it and Enter opens it as a tab.
+        if let Some(s) = &self.state {
+            if s.glance {
+                if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) {
+                    send(&self.proxy, json!({"t": "glanceClose"}));
+                    return true;
+                }
+                if vk == VK_RETURN.0 as u32 {
+                    send(&self.proxy, json!({"t": "glanceOpen"}));
+                    return true;
+                }
+            }
+        }
         if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) {
             if self.state.as_ref().is_some_and(|s| s.panel != "none") {
                 send(&self.proxy, json!({"t": "panel", "open": false}));
@@ -1767,7 +1950,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let code = ((wp.0 >> 16) & 0xffff) as u32;
                 if id == ID_EDIT {
                     match code {
-                        EN_CHANGE => i.suggest(),
+                        // Typing a new workspace name is not a search.
+                        EN_CHANGE => {
+                            if i.renaming.is_none() {
+                                i.suggest();
+                            }
+                        }
                         EN_KILLFOCUS => i.end_edit(),
                         _ => {}
                     }
@@ -1807,6 +1995,27 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 && let Ok(mut i) = cell.try_borrow_mut()
             {
                 if id == ID_EDIT {
+                    // Workspace rename mode: Enter confirms, Escape cancels.
+                    if let Some(ri) = i.renaming {
+                        match vk {
+                            v if v == VK_RETURN.0 => {
+                                let name = wide_text(hwnd).trim().to_string();
+                                if !name.is_empty() {
+                                    send(&i.proxy, json!({"t": "workspaceRename", "i": ri, "name": name}));
+                                }
+                                i.renaming = None;
+                                i.end_edit();
+                                return LRESULT(0);
+                            }
+                            v if v == VK_ESCAPE.0 => {
+                                i.renaming = None;
+                                i.end_edit();
+                                send(&i.proxy, json!({"t": "focusPage"}));
+                                return LRESULT(0);
+                            }
+                            _ => {}
+                        }
+                    }
                     match vk {
                         v if v == VK_RETURN.0 => {
                             let q = wide_text(hwnd).trim().to_string();

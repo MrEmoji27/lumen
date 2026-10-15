@@ -28,7 +28,7 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT},
-            WindowsAndMessaging::GetClientRect,
+            WindowsAndMessaging::{GetClientRect, HWND_TOP, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE},
         },
     },
     core::{Interface, HSTRING, PWSTR},
@@ -103,6 +103,10 @@ pub enum Ev {
     /// A page died: (tab, the whole browser process went with it).
     /// The browser going takes every page with it; one page going takes only itself.
     Crashed(u64, bool),
+    /// Shift+click on an anchor: open it as a glance (tab id, URL).
+    Glance(u64, String),
+    /// The focused glance card got a key: "esc" closes it, "enter" promotes it.
+    GlanceKey(&'static str),
 }
 
 /// A download's state, copied out of WebView2 for the main loop.
@@ -162,6 +166,8 @@ pub enum Action {
     DevTools,
     Reader,
     DarkSite,
+    /// Ctrl+Alt+1..4: switch to workspace N.
+    Workspace(usize),
 }
 
 pub struct Ctx {
@@ -335,6 +341,7 @@ fn build_tab_in(
         .with_devtools(true)
         .with_hotkeys_zoom(true)
         .with_initialization_script(crate::blocker::COSMETIC_JS)
+        .with_initialization_script(crate::glance::GLANCE_JS)
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -376,6 +383,7 @@ fn build_tab_in(
         set_tracking(&wv, &ctx.tracking.borrow());
     }
     hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone());
+    crate::glance::hook(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv, id, private);
     hook_crash(&wv, id, ctx.proxy.clone());
     hook_permissions(ctx, &wv, id, isolated);
@@ -652,6 +660,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, false, false, v) if v == k('H') => History,
         (true, true, false, v) if v == k('O') => Bookmarks,
         (true, true, false, v) if v == k('I') => DevTools,
+        (true, false, true, v) if (k('1')..=k('4')).contains(&v) => Workspace((v - k('1')) as usize),
         _ => return None,
     })
 }
@@ -1201,6 +1210,18 @@ pub fn round_corners(wv: &WebView, r: i32) {
         let rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1, r * 2, r * 2);
         // The window owns the region after this call. Do not free it.
         SetWindowRgn(hwnd, Some(rgn), true);
+    }
+}
+
+/// Bring a page's window above its siblings. The glance card sits over the
+/// chrome's dim overlay, which is itself raised over the page.
+pub fn raise(wv: &WebView) {
+    unsafe {
+        let mut hwnd = HWND::default();
+        if wv.controller().ParentWindow(&mut hwnd).is_err() || hwnd.is_invalid() {
+            return;
+        }
+        let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 }
 
