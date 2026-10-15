@@ -89,6 +89,9 @@ struct Tab {
     reader: Option<String>,
     /// Opened by a page (window.open, target=_blank).
     popup: bool,
+    /// InPrivate. Nothing here is written anywhere: no history, no page text,
+    /// no session, no download row, no cookies once the last private page goes.
+    private: bool,
     /// For agent tabs: the MCP session that owns it, and its client's name.
     owner: String,
     owner_name: String,
@@ -114,6 +117,7 @@ impl Tab {
             agent: false,
             reader: None,
             popup: false,
+            private: false,
             owner: String::new(),
             owner_name: String::new(),
             view: None,
@@ -201,6 +205,9 @@ struct App {
     dl_dirty: bool,
     /// Video grabs: download id -> (page url, user agent, running yt-dlp).
     videos: HashMap<u64, (String, String, video::Slot)>,
+    /// "Clear history on exit" owed a WebView2 clear it could not make in time.
+    /// Done at the next start, as soon as a page exists to ask.
+    clear_pending: bool,
 }
 
 /// Headless: a real Lumen whose window lives off-screen, never takes focus, has no taskbar
@@ -395,6 +402,7 @@ fn main() {
         recall: recall::Recall::start(&store::data_dir()),
         agent_logs: Default::default(),
         handoff: None,
+        clear_pending: false,
     };
     {
         // One small thread polls aria2 while it has work, and sleeps otherwise.
@@ -410,6 +418,9 @@ fn main() {
             .ok();
     }
     app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
+    // The last run closed with "clear history on exit" and could not finish wiping
+    // WebView2's own history. It happens as soon as there is a page to ask.
+    app.clear_pending = store::clear_history_pending();
     app.apply_backdrop();
     app.apply_limits(None);
     app.refresh_dark();
@@ -421,6 +432,18 @@ fn main() {
     app.layout();
     if !headless() {
         app.focus_page();
+    }
+    // Test hook: LUMEN_TEST_PRIVATE=1 opens one normal and one private tab, so a
+    // headless run can prove a private tab leaves no trace in session.json. The
+    // private tab gets a url of its own: its Nav line in the log is the proof the
+    // InPrivate page built.
+    if std::env::var_os("LUMEN_TEST_PRIVATE").is_some() {
+        app.new_tab(Some("https://example.com/".into()), None);
+        let id = app.new_private_tab();
+        if let Some(i) = app.idx(id) {
+            app.tabs[i].url = "https://private.example/".into();
+            app.ensure_view(i);
+        }
     }
 
     event_loop.run(move |event, _, cf| {
@@ -482,6 +505,7 @@ fn main() {
         }
         if app.exit {
             app.library.flush();
+            app.clear_on_exit();
             app.save_session();
             *cf = ControlFlow::Exit;
         } else {
@@ -605,6 +629,12 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+/// Events that fire in a stream (download progress, aria2 polls) would drown the
+/// debug log in repeats. Everything else is worth one line.
+fn quiet_event(ev: &Ev) -> bool {
+    matches!(ev, Ev::Download(_) | Ev::AriaJobs(_) | Ev::Usage(_))
+}
+
 /// Debug builds only: append every engine event to %APPDATA%\Lumen\debug.log.
 fn debug_log(ev: &Ev) {
     use std::io::Write;
@@ -620,6 +650,12 @@ fn debug_log(ev: &Ev) {
     {
         let _ = writeln!(f, "{line}");
     }
+}
+
+/// The tabs that go into session.json. Private tabs and agent tabs leave no
+/// trace; an empty new tab page is only worth keeping while it is the active one.
+fn keepable(tabs: &[Tab], active: u64) -> Vec<&Tab> {
+    tabs.iter().filter(|t| !t.agent && !t.private && (!t.url.is_empty() || t.id == active)).collect()
 }
 
 /// Virtual-key code for the keys Lumen has shortcuts on.
@@ -839,6 +875,7 @@ impl App {
                         status: t.status(),
                         agent: t.agent,
                         reader: t.reader.is_some(),
+                        private: t.private,
                     })
                     .collect(),
                 active: self.active,
@@ -946,7 +983,7 @@ impl App {
         let isolated = t.agent && !self.settings.agent_shared_profile;
         // An agent's page starts blank, so the recording is on before the first request.
         let first = if t.agent { None } else { Some(t.url.as_str()) };
-        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), isolated) {
+        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), isolated, t.private) {
             if t.muted {
                 engine::set_muted(&v, true);
             }
@@ -1018,6 +1055,38 @@ impl App {
         id
     }
 
+    /// Ctrl+Shift+N, or the tab menu. WebView2 InPrivate: no cookies outlive the
+    /// last private page, and Lumen writes nothing about it anywhere.
+    fn new_private_tab(&mut self) -> u64 {
+        let id = self.ctx.alloc_id();
+        let mut t = Tab::new(id, String::new());
+        t.private = true;
+        self.tabs.push(t);
+        self.activate(id);
+        id
+    }
+
+    /// Which cookie jar a tab talks to: 0 the user's, 1 an agent's own, 2 a private one.
+    fn jar(&self, t: &Tab) -> u8 {
+        if t.private {
+            2
+        } else if t.agent && !self.settings.agent_shared_profile {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// A tab that leaves no trace: no history, no page text, no session, no reopen.
+    fn off_record(&self, t: &Tab) -> bool {
+        t.agent || t.private
+    }
+
+    /// A page of the user's own profile, to ask for cookies or clear data with.
+    fn plain_view(&self) -> Option<&WebView> {
+        self.tabs.iter().filter(|t| !self.off_record(t)).find_map(|t| t.view.as_ref())
+    }
+
     fn close(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
         let t = self.tabs.remove(i);
@@ -1035,7 +1104,7 @@ impl App {
         if let Some(w) = self.watches.remove(&id) {
             monitor::unwatch(None, w, true);
         }
-        if !t.url.is_empty() {
+        if !t.url.is_empty() && !t.private {
             self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned });
             if self.closed.len() > MAX_CLOSED {
                 self.closed.remove(0);
@@ -1112,7 +1181,17 @@ impl App {
         for s in store::load_downloads().into_iter().take(100) {
             let id = self.next_dl(3);
             let state = if s.state == "done" { "done" } else { "failed" };
-            self.downloads.push(engine::Dl { id, url: s.url, path: s.path, received: s.size, total: s.size, state, speed: 0, note: s.note });
+            self.downloads.push(engine::Dl {
+                id,
+                url: s.url,
+                path: s.path,
+                received: s.size,
+                total: s.size,
+                state,
+                speed: 0,
+                note: s.note,
+                private: false,
+            });
         }
     }
 
@@ -1121,6 +1200,7 @@ impl App {
         let keep: Vec<store::SavedDl> = self
             .downloads
             .iter()
+            .filter(|d| !d.private)
             .filter(|d| d.state == "done" || d.state == "failed")
             .take(100)
             .map(|d| store::SavedDl { url: d.url.clone(), path: d.path.clone(), state: d.state.to_string(), size: d.received, note: d.note.clone() })
@@ -1164,6 +1244,7 @@ impl App {
         if !url.starts_with("http") {
             return;
         }
+        let private = d.private;
         let gid = self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone());
         let (headers, name) = gid
             .as_ref()
@@ -1175,7 +1256,7 @@ impl App {
         let tab = self.active;
         std::thread::spawn(move || {
             let _ = match aria.add(&url, &headers, name.as_deref()) {
-                Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, url, headers, name)),
+                Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, url, headers, name, private)),
                 Err(_) => proxy.send_event(Ev::AriaFailed(tab, url)),
             };
         });
@@ -1192,10 +1273,21 @@ impl App {
         }
         let title = if t.title.is_empty() { host_of(&url) } else { t.title.clone() };
         let ua = t.view.as_ref().map(engine::user_agent).unwrap_or_default();
+        let private = t.private;
         let id = self.next_dl(2);
         self.downloads.insert(
             0,
-            engine::Dl { id, url: url.clone(), path: format!("{title}.mp4"), received: 0, total: 0, state: "progress", speed: 0, note: "starting".into() },
+            engine::Dl {
+                id,
+                url: url.clone(),
+                path: format!("{title}.mp4"),
+                received: 0,
+                total: 0,
+                state: "progress",
+                speed: 0,
+                note: "starting".into(),
+                private,
+            },
         );
         self.videos.insert(id, (url, ua, Default::default()));
         self.run_video(id);
@@ -1585,7 +1677,7 @@ impl App {
     // -------------------------------------------------------------- events
 
     fn on_event(&mut self, ev: Ev) {
-        if cfg!(debug_assertions) {
+        if cfg!(debug_assertions) && !quiet_event(&ev) {
             debug_log(&ev);
         }
         match ev {
@@ -1593,7 +1685,7 @@ impl App {
             Ev::Key(a) => self.on_key(a),
             Ev::Title(id, t) => {
                 if let Some(i) = self.idx(id) {
-                    if !self.tabs[i].agent {
+                    if !self.off_record(&self.tabs[i]) {
                         self.library.set_title(&self.tabs[i].url, &t);
                     }
                     self.tabs[i].title = t;
@@ -1610,8 +1702,8 @@ impl App {
                         }
                         self.tabs[i].reader = None;
                     }
-                    // Agents browse off the record.
-                    if !self.tabs[i].agent {
+                    // Agents browse off the record, and so do private tabs.
+                    if !self.off_record(&self.tabs[i]) {
                         self.library.visit(&u, &self.tabs[i].title);
                     }
                     self.tabs[i].url = u;
@@ -1627,7 +1719,7 @@ impl App {
                     self.push();
                     // Done loading: read the page a little later, once scripts have filled it in.
                     let t = &self.tabs[i];
-                    if !on && self.settings.remember_text && !t.agent && t.reader.is_none() && t.url.starts_with("http") {
+                    if !on && self.settings.remember_text && !self.off_record(t) && t.reader.is_none() && t.url.starts_with("http") {
                         let (proxy, url) = (self.ctx.proxy.clone(), t.url.clone());
                         std::thread::spawn(move || {
                             std::thread::sleep(Duration::from_millis(1500));
@@ -1654,7 +1746,7 @@ impl App {
                 }
             }
             Ev::PageText(id, url, out) => {
-                if self.idx(id).is_some_and(|i| self.tabs[i].url == url)
+                if self.idx(id).is_some_and(|i| !self.off_record(&self.tabs[i]) && self.tabs[i].url == url)
                     && let Ok(v) = serde_json::from_str::<Value>(&out)
                     && let Some(text) = v["x"].as_str()
                     && text.trim().len() > 40
@@ -1749,6 +1841,9 @@ impl App {
                 }
                 let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
                 let u = url.clone();
+                // A download started by a private tab leaves no row on disk either.
+                let jar = self.idx(tab).map_or(0, |i| self.jar(&self.tabs[i]));
+                let private = jar == 2;
                 let start = move |cookie: String| {
                     if !cookie.is_empty() {
                         headers.push(format!("Cookie: {cookie}"));
@@ -1756,18 +1851,18 @@ impl App {
                     std::thread::spawn(move || {
                         let name = (!name.is_empty()).then_some(name);
                         let _ = match aria.add(&u, &headers, name.as_deref()) {
-                            Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u, headers, name)),
+                            Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u, headers, name, private)),
                             Err(_) => proxy.send_event(Ev::AriaFailed(tab, u)),
                         };
                     });
                 };
-                // Cookies live in the profile, so ask a settled page of the same profile:
-                // a popup that is turning into a download may never answer.
-                let agent = self.idx(tab).is_some_and(|i| self.tabs[i].agent);
+                // Cookies live in the profile, so ask a settled page of the same jar:
+                // a popup that is turning into a download may never answer. A private
+                // tab's jar is its own; an agent's is its own; never mix them.
                 let asker = self
                     .tabs
                     .iter()
-                    .filter(|t| t.id != tab && !t.popup && t.agent == agent)
+                    .filter(|t| t.id != tab && !t.popup && self.jar(t) == jar)
                     .find_map(|t| t.view.as_ref())
                     .or(view);
                 match asker {
@@ -1775,11 +1870,19 @@ impl App {
                     None => start(String::new()),
                 }
             }
-            Ev::AriaAdded(gid, url, headers, name) => {
+            Ev::AriaAdded(gid, url, headers, name, private) => {
                 let id = self.next_dl(1);
                 self.aria_ids.insert(gid.clone(), id);
-                self.aria_meta.insert(gid, (url, headers, name));
+                self.aria_meta.insert(gid, (url.clone(), headers, name));
                 self.aria_poll.store(true, std::sync::atomic::Ordering::Relaxed);
+                if private {
+                    // Show it now, marked private, so it never reaches downloads.json.
+                    self.downloads.insert(
+                        0,
+                        engine::Dl { id, url, path: String::new(), received: 0, total: 0, state: "progress", speed: 0, note: "starting".into(), private },
+                    );
+                    self.push();
+                }
             }
             Ev::AriaFailed(tab, url) => {
                 // aria2 said no (auth, odd server): let WebView2 download it after all.
@@ -1809,7 +1912,18 @@ impl App {
                     if matches!(state, "done" | "failed") && self.downloads.iter().any(|x| x.id == id && x.state != state) {
                         self.dl_dirty = true;
                     }
-                    let d = engine::Dl { id, url: j.url, path: j.path, received: j.done as i64, total: j.total as i64, state, speed: j.speed, note };
+                    let private = self.downloads.iter().find(|x| x.id == id).is_some_and(|x| x.private);
+                    let d = engine::Dl {
+                        id,
+                        url: j.url,
+                        path: j.path,
+                        received: j.done as i64,
+                        total: j.total as i64,
+                        state,
+                        speed: j.speed,
+                        note,
+                        private,
+                    };
                     match self.downloads.iter_mut().find(|x| x.id == id) {
                         Some(x) => *x = d,
                         None => self.downloads.insert(0, d),
@@ -1851,6 +1965,7 @@ impl App {
                 }
             }
             Ev::Popup(id, parent) => {
+                let private = self.idx(parent).is_some_and(|i| self.tabs[i].private);
                 let agent = self.idx(parent).is_some_and(|i| self.tabs[i].agent);
                 let (owner, owner_name) = self.idx(parent).map(|i| (self.tabs[i].owner.clone(), self.tabs[i].owner_name.clone())).unwrap_or_default();
                 let found = {
@@ -1860,6 +1975,7 @@ impl App {
                 if let Some(v) = found {
                     let mut t = Tab::new(id, String::new());
                     t.agent = agent;
+                    t.private = private;
                     t.owner = owner;
                     t.owner_name = owner_name;
                     t.popup = true;
@@ -1884,6 +2000,9 @@ impl App {
                 // Like Chrome: a new tab means "I want to type an address".
                 self.new_tab(None, None);
                 self.on_key(Action::Omnibox);
+            }
+            Action::NewPrivate => {
+                self.new_private_tab();
             }
             Action::CloseTab => self.close(self.active),
             Action::Reopen => {
@@ -1981,6 +2100,9 @@ impl App {
             "nav" => self.navigate(m["url"].as_str().unwrap_or("")),
             "newtab" => {
                 self.new_tab(None, None);
+            }
+            "newPrivate" => {
+                self.new_private_tab();
             }
             "activate" => self.activate(id),
             "close" => self.close(id),
@@ -2170,8 +2292,20 @@ impl App {
                 self.push();
             }
             "clearHistory" => {
-                self.library.clear_history(None);
-                self.recall.clear(None);
+                // Seconds since the epoch; missing or null means everything.
+                let since = m["since"].as_u64();
+                self.library.clear_history(since);
+                self.recall.clear(since);
+                self.push();
+            }
+            "clearData" => {
+                let since = m["since"].as_u64();
+                let more = m["more"].as_bool().unwrap_or(false);
+                self.library.clear_history(since);
+                self.recall.clear(since);
+                if let Some(v) = self.plain_view() {
+                    engine::clear_data(v, since, more);
+                }
                 self.push();
             }
             "perm" => {
@@ -2234,6 +2368,8 @@ impl App {
         // Started headless for agents, never shown to a person, no agent tab left, quiet for
         // ten minutes: nobody needs this Lumen. lumen-agent starts a new one when asked.
         if headless() && self.handoff.is_none() && !self.tabs.iter().any(|t| t.agent) && now - self.agent_last > agent_idle() {
+            self.library.flush();
+            self.clear_on_exit();
             self.save_session();
             std::process::exit(0);
         }
@@ -2274,6 +2410,7 @@ impl App {
             }
         }
         self.enforce_ram(now);
+        self.settle_clear();
         self.ctx.aria_on.set(self.settings.accelerate_downloads && self.aria.ready());
         self.library.flush();
         if self.agent_seen.is_some_and(|t| now - t > Duration::from_secs(6)) {
@@ -2542,11 +2679,41 @@ impl App {
         }
     }
 
+    /// Clean close with "clear history on exit" on. Lumen's history and the page
+    /// text go right now; WebView2's own history goes now too when a page is there
+    /// to ask, and at the next start when there is not (the call is WebView2's to
+    /// finish, and this app is on its way out).
+    fn clear_on_exit(&mut self) {
+        if !self.settings.clear_on_exit {
+            return;
+        }
+        self.library.clear_history(None);
+        self.recall.clear(None);
+        self.library.flush();
+        let done = self.plain_view().is_some_and(|v| engine::clear_data(v, None, false));
+        store::set_clear_history_pending(!done);
+    }
+
+    /// A clear-on-exit the last run could not finish, done at the first chance.
+    fn settle_clear(&mut self) {
+        if !self.clear_pending {
+            return;
+        }
+        // Take the flag first: the view borrow and the field write must not overlap.
+        self.clear_pending = false;
+        let Some(v) = self.plain_view() else {
+            self.clear_pending = true;
+            return;
+        };
+        store::set_clear_history_pending(false);
+        engine::clear_data(v, None, false);
+    }
+
     fn save_session(&mut self) {
         self.dirty = false;
         let (width, height) = logical_size(&self.ctx);
         let maximized = self.ctx.window.is_maximized();
-        let keep: Vec<&Tab> = self.tabs.iter().filter(|t| !t.agent && (!t.url.is_empty() || t.id == self.active)).collect();
+        let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
         let s = Session {
             tabs: keep
                 .iter()
@@ -2558,5 +2725,40 @@ impl App {
             maximized,
         };
         store::save_session(&s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Tab, keepable};
+
+    /// A normal tab, a private one and an agent one; only the normal one may be saved.
+    #[test]
+    fn session_holds_normal_tabs_only() {
+        let mut tabs = vec![Tab::new(1, "https://plain.example/".into())];
+        tabs.push(Tab::new(2, String::new()));
+        let mut private = Tab::new(3, "https://secret.example/login".into());
+        private.private = true;
+        tabs.push(private);
+        let mut agent = Tab::new(4, "https://agent.example/".into());
+        agent.agent = true;
+        tabs.push(agent);
+
+        let keep = keepable(&tabs, 1);
+        // The private tab, the agent tab and the empty new tab page are all out.
+        assert_eq!(keep.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1]);
+
+        // An empty tab is kept while it is the one being looked at.
+        let keep = keepable(&tabs, 2);
+        assert_eq!(keep.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    /// A pinned private tab still leaves no trace.
+    #[test]
+    fn a_pinned_private_tab_is_not_saved_either() {
+        let mut private = Tab::new(7, "https://secret.example/".into());
+        private.private = true;
+        private.pinned = true;
+        assert!(keepable(&[private], 7).is_empty());
     }
 }

@@ -249,6 +249,31 @@ mod tests {
         assert!(search(&p, "towers", 5).is_empty());
     }
 
+    /// Clear with a `since` keeps what is older; None takes everything. The jobs
+    /// are one queue, so the search answer can only come after the clear ran.
+    #[test]
+    fn clear_with_since_or_everything() {
+        let dir = std::env::temp_dir().join(format!("lumen-recall-clear-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let ask = |r: &Recall, word: &str| {
+            let (tx, rx) = channel();
+            r.search(word, 5, move |_, hits| { let _ = tx.send(hits); });
+            rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a search answer")
+        };
+        let r = Recall::start(&dir);
+        r.add("https://old.com/", "Old", "alpha bravo charlie");
+        // A range starting after every visit: nothing goes.
+        r.clear(Some(now() + 3600));
+        assert_eq!(ask(&r, "alpha").len(), 1);
+        // A range starting at the epoch: everything from it on goes.
+        r.clear(Some(0));
+        assert!(ask(&r, "alpha").is_empty());
+        r.add("https://new.com/", "New", "delta echo foxtrot");
+        // None means all of it, range or not.
+        r.clear(None);
+        assert!(ask(&r, "delta").is_empty());
+    }
+
     #[test]
     fn snippets_cut_on_chars() {
         let text = "Ünïcödé text before the word lighthouse and after it, going on for a good long while more, and more, and then some more again.";
