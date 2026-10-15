@@ -152,6 +152,11 @@ impl UiState {
     fn compact(&self) -> bool {
         self.settings.compact && !self.peek
     }
+    /// Height the workspace row takes. One workspace has nothing to switch
+    /// to, so the row only shows for two or more, or to hold "Open as tab".
+    fn ws_h(&self) -> f32 {
+        if self.compact() || (self.workspaces.len() < 2 && !self.glance) { 0.0 } else { 32.0 }
+    }
     pub fn sidebar_w(&self) -> f32 {
         if self.compact() { 56.0 } else { self.settings.sidebar_width as f32 }
     }
@@ -736,7 +741,7 @@ impl Inner {
     fn omni_rect(&self) -> R {
         let sb = self.sidebar();
         let s = self.state.as_ref().unwrap();
-        let ws_h = if s.compact() || s.workspaces.is_empty() { 0.0 } else { 32.0 };
+        let ws_h = s.ws_h();
         if s.compact() {
             R::new(sb.x + (sb.w - 36.0) / 2.0, 104.0 + ws_h, 36.0, 34.0)
         } else {
@@ -973,9 +978,9 @@ impl Inner {
         }
 
         // Workspace switcher: pill tabs at the top of the sidebar (non-compact).
-        if !compact && !s.workspaces.is_empty() {
-            let ws_y = 40.0;
-            let ws_h = 28.0;
+        if s.ws_h() > 0.0 {
+            let ws_y = 42.0;
+            let ws_h = 26.0;
             let n = s.workspaces.len();
             let glance_w = if s.glance { self.gfx.measure("Open as tab", Font::ui(12.0, 500)) + 20.0 } else { 0.0 };
             // The row holds the pills, "+" and, while a card is open, "Open as tab".
@@ -988,22 +993,27 @@ impl Inner {
                 let active = i == s.active_workspace;
                 let tw = (self.gfx.measure(name, Font::ui(12.0, 500)) + 20.0).min(cap).max(44.0);
                 let r = R::new(wx, ws_y, tw, ws_h);
+                let hov = self.is_hover(&Hit::Workspace(i));
+                let label = R::new(r.x + 8.0, r.y, r.w - 16.0, r.h);
                 if active {
-                    self.gfx.round(r, 8.0, th.accent);
-                    self.gfx.text(name, R::new(r.x + 10.0, r.y + 4.0, r.w - 20.0, r.h), Font::ui(12.0, 500), th.bg);
+                    self.gfx.round(r, 7.0, th.raise);
+                    self.gfx.text(name, label, Font::ui(12.0, 600).align(Align::Center), th.text);
                 } else {
-                    let hov = self.is_hover(&Hit::Workspace(i));
-                    self.gfx.round(r, 8.0, if hov { th.hover } else { th.shade.alpha(0.4) });
-                    self.gfx.text(name, R::new(r.x + 10.0, r.y + 4.0, r.w - 20.0, r.h), Font::ui(12.0, 500), if hov { th.text } else { th.dim });
+                    if hov {
+                        self.gfx.round(r, 7.0, th.hover);
+                    }
+                    self.gfx.text(name, label, Font::ui(12.0, 500).align(Align::Center), if hov { th.text } else { th.dim });
                 }
                 self.hit(r, Hit::Workspace(i));
                 wx += tw + 6.0;
             }
             // "+" to add a workspace.
-            let add_r = R::new(wx, ws_y, 28.0, ws_h);
+            let add_r = R::new(wx, ws_y, 26.0, ws_h);
             let ah = self.is_hover(&Hit::WorkspaceAdd);
-            self.gfx.round(add_r, 8.0, if ah { th.hover } else { th.shade.alpha(0.4) });
-            self.gfx.icon("plus", add_r.x + 6.0, add_r.y + 6.0, 16.0, if ah { th.dim } else { th.faint });
+            if ah {
+                self.gfx.round(add_r, 7.0, th.hover);
+            }
+            self.gfx.icon("plus", add_r.x + 6.0, add_r.y + 6.0, 14.0, if ah { th.dim } else { th.faint });
             self.hit(add_r, Hit::WorkspaceAdd);
             wx += 34.0;
             // "Open as tab" when a glance is open.
@@ -1011,7 +1021,7 @@ impl Inner {
                 let open_r = R::new(wx, ws_y, glance_w.min(sb.right() - wx - 8.0), ws_h);
                 let oh = self.is_hover(&Hit::GlanceOpen);
                 self.gfx.round(open_r, 8.0, if oh { th.accent } else { th.accent.alpha(0.85) });
-                self.gfx.text("Open as tab", R::new(open_r.x + 10.0, open_r.y + 4.0, open_r.w - 20.0, open_r.h), Font::ui(11.5, 500), th.bg);
+                self.gfx.text("Open as tab", open_r, Font::ui(11.5, 600).align(Align::Center), th.bg);
                 self.hit(open_r, Hit::GlanceOpen);
             }
         }
@@ -1050,7 +1060,7 @@ impl Inner {
             self.hit(r, Hit::Star);
         }
 
-        let ws_h = if compact || s.workspaces.is_empty() { 0.0 } else { 32.0 };
+        let ws_h = s.ws_h();
         // Offer chips under the address bar: read aloud in reader view, and
         // the KeePass fills for this site. The tab list steps down for the row.
         let offer = !compact && (!s.listen.is_empty() || !s.kdbx.is_empty());
@@ -1679,6 +1689,8 @@ impl Inner {
                             items.push((20 + wi as u32, format!("Move to {name}")));
                         }
                     }
+                } else {
+                    items.push((15, "New workspace".into()));
                 }
                 // Two pages in one stage. Needs a second tab to share it with.
                 if t.split || s.tabs.len() > 1 {
@@ -1726,6 +1738,10 @@ impl Inner {
                     12 => "split",
                     13 => "translate",
                     14 => "webview2",
+                    15 => {
+                        send(&self.proxy, json!({"t": "workspaceAdd"}));
+                        return;
+                    }
                     7 => {
                         let mut st = s.settings.clone();
                         let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
