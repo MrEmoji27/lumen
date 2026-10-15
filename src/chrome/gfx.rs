@@ -598,6 +598,13 @@ impl Gfx {
                 l(p(6.0, 3.5), p(6.0, 12.5));
                 l(p(10.0, 3.5), p(10.0, 12.5));
             }
+            "split" => {
+                // Two pages side by side, one focus: the split view's mark.
+                let (a, b) = (p(2.4, 3.4), p(7.6, 12.6));
+                self.round_stroke(R::new(a.0, a.1, b.0 - a.0, b.1 - a.1), 1.4 * k, c, w * 0.85);
+                let (a, b) = (p(9.0, 3.4), p(13.6, 12.6));
+                self.round_stroke(R::new(a.0, a.1, b.0 - a.0, b.1 - a.1), 1.4 * k, c, w * 0.85);
+            }
             _ => {}
         }
     }

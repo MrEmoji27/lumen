@@ -13,7 +13,8 @@ use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
-    NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler, StateChangedEventHandler,
+    FocusChangedEventHandler, NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
+    StateChangedEventHandler,
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
     SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
@@ -114,6 +115,32 @@ pub enum Ev {
     /// A page died: (tab, the whole browser process went with it).
     /// The browser going takes every page with it; one page going takes only itself.
     Crashed(u64, bool),
+    /// A page took keyboard focus: a click landed in its half of the stage.
+    PaneFocus(u64),
+    /// The split divider is being dragged: pointer x, in window coordinates.
+    SplitDrag(f64),
+    /// The divider was let go of.
+    SplitDrop,
+    /// The divider was double-clicked: back to the middle.
+    SplitReset,
+    /// A page answered with its language and its text: (tab, target language, JSON).
+    TrPage(u64, String, String),
+    /// The model for a language pair is on disk (or could not be fetched).
+    TrModel(u64, bool, String),
+    /// A message from the translator page: JSON, tagged with "lumen":"tr".
+    TrMsg(String),
+    /// Servo has work: spin its event loop. Also its page's reports to Lumen.
+    #[cfg(feature = "servo")]
+    ServoWake,
+    #[cfg(feature = "servo")]
+    ServoUrl(u64, String),
+    #[cfg(feature = "servo")]
+    ServoTitle(u64, String),
+    #[cfg(feature = "servo")]
+    ServoLoad(u64, bool),
+    /// A Servo page died, or its engine gave up on it.
+    #[cfg(feature = "servo")]
+    ServoGone(u64),
 }
 
 /// A download's state, copied out of WebView2 for the main loop.
@@ -174,6 +201,10 @@ pub enum Action {
     Reader,
     Listen,
     DarkSite,
+    /// Ctrl+\: two tabs side by side, or back to one.
+    Split,
+    /// F8: the page's text in the target language, or the original text back.
+    TranslatePage,
 }
 
 pub struct Ctx {
@@ -230,7 +261,7 @@ fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Vec<u8> {
     out
 }
 
-fn take(p: PWSTR) -> String {
+pub(crate) fn take(p: PWSTR) -> String {
     if p.is_null() {
         return String::new();
     }
@@ -395,6 +426,7 @@ fn build_tab_in(
     // and InPrivate keeps nothing anyway, so private pages get it off too.
     set_passwords(&wv, ctx.passwords.get() && !isolated && !private);
     hook_keys(&wv, ctx.proxy.clone());
+    hook_focus(&wv, id, ctx.proxy.clone());
     if crate::headless() {
         set_muted(&wv, true);
     }
@@ -407,6 +439,23 @@ fn build_tab_in(
         f(&wv);
     }
     Ok(wv)
+}
+
+/// A page of Lumen's own, off screen: for work that needs a web engine but not the
+/// person's attention (offline translation). Not a tab: no blocker, no shortcuts, no
+/// dark reader, and nothing shows it. It starts blank; the caller maps a host name
+/// and navigates. None when no page has made an environment yet.
+pub fn build_hidden(ctx: &Rc<Ctx>, bounds: Rect) -> Option<WebView> {
+    let env = ctx.env.borrow().clone()?;
+    let dark = ctx.dark.get();
+    WebViewBuilder::new()
+        .with_environment(env)
+        .with_bounds(bounds)
+        .with_visible(false)
+        .with_theme(theme(dark))
+        .with_background_color(page_bg(dark))
+        .build_as_child(&*ctx.window)
+        .ok()
 }
 
 /// Popups are born inside a callback with no access to app state.
@@ -598,6 +647,21 @@ fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
     }
 }
 
+/// The page took keyboard focus. In a split, that is a click landing in one half
+/// of the stage: the main loop moves the pane the person is working in over there.
+fn hook_focus(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
+    let mut token = 0i64;
+    unsafe {
+        let _ = wv.controller().add_GotFocus(
+            &FocusChangedEventHandler::create(Box::new(move |_, _| {
+                let _ = proxy.send_event(Ev::PaneFocus(id));
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
 // ------------------------------------------------------------- crashed pages
 
 /// A page that dies leaves a white rectangle that looks like a slow page.
@@ -632,11 +696,14 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
     const F5: u32 = 0x74;
     const F6: u32 = 0x75;
     const F7: u32 = 0x76;
+    const F8: u32 = 0x77;
     const F9: u32 = 0x78;
     const F11: u32 = 0x7A;
     const F12: u32 = 0x7B;
     const ESC: u32 = 0x1B;
     const COMMA: u32 = 0xBC;
+    // The \ key. A layout may move it, but Windows keeps the code.
+    const BACKSLASH: u32 = 0xDC;
     let k = |c: char| c as u32;
     Some(match (ctrl, shift, alt, vk) {
         (true, false, false, v) if v == k('T') => NewTab,
@@ -659,8 +726,10 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (false, false, false, F12) => DevTools,
         (false, false, false, F9) => Reader,
         (false, false, false, F7) => Listen,
+        (false, false, false, F8) => TranslatePage,
         (false, true, false, F9) => DarkSite,
         (false, true, false, ESC) => Control,
+        (true, false, false, BACKSLASH) => Split,
         (true, false, false, v) if v == k('J') => Downloads,
         (true, false, false, v) if v == k('D') => Bookmark,
         (true, false, false, v) if v == k('H') => History,

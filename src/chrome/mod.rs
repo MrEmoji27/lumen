@@ -58,6 +58,14 @@ pub struct UiTab {
     pub reader: bool,
     /// InPrivate tab. Marked in the sidebar, never saved anywhere.
     pub private: bool,
+    /// This tab is one half of a split: the stage shows it beside another.
+    pub split: bool,
+    /// The page is showing in the target language.
+    pub translated: bool,
+    /// A translation of it is being worked on.
+    pub translating: bool,
+    /// The page runs in Servo rather than WebView2.
+    pub servo: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +127,8 @@ pub struct UiState {
     pub bookmarks: Vec<(String, String)>,
     /// A download ended while the page was closed: a small dot on the footer button.
     pub dl_unseen: bool,
+    /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
+    pub upnp_port_open: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1236,6 +1246,25 @@ impl Inner {
             self.gfx.text("Private", b, Font::ui(9.0, 650).align(Align::Center), mark);
             right = b.x - 4.0;
         }
+        if t.split {
+            // Both halves wear it, so the pair reads as one thing in the list.
+            let b = R::new(right - 18.0, r.y + 8.0, 16.0, 16.0);
+            self.gfx.icon("split", b.x, b.y, 16.0, if active { th.dim } else { th.faint });
+            right = b.x - 4.0;
+        }
+        if t.translated || t.translating {
+            // In another language, or on its way there: a globe, quiet until it is on.
+            let b = R::new(right - 18.0, r.y + 8.0, 16.0, 16.0);
+            self.gfx.icon("globe", b.x, b.y, 16.0, if t.translating { th.faint } else { th.accent });
+            right = b.x - 4.0;
+        }
+        if t.servo {
+            // A quiet mark: this page is the other engine's.
+            let b = R::new(right - 22.0, r.y + 9.0, 20.0, 14.0);
+            self.gfx.round(b, 4.0, th.press);
+            self.gfx.text("SV", b, Font::ui(9.0, 650).align(Align::Center), th.dim);
+            right = b.x - 4.0;
+        }
         let title = if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {
@@ -1501,9 +1530,19 @@ impl Inner {
                     items.push((2, "Duplicate".into()));
                     items.push((7, "Add to new tab page".into()));
                 }
+                // Two pages in one stage. Needs a second tab to share it with.
+                if t.split || s.tabs.len() > 1 {
+                    items.push((12, if t.split { "Unsplit".into() } else { "Split with next tab".into() }));
+                }
+                if t.servo {
+                    // The other engine did not have it: hand this host back to WebView2.
+                    items.push((14, "Reopen in WebView2".into()));
+                }
                 if t.url.starts_with("http") && (t.status == "live" || t.status == "asleep") {
                     items.push((10, "Save video".into()));
                     items.push((8, if t.reader { "Exit reader view\tF9".into() } else { "Reader view\tF9".into() }));
+                    // Offline: the model for the pair is fetched once, then it is local.
+                    items.push((13, if t.translated { "Show the original text\tF8".into() } else { "Translate page\tF8".into() }));
                     let h = host(&t.url);
                     let skipped = s.settings.dark_skip.iter().any(|x| *x == h);
                     if s.dark && s.settings.dark_pages && !skipped {
@@ -1534,6 +1573,9 @@ impl Inner {
                     10 => "video",
                     9 => "darksite",
                     11 => "newPrivate",
+                    12 => "split",
+                    13 => "translate",
+                    14 => "webview2",
                     7 => {
                         let mut st = s.settings.clone();
                         let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
