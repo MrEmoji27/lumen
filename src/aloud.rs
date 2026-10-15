@@ -14,8 +14,10 @@ use windows::core::{GUID, PCWSTR};
 const POLL: Duration = Duration::from_millis(50);
 
 /// The system's speech object, by CLSID. The windows crate's Speech bindings
-/// do not carry the class id, so it is named here (the well-known SpVoice id).
-const CLSID_SPVOICE: GUID = GUID::from_u128(0x96749B77_8922_48FD_9F48_41FB524B4C11);
+/// do not carry the class id, so it is named here (CLSID_SpVoice from the SAPI
+/// headers). A wrong id is not a loud failure: CoCreateInstance says "class not
+/// registered" and every call becomes a no-op, so `aloud::live` checks it.
+const CLSID_SPVOICE: GUID = GUID::from_u128(0x96749377_3391_11D2_9EE3_00C04F797396);
 
 enum Cmd {
     Play {
@@ -275,5 +277,23 @@ mod tests {
         assert!(highlight_script(Some(3)).contains("const n=3"));
         assert!(highlight_script(None).contains("const n=-1"));
         assert!(highlight_script(Some(0)).contains("lumen-aloud"));
+    }
+}
+
+/// Against the machine's own engine. `cargo test -- --ignored`, and it makes
+/// no sound: it only proves the class id is a real voice and not a typo, which
+/// is otherwise a silent no-op at runtime.
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs the Windows speech engine"]
+    fn the_system_voice_comes_up() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let v = CoCreateInstance::<_, ISpVoice>(&CLSID_SPVOICE, None, CLSCTX_ALL);
+            assert!(v.is_ok(), "no voice on this machine: {:?}", v.err());
+        }
     }
 }
