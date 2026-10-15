@@ -1099,7 +1099,8 @@ impl Inner {
         let th = self.theme;
         let compact = s.compact();
         let active = t.id == s.active;
-        let asleep = t.status == "asleep" || t.status == "off";
+        // Asleep, unloaded or dead: drawn dim. None of them are live pages.
+        let asleep = matches!(t.status, "asleep" | "off" | "crashed");
         let (fx, fy) = if pinned || compact { (r.x + (r.w - 16.0) / 2.0, r.y + (r.h - 16.0) / 2.0) } else { (r.x + 9.0, r.y + 8.0) };
         let fav = R::new(fx, fy, 16.0, 16.0);
         if t.loading {
