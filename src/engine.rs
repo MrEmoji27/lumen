@@ -38,6 +38,21 @@ use wry::{
     WebViewBuilderExtWindows, WebViewExtWindows,
 };
 
+/// What aria2 said after an add, and how the add was started.
+#[derive(Debug)]
+pub struct Added {
+    pub gid: String,
+    pub url: String,
+    pub headers: Vec<String>,
+    pub name: Option<String>,
+    pub private: bool,
+    /// The person started it (address bar, Add link, Open torrent…, Retry):
+    /// it runs at once. A page started it: it waits for Resume.
+    pub person: bool,
+    /// Why a page-started torrent is waiting; the paused row shows it.
+    pub hold: Option<String>,
+}
+
 /// Messages from engine callbacks to the main loop.
 /// Callbacks never touch app state. They post here. No re-entrancy bugs.
 #[derive(Debug)]
@@ -76,8 +91,8 @@ pub enum Ev {
     Reader(u64, String, String),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
-    /// aria2 took a download: (gid, url, headers sent, file name asked for, private).
-    AriaAdded(String, String, Vec<String>, Option<String>, bool),
+    /// aria2 took a download; `Added` says how it was started.
+    AriaAdded(Box<Added>),
     AriaFailed(u64, String),
     AriaJobs(Vec<crate::aria::Job>),
     /// A request from the agent thread, answered through its channel.

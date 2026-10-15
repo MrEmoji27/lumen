@@ -200,15 +200,16 @@ impl Aria {
     }
 
     /// Queue a URL. Headers are whole lines: "Cookie: a=b", "Referer: ...".
-    /// Returns the gid aria2 gave it.
-    pub fn add(&self, url: &str, headers: &[String], filename: Option<&str>) -> Result<String, String> {
+    /// `pause` puts it in paused, for a torrent a PAGE started: it must wait
+    /// for the person to press Resume. Returns the gid aria2 gave it.
+    pub fn add(&self, url: &str, headers: &[String], filename: Option<&str>, pause: bool) -> Result<String, String> {
         let (port, secret) = self.line()?;
         let gid = call(
             port,
             &secret,
             self.id(),
             "aria2.addUri",
-            &[json!([url]), uri_options(headers, filename)],
+            &[json!([url]), uri_options(headers, filename, pause)],
         )?
         .as_str()
         .map(str::to_string)
@@ -360,6 +361,10 @@ impl Engine {
             "--dht-listen-port=6881-6999",
             "--follow-torrent=true",
             "--bt-save-metadata=true",
+            // A torrent a PAGE starts must never join the swarm on its own:
+            // born paused, waiting for the person to press Resume. Person-started
+            // torrents are resumed by the main loop once their metadata is in.
+            "--pause-metadata=true",
             "--seed-ratio=1.0",
         ]);
         // Stop seeding after an hour, or immediately when the user said no to sharing.
@@ -593,13 +598,16 @@ fn request(id: u64, secret: &str, method: &str, params: &[Value]) -> Value {
 }
 
 /// Per download options. Header lines travel as a list; the name goes in "out".
-fn uri_options(headers: &[String], filename: Option<&str>) -> Value {
+fn uri_options(headers: &[String], filename: Option<&str>, pause: bool) -> Value {
     let mut options = serde_json::Map::new();
     if !headers.is_empty() {
         options.insert("header".to_string(), json!(headers));
     }
     if let Some(name) = filename.filter(|n| !n.is_empty()) {
         options.insert("out".to_string(), Value::String(name.to_string()));
+    }
+    if pause {
+        options.insert("pause".to_string(), json!("true"));
     }
     Value::Object(options)
 }
@@ -715,7 +723,7 @@ mod tests {
 
     #[test]
     fn request_keeps_the_methods_own_params_last() {
-        let body = request(2, "k", "aria2.addUri", &[json!(["https://a.test/x"]), uri_options(&[], Some("x.bin"))]);
+        let body = request(2, "k", "aria2.addUri", &[json!(["https://a.test/x"]), uri_options(&[], Some("x.bin"), false)]);
         assert_eq!(body["params"][0], "token:k");
         assert_eq!(body["params"][1], json!(["https://a.test/x"]));
         assert_eq!(body["params"][2], json!({"out": "x.bin"}));
@@ -776,14 +784,16 @@ mod tests {
 
     #[test]
     fn headers_and_a_name_become_options() {
-        assert_eq!(uri_options(&[], None), json!({}));
-        let options = uri_options(&["Cookie: a=b".to_string(), "Referer: https://a.test/".to_string()], Some("movie.mkv"));
+        assert_eq!(uri_options(&[], None, false), json!({}));
+        let options = uri_options(&["Cookie: a=b".to_string(), "Referer: https://a.test/".to_string()], Some("movie.mkv"), false);
         assert_eq!(
             options,
             json!({"header": ["Cookie: a=b", "Referer: https://a.test/"], "out": "movie.mkv"})
         );
         // A name that is only spaces is no name at all.
-        assert_eq!(uri_options(&["User-Agent: x".to_string()], Some("")), json!({"header": ["User-Agent: x"]}));
+        assert_eq!(uri_options(&["User-Agent: x".to_string()], Some(""), false), json!({"header": ["User-Agent: x"]}));
+        // A torrent a page started goes in paused, waiting for the person.
+        assert_eq!(uri_options(&[], None, true), json!({"pause": "true"}));
     }
 
     #[test]
@@ -1003,7 +1013,7 @@ mod live {
         assert!(aria.ready(), "aria2 never came up");
 
         let gid = aria
-            .add("https://example.com/", &["Referer: https://example.com/".to_string()], None)
+            .add("https://example.com/", &["Referer: https://example.com/".to_string()], None, false)
             .expect("aria2 took the url");
 
         let mut done = false;
@@ -1025,7 +1035,7 @@ mod live {
         assert!(done, "the download never finished");
 
         aria.set_speed_limit(1024);
-        let again = aria.add("https://example.com/", &[], Some("second.html")).expect("aria2 took it again");
+        let again = aria.add("https://example.com/", &[], Some("second.html"), false).expect("aria2 took it again");
         assert_eq!(aria.pause(&again).ok(), Some(()));
         assert_eq!(aria.resume(&again).ok(), Some(()));
         assert_eq!(aria.remove(&again).ok(), Some(()));

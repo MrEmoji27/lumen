@@ -19,7 +19,7 @@ mod store;
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -215,6 +215,15 @@ struct App {
     handoff: Option<(u64, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,
     /// What aria2 was given per gid, so a failed download can be tried again.
     aria_meta: HashMap<String, (String, Vec<String>, Option<String>)>,
+    /// Gids the person started: a paused one with its metadata in gets
+    /// un-paused once (pause-metadata stops it after the metadata arrives).
+    /// A Pause by the person removes the gid: their Pause is never undone.
+    aria_person: HashSet<String>,
+    /// Page-started adds (Handoff, page magnets): the torrent they spawn
+    /// waits for Resume. Plain files never spawn one, so the mark is inert.
+    aria_page: HashSet<String>,
+    /// Why a page-started row waits: gid -> the note its paused row shows.
+    aria_hold: HashMap<String, String>,
     /// Next download id for aria2, video and remembered rows. Never reused.
     dl_seq: u64,
     /// Finished downloads changed; write downloads.json on the next tick.
@@ -426,6 +435,9 @@ fn main() {
         aria_ids: HashMap::new(),
         aria_adopted: false,
         aria_poll: aria::Poll::new(),
+        aria_person: HashSet::new(),
+        aria_page: HashSet::new(),
+        aria_hold: HashMap::new(),
         videos: HashMap::new(),
         aria_meta: HashMap::new(),
         dl_seq: 0,
@@ -764,6 +776,25 @@ fn percent_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Why a page-started magnet waits, in words: which page asked for it.
+fn magnet_hold(page_url: &str) -> String {
+    let h = host_of(page_url);
+    if h.is_empty() {
+        "from a page: press Resume to start".to_string()
+    } else {
+        format!("from {h}: press Resume to start")
+    }
+}
+
+/// A person-started torrent pause-metadata stopped once its metadata is in:
+/// start it. `partial` keeps the rule off finished torrents, so an aria2
+/// seed-limit pause is not undone. A page-started one (not in the person
+/// set) waits for Resume; a Pause by the person removes the gid, so their
+/// Pause is never undone either.
+fn should_auto_resume(person: bool, status: &str, named: bool, partial: bool) -> bool {
+    person && status == "paused" && named && partial
 }
 
 /// Events that fire in a stream (download progress, aria2 polls) would drown the
@@ -1376,6 +1407,9 @@ impl App {
         if let Some(gid) = self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
             self.aria_ids.remove(&gid);
             self.aria_meta.remove(&gid);
+            self.aria_person.remove(&gid);
+            self.aria_page.remove(&gid);
+            self.aria_hold.remove(&gid);
             let aria = self.aria.clone();
             std::thread::spawn(move || {
                 let _ = aria.remove(&gid);
@@ -1418,23 +1452,42 @@ impl App {
         let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
         let tab = self.active;
         std::thread::spawn(move || {
-            let _ = match aria.add(&url, &headers, name.as_deref()) {
-                Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, url, headers, name, private)),
+            let _ = match aria.add(&url, &headers, name.as_deref(), false) {
+                Ok(gid) => proxy.send_event(Ev::AriaAdded(Box::new(engine::Added {
+                    gid,
+                    url,
+                    headers,
+                    name,
+                    private,
+                    person: true,
+                    hold: None,
+                }))),
                 Err(_) => proxy.send_event(Ev::AriaFailed(tab, url)),
             };
         });
     }
 
     /// A magnet link goes straight to aria2. The display name comes from `dn=`
-    /// until the torrent metadata arrives with the real one.
-    fn add_magnet(&mut self, url: &str, private: bool) {
+    /// until the torrent metadata arrives with the real one. `hold` is Some for
+    /// a magnet a PAGE asked for: it goes in paused and waits for the person —
+    /// a torrent tells the swarm the user's IP, so a page never starts one.
+    fn add_magnet(&mut self, url: &str, private: bool, hold: Option<String>) {
         let name = magnet_name(url);
+        let person = hold.is_none();
         let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
         let u = url.to_string();
         let headers: Vec<String> = Vec::new();
         std::thread::spawn(move || {
-            let _ = match aria.add(&u, &headers, None) {
-                Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u, headers, Some(name), private)),
+            let _ = match aria.add(&u, &headers, None, !person) {
+                Ok(gid) => proxy.send_event(Ev::AriaAdded(Box::new(engine::Added {
+                    gid,
+                    url: u,
+                    headers,
+                    name: Some(name),
+                    private,
+                    person,
+                    hold,
+                }))),
                 Err(_) => proxy.send_event(Ev::AriaFailed(0, u)),
             };
         });
@@ -1636,8 +1689,9 @@ impl App {
     fn navigate(&mut self, raw: &str) {
         let Some(url) = resolve_input(raw, &self.settings.search) else { return };
         // A magnet link is not a page: hand it to aria2 instead of loading it.
+        // The person typed it, so it runs at once.
         if url.starts_with("magnet:") {
-            self.add_magnet(&url, self.active_tab().is_some_and(|t| t.private));
+            self.add_magnet(&url, self.active_tab().is_some_and(|t| t.private), None);
             return;
         }
         let i = self.active_idx();
@@ -2078,8 +2132,18 @@ impl App {
                     }
                     std::thread::spawn(move || {
                         let name = (!name.is_empty()).then_some(name);
-                        let _ = match aria.add(&u, &headers, name.as_deref()) {
-                            Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u, headers, name, private)),
+                        // A page's download: the .torrent file itself is fetched
+                        // like any file, but the torrent it spawns waits for Resume.
+                        let _ = match aria.add(&u, &headers, name.as_deref(), false) {
+                            Ok(gid) => proxy.send_event(Ev::AriaAdded(Box::new(engine::Added {
+                                gid,
+                                url: u,
+                                headers,
+                                name,
+                                private,
+                                person: false,
+                                hold: None,
+                            }))),
                             Err(_) => proxy.send_event(Ev::AriaFailed(tab, u)),
                         };
                     });
@@ -2098,13 +2162,24 @@ impl App {
                     None => start(String::new()),
                 }
             }
-            Ev::AriaAdded(gid, url, headers, name, private) => {
+            Ev::AriaAdded(a) => {
+                let engine::Added { gid, url, headers, name, private, person, hold } = *a;
+                if person {
+                    self.aria_person.insert(gid.clone());
+                } else if hold.is_none() {
+                    // A page's download: any torrent it spawns waits for Resume.
+                    self.aria_page.insert(gid.clone());
+                }
+                if let Some(note) = hold {
+                    self.aria_hold.insert(gid.clone(), note);
+                }
                 // The row may already exist if a poll adopted this gid first; keep its id.
                 if !self.aria_ids.contains_key(&gid) {
                     let id = self.next_dl(1);
                     self.aria_ids.insert(gid.clone(), id);
                     if private {
                         // Show it now, marked private, so it never reaches downloads.json.
+                        let held = self.aria_hold.get(&gid).cloned();
                         self.downloads.insert(
                             0,
                             engine::Dl {
@@ -2113,9 +2188,9 @@ impl App {
                                 path: String::new(),
                                 received: 0,
                                 total: 0,
-                                state: "progress",
+                                state: if held.is_some() { "paused" } else { "progress" },
                                 speed: 0,
-                                note: "starting".into(),
+                                note: held.unwrap_or_else(|| "starting".into()),
                                 private,
                                 name: String::new(),
                                 kind: "file",
@@ -2224,6 +2299,7 @@ impl App {
                 }
                 // A finished .torrent file hands its row to the torrent it spawned.
                 let fmap = aria::follow_map(&jobs);
+                let mut busy_pending = false;
                 for (old, new) in &fmap {
                     if let Some(&id) = self.aria_ids.get(old)
                         && !self.aria_ids.contains_key(new)
@@ -2231,11 +2307,43 @@ impl App {
                         self.aria_ids.remove(old);
                         self.aria_meta.remove(old);
                         self.aria_ids.insert(new.clone(), id);
+                        if self.aria_person.remove(old) {
+                            // A person-started .torrent hands its consent to the
+                            // torrent it spawned; pause-metadata stops the child,
+                            // so start it now.
+                            self.aria_person.insert(new.clone());
+                            let gid = new.clone();
+                            let aria = self.aria.clone();
+                            std::thread::spawn(move || {
+                                let _ = aria.resume(&gid);
+                            });
+                            busy_pending = true;
+                        } else if self.aria_page.remove(old) {
+                            // A page's .torrent: the torrent it spawned waits for
+                            // the person, with a note saying so.
+                            self.aria_hold.insert(new.clone(), "press Resume to start this torrent".into());
+                            let gid = new.clone();
+                            let aria = self.aria.clone();
+                            std::thread::spawn(move || {
+                                let _ = aria.pause(&gid);
+                            });
+                        }
                     }
                 }
-                let mut busy = false;
+                let mut busy = busy_pending;
                 for j in jobs {
                     let Some(&id) = self.aria_ids.get(&j.gid) else { continue };
+                    // A person-started torrent pause-metadata stopped once its
+                    // metadata arrived: start it. Keep the poll awake for one
+                    // more round to see it run.
+                    if should_auto_resume(self.aria_person.contains(&j.gid), &j.status, !j.name.is_empty(), j.done < j.total) {
+                        let gid = j.gid.clone();
+                        let aria = self.aria.clone();
+                        std::thread::spawn(move || {
+                            let _ = aria.resume(&gid);
+                        });
+                        busy = true;
+                    }
                     let state = match j.status {
                         "active" | "waiting" => {
                             if j.seeder { "seeding" } else { "progress" }
@@ -2251,6 +2359,7 @@ impl App {
                         "active" if j.seeder => format!("{} peers", j.connections),
                         "active" => format!("{} connections", j.connections),
                         "waiting" => "queued".to_string(),
+                        "paused" => self.aria_hold.get(&j.gid).cloned().unwrap_or_default(),
                         "removed" => "cancelled".to_string(),
                         "error" if !j.error.is_empty() => j.error.trim().trim_end_matches('.').to_string(),
                         _ => String::new(),
@@ -2333,9 +2442,12 @@ impl App {
                 }
             }
             Ev::Magnet(tab, url) => {
-                // A page (or the address bar) asked for a magnet: aria2 takes it.
+                // A page (or an agent tab — those count as pages) asked for a
+                // magnet: it goes in paused, waiting for the person. The note
+                // says which page asked.
                 let private = self.idx(tab).is_some_and(|i| self.tabs[i].private);
-                self.add_magnet(&url, private);
+                let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
+                self.add_magnet(&url, private, Some(magnet_hold(&page)));
             }
             Ev::Popup(id, parent) => {
                 let private = self.idx(parent).is_some_and(|i| self.tabs[i].private);
@@ -2608,6 +2720,15 @@ impl App {
                     "pause" | "resume" | "cancel" if self.videos.contains_key(&id) => self.video_control(id, a),
                     "pause" | "resume" | "cancel" => match self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
                         Some(gid) => {
+                            // Resume on a held row is consent: it runs now, and
+                            // any torrent it spawns inherits that consent.
+                            // Pause takes a person-started one out of auto-start.
+                            if a == "resume" {
+                                self.aria_hold.remove(&gid);
+                                self.aria_person.insert(gid.clone());
+                            } else if a == "pause" {
+                                self.aria_person.remove(&gid);
+                            }
                             let aria = self.aria.clone();
                             let act = a.to_string();
                             self.aria_poll.store(true);
@@ -2639,15 +2760,23 @@ impl App {
                         let url = m["url"].as_str().unwrap_or("").to_string();
                         if url.starts_with("magnet:") {
                             let private = self.active_tab().is_some_and(|t| t.private);
-                            self.add_magnet(&url, private);
+                            self.add_magnet(&url, private, None);
                         } else if url.starts_with("http") {
                             let private = self.active_tab().is_some_and(|t| t.private);
                             let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
                             let u = url.clone();
                             let headers: Vec<String> = Vec::new();
                             std::thread::spawn(move || {
-                                let _ = match aria.add(&u, &headers, None) {
-                                    Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u, headers, None, private)),
+                                let _ = match aria.add(&u, &headers, None, false) {
+                                    Ok(gid) => proxy.send_event(Ev::AriaAdded(Box::new(engine::Added {
+                                        gid,
+                                        url: u,
+                                        headers,
+                                        name: None,
+                                        private,
+                                        person: true,
+                                        hold: None,
+                                    }))),
                                     Err(_) => proxy.send_event(Ev::AriaFailed(0, u)),
                                 };
                             });
@@ -2665,7 +2794,15 @@ impl App {
                         let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
                         std::thread::spawn(move || {
                             let _ = match aria.add_torrent(&b64, &[]) {
-                                Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, String::new(), Vec::new(), None, private)),
+                                Ok(gid) => proxy.send_event(Ev::AriaAdded(Box::new(engine::Added {
+                                    gid,
+                                    url: String::new(),
+                                    headers: Vec::new(),
+                                    name: None,
+                                    private,
+                                    person: true,
+                                    hold: None,
+                                }))),
                                 Err(_) => proxy.send_event(Ev::AriaFailed(0, String::new())),
                             };
                         });
@@ -2684,6 +2821,9 @@ impl App {
                         if let Some(gid) = self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
                             self.aria_ids.remove(&gid);
                             self.aria_meta.remove(&gid);
+                            self.aria_person.remove(&gid);
+                            self.aria_page.remove(&gid);
+                            self.aria_hold.remove(&gid);
                             let aria = self.aria.clone();
                             std::thread::spawn(move || {
                                 let _ = aria.remove(&gid);
@@ -2954,7 +3094,7 @@ impl App {
                 self.test_magnet = false;
                 self.test_pending = true;
                 const MAGNET: &str = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.webtorrent.dev";
-                self.add_magnet(MAGNET, false);
+                self.add_magnet(MAGNET, false, None);
             }
             if let Some((gid, _)) = self.test_dl.take_if(|(_, at)| now >= *at) {
                 if let Some(&id) = self.aria_ids.get(&gid) {
@@ -3287,7 +3427,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tab, keepable, magnet_name, resolve_input};
+    use super::{Tab, keepable, magnet_hold, magnet_name, resolve_input, should_auto_resume};
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
     #[test]
@@ -3327,6 +3467,29 @@ mod tests {
         // No dn= at all: empty, not a crash.
         assert_eq!(magnet_name("magnet:?xt=urn:btih:abc"), "");
         assert_eq!(magnet_name("https://example.com/"), "");
+    }
+
+    /// A page-started magnet's hold note names the page that asked for it.
+    #[test]
+    fn magnet_hold_names_the_page() {
+        assert_eq!(magnet_hold("https://example.com/files?x=1"), "from example.com: press Resume to start");
+        // No host to name: still says a page asked.
+        assert_eq!(magnet_hold("about:blank"), "from a page: press Resume to start");
+    }
+
+    /// Only a person-started, unfinished, known-name torrent gets auto-started.
+    #[test]
+    fn only_person_torrents_auto_resume() {
+        // The rule fires for a person's torrent that pause-metadata stopped.
+        assert!(should_auto_resume(true, "paused", true, true));
+        // A page-started one waits for Resume.
+        assert!(!should_auto_resume(false, "paused", true, true));
+        // Still fetching metadata: nothing to resume into yet.
+        assert!(!should_auto_resume(true, "paused", false, true));
+        // A finished torrent paused by aria2's seed limit is left alone.
+        assert!(!should_auto_resume(true, "paused", true, false));
+        // Running torrents need nothing.
+        assert!(!should_auto_resume(true, "active", true, true));
     }
 
     /// A magnet typed in the address bar reaches the main loop, not the renderer.
