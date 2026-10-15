@@ -49,17 +49,21 @@ struct UpnpThread {
     wake: Condvar,
     /// Whether the port is currently mapped (updated by the thread).
     mapped: Arc<std::sync::atomic::AtomicBool>,
+    /// The discovered gateway, shared so Drop can access it for cleanup.
+    gateway: Arc<Mutex<Option<Gateway>>>,
 }
 
 impl UpnpThread {
     /// Start the background thread. Returns the controller.
     fn start(port: u16) -> Arc<Self> {
         let mapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gateway = Arc::new(Mutex::new(None));
         let this = Arc::new(Self {
             port,
             active: Mutex::new(false),
             wake: Condvar::new(),
             mapped: mapped.clone(),
+            gateway: gateway.clone(),
         });
         let weak = Arc::downgrade(&this);
         thread::Builder::new()
@@ -91,6 +95,8 @@ impl UpnpThread {
 
         // Initial discovery (blocking, up to 5 s).
         gateway = discover_gateway();
+        // Store gateway for potential cleanup on drop.
+        *lock(&self.gateway) = gateway.clone();
         if gateway.is_none() {
             eprintln!("lumen: upnp: no gateway found in 5 s; torrents work outbound only");
             logged_no_gateway = true;
@@ -110,6 +116,7 @@ impl UpnpThread {
                 if gateway.is_none() {
                     // Retry discovery once per active period.
                     gateway = discover_gateway();
+                    *lock(&self.gateway) = gateway.clone();
                     if gateway.is_none() && !logged_no_gateway {
                         eprintln!("lumen: upnp: no gateway; torrents work outbound only");
                         logged_no_gateway = true;
@@ -144,6 +151,7 @@ impl UpnpThread {
                 }
                 // Forget gateway so we re-discover next time (router may have changed).
                 gateway = None;
+                *lock(&self.gateway) = None;
                 logged_no_gateway = false;
             }
         }
@@ -200,7 +208,7 @@ impl Upnp {
     /// returns a no-op controller.
     pub fn start(port: u16, enabled: bool) -> Self {
         if !enabled {
-            return Self { inner: Arc::new(UpnpThread { port, active: Mutex::new(false), wake: Condvar::new(), mapped: Arc::new(std::sync::atomic::AtomicBool::new(false)) }) };
+            return Self { inner: Arc::new(UpnpThread { port, active: Mutex::new(false), wake: Condvar::new(), mapped: Arc::new(std::sync::atomic::AtomicBool::new(false)), gateway: Arc::new(Mutex::new(None)) }) };
         }
         Self { inner: UpnpThread::start(port) }
     }
@@ -223,10 +231,26 @@ impl Upnp {
 
 impl Drop for Upnp {
     fn drop(&mut self) {
-        // Signal idle so the thread unmaps on its next wake.
+        // If we have a gateway and a mapping, remove it synchronously now.
+        // Bounded to ~2 seconds total so exit isn't delayed.
+        let gateway = {
+            let mut g = lock(&self.inner.gateway);
+            g.take()
+        };
+        if let Some(gw) = gateway {
+            if self.inner.mapped.load(std::sync::atomic::Ordering::Relaxed) {
+                let port = self.inner.port;
+                let _ = thread::Builder::new()
+                    .name("lumen-upnp-cleanup".into())
+                    .spawn(move || {
+                        let _ = remove_mapping(&gw, port);
+                        eprintln!("lumen: upnp: cleanup unmapped port {}", port);
+                    })
+                    .map(|h| h.join());
+            }
+        }
+        // Signal idle so the background thread knows we're done.
         UpnpThread::set_active(&self.inner, false);
-        // The thread will unmap within 10 min. We don't join to avoid blocking exit.
-        // The OS will clean up the process and the mappings expire in 1 hour anyway.
     }
 }
 
