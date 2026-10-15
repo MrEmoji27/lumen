@@ -109,6 +109,10 @@ pub struct UiState {
     pub bookmarked: bool,
     /// Read aloud in reader view: "" | "ready" | "playing" | "paused".
     pub listen: &'static str,
+    /// KeePass entries matching the active site: labels only, empty when locked.
+    pub kdbx: Vec<String>,
+    /// Entries in the open KeePass database; 0 = no database open.
+    pub vault: usize,
     /// Filled only while the History page is open.
     pub history: Vec<UiVisit>,
     /// Filled only while the Bookmarks page is open: (url, title).
@@ -162,6 +166,7 @@ pub enum Hit {
     Star,
     Listen,
     ListenStop,
+    KdbxFill,
     Sugg(usize),
     Shortcut(usize),
     NtpSearch,
@@ -413,6 +418,13 @@ impl Chrome {
     pub fn set_state(&self, s: UiState) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         i.apply(s);
+    }
+
+    /// A short-lived note: a failed KeePass unlock, shown where it happened.
+    pub fn flash(&self, msg: String) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        i.page.flash = Some((msg, Instant::now()));
+        i.invalidate();
     }
 
     pub fn set_fav(&self, id: u64, data_uri: &str) {
@@ -890,34 +902,30 @@ impl Inner {
             self.hit(r, Hit::Star);
         }
 
-        // Read aloud in reader view: one chip under the address bar. The tab
-        // list steps down so the chip has a row of its own.
-        let chip = !compact && !s.listen.is_empty();
-        if chip {
-            let label = match s.listen {
-                "playing" => "Pause",
-                "paused" => "Resume",
-                _ => "Listen",
-            };
-            let w = (self.gfx.measure(label, Font::ui(12.5, 600)) + 44.0).min(sb.w - 16.0);
-            let r = R::new(sb.x + 8.0, 84.0, w, 28.0);
-            let hov = self.is_hover(&Hit::Listen);
-            self.gfx.round(r, 8.0, if hov { th.hover } else { th.raise });
-            self.gfx.icon(if s.listen == "playing" { "pause" } else { "play" }, r.x + 10.0, r.y + 6.0, 16.0, th.accent);
-            self.gfx.text(label, R::new(r.x + 32.0, r.y, r.w - 34.0, r.h), Font::ui(12.5, 600), th.text);
-            self.hit(r, Hit::Listen);
-            if s.listen != "ready" {
-                let sw = self.gfx.measure("Stop", Font::ui(12.5, 600)) + 20.0;
-                let sr = R::new(r.right() + 6.0, 84.0, sw, 28.0);
-                let hovs = self.is_hover(&Hit::ListenStop);
-                self.gfx.round(sr, 8.0, if hovs { th.hover } else { th.raise });
-                self.gfx.text("Stop", sr, Font::ui(12.5, 600).align(Align::Center), th.dim);
-                self.hit(sr, Hit::ListenStop);
+        // Offer chips under the address bar: read aloud in reader view, and
+        // the KeePass fills for this site. The tab list steps down for the row.
+        let offer = !compact && (!s.listen.is_empty() || !s.kdbx.is_empty());
+        if offer {
+            let mut cx = sb.x + 8.0;
+            let right = sb.right() - 8.0;
+            if !s.listen.is_empty() {
+                let label = match s.listen {
+                    "playing" => "Pause",
+                    "paused" => "Resume",
+                    _ => "Listen",
+                };
+                cx = self.chip(cx, 84.0, right, label, Some(if s.listen == "playing" { "pause" } else { "play" }), Hit::Listen, true);
+                if s.listen != "ready" {
+                    cx = self.chip(cx, 84.0, right, "Stop", None, Hit::ListenStop, false);
+                }
+            }
+            if !s.kdbx.is_empty() {
+                self.chip(cx, 84.0, right, "Fill from KeePass", Some("lock"), Hit::KdbxFill, false);
             }
         }
 
         // Tabs.
-        let list_top = if compact { 148.0 } else if chip { 122.0 } else { 90.0 };
+        let list_top = if compact { 148.0 } else if offer { 122.0 } else { 90.0 };
         let list = R::new(sb.x, list_top, sb.w, sb.h - list_top - 40.0);
         self.gfx.clip(list);
         let mut y = list.y - self.scroll;
@@ -1437,6 +1445,16 @@ impl Inner {
             Hit::Star => send(p, json!({"t": "bookmark"})),
             Hit::Listen => send(p, json!({"t": "listen"})),
             Hit::ListenStop => send(p, json!({"t": "listenStop"})),
+            Hit::KdbxFill => {
+                let items: Vec<(u32, String)> = match self.state.as_ref() {
+                    Some(s) => s.kdbx.iter().enumerate().map(|(n, l)| (n as u32 + 1, l.clone())).collect(),
+                    None => return,
+                };
+                let cmd = self.popup(&items, x, y);
+                if cmd > 0 {
+                    send(p, json!({"t": "kdbxFill", "n": cmd - 1}));
+                }
+            }
             Hit::PermBlock(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": false})),
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {
@@ -1538,6 +1556,32 @@ impl Inner {
             }
             _ => {}
         }
+    }
+
+    /// One small chip in the offer row under the address bar. Returns the x
+    /// after it; draws nothing when it would not fit.
+    fn chip(&mut self, x: f32, y: f32, right: f32, label: &str, icon: Option<&'static str>, hit: Hit, accent: bool) -> f32 {
+        let th = self.theme;
+        let pad = if icon.is_some() { 44.0 } else { 20.0 };
+        let w = (self.gfx.measure(label, Font::ui(12.5, 600)) + pad).min(right - x);
+        if x >= right || w < 44.0 {
+            return x;
+        }
+        let r = R::new(x, y, w, 28.0);
+        self.gfx.round(r, 8.0, if self.is_hover(&hit) { th.hover } else { th.raise });
+        let mut tx = r.x;
+        if let Some(ic) = icon {
+            self.gfx.icon(ic, r.x + 10.0, r.y + 6.0, 16.0, if accent { th.accent } else { th.dim });
+            tx = r.x + 32.0;
+        }
+        self.gfx.text(
+            label,
+            R::new(tx, r.y, r.right() - tx - 4.0, r.h),
+            Font::ui(12.5, 600).align(if icon.is_some() { Align::Left } else { Align::Center }),
+            th.text,
+        );
+        self.hit(r, hit);
+        r.right() + 6.0
     }
 
     /// A native popup menu. Returns the chosen id, 0 for none.

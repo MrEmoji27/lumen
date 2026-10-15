@@ -54,6 +54,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 wry = { version = "0.57", features = ["devtools"] }
+# save_kdbx4 is for the tests only: they write a real KDBX4 file and read it
+# back, which is the only way to exercise the parser without a KeePass install.
+keepass = { version = "0.15", features = ["save_kdbx4"] }
 
 [features]
 # The Servo engine is heavy to build; only examples that ask for it compile it.

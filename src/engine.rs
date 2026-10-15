@@ -95,6 +95,11 @@ pub enum Ev {
     AloudPrep(u64, String),
     /// Read aloud: (tab, sentence index; usize::MAX means "spoken through").
     AloudLine(u64, usize),
+    /// The KeePass dialogs came back: (path, master password). Quiet: a
+    /// password must never reach the debug log.
+    VaultOpen(String, String),
+    /// The KeePass file was parsed: the vault, or why it failed. Quiet too.
+    VaultReady(Result<Box<crate::kdbx::Vault>, String>),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
     /// aria2 took a download; `Added` says how it was started.

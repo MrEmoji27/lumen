@@ -11,6 +11,7 @@ mod aloud;
 mod blocker;
 mod chrome;
 mod engine;
+mod kdbx;
 mod library;
 mod monitor;
 mod pagekit;
@@ -254,6 +255,10 @@ struct App {
     clear_pending: bool,
     /// Read aloud: the reader-view tab being spoken, if any.
     aloud: Option<Aloud>,
+    /// The open KeePass database: memory only, dropped after ten idle minutes.
+    vault: Option<kdbx::Vault>,
+    /// When the vault was last used; the idle lock counts from here.
+    vault_seen: Instant,
 }
 
 /// Headless: a real Lumen whose window lives off-screen, never takes focus, has no taskbar
@@ -463,6 +468,8 @@ fn main() {
         handoff: None,
         clear_pending: false,
         aloud: None,
+        vault: None,
+        vault_seen: Instant::now(),
     };
     {
         // One small thread asks aria2 about its jobs. It sleeps on a condvar
@@ -813,7 +820,9 @@ fn should_auto_resume(person: bool, status: &str, named: bool, partial: bool) ->
 /// Events that fire in a stream (download progress, aria2 polls) would drown the
 /// debug log in repeats. Everything else is worth one line.
 fn quiet_event(ev: &Ev) -> bool {
-    matches!(ev, Ev::Download(_) | Ev::AriaJobs(_) | Ev::Usage(_))
+    // Vault events carry a master password or the secrets behind it: never
+    // let the debug log see them.
+    matches!(ev, Ev::Download(_) | Ev::AriaJobs(_) | Ev::Usage(_) | Ev::VaultOpen(..) | Ev::VaultReady(_))
 }
 
 /// Debug builds only: append every engine event to %APPDATA%\Lumen\debug.log.
@@ -1104,6 +1113,12 @@ impl App {
                     },
                     _ => "",
                 },
+                // Labels only; passwords never reach the chrome.
+                kdbx: match (self.vault.as_ref(), self.active_tab()) {
+                    (Some(v), Some(t)) if t.url.starts_with("http") => v.matches(&t.url).into_iter().take(8).map(|n| v.label(n)).collect(),
+                    _ => Vec::new(),
+                },
+                vault: self.vault.as_ref().map_or(0, |v| v.len()),
                 history: if self.panel == Panel::History {
                     self.library
                         .recent("", 0, 400)
@@ -1711,6 +1726,20 @@ impl App {
             let _ = v.evaluate_script(&aloud::highlight_script(None));
         }
         self.push();
+    }
+
+    /// Put the chosen KeePass login into the password box on screen. The
+    /// values exist only inside the script string, handed straight to the page.
+    fn kdbx_fill(&mut self, n: usize) {
+        let Some(i) = self.idx(self.active) else { return };
+        let Some(v) = &self.vault else { return };
+        let Some(k) = v.matches(&self.tabs[i].url).get(n).copied() else { return };
+        let Some((user, pass)) = v.get(k) else { return };
+        let js = kdbx::fill_js(user, pass);
+        if let Some(view) = &self.tabs[i].view {
+            let _ = view.evaluate_script(&js);
+        }
+        self.vault_seen = Instant::now();
     }
 
     fn show_reader(&mut self, id: u64, url: &str, out: &str) {
@@ -2565,6 +2594,26 @@ impl App {
                 }
                 self.push();
             }
+            Ev::VaultOpen(path, pw) => {
+                // Parsing is slow and must stay off the UI thread. The pair
+                // rides on a quiet event: never logged, never written.
+                let proxy = self.ctx.proxy.clone();
+                std::thread::spawn(move || {
+                    let r = kdbx::Vault::open(std::path::Path::new(&path), &pw).map(Box::new);
+                    let _ = proxy.send_event(Ev::VaultReady(r));
+                });
+            }
+            Ev::VaultReady(r) => match r {
+                Ok(v) => {
+                    self.vault = Some(*v);
+                    self.vault_seen = Instant::now();
+                    self.push();
+                }
+                Err(e) => {
+                    // Wrong password or not a .kdbx: say it where the button was.
+                    self.chrome.flash(format!("Couldn't open that file: {e}"));
+                }
+            },
             Ev::Video(id, up) => self.on_video(id, up),
             Ev::ShowMe => self.show_me(),
             Ev::Orphan(id) => {
@@ -3022,6 +3071,11 @@ impl App {
             "bookmark" => self.toggle_bookmark(),
             "listen" => self.listen_toggle(),
             "listenStop" => self.listen_stop(),
+            "kdbxFill" => self.kdbx_fill(m["n"].as_u64().unwrap_or(0) as usize),
+            "kdbxLock" => {
+                self.vault = None;
+                self.push();
+            }
             "unbookmark" => {
                 self.library.unbookmark(m["url"].as_str().unwrap_or(""));
                 // Written now, not on a later tick: a bookmark is worth a write.
@@ -3229,6 +3283,12 @@ impl App {
         self.library.flush();
         if self.agent_seen.is_some_and(|t| now - t > Duration::from_secs(6)) {
             self.agent_seen = None;
+            self.push();
+        }
+
+        // KeePass: ten minutes untouched and the database leaves memory.
+        if self.vault.is_some() && now - self.vault_seen > Duration::from_secs(600) {
+            self.vault = None;
             self.push();
         }
 
