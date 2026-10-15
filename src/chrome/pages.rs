@@ -803,6 +803,7 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
         let state = match tab.status {
             "off" => "Unloaded",
             "asleep" => "Frozen",
+            "crashed" => "Crashed",
             _ if tab.id == s.active => "Active",
             _ => "",
         };

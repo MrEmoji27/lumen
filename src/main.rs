@@ -41,7 +41,12 @@ use store::{SavedTab, Session, Settings};
 
 const TICK: Duration = Duration::from_secs(3);
 /// A hidden tab keeps its caches this long, so flipping back is instant.
-const TRIM_AFTER: Duration = Duration::from_secs(60);
+const TRIM_AFTER: Duration = Duration::from_secs(30);
+/// Nothing waits: the loop sleeps this long instead of waking every TICK forever.
+const IDLE_TICK: Duration = Duration::from_secs(30);
+/// The sidebar memory readout, on its own slow clock. Reading it walks every
+/// WebView2 process, so it does not run on the tick.
+const MEM_TICK: Duration = Duration::from_secs(5);
 const MAX_CLOSED: usize = 25;
 const COMPACT_W: f64 = 56.0;
 /// Control page refresh. Only runs while the page is open.
@@ -85,6 +90,8 @@ struct Tab {
     trimmed: bool,
     /// Opened by an AI agent. Marked in the sidebar, never saved in the session.
     agent: bool,
+    /// Its page died. Clicking the tab reloads it.
+    crashed: bool,
     /// Showing reader view of this URL.
     reader: Option<String>,
     /// Opened by a page (window.open, target=_blank).
@@ -115,6 +122,7 @@ impl Tab {
             suspended: false,
             trimmed: false,
             agent: false,
+            crashed: false,
             reader: None,
             popup: false,
             private: false,
@@ -126,11 +134,12 @@ impl Tab {
     }
 
     fn status(&self) -> &'static str {
-        match (&self.view, self.url.is_empty(), self.suspended) {
-            (None, true, _) => "new",
-            (None, false, _) => "off",
-            (Some(_), _, true) => "asleep",
-            (Some(_), _, false) => "live",
+        match (&self.view, self.url.is_empty(), self.crashed, self.suspended) {
+            (None, true, _, _) => "new",
+            (None, false, _, _) => "off",
+            (Some(_), _, true, _) => "crashed",
+            (Some(_), _, _, true) => "asleep",
+            (Some(_), _, _, false) => "live",
         }
     }
 }
@@ -161,7 +170,11 @@ struct App {
     dirty: bool,
     mem: Option<(u64, u32)>,
     born: Instant,
+    /// When the tick next wants to run. TICK apart, so a step that is not
+    /// ready cannot wake the loop again on the same deadline.
     next_tick: Instant,
+    /// When the sidebar memory readout next wants a fresh number.
+    next_mem: Instant,
     exit: bool,
     /// The browser tree's Job Object. The CPU cap lives here.
     job: Option<monitor::Job>,
@@ -190,7 +203,8 @@ struct App {
     /// aria2 and its jobs: gid -> download id in the list.
     aria: std::sync::Arc<aria::Aria>,
     aria_ids: HashMap<String, u64>,
-    aria_poll: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The aria2 poll thread. Asleep until a download gives it work.
+    aria_poll: std::sync::Arc<aria::Poll>,
     /// Page text for searching history by content.
     recall: recall::Recall,
     /// Console, network and dialog records of agent tabs.
@@ -273,6 +287,7 @@ fn main() {
         std::sync::atomic::Ordering::Relaxed,
     );
     let Some(instance) = claim_instance() else { return };
+    install_panic_hook();
     // Before WebView2 starts: its processes must be born inside the job.
     let job = monitor::Job::adopt_self();
     let settings = store::load_settings();
@@ -376,6 +391,7 @@ fn main() {
         mem: None,
         born: Instant::now(),
         next_tick: Instant::now() + TICK,
+        next_mem: Instant::now() + MEM_TICK,
         exit: false,
         job,
         next_sample: None,
@@ -394,7 +410,7 @@ fn main() {
         library: library::Library::load(&store::data_dir()),
         aria: aria::Aria::start(&store::data_dir(), &dirs::download_dir().unwrap_or_else(store::data_dir)),
         aria_ids: HashMap::new(),
-        aria_poll: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        aria_poll: aria::Poll::new(),
         videos: HashMap::new(),
         aria_meta: HashMap::new(),
         dl_seq: 0,
@@ -405,13 +421,15 @@ fn main() {
         clear_pending: false,
     };
     {
-        // One small thread polls aria2 while it has work, and sleeps otherwise.
+        // One small thread asks aria2 about its jobs. It sleeps on a condvar
+        // until a download gives it something to ask about.
         let (aria, poll, proxy) = (app.aria.clone(), app.aria_poll.clone(), app.ctx.proxy.clone());
         std::thread::Builder::new()
             .name("lumen-aria-poll".into())
             .spawn(move || loop {
+                poll.wait();
                 std::thread::sleep(Duration::from_millis(700));
-                if poll.load(std::sync::atomic::Ordering::Relaxed) && proxy.send_event(Ev::AriaJobs(aria.jobs())).is_err() {
+                if proxy.send_event(Ev::AriaJobs(aria.jobs())).is_err() {
                     break;
                 }
             })
@@ -453,7 +471,10 @@ fn main() {
                 if app.next_sample.is_some_and(|t| t <= now) {
                     app.sample();
                 }
-                if app.next_tick <= now {
+                if app.settings.show_memory && app.next_mem <= now {
+                    app.read_memory(now);
+                }
+                if app.tick_due(now) {
                     app.tick();
                 }
             }
@@ -509,10 +530,59 @@ fn main() {
             app.save_session();
             *cf = ControlFlow::Exit;
         } else {
-            let wake = app.next_sample.map_or(app.next_tick, |t| t.min(app.next_tick));
-            *cf = ControlFlow::WaitUntil(wake);
+            *cf = ControlFlow::WaitUntil(app.next_wake(Instant::now()));
         }
     });
+}
+
+// ------------------------------------------------------------------- sleeping
+
+/// The session as it was last written. A panic hook writes it back out before the
+/// process goes, so a crash loses nothing the user had not already lost.
+static LAST_SESSION: std::sync::Mutex<Option<Session>> = std::sync::Mutex::new(None);
+
+/// Where a panic goes, and what it saves. Without this, a Rust panic in release is
+/// an abort with no trace: the user sees Lumen vanish and learns nothing.
+fn install_panic_hook() {
+    let plain = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let what = info.payload().downcast_ref::<&str>().map(|s| (*s).to_string()).unwrap_or_else(|| "panic".to_string());
+        let why = info.payload().downcast_ref::<String>().cloned().unwrap_or(what);
+        let at = info.location().map_or_else(String::new, |l| format!("{}:{}", l.file().rsplit(['\\', '/']).next().unwrap_or(l.file()), l.line()));
+        let _ = write_crash(&format!("{why}  at {at}"));
+        // The session on disk goes back to what we last had. It is the user's tabs.
+        if let Ok(g) = LAST_SESSION.lock()
+            && let Some(s) = g.as_ref()
+        {
+            store::save_session(s);
+        }
+        plain(info);
+    }));
+}
+
+/// One line in `data_dir()/crash.log`. The file is kept small: it is a log, not a history.
+fn write_crash(line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let (at, clock) = local_day_time(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+    );
+    let path = store::data_dir().join("crash.log");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(f, "{at} {clock}  {line}")?;
+    // Past a page of it, keep only the tail: the newest crash is the one that matters.
+    const MAX: u64 = 32 << 10;
+    if f.metadata().map(|m| m.len()).unwrap_or(0) > 2 * MAX {
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let keep: Vec<&str> = old.lines().collect();
+        let drop = keep.len().saturating_sub(MAX as usize / 64);
+        let mut tail = keep[drop..].join("\n");
+        tail.push('\n');
+        let tmp = path.with_extension("part");
+        if std::fs::write(&tmp, tail).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------- helpers
@@ -1021,6 +1091,14 @@ impl App {
         self.ensure_view(i);
         // Show the new page first, then hide the old. No flash of empty stage between.
         self.layout();
+        // A dead page comes back on click: load it again. (A dead browser
+        // process left no view; ensure_view already built a fresh one.)
+        if self.tabs[i].crashed {
+            self.tabs[i].crashed = false;
+            if let Some(v) = &self.tabs[i].view {
+                let _ = v.load_url(&self.tabs[i].url);
+            }
+        }
         let t = &mut self.tabs[i];
         t.hidden_at = None;
         t.suspended = false;
@@ -1712,19 +1790,24 @@ impl App {
                 }
             }
             Ev::Loading(id, on) => {
-                if let Some(i) = self.idx(id)
-                    && self.tabs[i].loading != on
-                {
-                    self.tabs[i].loading = on;
-                    self.push();
-                    // Done loading: read the page a little later, once scripts have filled it in.
-                    let t = &self.tabs[i];
-                    if !on && self.settings.remember_text && !self.off_record(t) && t.reader.is_none() && t.url.starts_with("http") {
-                        let (proxy, url) = (self.ctx.proxy.clone(), t.url.clone());
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(1500));
-                            let _ = proxy.send_event(Ev::Capture(id, url));
-                        });
+                if let Some(i) = self.idx(id) {
+                    // A page navigating again is a page that came back from "crashed".
+                    if on && self.tabs[i].crashed {
+                        self.tabs[i].crashed = false;
+                        self.push();
+                    }
+                    if self.tabs[i].loading != on {
+                        self.tabs[i].loading = on;
+                        self.push();
+                        // Done loading: read the page a little later, once scripts have filled it in.
+                        let t = &self.tabs[i];
+                        if !on && self.settings.remember_text && !self.off_record(t) && t.reader.is_none() && t.url.starts_with("http") {
+                            let (proxy, url) = (self.ctx.proxy.clone(), t.url.clone());
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_millis(1500));
+                                let _ = proxy.send_event(Ev::Capture(id, url));
+                            });
+                        }
                     }
                 }
             }
@@ -1795,6 +1878,22 @@ impl App {
                     self.tabs[i].suspended = ok && id != self.active;
                     self.push();
                 }
+            }
+            Ev::Crashed(id, browser) => {
+                if browser {
+                    // The browser process is gone and every WebView2 object with it.
+                    // Dropping them all lets the next tab activation build a fresh
+                    // environment, the same way the first tab does at startup.
+                    self.ctx.env.replace(None);
+                    self.ctx.popups.borrow_mut().clear();
+                    for t in &mut self.tabs {
+                        t.view = None;
+                    }
+                } else if let Some(i) = self.idx(id) {
+                    // The renderer died; the tab stays. Clicking it reloads the page.
+                    self.tabs[i].crashed = true;
+                }
+                self.push();
             }
             Ev::FullScreen(id, on) => {
                 if id == self.active {
@@ -1874,7 +1973,7 @@ impl App {
                 let id = self.next_dl(1);
                 self.aria_ids.insert(gid.clone(), id);
                 self.aria_meta.insert(gid, (url.clone(), headers, name));
-                self.aria_poll.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.aria_poll.store(true);
                 if private {
                     // Show it now, marked private, so it never reaches downloads.json.
                     self.downloads.insert(
@@ -1930,7 +2029,7 @@ impl App {
                     }
                 }
                 if !busy && !self.downloads.iter().any(|d| d.state == "paused" && d.id >= 1 << 40) {
-                    self.aria_poll.store(false, std::sync::atomic::Ordering::Relaxed);
+                    self.aria_poll.store(false);
                 }
                 self.push();
             }
@@ -2237,7 +2336,7 @@ impl App {
                         Some(gid) => {
                             let aria = self.aria.clone();
                             let act = a.to_string();
-                            self.aria_poll.store(true, std::sync::atomic::Ordering::Relaxed);
+                            self.aria_poll.store(true);
                             std::thread::spawn(move || {
                                 let _ = match act.as_str() {
                                     "pause" => aria.pause(&gid),
@@ -2284,10 +2383,13 @@ impl App {
             "bookmark" => self.toggle_bookmark(),
             "unbookmark" => {
                 self.library.unbookmark(m["url"].as_str().unwrap_or(""));
+                // Written now, not on a later tick: a bookmark is worth a write.
+                self.library.flush();
                 self.push();
             }
             "forget" => {
                 self.library.forget(m["url"].as_str().unwrap_or(""));
+                self.library.flush();
                 self.recall.forget(m["url"].as_str().unwrap_or(""));
                 self.push();
             }
@@ -2296,6 +2398,7 @@ impl App {
                 let since = m["since"].as_u64();
                 self.library.clear_history(since);
                 self.recall.clear(since);
+                self.library.flush();
                 // WebView2 keeps a history of its own in the profile; it goes too.
                 if let Some(v) = self.plain_view() {
                     engine::clear_data(v, since, false);
@@ -2307,6 +2410,7 @@ impl App {
                 let more = m["more"].as_bool().unwrap_or(false);
                 self.library.clear_history(since);
                 self.recall.clear(since);
+                self.library.flush();
                 if let Some(v) = self.plain_view() {
                     engine::clear_data(v, since, more);
                 }
@@ -2366,7 +2470,81 @@ impl App {
 
     // ---------------------------------------------------------------- tick
 
-    /// Every few seconds: trim, freeze and discard hidden tabs, read memory, save.
+    /// The tick runs when something waits for it, at most once per TICK. The
+    /// rate limit matters: a step whose time has come but whose turn has not
+    /// must not wake the loop again on the same instant.
+    fn tick_due(&self, now: Instant) -> bool {
+        self.next_tick <= now && self.tick_waiting(now)
+    }
+
+    /// What wants a tick: pending saves, the agent chip, the RAM cap, a sleep
+    /// step gone due, and aria2's boot (the tick is what notices it answered
+    /// and turns accelerate_downloads on).
+    fn tick_waiting(&self, now: Instant) -> bool {
+        if self.dirty || self.dl_dirty || self.agent_seen.is_some() || self.settings.ram_limit {
+            return true;
+        }
+        // The window not shown yet (the 3 s fallback), and a headless Lumen, which
+        // must notice when agents have gone quiet and leave.
+        if !self.shown || headless() {
+            return true;
+        }
+        if self.settings.accelerate_downloads && !self.ctx.aria_on.get() && self.aria.ready() {
+            return true;
+        }
+        self.next_tab_wake().is_some_and(|t| t <= now)
+    }
+
+    /// When the loop owes the next wake: a deadline it owns, the tick's next
+    /// turn when something waits for it, IDLE_TICK when nothing does.
+    fn next_wake(&self, now: Instant) -> Instant {
+        let mut at = now + IDLE_TICK;
+        let mem = self.settings.show_memory.then_some(self.next_mem);
+        for t in [self.next_sample, mem].into_iter().flatten() {
+            if t < at {
+                at = t;
+            }
+        }
+        if self.tick_waiting(now) {
+            if self.next_tick < at {
+                at = self.next_tick;
+            }
+        } else if let Some(t) = self.next_tab_wake()
+            && t < at
+        {
+            // Not due yet: arrive for it exactly.
+            at = t;
+        }
+        at
+    }
+
+    /// The next sleep-policy step of any hidden tab, in the past if one is due:
+    /// trim at TRIM_AFTER, freeze at sleep_after_min, discard at discard_after_min.
+    /// A crashed page is already dead and audio plays on: nothing to do to those.
+    fn next_tab_wake(&self) -> Option<Instant> {
+        let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
+        let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
+        self.tabs
+            .iter()
+            .filter(|t| t.view.is_some() && !t.audio && !t.crashed && t.id != self.active)
+            .filter_map(|t| {
+                let at = t.hidden_at?;
+                let step = if !t.trimmed {
+                    TRIM_AFTER
+                } else if !t.suspended {
+                    sleep
+                } else if !t.pinned {
+                    discard
+                } else {
+                    // Pinned and frozen: nothing left to do to it.
+                    return None;
+                };
+                Some(at + step)
+            })
+            .min()
+    }
+
+    /// Trim, freeze and discard hidden tabs, enforce the RAM cap, save what changed.
     fn tick(&mut self) {
         let now = Instant::now();
         // Started headless for agents, never shown to a person, no agent tab left, quiet for
@@ -2403,16 +2581,7 @@ impl App {
             }
         }
 
-        if self.settings.show_memory
-            && let Some(env) = self.ctx.env.borrow().as_ref()
-        {
-            let m = engine::memory(env);
-            // Only redraw when it moved by more than 1 MB.
-            if self.mem.is_none_or(|(b, _)| b.abs_diff(m.0) > 1 << 20) {
-                self.mem = Some(m);
-                self.ui_dirty = true;
-            }
-        }
+        // The sidebar memory readout has its own clock in the event loop.
         self.enforce_ram(now);
         self.settle_clear();
         self.ctx.aria_on.set(self.settings.accelerate_downloads && self.aria.ready());
@@ -2433,6 +2602,23 @@ impl App {
         }
         if self.dl_dirty {
             self.save_downloads();
+        }
+    }
+
+    /// The sidebar memory readout, on its own slow clock. Reading it walks every
+    /// WebView2 process, so it does not run on the tick.
+    fn read_memory(&mut self, now: Instant) {
+        self.next_mem = now + MEM_TICK;
+        if !self.settings.show_memory {
+            return;
+        }
+        let env = self.ctx.env.borrow();
+        let Some(env) = env.as_ref() else { return };
+        let m = engine::memory(env);
+        // Only redraw when it moved by more than 1 MB.
+        if self.mem.is_none_or(|(b, _)| b.abs_diff(m.0) > 1 << 20) {
+            self.mem = Some(m);
+            self.ui_dirty = true;
         }
     }
 
@@ -2732,6 +2918,10 @@ impl App {
             height: if maximized || self.fullscreen() { 0.0 } else { height },
             maximized,
         };
+        // Remember it for the panic hook: a panic must not lose these tabs.
+        if let Ok(mut g) = LAST_SESSION.lock() {
+            *g = Some(s.clone());
+        }
         store::save_session(&s);
     }
 }

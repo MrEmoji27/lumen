@@ -13,7 +13,7 @@ use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
-    NavigationStartingEventHandler, PermissionRequestedEventHandler, StateChangedEventHandler,
+    NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler, StateChangedEventHandler,
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
     SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
@@ -83,6 +83,9 @@ pub enum Ev {
     Suspended(u64, bool),
     Key(Action),
     Usage(Vec<crate::monitor::Proc>),
+    /// A page died: (tab, the whole browser process went with it).
+    /// The browser going takes every page with it; one page going takes only itself.
+    Crashed(u64, bool),
 }
 
 /// A download's state, copied out of WebView2 for the main loop.
@@ -204,11 +207,40 @@ fn page_bg(dark: bool) -> (u8, u8, u8, u8) {
 
 // ---------------------------------------------------------------- building
 
+/// Chromium work Lumen has no use for. One comma list, because Chromium keeps
+/// only the last `--disable-features=` switch it is given.
+const UNNEEDED: &[&str] = &[
+    // A spare renderer is kept warm for the next navigation. Lumen has few tabs,
+    // and a warm process is 20 MB that sits there doing nothing.
+    "SpareRendererForSitePerProcess",
+    // Hidden tabs are already frozen by Lumen's sleep policy; a second cache of
+    // the same pages for back and forward is memory nobody asked for.
+    "BackForwardCache",
+    // No Cast dialog, no translation prompt, no new tab feed in a browser shell.
+    "Translate",
+    "MediaRouter",
+    "InterestFeedContentSuggestions",
+    // Autofill and page hints fetched from a server. Lumen fills nothing in.
+    "AutofillServerCommunication",
+    "OptimizationHints",
+    // Edge chrome that never shows here.
+    "msWebView2EnableShoppingFeatures",
+    "msEdgeCollections",
+    "msEdgeRewards",
+    "msEdgeWallet",
+];
+
 /// Chromium switches for the whole browser. Set once, when the environment is born.
 /// LUMEN_ARGS appends more, for measuring without a rebuild.
 pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
     // wry's own defaults. Passing args replaces them, so keep them.
     let mut a = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
+    // One --disable-features only: Chromium keeps the last one it sees, so every
+    // feature Lumen does not need goes into this list.
+    for f in UNNEEDED {
+        a.push(',');
+        a.push_str(f);
+    }
     if crate::headless() {
         // Off-screen is "occluded" to Chromium, which would then stop painting and slow timers.
         // One --disable-features only: Chromium keeps the last one it sees.
@@ -314,6 +346,7 @@ fn build_tab_in(
     }
     hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone());
     hook_downloads(ctx, &wv, id, private);
+    hook_crash(&wv, id, ctx.proxy.clone());
     hook_permissions(ctx, &wv, id, isolated);
     // Password saving is per profile. The agent's profile never saves passwords,
     // and InPrivate keeps nothing anyway, so private pages get it off too.
@@ -508,6 +541,32 @@ fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
                     if !repeat || matches!(a, Action::NextTab | Action::PrevTab) {
                         let _ = proxy.send_event(Ev::Key(a));
                     }
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+// ------------------------------------------------------------- crashed pages
+
+/// A page that dies leaves a white rectangle that looks like a slow page.
+/// WebView2 says so here; the main loop turns it into "crashed" and reloads on
+/// the next click. Only the page's own renderer counts: a GPU or utility
+/// process coming and going, or one dead iframe, does not take the page with it.
+fn hook_crash(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
+    let mut token = 0i64;
+    unsafe {
+        let _ = wv.webview().add_ProcessFailed(
+            &ProcessFailedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                let _ = args.ProcessFailedKind(&mut kind);
+                let dead_page = kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED;
+                let whole_browser = kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
+                if dead_page || whole_browser {
+                    let _ = proxy.send_event(Ev::Crashed(id, whole_browser));
                 }
                 Ok(())
             })),

@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -69,6 +69,33 @@ pub struct Job {
     /// "active" | "waiting" | "paused" | "complete" | "error" | "removed"
     pub status: &'static str,
     pub error: String,
+}
+
+/// The poll thread's switch. A download flips it on; the thread sleeps on a
+/// condvar until then, so an idle Lumen has no polling thread at all.
+pub struct Poll {
+    on: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl Poll {
+    pub fn new() -> Arc<Poll> {
+        Arc::new(Poll { on: Mutex::new(false), wake: Condvar::new() })
+    }
+
+    /// True: start asking aria2 about its jobs. False: go back to sleep.
+    pub fn store(&self, on: bool) {
+        *lock(&self.on) = on;
+        self.wake.notify_all();
+    }
+
+    /// Sleep until a download has something to ask about.
+    pub fn wait(&self) {
+        let mut g = lock(&self.on);
+        while !*g {
+            g = self.wake.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 /// The engine, and nothing else. `start` returns before it knows anything.
