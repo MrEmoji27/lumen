@@ -1246,6 +1246,8 @@ impl App {
 
     fn activate(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
+        // The card covered the page being left; a new page under it means it is done.
+        self.drop_glance();
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
         self.leave_panel();
@@ -1496,12 +1498,22 @@ impl App {
 
     /// Escape: drop the floating card, back to the page below.
     fn close_glance(&mut self) {
-        if self.glance.take().is_some() {
-            self.chrome.set_glance(false);
-            self.layout();
+        if self.drop_glance() {
             self.dirty = true;
             self.push();
             self.focus_page();
+        }
+    }
+
+    /// The card goes down without the trailing work: the caller lays out and
+    /// pushes anyway. True when a card was open.
+    fn drop_glance(&mut self) -> bool {
+        if self.glance.take().is_some() {
+            self.chrome.set_glance(false);
+            self.layout();
+            true
+        } else {
+            false
         }
     }
 

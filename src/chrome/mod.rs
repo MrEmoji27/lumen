@@ -19,8 +19,8 @@ use windows::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
             BeginPaint, CLEARTYPE_QUALITY, ClientToScreen, ScreenToClient, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW,
-            CreateSolidBrush, DEFAULT_CHARSET, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetTextFaceW, HBRUSH, HDC,
-            HFONT, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkColor, SetTextColor,
+            BLACKNESS, CreateSolidBrush, DEFAULT_CHARSET, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetTextFaceW,
+            HBRUSH, HDC, HFONT, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PatBlt, SelectObject, SetBkColor, SetTextColor,
         },
         System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW},
         UI::{
@@ -334,6 +334,10 @@ impl Chrome {
                 Some(hinst),
                 None,
             ).unwrap_or_default();
+            if !dim.is_invalid() {
+                let old = SetWindowLongPtrW(dim, GWLP_WNDPROC, dim_proc as *const () as isize);
+                SetWindowLongPtrW(dim, GWLP_USERDATA, old);
+            }
             let _ = ShowWindow(dim, SW_HIDE);
             let _ = SetLayeredWindowAttributes(dim, COLORREF(0), 75, LWA_ALPHA);
             let edit = CreateWindowExW(
@@ -946,11 +950,18 @@ impl Inner {
         if !compact && !s.workspaces.is_empty() {
             let ws_y = 40.0;
             let ws_h = 28.0;
+            let n = s.workspaces.len();
+            let glance_w = if s.glance { self.gfx.measure("Open as tab", Font::ui(12.0, 500)) + 20.0 } else { 0.0 };
+            // The row holds the pills, "+" and, while a card is open, "Open as tab".
+            // Share the sidebar between them, so a long name cannot push a button out.
+            let gaps = 6.0 * (n as f32 + if s.glance { 1.0 } else { 0.0 });
+            let room = (sb.w - 16.0 - 28.0 - glance_w - gaps).max(44.0 * n as f32);
+            let cap = room / n as f32;
             let mut wx = sb.x + 8.0;
             for (i, name) in s.workspaces.iter().enumerate() {
                 let active = i == s.active_workspace;
-                let tw = (self.gfx.measure(name, Font::ui(12.0, 500)) + 20.0).min(sb.w - 16.0 - 28.0);
-                let r = R::new(wx, ws_y, tw.max(44.0), ws_h);
+                let tw = (self.gfx.measure(name, Font::ui(12.0, 500)) + 20.0).min(cap).max(44.0);
+                let r = R::new(wx, ws_y, tw, ws_h);
                 if active {
                     self.gfx.round(r, 8.0, th.accent);
                     self.gfx.text(name, R::new(r.x + 10.0, r.y + 4.0, r.w - 20.0, r.h), Font::ui(12.0, 500), th.bg);
@@ -970,8 +981,8 @@ impl Inner {
             self.hit(add_r, Hit::WorkspaceAdd);
             wx += 34.0;
             // "Open as tab" when a glance is open.
-            if s.glance {
-                let open_r = R::new(wx, ws_y, (self.gfx.measure("Open as tab", Font::ui(12.0, 500)) + 20.0).min(sb.right() - wx - 8.0), ws_h);
+            if s.glance && glance_w >= 60.0 && wx + 60.0 < sb.right() {
+                let open_r = R::new(wx, ws_y, glance_w.min(sb.right() - wx - 8.0), ws_h);
                 let oh = self.is_hover(&Hit::GlanceOpen);
                 self.gfx.round(open_r, 8.0, if oh { th.accent } else { th.accent.alpha(0.85) });
                 self.gfx.text("Open as tab", R::new(open_r.x + 10.0, open_r.y + 4.0, open_r.w - 20.0, open_r.h), Font::ui(11.5, 500), th.bg);
@@ -1978,6 +1989,33 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 drop(i);
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
+        }
+    }
+}
+
+/// The glance card's dim overlay. A plain STATIC paints the light 3D face,
+/// which brightens a dark page instead of dimming it: fill it black instead.
+/// The layered-window alpha set at creation turns that into a wash.
+extern "system" fn dim_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        let old: WNDPROC = std::mem::transmute(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        match msg {
+            WM_ERASEBKGND => {
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let _ = PatBlt(HDC(wp.0 as _), 0, 0, rc.right, rc.bottom, BLACKNESS);
+                LRESULT(1)
+            }
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let _ = PatBlt(hdc, 0, 0, rc.right, rc.bottom, BLACKNESS);
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            _ => CallWindowProcW(old, hwnd, msg, wp, lp),
         }
     }
 }
