@@ -74,8 +74,8 @@ pub enum Ev {
     Reader(u64, String, String),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
-    /// aria2 took a download: (gid, url, headers sent, file name asked for).
-    AriaAdded(String, String, Vec<String>, Option<String>),
+    /// aria2 took a download: (gid, url, headers sent, file name asked for, private).
+    AriaAdded(String, String, Vec<String>, Option<String>, bool),
     AriaFailed(u64, String),
     AriaJobs(Vec<crate::aria::Job>),
     /// A request from the agent thread, answered through its channel.
@@ -99,11 +99,14 @@ pub struct Dl {
     pub speed: u64,
     /// A short extra, e.g. "16 connections".
     pub note: String,
+    /// Started by a private tab: works, but leaves no row in downloads.json.
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
     NewTab,
+    NewPrivate,
     CloseTab,
     Reopen,
     NextTab,
@@ -233,9 +236,11 @@ pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
 /// One page. All pages share the UI's environment, so one browser process,
 /// one GPU process, one network process for the whole app.
 /// `isolated`: the page lives in the separate "agent" profile (own cookies and storage).
-pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, isolated: bool) -> wry::Result<WebView> {
+/// `private`: WebView2 InPrivate. No cookies outlive the last private page, and
+/// nothing the page does reaches this profile's history.
+pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, isolated: bool, private: bool) -> wry::Result<WebView> {
     let env = ctx.env.borrow().clone();
-    build_tab_in(ctx, id, url, bounds, env, isolated)
+    build_tab_in(ctx, id, url, bounds, env, isolated, private)
 }
 
 fn build_tab_in(
@@ -245,6 +250,7 @@ fn build_tab_in(
     bounds: Rect,
     env: Option<ICoreWebView2Environment>,
     isolated: bool,
+    private: bool,
 ) -> wry::Result<WebView> {
     let dark = ctx.dark.get();
     let p_title = ctx.proxy.clone();
@@ -268,6 +274,7 @@ fn build_tab_in(
         .with_initialization_script(crate::blocker::COSMETIC_JS)
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
+        .with_incognito(private)
         .with_document_title_changed_handler(move |t| {
             let _ = p_title.send_event(Ev::Title(id, t));
         })
@@ -276,11 +283,12 @@ fn build_tab_in(
         })
         .with_new_window_req_handler(move |_uri, features| {
             // window.open / target=_blank. Make a real tab and hand it to WebView2,
-            // so window.opener works (OAuth popups need it).
+            // so window.opener works (OAuth popups need it). A popup of a private
+            // tab is private too: same InPrivate cookie jar, same silence.
             let ctx = &popup_ctx;
             let new_id = ctx.alloc_id();
             let bounds = content_bounds_now(ctx);
-            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), isolated) {
+            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), isolated, private) {
                 Ok(wv) => {
                     let core = wv.webview();
                     ctx.popups.borrow_mut().push((new_id, wv));
@@ -305,10 +313,11 @@ fn build_tab_in(
         set_tracking(&wv, &ctx.tracking.borrow());
     }
     hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone());
-    hook_downloads(ctx, &wv, id);
+    hook_downloads(ctx, &wv, id, private);
     hook_permissions(ctx, &wv, id, isolated);
-    // Password saving is per profile. The agent's profile never saves passwords.
-    set_passwords(&wv, ctx.passwords.get() && !isolated);
+    // Password saving is per profile. The agent's profile never saves passwords,
+    // and InPrivate keeps nothing anyway, so private pages get it off too.
+    set_passwords(&wv, ctx.passwords.get() && !isolated && !private);
     hook_keys(&wv, ctx.proxy.clone());
     if crate::headless() {
         set_muted(&wv, true);
@@ -522,6 +531,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
     let k = |c: char| c as u32;
     Some(match (ctrl, shift, alt, vk) {
         (true, false, false, v) if v == k('T') => NewTab,
+        (true, true, false, v) if v == k('N') => NewPrivate,
         (true, true, false, v) if v == k('T') => Reopen,
         (true, false, false, v) if v == k('W') => CloseTab,
         (true, false, false, v) if v == k('L') || v == k('K') => Omnibox,
@@ -554,7 +564,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
 
 static NEXT_DL: AtomicU64 = AtomicU64::new(1);
 
-fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64) -> Dl {
+fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64, private: bool) -> Dl {
     unsafe {
         let (mut uri, mut path) = (PWSTR::null(), PWSTR::null());
         let _ = op.Uri(&mut uri);
@@ -572,12 +582,12 @@ fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64) -> Dl {
             COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED => "failed",
             _ => "progress",
         };
-        Dl { id, url: take(uri), path: take(path), received: got, total, state, speed: 0, note: String::new() }
+        Dl { id, url: take(uri), path: take(path), received: got, total, state, speed: 0, note: String::new(), private }
     }
 }
 
 /// Downloads come to Lumen. WebView2's own flyout stays hidden; the Downloads page shows them.
-fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64) {
+fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64, private: bool) {
     // Lumen has its own downloads page. WebView2's flyout never stays open.
     if let Ok(c9) = wv.webview().cast::<ICoreWebView2_9>() {
         let mut token = 0i64;
@@ -639,7 +649,7 @@ fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64) {
                 let _ = op.add_BytesReceivedChanged(
                     &BytesReceivedChangedEventHandler::create(Box::new(move |op, _| {
                         if let Some(op) = op {
-                            let _ = p.send_event(Ev::Download(dl_state(&op, id)));
+                            let _ = p.send_event(Ev::Download(dl_state(&op, id, private)));
                         }
                         Ok(())
                     })),
@@ -649,13 +659,13 @@ fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64) {
                 let _ = op.add_StateChanged(
                     &StateChangedEventHandler::create(Box::new(move |op, _| {
                         if let Some(op) = op {
-                            let _ = p.send_event(Ev::Download(dl_state(&op, id)));
+                            let _ = p.send_event(Ev::Download(dl_state(&op, id, private)));
                         }
                         Ok(())
                     })),
                     &mut t,
                 );
-                let _ = ctx.proxy.send_event(Ev::Download(dl_state(&op, id)));
+                let _ = ctx.proxy.send_event(Ev::Download(dl_state(&op, id, private)));
                 ctx.downloads.borrow_mut().insert(id, op);
                 Ok(())
             })),
@@ -790,7 +800,18 @@ pub fn clean_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_url, origin_of};
+    use super::{Action, clean_url, map_key, origin_of};
+
+    #[test]
+    fn ctrl_shift_n_is_a_new_private_tab() {
+        let n = 'N' as u32;
+        assert!(matches!(map_key(n, true, true, false), Some(Action::NewPrivate)));
+        // Ctrl+Shift+N must not be mistaken for reopen (Ctrl+Shift+T).
+        let t = 'T' as u32;
+        assert!(matches!(map_key(t, true, true, false), Some(Action::Reopen)));
+        assert!(map_key(n, true, false, false).is_none());
+        assert!(map_key(n, false, true, false).is_none());
+    }
 
     #[test]
     fn strips_trackers_only() {
@@ -945,6 +966,43 @@ pub fn clear_passwords(wv: &WebView) {
                 &ClearBrowsingDataCompletedHandler::create(Box::new(|_| Ok(()))),
             );
         }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Wipe WebView2's own records for one time range. `since` in unix seconds,
+/// None for everything there is. `more` also takes cookies, cache and site data;
+/// passwords and autofill are never touched. True when the call was made: the
+/// work itself is WebView2's, and it may outlive this function.
+pub fn clear_data(wv: &WebView, since: Option<u64>, more: bool) -> bool {
+    let mut kinds = COREWEBVIEW2_BROWSING_DATA_KINDS_BROWSING_HISTORY | COREWEBVIEW2_BROWSING_DATA_KINDS_DOWNLOAD_HISTORY;
+    if more {
+        kinds |= COREWEBVIEW2_BROWSING_DATA_KINDS_COOKIES
+            | COREWEBVIEW2_BROWSING_DATA_KINDS_DISK_CACHE
+            | COREWEBVIEW2_BROWSING_DATA_KINDS_ALL_SITE
+            | COREWEBVIEW2_BROWSING_DATA_KINDS_ALL_DOM_STORAGE
+            | COREWEBVIEW2_BROWSING_DATA_KINDS_CACHE_STORAGE;
+    }
+    let start = since.unwrap_or(0);
+    unsafe {
+        let Ok(p2) = wv
+            .webview()
+            .cast::<ICoreWebView2_13>()
+            .and_then(|c| c.Profile())
+            .and_then(|p| p.cast::<ICoreWebView2Profile2>())
+        else {
+            return false;
+        };
+        p2.ClearBrowsingDataInTimeRange(
+            kinds,
+            start as f64,
+            unix_now() as f64,
+            &ClearBrowsingDataCompletedHandler::create(Box::new(|_| Ok(()))),
+        )
+        .is_ok()
     }
 }
 

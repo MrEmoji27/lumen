@@ -71,6 +71,8 @@ pub struct Settings {
     pub accelerate_downloads: bool,
     /// Keep the text of opened pages so history can be searched by it.
     pub remember_text: bool,
+    /// Clear history (Lumen's, page text and WebView2's own) when Lumen closes.
+    pub clear_on_exit: bool,
     /// When Lumen is dark, darken light sites too (Dark Reader).
     pub dark_pages: bool,
     /// Hosts Dark Reader leaves alone.
@@ -124,6 +126,7 @@ impl Default for Settings {
             cosmetic: true,
             dark_pages: false,
             remember_text: true,
+            clear_on_exit: false,
             dark_skip: Vec::new(),
             ui_font: "segoe".into(),
             display_font: "instrument".into(),
@@ -264,4 +267,46 @@ pub fn load_session() -> Session {
 
 pub fn save_session(s: &Session) {
     save("session.json", s);
+}
+
+/// Set when Lumen closed with "clear history on exit" on and the WebView2 call
+/// could not be made to finish first. The next start wipes it and drops the flag.
+const CLEAR_FLAG: &str = "clear-history.flag";
+
+pub fn clear_history_pending() -> bool {
+    data_dir().join(CLEAR_FLAG).exists()
+}
+
+pub fn set_clear_history_pending(pending: bool) {
+    if pending {
+        save(CLEAR_FLAG, &true);
+    } else {
+        let _ = fs::remove_file(data_dir().join(CLEAR_FLAG));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_on_exit_is_off_by_default() {
+        assert!(!Settings::default().clear_on_exit);
+    }
+
+    /// A settings.json written before the field existed still loads, and reads as off.
+    #[test]
+    fn an_old_settings_file_without_clear_on_exit_loads() {
+        let mut v = serde_json::to_value(Settings::default()).expect("settings to json");
+        v.as_object_mut().expect("an object").remove("clear_on_exit");
+        let s: Settings = serde_json::from_value(v).expect("old file loads");
+        assert!(!s.clear_on_exit);
+        // The rest of the file came through untouched.
+        assert_eq!(s.search, Settings::default().search);
+        // And turning it on survives a round trip.
+        let mut s = s;
+        s.clear_on_exit = true;
+        s.clamp();
+        assert!(s.clear_on_exit);
+    }
 }

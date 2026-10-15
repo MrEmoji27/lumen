@@ -34,6 +34,7 @@ pub enum PageHit {
     Forget(String),
     Unbookmark(String),
     ClearHistory,
+    ClearData,
 }
 
 #[derive(Clone, Copy)]
@@ -83,8 +84,9 @@ const ENGINES: [(&str, &str); 5] = [
     ("Bing", "https://www.bing.com/search?q=%s"),
     ("Startpage", "https://www.startpage.com/do/search?q=%s"),
 ];
-const KEYS: [(&str, &str); 19] = [
+const KEYS: [(&str, &str); 20] = [
     ("New tab", "Ctrl+T"),
+    ("New private tab", "Ctrl+Shift+N"),
     ("Reopen closed tab", "Ctrl+Shift+T"),
     ("Close tab", "Ctrl+W"),
     ("Address bar", "Ctrl+L"),
@@ -143,6 +145,10 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("agent", "Let AI agents browse", "A local MCP server. Agents open their own tabs, marked AI, and you can stop them any time."),
             Toggle("agent_shared_profile", "Agents use my profile", "Off: agent tabs have their own cookies and logins. On: they act as you."),
             AgentSetup,
+        ]),
+        ("Privacy", vec![
+            Button("Clear browsing data", "Lumen history, page text and WebView2's own browsing history and downloads. Passwords and bookmarks are never touched.", "Clear…", PageHit::ClearData),
+            Toggle("clear_on_exit", "Clear history when Lumen closes", "Lumen history, the words of pages and WebView2's own browsing history go when the browser closes. Private tabs leave nothing anyway."),
         ]),
         ("Keys", vec![Keys]),
     ]
@@ -207,6 +213,60 @@ fn fmt_value(v: f32, unit: &str) -> String {
 
 fn trim(v: f32) -> String {
     if (v - v.round()).abs() < 0.05 { format!("{}", v.round() as u32) } else { format!("{v:.1}") }
+}
+
+// ------------------------------------------------------------------- clearing
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Days since 1970-01-01 for a civil date. Howard Hinnant's algorithm.
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era as i64 * 146097 + doe as i64 - 719468
+}
+
+/// Unix seconds of local midnight today.
+fn midnight() -> u64 {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let t = unsafe { GetLocalTime() };
+    let today = days_from_civil(t.wYear as i32, t.wMonth as u32, t.wDay as u32) * 86_400;
+    (today - local_offset()).max(0) as u64
+}
+
+/// Seconds local time is ahead of UTC. A negative number west of Greenwich.
+fn local_offset() -> i64 {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let t = unsafe { GetLocalTime() };
+    let wall = days_from_civil(t.wYear as i32, t.wMonth as u32, t.wDay as u32) * 86_400
+        + t.wHour as i64 * 3600
+        + t.wMinute as i64 * 60
+        + t.wSecond as i64;
+    wall - unix_now() as i64
+}
+
+/// The slice of history to clear: Some(None) = everything, Some(Some(t)) = from
+/// unix `t` on, None = the menu was dismissed.
+fn ask_range(i: &Inner) -> Option<Option<u64>> {
+    let now = unix_now();
+    let items: Vec<(u32, String)> = [(1u32, "Last hour"), (2, "Today"), (3, "Last 7 days"), (4, "Last 4 weeks"), (5, "Everything")]
+        .into_iter()
+        .map(|(id, label)| (id, label.to_string()))
+        .collect();
+    let (x, y) = i.mouse;
+    match i.popup(&items, x, y) {
+        1 => Some(Some(now - 3600)),
+        2 => Some(Some(midnight())),
+        3 => Some(Some(now - 7 * 86_400)),
+        4 => Some(Some(now - 28 * 86_400)),
+        5 => Some(None),
+        _ => None,
+    }
 }
 
 fn ratio(scale: Scale, v: f32) -> f32 {
@@ -870,7 +930,24 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::Open(url) => send(&i.proxy, json!({"t": "nav", "url": url})),
         PageHit::Forget(url) => send(&i.proxy, json!({"t": "forget", "url": url})),
         PageHit::Unbookmark(url) => send(&i.proxy, json!({"t": "unbookmark", "url": url})),
-        PageHit::ClearHistory => send(&i.proxy, json!({"t": "clearHistory"})),
+        PageHit::ClearHistory => {
+            // One native menu of time ranges first, then the wipe.
+            if let Some(since) = ask_range(i) {
+                send(&i.proxy, json!({"t": "clearHistory", "since": since}));
+            }
+        }
+        PageHit::ClearData => {
+            if let Some(since) = ask_range(i) {
+                let (x, y) = i.mouse;
+                // Second choice: history only, or the cookies and cache with it.
+                let more = match i.popup(&[(1, "History only".into()), (2, "History, cookies and cache".into())], x, y) {
+                    1 => false,
+                    2 => true,
+                    _ => return,
+                };
+                send(&i.proxy, json!({"t": "clearData", "since": since, "more": more}));
+            }
+        }
         PageHit::PermReset(n) => {
             if let Some((origin, kind, _)) = s.rules.get(n) {
                 send(&i.proxy, json!({"t": "permReset", "origin": origin, "kind": kind}));
@@ -919,5 +996,30 @@ fn pick_color(owner: windows::Win32::Foundation::HWND, start: Color) -> Option<C
 impl Inner {
     fn hwnd_raw(&self) -> windows::Win32::Foundation::HWND {
         self.hwnd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{days_from_civil, midnight, unix_now};
+
+    #[test]
+    fn civil_days_are_the_epoch_count() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1970, 1, 2), 1);
+        assert_eq!(days_from_civil(2000, 3, 1), 11017);
+        // A leap day and a century rule that is not a leap.
+        assert_eq!(days_from_civil(2024, 2, 29), days_from_civil(2024, 3, 1) - 1);
+        assert_eq!(days_from_civil(1900, 3, 1), days_from_civil(1900, 2, 28) + 1);
+    }
+
+    #[test]
+    fn midnight_is_the_start_of_today() {
+        let now = unix_now();
+        let m = midnight();
+        assert!(m <= now, "midnight is not in the future");
+        assert!(now - m < 86_400, "midnight is not within the last day");
+        // Local time-of-day at midnight is 00:00, which is what the ranges need.
+        assert_eq!((now - m) / 3600, ((now - m) / 3600).min(23));
     }
 }

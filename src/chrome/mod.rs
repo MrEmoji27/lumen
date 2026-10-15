@@ -56,6 +56,8 @@ pub struct UiTab {
     pub status: &'static str,
     pub agent: bool,
     pub reader: bool,
+    /// InPrivate tab. Marked in the sidebar, never saved anywhere.
+    pub private: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1121,6 +1123,10 @@ impl Inner {
         if t.agent && (pinned || compact) {
             self.gfx.circle(r.right() - 5.0, r.y + 5.0, 3.0, th.accent);
         }
+        if t.private && (pinned || compact) {
+            // A dot, like the AI one, in a colour of its own.
+            self.gfx.circle(r.right() - 5.0, r.y + 5.0, 3.0, private_mark(self.theme.dark));
+        }
         if (t.audio || t.muted) && pinned {
             let b = R::new(r.right() - 15.0, r.y + 1.0, 14.0, 14.0);
             self.gfx.round(b, 4.0, th.bg);
@@ -1154,6 +1160,14 @@ impl Inner {
             let b = R::new(right - 24.0, r.y + 9.0, 22.0, 14.0);
             self.gfx.round(b, 4.0, th.accent.alpha(0.22));
             self.gfx.text("AI", b, Font::ui(9.0, 650).align(Align::Center), th.accent);
+            right = b.x - 4.0;
+        }
+        if t.private {
+            // Same shape as the AI badge, muted violet so it never reads as accent.
+            let mark = private_mark(self.theme.dark);
+            let b = R::new(right - 46.0, r.y + 9.0, 44.0, 14.0);
+            self.gfx.round(b, 4.0, mark.alpha(0.22));
+            self.gfx.text("Private", b, Font::ui(9.0, 650).align(Align::Center), mark);
             right = b.x - 4.0;
         }
         let title = if !t.title.is_empty() {
@@ -1190,6 +1204,16 @@ impl Inner {
         self.gfx.text(":", R::new(row.x + wh, row.y, wc + 4.0, row.h), fh, th.faint.alpha(t1));
         self.gfx.text(&mm, R::new(row.x + wh + wc, row.y, wm + 8.0, row.h), fh.italic(), th.text.alpha(t1));
         self.gfx.text(&date.to_uppercase(), R::new(x0 + 2.0, row.bottom() + 2.0 + (1.0 - t2) * 8.0, field.w, 20.0), Font::ui(12.0, 450), th.faint.alpha(t2));
+        // A private new tab page says what private means, right under the clock.
+        if s.active_tab().is_some_and(|t| t.private) {
+            let mark = private_mark(th.dark);
+            self.gfx.text(
+                "Private tab. Nothing you do here is saved: no history, no cookies after the last private tab closes.",
+                R::new(x0 + 2.0, row.bottom() + 26.0 + (1.0 - t2) * 8.0, field.w, 20.0),
+                Font::ui(12.0, 450),
+                mark.alpha(t2),
+            );
+        }
         // Search field: the edit box sits on top of this.
         self.gfx.round(field, 12.0, th.bg);
         let focused = unsafe { GetFocus() } == self.ntp_edit;
@@ -1394,7 +1418,8 @@ impl Inner {
             Hit::Tab(id) | Hit::TabX(id) | Hit::TabSnd(id) => {
                 let Some(t) = s.tabs.iter().find(|t| t.id == id) else { return };
                 let mut items: Vec<(u32, String)> = vec![(1, if t.pinned { "Unpin".into() } else { "Pin".into() })];
-                if !t.url.is_empty() {
+                // Never offer to copy a private URL anywhere it would be written down.
+                if !t.url.is_empty() && !t.private {
                     items.push((2, "Duplicate".into()));
                     items.push((7, "Add to new tab page".into()));
                 }
@@ -1415,6 +1440,7 @@ impl Inner {
                 if t.id != s.active && (t.status == "live" || t.status == "asleep") {
                     items.push((4, "Unload now".into()));
                 }
+                items.push((11, "New private tab\tCtrl+Shift+N".into()));
                 items.push((0, String::new()));
                 items.push((5, "Close other tabs".into()));
                 items.push((6, "Close\tCtrl+W".into()));
@@ -1429,6 +1455,7 @@ impl Inner {
                     8 => "reader",
                     10 => "video",
                     9 => "darksite",
+                    11 => "newPrivate",
                     7 => {
                         let mut st = s.settings.clone();
                         let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
@@ -1539,6 +1566,11 @@ fn local_time() -> (String, String, String) {
         format!("{:02}", t.wMinute),
         format!("{}, {} {}", DAYS[t.wDayOfWeek as usize % 7], t.wDay, MONTHS[(t.wMonth as usize).saturating_sub(1) % 12]),
     )
+}
+
+/// The private-tab mark. A muted violet, never the accent: private is not a brand.
+fn private_mark(dark: bool) -> theme::Color {
+    theme::oklch(if dark { 0.74 } else { 0.52 }, 0.14, 300.0)
 }
 
 /// Win32 menus follow the app theme only through two undocumented uxtheme calls.
