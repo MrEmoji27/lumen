@@ -29,6 +29,9 @@ pub struct Segment {
 /// The SponsorBlock hashed-prefix endpoint base.
 const API_BASE: &str = "https://sponsor.ajay.app/api/skipSegments/";
 
+/// The categories, as the query parameter wants them: a JSON array.
+const CATEGORIES_QUERY: &str = "%5B%22sponsor%22%2C%22selfpromo%22%2C%22interaction%22%5D";
+
 /// Four hex characters of the sha256 of a video ID, so the server cannot
 /// learn the exact video until it hands back the full segment list.
 pub fn prefix(video_id: &str) -> String {
@@ -67,37 +70,48 @@ pub fn is_youtube_watch(url: &str) -> bool {
 }
 
 /// Parse a SponsorBlock API response and filter to our categories and video.
-/// The server returns segments for ALL videos sharing the hash prefix; we keep
-/// only ours and only the categories we skip.
+/// The server returns every video sharing the hash prefix, each with its own
+/// `segments` list; we keep only ours and only the categories we skip.
 pub fn parse_segments(raw: &str, video_id: &str) -> Vec<Segment> {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) else {
         return Vec::new();
     };
-    let Some(arr) = json.as_array() else {
+    let Some(videos) = json.as_array() else {
         return Vec::new();
     };
-    arr.iter()
-        .filter_map(|item| {
-            if item["videoID"].as_str() != Some(video_id) {
-                return None;
+    let mut out = Vec::new();
+    for v in videos {
+        if v["videoID"].as_str() != Some(video_id) {
+            continue;
+        }
+        let Some(segs) = v["segments"].as_array() else {
+            continue;
+        };
+        for s in segs {
+            // intro, outro, music_offtopic and the rest are left alone.
+            let category = s["category"].as_str().unwrap_or("");
+            if !CATEGORIES.contains(&category) {
+                continue;
             }
-            let cats = item["category"].as_array()?;
-            let cat = cats.iter().find(|c| CATEGORIES.contains(&c.as_str().unwrap_or("")))?;
-            let seg = item["segment"].as_array()?;
-            let start = seg.get(0)?.as_f64()?;
-            let end = seg.get(1)?.as_f64()?;
-            Some(Segment {
+            let Some(times) = s["segment"].as_array() else {
+                continue;
+            };
+            let (Some(start), Some(end)) = (times.first().and_then(|t| t.as_f64()), times.get(1).and_then(|t| t.as_f64())) else {
+                continue;
+            };
+            out.push(Segment {
                 start,
                 end,
-                category: cat.as_str().unwrap_or("").to_string(),
-            })
-        })
-        .collect()
+                category: category.to_string(),
+            });
+        }
+    }
+    out
 }
 
 /// Fetch segment data for a video. Empty on any failure.
 pub fn fetch_segments(video_id: &str) -> Vec<Segment> {
-    let url = format!("{}{}", API_BASE, prefix(video_id));
+    let url = format!("{}{}?categories={}", API_BASE, prefix(video_id), CATEGORIES_QUERY);
     let config = ureq::config::Config::builder()
         .timeout_global(Some(Duration::from_secs(10)))
         .build();
@@ -184,40 +198,54 @@ mod tests {
 
     #[test]
     fn prefix_is_four_hex_chars_of_sha256() {
-        // sha256("dQw4w9WgXcQ") = 7b...; first 4 hex chars are "7b4b".
-        let p = prefix("dQw4w9WgXcQ");
-        assert_eq!(p.len(), 4);
-        assert!(p.chars().all(|c| c.is_ascii_hexdigit()));
-        // Deterministic.
-        assert_eq!(prefix("abc"), prefix("abc"));
+        // A known answer: sha256("dQw4w9WgXcQ") starts 5f6b. The server sees
+        // these four characters and never the video ID itself.
+        assert_eq!(prefix("dQw4w9WgXcQ"), "5f6b");
+        assert_eq!(prefix("dQw4w9WgXcQ").len(), 4);
+        assert!(prefix("dQw4w9WgXcQ").chars().all(|c| c.is_ascii_hexdigit()));
         // Different IDs -> different prefixes (overwhelmingly likely).
         assert_ne!(prefix("dQw4w9WgXcQ"), prefix("abcdefghijk"));
     }
 
+    /// The real shape of a hashed-prefix reply, captured from the API and cut
+    /// down: one object per video that shares the prefix, each with its own
+    /// segments, each segment with one category name.
+    const REPLY: &str = r#"[
+      {"videoID":"aQp-iM0bCs4","segments":[
+        {"category":"sponsor","actionType":"skip","segment":[0,31.861],"UUID":"b7","votes":0},
+        {"category":"intro","actionType":"skip","segment":[31.861,40.0],"UUID":"c1","votes":3},
+        {"category":"selfpromo","actionType":"skip","segment":[45.5,60.25],"UUID":"d2","votes":2},
+        {"category":"interaction","actionType":"skip","segment":[70.0,74.5],"UUID":"e3","votes":1},
+        {"category":"music_offtopic","actionType":"skip","segment":[80.0,90.0],"UUID":"f4","votes":0}
+      ]},
+      {"videoID":"thODYqd9G9U","segments":[
+        {"category":"sponsor","actionType":"skip","segment":[0.332106,22.484015],"UUID":"a1","votes":1}
+      ]}
+    ]"#;
+
     #[test]
     fn segments_filter_by_category_and_video() {
-        let raw = r#"[
-          {"segment":[10.0, 25.0], "category":["sponsor"], "videoID":"dQw4w9WgXcQ"},
-          {"segment":[30.0, 40.0], "category":["selfpromo"], "videoID":"dQw4w9WgXcQ"},
-          {"segment":[50.0, 60.0], "category":["interaction"], "videoID":"dQw4w9WgXcQ"},
-          {"segment":[70.0, 80.0], "category":["intro"], "videoID":"dQw4w9WgXcQ"},
-          {"segment":[90.0, 100.0], "category":["sponsor"], "videoID":"other_video_id"}
-        ]"#;
-        let segs = parse_segments(raw, "dQw4w9WgXcQ");
-        // Three kept (sponsor, selfpromo, interaction), intro and other-video dropped.
+        let segs = parse_segments(REPLY, "aQp-iM0bCs4");
+        // Three kept (sponsor, selfpromo, interaction), intro and
+        // music_offtopic dropped, and nothing from the other video.
         assert_eq!(segs.len(), 3);
-        assert_eq!(segs[0].start, 10.0);
-        assert_eq!(segs[0].end, 25.0);
+        assert_eq!((segs[0].start, segs[0].end), (0.0, 31.861));
         assert_eq!(segs[0].category, "sponsor");
         assert_eq!(segs[1].category, "selfpromo");
         assert_eq!(segs[2].category, "interaction");
+        // The other video in the same bucket is parsed on its own.
+        assert_eq!(parse_segments(REPLY, "thODYqd9G9U").len(), 1);
+        // A video with no segments of ours gets nothing.
+        assert!(parse_segments(REPLY, "dQw4w9WgXcQ").is_empty());
     }
 
     #[test]
     fn segments_tolerate_garbage() {
         assert!(parse_segments("not json", "x").is_empty());
         assert!(parse_segments("[]", "x").is_empty());
-        assert!(parse_segments(r#"[{"category":["sponsor"]}]"#, "x").is_empty());
+        assert!(parse_segments(r#"[{"videoID":"x"}]"#, "x").is_empty());
+        assert!(parse_segments(r#"[{"videoID":"x","segments":[{"category":"sponsor"}]}]"#, "x").is_empty());
+        assert!(parse_segments(r#"[{"videoID":"x","segments":[{"segment":[1]}]}]"#, "x").is_empty());
     }
 
     #[test]
@@ -247,5 +275,21 @@ mod tests {
         assert!(s.contains("[[10.0,25.0],[30.0,40.0]]"));
         assert!(s.contains("Skipped sponsor"));
         assert!(s.contains("timeupdate"));
+    }
+}
+
+/// Against the real API. `cargo test -- --ignored` when the network is there:
+/// it is the only way to see that the endpoint and its shape still hold.
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore = "talks to sponsor.ajay.app"]
+    fn the_api_answers_for_a_video_with_segments() {
+        let segs = fetch_segments("aQp-iM0bCs4");
+        println!("{segs:#?}");
+        assert!(!segs.is_empty(), "the prefix hash, the URL or the reply shape changed");
+        assert!(segs.iter().all(|s| CATEGORIES.contains(&s.category.as_str())));
     }
 }

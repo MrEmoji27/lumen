@@ -255,6 +255,9 @@ struct App {
     clear_pending: bool,
     /// Read aloud: the reader-view tab being spoken, if any.
     aloud: Option<Aloud>,
+    /// SponsorBlock: a fetched skip script waiting for its tab to finish
+    /// loading, so it lands in the new document and not the one going away.
+    spb: HashMap<u64, String>,
     /// The open KeePass database: memory only, dropped after ten idle minutes.
     vault: Option<kdbx::Vault>,
     /// When the vault was last used; the idle lock counts from here.
@@ -468,6 +471,7 @@ fn main() {
         handoff: None,
         clear_pending: false,
         aloud: None,
+        spb: HashMap::new(),
         vault: None,
         vault_seen: Instant::now(),
     };
@@ -1318,6 +1322,7 @@ impl App {
         if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
             self.listen_stop();
         }
+        self.spb.remove(&id);
         let t = self.tabs.remove(i);
         self.agent_logs.borrow_mut().remove(&id);
         if self.handoff.as_ref().is_some_and(|h| h.0 == id) {
@@ -2075,10 +2080,14 @@ impl App {
                         }
                     }
                     // SponsorBlock: on a YouTube watch page, fetch segments and
-                    // inject the skip script. One background fetch per video load.
+                    // inject the skip script. One background fetch per video;
+                    // whatever was pending for this tab is about the old page.
+                    // Nothing is stored and the video ID never leaves the
+                    // machine in the clear, so agent and private tabs get it too.
+                    self.spb.remove(&self.tabs[i].id);
                     if self.settings.sponsorblock && sponsorblock::is_youtube_watch(&u) {
                         if let Some(vid) = sponsorblock::video_id(&u) {
-                            if self.tabs[i].view.is_some() && !self.tabs[i].agent && !self.tabs[i].private {
+                            if self.tabs[i].view.is_some() {
                                 let tab_id = self.tabs[i].id;
                                 let proxy = self.ctx.proxy.clone();
                                 std::thread::spawn(move || {
@@ -2109,6 +2118,13 @@ impl App {
                     if self.tabs[i].loading != on {
                         self.tabs[i].loading = on;
                         self.push();
+                        // The document is here: a skip script that was waiting
+                        // for it can go in now.
+                        if !on && let Some(script) = self.spb.remove(&id) {
+                            if let Some(v) = &self.tabs[i].view {
+                                let _ = v.evaluate_script(&script);
+                            }
+                        }
                         // Done loading: read the page a little later, once scripts have filled it in.
                         let t = &self.tabs[i];
                         if !on && self.settings.remember_text && !self.off_record(t) && t.reader.is_none() && t.url.starts_with("http") {
@@ -2543,9 +2559,18 @@ impl App {
             }
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
             Ev::SponsorBlock(id, script) => {
-                if let Some(i) = self.idx(id) {
-                    if let Some(v) = &self.tabs[i].view {
-                        let _ = v.evaluate_script(&script);
+                // A page still loading is about to become another document:
+                // hold the script until it is there, or it runs in the old one
+                // and the player never hears of it.
+                let loading = self.idx(id).is_some_and(|i| self.tabs[i].loading);
+                if loading {
+                    self.spb.insert(id, script);
+                } else {
+                    self.spb.remove(&id);
+                    if let Some(i) = self.idx(id) {
+                        if let Some(v) = &self.tabs[i].view {
+                            let _ = v.evaluate_script(&script);
+                        }
                     }
                 }
             }
