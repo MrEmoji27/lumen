@@ -145,7 +145,12 @@ impl Agent {
     /// Paste into a terminal and Claude Code can browse with Lumen. `lumen-agent` (next to
     /// lumen.exe) needs no token at all; this form is for clients that only speak HTTP.
     pub fn setup_command(&self, port: u32) -> String {
-        format!("claude mcp add --transport http lumen {} --header \"Authorization: Bearer {}\"", self.endpoint(port), self.token)
+        let bridge = std::env::current_exe().ok().map(|p| p.with_file_name("lumen-agent.exe")).filter(|p| p.is_file());
+        match bridge {
+            // No secret in the command: lumen-agent reads the token itself.
+            Some(b) => format!("claude mcp add -s user lumen -- \"{}\" mcp", b.display()),
+            None => format!("claude mcp add --transport http lumen {} --header \"Authorization: Bearer {}\"", self.endpoint(port), self.token),
+        }
     }
 }
 

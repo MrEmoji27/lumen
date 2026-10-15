@@ -387,7 +387,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
         }
         Item::AgentSetup => {
             let on = s.settings.agent;
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Connect Claude Code", if on { &s.agent_endpoint } else { "Turn the agent on first." });
+            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Connect an AI agent", if on { "Claude Code, opencode, Codex, Cursor: run lumen-agent.exe mcp. Copy gives the Claude Code line." } else { "Turn the agent on first." });
             if on {
                 draw_button(i, right, r.y + 27.0, "Copy setup command", PageHit::CopyAgent);
             }

@@ -88,7 +88,6 @@ pub struct UiState {
     pub cpu_cap: bool,
     pub downloads: Vec<UiDl>,
     pub agent_busy: bool,
-    pub agent_endpoint: String,
     pub agent_cmd: String,
     /// A site waiting for a permission answer: (request id, origin, what).
     pub prompt: Option<(u64, String, &'static str)>,

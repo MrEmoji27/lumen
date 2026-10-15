@@ -897,7 +897,6 @@ impl App {
                     .iter()
                     .flat_map(|(o, r)| r.iter().map(move |(k, a)| (o.clone(), k.clone(), *a)))
                     .collect(),
-                agent_endpoint: self.agent.endpoint(self.settings.agent_port),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
             };
             self.chrome.set_state(state);
