@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+servo = { version = "0.7", optional = true }
+euclid = { version = "0.22", optional = true }
+url = { version = "2.5", optional = true }
+dpi = { version = "0.1", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+# ANGLE (GL on Direct3D 11): native WGL needs NV_DX_interop, which hybrid laptops lack.
+surfman = { version = "0.14", optional = true, features = ["sm-angle-builtin", "sm-angle-default"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "aws-lc-rs"] }
 adblock = "0.13"
 base64 = "0.23"
 dirs = "7.0.0"
@@ -43,6 +51,14 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 wry = { version = "0.57", features = ["devtools"] }
+
+[features]
+# The Servo engine is heavy to build; only examples that ask for it compile it.
+servo = ["dep:servo", "dep:euclid", "dep:url", "dep:dpi", "dep:rustls", "dep:raw-window-handle", "dep:surfman"]
+
+[[example]]
+name = "servo_tab"
+required-features = ["servo"]
 
 [profile.release]
 opt-level = 3
