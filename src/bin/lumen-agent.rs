@@ -62,6 +62,14 @@ impl Door {
     }
 }
 
+/// The profile's "agent" setting. Missing settings mean a fresh profile: off.
+fn agent_switch_on() -> bool {
+    std::fs::read_to_string(data_dir().join("settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .is_some_and(|v| v["agent"] == true)
+}
+
 /// Make sure a Lumen is listening. Start a headless one next to this program if none is.
 fn reach() -> Result<Door, String> {
     let door = Door::find()?;
@@ -72,6 +80,14 @@ fn reach() -> Result<Door, String> {
         Ok((401, ..)) => return Err("Lumen refused the token (agent_token changed?); restart Lumen".into()),
         Ok((code, ..)) => return Err(format!("Lumen answered {code}")),
         Err(_) => {}
+    }
+    // A Lumen started with the switch off would never answer. Say so instead of
+    // starting one that waits there for nothing.
+    if !agent_switch_on() {
+        return Err(format!(
+            "Lumen is not running, and its AI agent switch is off in {} (Settings > AI agent, or \"agent\": true in settings.json)",
+            data_dir().display()
+        ));
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("lumen.exe");
     if !exe.is_file() {
