@@ -2,6 +2,7 @@
 name = "lumen"
 version = "0.1.0"
 edition = "2024"
+default-run = "lumen"
 
 [dependencies]
 servo = { version = "0.7", optional = true }
@@ -45,6 +46,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    "Win32_System_Console",
     "Win32_System_Time",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",

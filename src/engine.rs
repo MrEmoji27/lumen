@@ -64,6 +64,8 @@ pub enum Ev {
     PageText(u64, String, String),
     /// Text search answers for the address bar: (query, hits).
     TextHits(String, Vec<crate::recall::Hit>),
+    /// Another `lumen.exe` was started: come to the front (and stop being headless).
+    ShowMe,
     /// This tab only existed to start a download, now handed off.
     Orphan(u64),
     /// A video grab moved: (download id, what happened).
@@ -207,7 +209,9 @@ pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
     if crate::headless() {
         // Off-screen is "occluded" to Chromium, which would then stop painting and slow timers.
         // One --disable-features only: Chromium keeps the last one it sees.
-        a.push_str(",CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --mute-audio");
+        // Sound is muted per page instead (see build_tab_in), so it can come back if the
+        // headless Lumen is turned into a normal one.
+        a.push_str(",CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows");
     }
     if gpu_in_process {
         // Measured: about 100 MB less commit, 55 MB less working set, one process fewer.
@@ -306,6 +310,9 @@ fn build_tab_in(
     // Password saving is per profile. The agent's profile never saves passwords.
     set_passwords(&wv, ctx.passwords.get() && !isolated);
     hook_keys(&wv, ctx.proxy.clone());
+    if crate::headless() {
+        set_muted(&wv, true);
+    }
     // A new view has no scripts yet; forget any id an older view of this tab had.
     ctx.dark_ids.borrow_mut().remove(&id);
     if !isolated {

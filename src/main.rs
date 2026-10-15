@@ -204,8 +204,35 @@ struct App {
 /// button and makes no sound. For tests and for agents working while someone uses the PC.
 /// `--headless` or LUMEN_HEADLESS=1.
 pub fn headless() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("LUMEN_HEADLESS").is_some_and(|v| v != "0") || std::env::args().any(|a| a == "--headless"))
+    HEADLESS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One Lumen per profile. The first one owns a named event; a later start sets it and
+/// leaves, and the first one comes to the front. Returns the event if we are the first.
+fn claim_instance() -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::{
+        Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
+        System::Threading::{CreateEventW, SetEvent},
+        UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow},
+    };
+    let dir = store::data_dir().to_string_lossy().to_lowercase();
+    // FNV-1a: a short, stable name for this profile folder.
+    let h = dir.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    let name = windows::core::HSTRING::from(format!("Local\\Lumen-{h:016x}"));
+    unsafe {
+        let ev = CreateEventW(None, false, false, &name).ok()?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            // A headless start (an agent asking) has nothing to show; a normal one does.
+            if !headless() {
+                let _ = AllowSetForegroundWindow(ASFW_ANY);
+                let _ = SetEvent(ev);
+            }
+            return None;
+        }
+        Some(ev)
+    }
 }
 
 /// Show the main window: normally, or, headless, out of sight and without stealing focus.
@@ -225,6 +252,11 @@ fn show_window(w: &tao::window::Window) {
 }
 
 fn main() {
+    HEADLESS.store(
+        std::env::var_os("LUMEN_HEADLESS").is_some_and(|v| v != "0") || std::env::args().any(|a| a == "--headless"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let Some(instance) = claim_instance() else { return };
     // Before WebView2 starts: its processes must be born inside the job.
     let job = monitor::Job::adopt_self();
     let settings = store::load_settings();
@@ -275,6 +307,21 @@ fn main() {
         rewrite: RefCell::new(None),
         dark_ids: Rc::new(RefCell::new(HashMap::new())),
     });
+
+    {
+        // A second lumen.exe sets the event: come forward.
+        let (ev, proxy) = (instance.0 as isize, ctx.proxy.clone());
+        std::thread::Builder::new()
+            .name("lumen-instance".into())
+            .spawn(move || loop {
+                let h = windows::Win32::Foundation::HANDLE(ev as _);
+                let r = unsafe { windows::Win32::System::Threading::WaitForSingleObject(h, windows::Win32::System::Threading::INFINITE) };
+                if r != windows::Win32::Foundation::WAIT_OBJECT_0 || proxy.send_event(Ev::ShowMe).is_err() {
+                    break;
+                }
+            })
+            .ok();
+    }
 
     let blocker = blocker::Blocker::start(store::data_dir());
     blocker.set_enabled(settings.adblock);
@@ -1017,6 +1064,33 @@ impl App {
         t.audio = false;
     }
 
+    /// Someone started lumen.exe while this one runs. Headless becomes a normal window:
+    /// centred, in the taskbar, with sound. A normal one just comes to the front.
+    fn show_me(&mut self) {
+        let w = self.ctx.window.clone();
+        if headless() {
+            HEADLESS.store(false, std::sync::atomic::Ordering::Relaxed);
+            use tao::platform::windows::WindowExtWindows as _;
+            let _ = w.set_skip_taskbar(false);
+            if let Some(m) = w.current_monitor().or_else(|| w.primary_monitor()) {
+                let (ms, mp, ws) = (m.size(), m.position(), w.outer_size());
+                let x = mp.x + (ms.width as i32 - ws.width as i32).max(0) / 2;
+                let y = mp.y + (ms.height as i32 - ws.height as i32).max(0) / 2;
+                w.set_outer_position(tao::dpi::PhysicalPosition::new(x, y));
+            }
+            for t in &self.tabs {
+                if let Some(v) = &t.view {
+                    engine::set_muted(v, t.muted);
+                }
+            }
+        }
+        w.set_visible(true);
+        w.set_minimized(false);
+        w.set_focus();
+        self.layout();
+        self.focus_page();
+    }
+
     // ---------------------------------------------------------- downloads
 
     /// A download id in band `band` (1 aria2, 2 video, 3 remembered). Ids never repeat.
@@ -1739,6 +1813,7 @@ impl App {
             }
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
             Ev::Video(id, up) => self.on_video(id, up),
+            Ev::ShowMe => self.show_me(),
             Ev::Orphan(id) => {
                 // Like Chrome: a tab a page opened just for a download goes away.
                 // A tab the user typed it into goes back to the new tab page.
