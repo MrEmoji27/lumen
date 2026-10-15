@@ -15,6 +15,16 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+/// Where downloads land. LUMEN_DOWNLOADS points tests at a throwaway folder,
+/// so a live test never touches the real Downloads.
+pub fn download_dir() -> PathBuf {
+    let dir = std::env::var_os("LUMEN_DOWNLOADS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::download_dir().unwrap_or_else(data_dir));
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Shortcut {
     pub title: String,
@@ -69,6 +79,13 @@ pub struct Settings {
     pub save_passwords: bool,
     /// Hand http(s) downloads to aria2: many connections per file, resume, queue.
     pub accelerate_downloads: bool,
+    /// Cap aria2's total download speed, in KB/s. 0 = no limit.
+    pub download_limit_kbps: u32,
+    /// Share torrents back after they finish (until ratio 1.0 or one hour).
+    /// Applies on the next start.
+    pub keep_seeding: bool,
+    /// Show the "Windows may ask to let aria2 through the firewall" note once.
+    pub torrent_note: bool,
     /// Keep the text of opened pages so history can be searched by it.
     pub remember_text: bool,
     /// Clear history (Lumen's, page text and WebView2's own) when Lumen closes.
@@ -123,6 +140,9 @@ impl Default for Settings {
             share_processes: true,
             save_passwords: true,
             accelerate_downloads: true,
+            download_limit_kbps: 0,
+            keep_seeding: true,
+            torrent_note: true,
             cosmetic: true,
             dark_pages: false,
             remember_text: true,
@@ -176,6 +196,7 @@ impl Settings {
         self.agent_port = self.agent_port.clamp(1024, 65535);
         self.cpu_limit_pct = self.cpu_limit_pct.clamp(5, 100);
         self.net_limit_kbps = self.net_limit_kbps.clamp(32, 1_000_000);
+        self.download_limit_kbps = self.download_limit_kbps.min(1_000_000);
         if !self.search.contains("%s") {
             self.search = Settings::default().search;
         }

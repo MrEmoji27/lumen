@@ -38,6 +38,21 @@ use wry::{
     WebViewBuilderExtWindows, WebViewExtWindows,
 };
 
+/// What aria2 said after an add, and how the add was started.
+#[derive(Debug)]
+pub struct Added {
+    pub gid: String,
+    pub url: String,
+    pub headers: Vec<String>,
+    pub name: Option<String>,
+    pub private: bool,
+    /// The person started it (address bar, Add link, Open torrent…, Retry):
+    /// it runs at once. A page started it: it waits for Resume.
+    pub person: bool,
+    /// Why a page-started torrent is waiting; the paused row shows it.
+    pub hold: Option<String>,
+}
+
 /// Messages from engine callbacks to the main loop.
 /// Callbacks never touch app state. They post here. No re-entrancy bugs.
 #[derive(Debug)]
@@ -58,6 +73,8 @@ pub enum Ev {
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
+    /// A magnet link was cancelled out of a page; hand it to aria2.
+    Magnet(u64, String),
     /// Time to read this tab's text for history search: (tab, url it was loading).
     Capture(u64, String),
     /// The text came back: (tab, url, JSON or "null").
@@ -74,8 +91,8 @@ pub enum Ev {
     Reader(u64, String, String),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
-    /// aria2 took a download: (gid, url, headers sent, file name asked for, private).
-    AriaAdded(String, String, Vec<String>, Option<String>, bool),
+    /// aria2 took a download; `Added` says how it was started.
+    AriaAdded(Box<Added>),
     AriaFailed(u64, String),
     AriaJobs(Vec<crate::aria::Job>),
     /// A request from the agent thread, answered through its channel.
@@ -96,7 +113,7 @@ pub struct Dl {
     pub path: String,
     pub received: i64,
     pub total: i64,
-    /// "progress" | "done" | "failed" | "paused"
+    /// "progress" | "done" | "failed" | "paused" | "seeding"
     pub state: &'static str,
     /// Bytes per second, when known (aria2).
     pub speed: u64,
@@ -104,6 +121,20 @@ pub struct Dl {
     pub note: String,
     /// Started by a private tab: works, but leaves no row in downloads.json.
     pub private: bool,
+    /// Display name: torrent name when known, else the file name.
+    pub name: String,
+    /// "file" | "torrent" | "video"
+    pub kind: &'static str,
+    /// Upload speed, bytes per second (aria2 torrents).
+    pub up: u64,
+    /// Connected peers (aria2 torrents) or connections (plain files).
+    pub peers: u64,
+    /// Seeder count (aria2 torrents).
+    pub seeds: u64,
+    /// Uploaded / downloaded. 0 until both sides have bytes.
+    pub ratio: f64,
+    /// Number of files (a multi-file torrent opens its folder).
+    pub files: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -396,6 +427,12 @@ fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<R
                 let mut u = PWSTR::null();
                 args.Uri(&mut u)?;
                 let u = take(u);
+                // A magnet link is not a page: cancel and hand it to aria2.
+                if u.starts_with("magnet:") {
+                    args.SetCancel(true)?;
+                    let _ = p.send_event(Ev::Magnet(id, u));
+                    return Ok(());
+                }
                 let clean = clean_url(&u);
                 let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u)));
                 if let Some(clean) = listed.or(clean) {
@@ -641,7 +678,24 @@ fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64, private: bool) -> Dl {
             COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED => "failed",
             _ => "progress",
         };
-        Dl { id, url: take(uri), path: take(path), received: got, total, state, speed: 0, note: String::new(), private }
+        Dl {
+            id,
+            url: take(uri),
+            path: take(path),
+            received: got,
+            total,
+            state,
+            speed: 0,
+            note: String::new(),
+            private,
+            name: String::new(),
+            kind: "file",
+            up: 0,
+            peers: 0,
+            seeds: 0,
+            ratio: 0.0,
+            files: 1,
+        }
     }
 }
 
