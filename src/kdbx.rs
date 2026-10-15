@@ -99,6 +99,11 @@ fn score(entry_url: &str, page_url: &str) -> Option<u32> {
     if e.is_empty() || p.is_empty() {
         return None;
     }
+    // A password never goes into a page anyone on the wire can read or rewrite.
+    let local = p == "localhost" || p == "127.0.0.1";
+    if !page_url.trim().to_ascii_lowercase().starts_with("https://") && !local {
+        return None;
+    }
     if e == p {
         return Some(2);
     }
@@ -270,5 +275,12 @@ mod tests {
         // So is something that is not a .kdbx at all.
         assert!(Vault::open(Path::new("does-not-exist.kdbx"), "master").is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn never_offered_on_plain_http() {
+        assert!(!host_matches("https://example.com", "http://example.com/login"));
+        assert!(host_matches("https://example.com", "https://example.com/login"));
+        assert!(host_matches("http://localhost:3000", "http://localhost:3000/"));
     }
 }
