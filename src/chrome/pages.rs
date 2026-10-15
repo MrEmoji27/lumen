@@ -76,6 +76,9 @@ enum Item {
     Swatch,
     Accent,
     Seg(&'static str, &'static str, &'static str, &'static [(&'static str, &'static str)]),
+    /// Like Seg, but the choices wrap onto as many lines as they need. For lists
+    /// that are too long for one pill (the translation languages).
+    Pick(&'static str, &'static str, &'static str, &'static [(&'static str, &'static str)]),
     Toggle(&'static str, &'static str, &'static str),
     Range(&'static str, &'static str, &'static str, Scale, &'static str),
     Engine,
@@ -137,6 +140,9 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("Search", vec![
             Engine,
             Toggle("remember_text", "Search history by page text", "Lumen keeps the words of pages you open, on this PC only, so the address bar finds them by what they said. Pages with a password box are skipped."),
+        ]),
+        ("Translation", vec![
+            Pick("translate_to", "Translate pages into", "F8, or Translate page in the tab menu. The page's own language is read off the page; the model for the pair is fetched once, then it works offline.", crate::translate::TARGETS),
         ]),
         ("Performance", vec![
             Toggle("adblock", "Block ads and trackers", "Stops them before they load. Saves memory and data."),
@@ -418,6 +424,41 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             draw_seg(i, right, r.y + 27.0, k, opts, &cur);
             54.0
         }
+        Item::Pick(k, label, hint, opts) => {
+            // Label and hint on their own lines, then the choices wrap across the row:
+            // a list this long does not fit in the half a Seg gets, and one pill wide
+            // enough for it would run off the page.
+            let f = Font::ui(12.5, 450).align(Align::Center);
+            let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
+            let mut y = r.y;
+            i.gfx.text(label, R::new(r.x, y, r.w, 20.0), Font::ui(13.0, 500), th.text);
+            y += 20.0;
+            if !hint.is_empty() {
+                i.gfx.text_wrap(hint, R::new(r.x, y, r.w, 34.0), Font::ui(12.0, 400), th.faint);
+                y += 36.0;
+            }
+            y += 4.0;
+            let widths: Vec<f32> = opts.iter().map(|(_, l)| i.gfx.measure(l, f) + 22.0).collect();
+            let mut x = r.x;
+            for ((v, l), w) in opts.iter().zip(widths) {
+                if x > r.x && x + w > right {
+                    x = r.x;
+                    y += 30.0;
+                }
+                let chip = R::new(x, y, w, 26.0);
+                let h = Hit::Page(PageHit::Seg(k, v));
+                let on = *v == cur;
+                if on {
+                    i.gfx.round(chip, 8.0, th.press);
+                } else if i.is_hover(&h) {
+                    i.gfx.round(chip, 8.0, th.hover);
+                }
+                i.gfx.text(l, chip, f, if on { th.text } else { th.dim });
+                i.hit(chip, h);
+                x += w + 4.0;
+            }
+            y + 26.0 - r.y + 14.0
+        }
         Item::Toggle(k, label, hint) => {
             row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint);
             let on = get(&s.settings, k).as_bool().unwrap_or(false);
@@ -542,11 +583,18 @@ fn eta(d: &super::UiDl) -> String {
 }
 
 /// "3 active · 4.2 MB/s down · 310 KB/s up"; empty when nothing is running.
-fn summary(active: usize, down: i64, up: i64) -> String {
+/// While torrents run, appends " · port open" or " · port closed".
+fn summary(active: usize, down: i64, up: i64, upnp_port_open: bool) -> String {
     if active == 0 {
         return String::new();
     }
-    format!("{active} active · {}/s down · {}/s up", fmt_bytes(down), fmt_bytes(up))
+    let mut s = format!("{active} active · {}/s down · {}/s up", fmt_bytes(down), fmt_bytes(up));
+    if upnp_port_open {
+        s.push_str(" · port open");
+    } else {
+        s.push_str(" · port closed");
+    }
+    s
 }
 
 /// The group a row falls in; the page draws them in this order, empty ones hidden.
@@ -709,7 +757,7 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
         let active: Vec<&UiDl> = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused")).collect();
         let down: i64 = active.iter().map(|d| d.speed as i64).sum();
         let up: i64 = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused" | "seeding")).map(|d| d.up as i64).sum();
-        let t = summary(active.len(), down, up);
+        let t = summary(active.len(), down, up, s.upnp_port_open);
         if !t.is_empty() {
             i.gfx.text(&t, R::new(col.x, y, col.w - 160.0, 22.0), Font::ui(12.5, 400), th.faint);
         }
@@ -1284,9 +1332,10 @@ mod tests {
     /// The summary line, exactly as the brief spells it.
     #[test]
     fn summary_counts_and_speeds() {
-        assert_eq!(summary(3, 4_404_019, 317_440), "3 active · 4.2 MB/s down · 310 KB/s up");
+        assert_eq!(summary(3, 4_404_019, 317_440, true), "3 active · 4.2 MB/s down · 310 KB/s up · port open");
+        assert_eq!(summary(3, 4_404_019, 317_440, false), "3 active · 4.2 MB/s down · 310 KB/s up · port closed");
         // Nothing running: no line at all.
-        assert_eq!(summary(0, 0, 0), "");
+        assert_eq!(summary(0, 0, 0, true), "");
     }
 
     /// Every state lands in a group; the page draws them in a fixed order.
