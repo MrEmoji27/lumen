@@ -118,6 +118,18 @@ pub enum Ev {
     TrModel(u64, bool, String),
     /// A message from the translator page: JSON, tagged with "lumen":"tr".
     TrMsg(String),
+    /// Servo has work: spin its event loop. Also its page's reports to Lumen.
+    #[cfg(feature = "servo")]
+    ServoWake,
+    #[cfg(feature = "servo")]
+    ServoUrl(u64, String),
+    #[cfg(feature = "servo")]
+    ServoTitle(u64, String),
+    #[cfg(feature = "servo")]
+    ServoLoad(u64, bool),
+    /// A Servo page died, or its engine gave up on it.
+    #[cfg(feature = "servo")]
+    ServoGone(u64),
 }
 
 /// A download's state, copied out of WebView2 for the main loop.

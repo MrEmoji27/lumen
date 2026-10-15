@@ -97,6 +97,10 @@ pub struct Settings {
     /// "Translate page" (F8) target language, two letters: a Spanish page reads in
     /// English. The pair has to be one the model registry carries.
     pub translate_to: String,
+    /// Hosts that open in Servo instead of WebView2 ("Servo sites"). Light pages,
+    /// where Servo's smaller footprint pays. Empty means everything is WebView2.
+    /// Needs a build with the `servo` feature; without it the list does nothing.
+    pub servo_sites: Vec<String>,
     /// Interface font: "segoe" | "instrument" | "figtree" | "atkinson".
     pub ui_font: String,
     /// Display font for the clock and page titles: "instrument" | "fraunces" | "newsreader".
@@ -152,6 +156,7 @@ impl Default for Settings {
             clear_on_exit: false,
             dark_skip: Vec::new(),
             translate_to: "en".into(),
+            servo_sites: Vec::new(),
             ui_font: "segoe".into(),
             display_font: "instrument".into(),
             agent: false,
@@ -211,6 +216,10 @@ impl Settings {
         } else {
             self.translate_to.make_ascii_lowercase();
         }
+        // A host list is hosts: no spaces, no blanks, and not a thousand of them.
+        self.servo_sites.iter_mut().for_each(|h| *h = h.trim().to_string());
+        self.servo_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
+        self.servo_sites.truncate(500);
     }
 }
 

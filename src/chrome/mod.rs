@@ -64,6 +64,8 @@ pub struct UiTab {
     pub translated: bool,
     /// A translation of it is being worked on.
     pub translating: bool,
+    /// The page runs in Servo rather than WebView2.
+    pub servo: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1216,6 +1218,13 @@ impl Inner {
             self.gfx.icon("globe", b.x, b.y, 16.0, if t.translating { th.faint } else { th.accent });
             right = b.x - 4.0;
         }
+        if t.servo {
+            // A quiet mark: this page is the other engine's.
+            let b = R::new(right - 22.0, r.y + 9.0, 20.0, 14.0);
+            self.gfx.round(b, 4.0, th.press);
+            self.gfx.text("SV", b, Font::ui(9.0, 650).align(Align::Center), th.dim);
+            right = b.x - 4.0;
+        }
         let title = if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {
@@ -1473,6 +1482,10 @@ impl Inner {
                 if t.split || s.tabs.len() > 1 {
                     items.push((12, if t.split { "Unsplit".into() } else { "Split with next tab".into() }));
                 }
+                if t.servo {
+                    // The other engine did not have it: hand this host back to WebView2.
+                    items.push((14, "Reopen in WebView2".into()));
+                }
                 if t.url.starts_with("http") && (t.status == "live" || t.status == "asleep") {
                     items.push((10, "Save video".into()));
                     items.push((8, if t.reader { "Exit reader view\tF9".into() } else { "Reader view\tF9".into() }));
@@ -1510,6 +1523,7 @@ impl Inner {
                     11 => "newPrivate",
                     12 => "split",
                     13 => "translate",
+                    14 => "webview2",
                     7 => {
                         let mut st = s.settings.clone();
                         let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };

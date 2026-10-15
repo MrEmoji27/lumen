@@ -14,6 +14,8 @@ mod library;
 mod monitor;
 mod pagekit;
 mod recall;
+#[cfg(feature = "servo")]
+mod servo_engine;
 mod split;
 mod translate;
 mod video;
@@ -109,6 +111,9 @@ struct Tab {
     owner: String,
     owner_name: String,
     view: Option<WebView>,
+    /// A Servo page, for the hosts in the "Servo sites" list. The other engine.
+    #[cfg(feature = "servo")]
+    servo: Option<servo_engine::Page>,
     hidden_at: Option<Instant>,
     /// Its page window is on screen right now.
     visible: bool,
@@ -139,18 +144,32 @@ impl Tab {
             owner: String::new(),
             owner_name: String::new(),
             view: None,
+            #[cfg(feature = "servo")]
+            servo: None,
             hidden_at: None,
             visible: false,
         }
     }
 
+    /// The tab has a live page, of whichever engine. A Servo tab has no WebView2.
+    fn has_page(&self) -> bool {
+        if self.view.is_some() {
+            return true;
+        }
+        #[cfg(feature = "servo")]
+        if self.servo.is_some() {
+            return true;
+        }
+        false
+    }
+
     fn status(&self) -> &'static str {
-        match (&self.view, self.url.is_empty(), self.crashed, self.suspended) {
-            (None, true, _, _) => "new",
-            (None, false, _, _) => "off",
-            (Some(_), _, true, _) => "crashed",
-            (Some(_), _, _, true) => "asleep",
-            (Some(_), _, _, false) => "live",
+        match (self.has_page(), self.url.is_empty(), self.crashed, self.suspended) {
+            (false, true, _, _) => "new",
+            (false, false, _, _) => "off",
+            (true, _, true, _) => "crashed",
+            (true, _, _, true) => "asleep",
+            (true, _, _, false) => "live",
         }
     }
 }
@@ -245,9 +264,11 @@ struct App {
     aria_page: HashSet<String>,
     /// Why a page-started row waits: gid -> the note its paused row shows.
     aria_hold: HashMap<String, String>,
-    /// The hidden page that runs the translation engine. Only alive while a
-    /// translation is in the air; dropping it tears the worker down.
+    /// The translator page is open. Only alive while a translation is in the air.
     translator: Option<translate::Page>,
+    /// Servo, when the feature is compiled in and a Servo tab has been opened.
+    #[cfg(feature = "servo")]
+    servo: Option<servo_engine::Engine>,
     /// The tab being translated right now.
     tr_busy: Option<u64>,
     /// The pair chosen for it, and its text, waiting for the models and the engine.
@@ -477,6 +498,8 @@ fn main() {
         aria_page: HashSet::new(),
         aria_hold: HashMap::new(),
         translator: None,
+        #[cfg(feature = "servo")]
+        servo: None,
         tr_busy: None,
         tr_pair: None,
         tr_texts: None,
@@ -559,6 +582,11 @@ fn main() {
     }
 
     event_loop.run(move |event, _, cf| {
+        // Servo works off its own clock: give it a turn whenever the loop wakes.
+        #[cfg(feature = "servo")]
+        if let Some(e) = &app.servo {
+            e.spin();
+        }
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 let now = Instant::now();
@@ -884,6 +912,19 @@ fn keepable(tabs: &[Tab], active: u64) -> Vec<&Tab> {
     tabs.iter().filter(|t| !t.agent && !t.private && (!t.url.is_empty() || t.id == active)).collect()
 }
 
+/// Whether this tab runs in Servo. Always false in a build without the feature.
+fn is_servo(t: &Tab) -> bool {
+    #[cfg(feature = "servo")]
+    {
+        t.servo.is_some()
+    }
+    #[cfg(not(feature = "servo"))]
+    {
+        let _ = t;
+        false
+    }
+}
+
 /// Virtual-key code for the keys Lumen has shortcuts on.
 fn vk_of(k: KeyCode) -> Option<u32> {
     use KeyCode::*;
@@ -1056,8 +1097,18 @@ impl App {
         let active = self.active;
         for i in 0..self.tabs.len() {
             let t = &mut self.tabs[i];
-            let want = on && (t.id == active || split == Some(t.id)) && t.view.is_some();
+            let want = on && (t.id == active || split == Some(t.id)) && t.has_page();
             if want == t.visible {
+                continue;
+            }
+            #[cfg(feature = "servo")]
+            if let Some(p) = &t.servo {
+                if want {
+                    p.show();
+                } else {
+                    p.hide();
+                }
+                t.visible = want;
                 continue;
             }
             if let Some(v) = &t.view {
@@ -1120,6 +1171,11 @@ impl App {
                 continue;
             }
             let Some(i) = self.idx(id) else { continue };
+            #[cfg(feature = "servo")]
+            if let Some(p) = &self.tabs[i].servo {
+                p.set_bounds(x, y, pw, ph);
+                continue;
+            }
             let Some(v) = &self.tabs[i].view else { continue };
             let _ = v.set_bounds(logical_rect(x, y, pw, ph));
             clips.push((id, (pw * scale) as u32, (ph * scale) as u32));
@@ -1143,11 +1199,21 @@ impl App {
         if headless() {
             return;
         }
+        if self.panel != Panel::None {
+            self.chrome.focus();
+            return;
+        }
+        // A Servo page takes the keyboard in its own child window.
+        #[cfg(feature = "servo")]
+        if let Some(p) = self.active_tab().and_then(|t| t.servo.as_ref()) {
+            p.focus();
+            return;
+        }
         match self.active_tab().and_then(|t| t.view.as_ref()) {
-            Some(v) if self.panel == Panel::None => {
+            Some(v) => {
                 let _ = v.focus();
             }
-            _ => self.chrome.focus(),
+            None => self.chrome.focus(),
         }
     }
 
@@ -1186,6 +1252,7 @@ impl App {
                         split: self.split.is_some() && self.on_stage(t.id),
                         translated: t.translated.is_some(),
                         translating: t.translating,
+                        servo: is_servo(t),
                     })
                     .collect(),
                 active: self.active,
@@ -1295,6 +1362,19 @@ impl App {
     }
 
     fn ensure_view(&mut self, i: usize) {
+        #[cfg(feature = "servo")]
+        {
+            // A host from the "Servo sites" list opens in Servo, unless the tab
+            // already has a WebView2 page (a reopened one) or the person put it back.
+            let url = self.tabs[i].url.clone();
+            if self.tabs[i].servo.is_none() && self.tabs[i].view.is_none() && self.wants_servo(&url) {
+                self.open_servo(i, &url);
+                if self.tabs[i].servo.is_some() {
+                    return;
+                }
+                // Servo would not have it: carry on with WebView2.
+            }
+        }
         if self.tabs[i].view.is_some() || self.tabs[i].url.is_empty() {
             return;
         }
@@ -1539,13 +1619,18 @@ impl App {
     /// Drop the page, keep the tab. Frees the renderer process.
     fn discard(&mut self, i: usize) {
         let t = &mut self.tabs[i];
-        if t.id == self.active || t.view.is_none() {
+        if t.id == self.active || !t.has_page() {
             return;
         }
         if let Some(w) = self.watches.remove(&t.id) {
             monitor::unwatch(None, w, true);
         }
         t.view = None;
+        // A Servo page: closing the child window gives the tab's memory back.
+        #[cfg(feature = "servo")]
+        {
+            t.servo = None;
+        }
         t.reader = None;
         t.suspended = false;
         t.trimmed = false;
@@ -1922,6 +2007,22 @@ impl App {
         }
         let i = self.active_idx();
         self.leave_panel();
+        // The other engine: a host from the "Servo sites" list is a Servo page, and
+        // one that left the list goes back to WebView2.
+        #[cfg(feature = "servo")]
+        self.place_on_engine(i, &url);
+        #[cfg(feature = "servo")]
+        if self.tabs[i].servo.is_some() {
+            if let Some(p) = &self.tabs[i].servo {
+                p.load(&url);
+            }
+            self.tabs[i].url = url;
+            self.layout();
+            self.focus_page();
+            self.dirty = true;
+            self.push();
+            return;
+        }
         if let Some(v) = &self.tabs[i].view {
             let _ = v.load_url(&url);
             self.tabs[i].url = url;
@@ -2336,6 +2437,58 @@ impl App {
             Ev::TrPage(id, target, out) => self.on_tr_page(id, &target, &out),
             Ev::TrModel(id, ok, why) => self.on_tr_model(id, ok, why),
             Ev::TrMsg(msg) => self.on_tr_msg(&msg),
+            // Servo's reports: the same shape as WebView2's, from the other engine.
+            #[cfg(feature = "servo")]
+            Ev::ServoWake => {}
+            #[cfg(feature = "servo")]
+            Ev::ServoUrl(id, u) => {
+                if let Some(i) = self.idx(id) {
+                    if !self.off_record(&self.tabs[i]) {
+                        self.library.visit(&u, &self.tabs[i].title);
+                    }
+                    self.tabs[i].url = u;
+                    self.dirty = true;
+                    self.push();
+                }
+            }
+            #[cfg(feature = "servo")]
+            Ev::ServoTitle(id, title) => {
+                if let Some(i) = self.idx(id) {
+                    if !self.off_record(&self.tabs[i]) {
+                        self.library.set_title(&self.tabs[i].url, &title);
+                    }
+                    self.tabs[i].title = title;
+                    self.dirty = true;
+                    self.push();
+                }
+            }
+            #[cfg(feature = "servo")]
+            Ev::ServoLoad(id, on) => {
+                if let Some(i) = self.idx(id) {
+                    if self.tabs[i].loading != on {
+                        self.tabs[i].loading = on;
+                        self.push();
+                    }
+                    // Test hook: the page finished loading, so say whether it painted.
+                    #[cfg(debug_assertions)]
+                    if !on
+                        && let Some(p) = self.tabs[i].servo.as_ref()
+                    {
+                        p.proof_of_paint();
+                    }
+                }
+            }
+            #[cfg(feature = "servo")]
+            Ev::ServoGone(id) => {
+                // Servo gave up on the page, or it crashed: the tab stays, with its
+                // URL, and a click on it opens it again (in WebView2, if it is not a
+                // Servo host any more).
+                if let Some(i) = self.idx(id) {
+                    self.tabs[i].servo = None;
+                    self.tabs[i].crashed = true;
+                    self.push();
+                }
+            }
             Ev::FullScreen(id, on) => {
                 if id == self.active {
                     self.page_fs = on;
@@ -2772,18 +2925,37 @@ impl App {
             Action::Omnibox => {
                 self.chrome.focus_omnibox();
             }
-            Action::Reload => match &self.tabs[i].view {
-                Some(v) => {
-                    let _ = v.reload();
+            Action::Reload => {
+                #[cfg(feature = "servo")]
+                if let Some(p) = &self.tabs[i].servo {
+                    p.reload();
+                    self.dirty = true;
+                    self.push();
+                    return;
                 }
-                None => self.activate(self.active),
-            },
+                match &self.tabs[i].view {
+                    Some(v) => {
+                        let _ = v.reload();
+                    }
+                    None => self.activate(self.active),
+                }
+            }
             Action::Back => {
+                #[cfg(feature = "servo")]
+                if let Some(p) = &self.tabs[i].servo {
+                    p.back();
+                    return;
+                }
                 if let Some(v) = &self.tabs[i].view {
                     let _ = v.go_back();
                 }
             }
             Action::Forward => {
+                #[cfg(feature = "servo")]
+                if let Some(p) = &self.tabs[i].servo {
+                    p.forward();
+                    return;
+                }
                 if let Some(v) = &self.tabs[i].view {
                     let _ = v.go_forward();
                 }
@@ -2882,6 +3054,25 @@ impl App {
                 }
             }
             "split" => self.split_next(id),
+            "webview2" => {
+                // "Reopen in WebView2": the host leaves the Servo list, so it opens
+                // here from now on, and this tab is handed over right away.
+                #[cfg(feature = "servo")]
+                if let Some(i) = self.idx(id) {
+                    let host = host_of(&self.tabs[i].url);
+                    if !host.is_empty() {
+                        let mut s = self.settings.clone();
+                        s.servo_sites.retain(|h| !host.eq_ignore_ascii_case(h.trim().trim_start_matches("www.")));
+                        self.apply_settings(s);
+                    }
+                    self.tabs[i].servo = None;
+                    self.tabs[i].visible = false;
+                    self.ensure_view(i);
+                    self.layout();
+                    self.focus_page();
+                    self.push();
+                }
+            }
             "translate" => {
                 if let Some(i) = self.idx(id) {
                     self.toggle_translate(i);
@@ -3385,6 +3576,62 @@ impl App {
         self.push();
     }
 
+    // ----------------------------------------------------------------- servo
+
+    /// A host from the "Servo sites" list: this tab is meant to run in Servo. The
+    /// list is exact hosts, with or without the "www.".
+    #[cfg(feature = "servo")]
+    fn wants_servo(&self, url: &str) -> bool {
+        let host = host_of(url);
+        if host.is_empty() {
+            return false;
+        }
+        self.settings.servo_sites.iter().any(|s| {
+            let s = s.trim().trim_start_matches("www.");
+            !s.is_empty() && (host.eq_ignore_ascii_case(s) || host.eq_ignore_ascii_case(&format!("www.{s}")))
+        })
+    }
+
+    /// Open a Servo page for this tab. Servo itself is made the first time one is
+    /// asked for, so a Lumen that never opens one never pays for it.
+    #[cfg(feature = "servo")]
+    fn open_servo(&mut self, i: usize, url: &str) {
+        let id = self.tabs[i].id;
+        if self.servo.is_none() {
+            self.servo = Some(servo_engine::Engine::new(self.ctx.proxy.clone()));
+        }
+        let parent = HWND(self.ctx.window.hwnd() as _);
+        let proxy = self.ctx.proxy.clone();
+        let page = self.servo.as_ref().and_then(|e| e.page(parent, id, url, proxy));
+        match page {
+            Some(page) => {
+                let (x, y, w, h) = self.stage();
+                page.set_bounds(x, y, w, h);
+                self.tabs[i].servo = Some(page);
+            }
+            None => eprintln!("lumen: servo would not open {url}"),
+        }
+    }
+
+    /// Put this tab on the engine its host asks for, dropping the other one's page.
+    /// Nothing happens when it is already on the right one.
+    #[cfg(feature = "servo")]
+    fn place_on_engine(&mut self, i: usize, url: &str) {
+        let wants = self.wants_servo(url);
+        if wants == self.tabs[i].servo.is_some() {
+            return;
+        }
+        if wants {
+            // Servo's turn: the WebView2 page goes.
+            self.tabs[i].view = None;
+            self.tabs[i].visible = false;
+            self.tabs[i].trimmed = false;
+            self.tabs[i].suspended = false;
+        } else {
+            self.tabs[i].servo = None;
+        }
+    }
+
     // ---------------------------------------------------------------- tick
 
     /// The tick runs when something waits for it, at most once per TICK. The
@@ -3443,7 +3690,7 @@ impl App {
         let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
         self.tabs
             .iter()
-            .filter(|t| t.view.is_some() && !t.audio && !t.crashed && !self.on_stage(t.id))
+            .filter(|t| t.has_page() && !t.audio && !t.crashed && !self.on_stage(t.id))
             .filter_map(|t| {
                 let at = t.hidden_at?;
                 let step = if !t.trimmed {
@@ -3481,7 +3728,7 @@ impl App {
                 continue;
             }
             let t = &mut self.tabs[i];
-            if t.view.is_none() || t.audio {
+            if !t.has_page() || t.audio {
                 continue;
             }
             let Some(at) = t.hidden_at else { continue };
@@ -3805,7 +4052,7 @@ impl App {
             .tabs
             .iter()
             .enumerate()
-            .filter(|(_, t)| !self.on_stage(t.id) && t.view.is_some() && !t.pinned && !t.audio)
+            .filter(|(_, t)| !self.on_stage(t.id) && t.has_page() && !t.pinned && !t.audio)
             .min_by_key(|(_, t)| t.hidden_at.unwrap_or(now))
             .map(|(i, _)| i);
         if let Some(i) = victim {
