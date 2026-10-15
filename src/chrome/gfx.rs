@@ -593,6 +593,13 @@ impl Gfx {
                 l(p(8.0, 10.0), p(8.0, 14.0));
                 self.polyline(&[p(5.0, 10.0), p(11.0, 10.0), p(10.0, 7.0), p(10.0, 3.0), p(6.0, 3.0), p(6.0, 7.0)], c, w, true);
             }
+            "split" => {
+                // Two pages side by side, one focus: the split view's mark.
+                let (a, b) = (p(2.4, 3.4), p(7.6, 12.6));
+                self.round_stroke(R::new(a.0, a.1, b.0 - a.0, b.1 - a.1), 1.4 * k, c, w * 0.85);
+                let (a, b) = (p(9.0, 3.4), p(13.6, 12.6));
+                self.round_stroke(R::new(a.0, a.1, b.0 - a.0, b.1 - a.1), 1.4 * k, c, w * 0.85);
+            }
             _ => {}
         }
     }

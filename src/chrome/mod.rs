@@ -58,6 +58,12 @@ pub struct UiTab {
     pub reader: bool,
     /// InPrivate tab. Marked in the sidebar, never saved anywhere.
     pub private: bool,
+    /// This tab is one half of a split: the stage shows it beside another.
+    pub split: bool,
+    /// The page is showing in the target language.
+    pub translated: bool,
+    /// A translation of it is being worked on.
+    pub translating: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1198,6 +1204,18 @@ impl Inner {
             self.gfx.text("Private", b, Font::ui(9.0, 650).align(Align::Center), mark);
             right = b.x - 4.0;
         }
+        if t.split {
+            // Both halves wear it, so the pair reads as one thing in the list.
+            let b = R::new(right - 18.0, r.y + 8.0, 16.0, 16.0);
+            self.gfx.icon("split", b.x, b.y, 16.0, if active { th.dim } else { th.faint });
+            right = b.x - 4.0;
+        }
+        if t.translated || t.translating {
+            // In another language, or on its way there: a globe, quiet until it is on.
+            let b = R::new(right - 18.0, r.y + 8.0, 16.0, 16.0);
+            self.gfx.icon("globe", b.x, b.y, 16.0, if t.translating { th.faint } else { th.accent });
+            right = b.x - 4.0;
+        }
         let title = if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {
@@ -1451,9 +1469,15 @@ impl Inner {
                     items.push((2, "Duplicate".into()));
                     items.push((7, "Add to new tab page".into()));
                 }
+                // Two pages in one stage. Needs a second tab to share it with.
+                if t.split || s.tabs.len() > 1 {
+                    items.push((12, if t.split { "Unsplit".into() } else { "Split with next tab".into() }));
+                }
                 if t.url.starts_with("http") && (t.status == "live" || t.status == "asleep") {
                     items.push((10, "Save video".into()));
                     items.push((8, if t.reader { "Exit reader view\tF9".into() } else { "Reader view\tF9".into() }));
+                    // Offline: the model for the pair is fetched once, then it is local.
+                    items.push((13, if t.translated { "Show the original text\tF8".into() } else { "Translate page\tF8".into() }));
                     let h = host(&t.url);
                     let skipped = s.settings.dark_skip.iter().any(|x| *x == h);
                     if s.dark && s.settings.dark_pages && !skipped {
@@ -1484,6 +1508,8 @@ impl Inner {
                     10 => "video",
                     9 => "darksite",
                     11 => "newPrivate",
+                    12 => "split",
+                    13 => "translate",
                     7 => {
                         let mut st = s.settings.clone();
                         let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };

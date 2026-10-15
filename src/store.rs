@@ -94,6 +94,9 @@ pub struct Settings {
     pub dark_pages: bool,
     /// Hosts Dark Reader leaves alone.
     pub dark_skip: Vec<String>,
+    /// "Translate page" (F8) target language, two letters: a Spanish page reads in
+    /// English. The pair has to be one the model registry carries.
+    pub translate_to: String,
     /// Interface font: "segoe" | "instrument" | "figtree" | "atkinson".
     pub ui_font: String,
     /// Display font for the clock and page titles: "instrument" | "fraunces" | "newsreader".
@@ -148,6 +151,7 @@ impl Default for Settings {
             remember_text: true,
             clear_on_exit: false,
             dark_skip: Vec::new(),
+            translate_to: "en".into(),
             ui_font: "segoe".into(),
             display_font: "instrument".into(),
             agent: false,
@@ -199,6 +203,13 @@ impl Settings {
         self.download_limit_kbps = self.download_limit_kbps.min(1_000_000);
         if !self.search.contains("%s") {
             self.search = Settings::default().search;
+        }
+        // The translation target is a two-letter language code, or English.
+        let two = self.translate_to.len() == 2 && self.translate_to.chars().all(|c| c.is_ascii_alphabetic());
+        if !two {
+            self.translate_to = Settings::default().translate_to;
+        } else {
+            self.translate_to.make_ascii_lowercase();
         }
     }
 }

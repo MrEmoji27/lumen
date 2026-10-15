@@ -14,6 +14,8 @@ mod library;
 mod monitor;
 mod pagekit;
 mod recall;
+mod split;
+mod translate;
 mod video;
 mod store;
 
@@ -94,6 +96,10 @@ struct Tab {
     crashed: bool,
     /// Showing reader view of this URL.
     reader: Option<String>,
+    /// Showing the page in the target language. What it said before is in the page.
+    translated: Option<String>,
+    /// A translation is being worked on: the models, the engine or the words.
+    translating: bool,
     /// Opened by a page (window.open, target=_blank).
     popup: bool,
     /// InPrivate. Nothing here is written anywhere: no history, no page text,
@@ -104,6 +110,8 @@ struct Tab {
     owner_name: String,
     view: Option<WebView>,
     hidden_at: Option<Instant>,
+    /// Its page window is on screen right now.
+    visible: bool,
 }
 
 impl Tab {
@@ -124,12 +132,15 @@ impl Tab {
             agent: false,
             crashed: false,
             reader: None,
+            translated: None,
+            translating: false,
             popup: false,
             private: false,
             owner: String::new(),
             owner_name: String::new(),
             view: None,
             hidden_at: None,
+            visible: false,
         }
     }
 
@@ -163,8 +174,18 @@ struct App {
     fav_queue: Vec<u64>,
     /// Sidebar color reported by the UI. Paints the gaps around the page.
     bg: (u8, u8, u8),
-    /// Last page size that got rounded corners. Skip the work when nothing moved.
-    rounded: Option<(u64, u32, u32)>,
+    /// Two pages side by side: the tab in the other half of the stage.
+    split: Option<u64>,
+    /// The active tab sits in the right half of the split.
+    pane_right: bool,
+    /// Where the divider sits, as a fraction of the stage width.
+    split_at: f64,
+    /// The strip between the two panes.
+    divider: split::Divider,
+    /// Colors the divider was last given. Only re-sent when they change.
+    div_colors: ((u8, u8, u8), (u8, u8, u8)),
+    /// Last page sizes that got rounded corners. Skip the work when nothing moved.
+    rounded: HashMap<u64, (u32, u32)>,
     was_max: bool,
     shown: bool,
     dirty: bool,
@@ -224,6 +245,14 @@ struct App {
     aria_page: HashSet<String>,
     /// Why a page-started row waits: gid -> the note its paused row shows.
     aria_hold: HashMap<String, String>,
+    /// The hidden page that runs the translation engine. Only alive while a
+    /// translation is in the air; dropping it tears the worker down.
+    translator: Option<translate::Page>,
+    /// The tab being translated right now.
+    tr_busy: Option<u64>,
+    /// The pair chosen for it, and its text, waiting for the models and the engine.
+    tr_pair: Option<&'static translate::P>,
+    tr_texts: Option<String>,
     /// Next download id for aria2, video and remembered rows. Never reused.
     dl_seq: u64,
     /// Finished downloads changed; write downloads.json on the next tick.
@@ -237,6 +266,8 @@ struct App {
     test_pending: bool,
     /// Debug test hook: (gid, when to cancel it). LUMEN_TEST_CANCEL seconds, default 60.
     test_dl: Option<(String, Instant)>,
+    /// Debug test hook: LUMEN_TEST_TRANSLATE translates the first page that loads.
+    test_translate: bool,
     /// Video grabs: download id -> (page url, user agent, running yt-dlp).
     videos: HashMap<u64, (String, String, video::Slot)>,
     /// "Clear history on exit" owed a WebView2 clear it could not make in time.
@@ -386,6 +417,8 @@ fn main() {
 
     // The browser chrome: a native child window. No webview until a page needs one.
     let chrome = chrome::Chrome::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
+    // The split divider: a strip of its own between the two panes.
+    let divider = split::Divider::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
 
     let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     // Read before the struct literal moves `settings` into the app.
@@ -407,7 +440,12 @@ fn main() {
         ui_dirty: false,
         fav_queue: Vec::new(),
         bg,
-        rounded: None,
+        split: None,
+        pane_right: false,
+        split_at: 0.5,
+        divider,
+        div_colors: ((0, 0, 0), (0, 0, 0)),
+        rounded: HashMap::new(),
         was_max: session.maximized,
         shown: false,
         dirty: false,
@@ -438,6 +476,10 @@ fn main() {
         aria_person: HashSet::new(),
         aria_page: HashSet::new(),
         aria_hold: HashMap::new(),
+        translator: None,
+        tr_busy: None,
+        tr_pair: None,
+        tr_texts: None,
         videos: HashMap::new(),
         aria_meta: HashMap::new(),
         dl_seq: 0,
@@ -446,6 +488,7 @@ fn main() {
         test_magnet: false,
         test_pending: false,
         test_dl: None,
+        test_translate: false,
         recall: recall::Recall::start(&store::data_dir()),
         agent_logs: Default::default(),
         handoff: None,
@@ -494,6 +537,21 @@ fn main() {
             app.ensure_view(i);
         }
     }
+    // Test hook: LUMEN_TEST_SPLIT=1 opens two pages and splits the stage with them,
+    // so a headless run can prove the panes were laid out and the divider placed.
+    // LUMEN_TEST_TRANSLATE=1 translates the first page that finishes loading, and
+    // prints what the page said afterwards.
+    if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_SPLIT").is_some() {
+        app.new_tab(Some("https://example.com/".into()), None);
+        app.new_tab(Some("https://example.org/".into()), None);
+        app.on_key(Action::Split);
+        let (act, other, div) = app.panes();
+        eprintln!("lumen: split test: active {act:?} other {other:?} divider {div:?}");
+    }
+    if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_TRANSLATE").is_some() {
+        app.test_translate = true;
+        app.new_tab(Some("https://es.wikipedia.org/wiki/Wikipedia:Portada".into()), None);
+    }
     // Test hook: LUMEN_TEST_MAGNET=1 adds one public-domain torrent magnet on the
     // first aria2 tick, then cancels it after LUMEN_TEST_CANCEL seconds (default 60).
     if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_MAGNET").is_some() {
@@ -531,7 +589,7 @@ fn main() {
                     }
                 }
                 WindowEvent::ScaleFactorChanged { .. } => {
-                    app.rounded = None;
+                    app.rounded.clear();
                     app.layout();
                 }
                 // Alt+Tab lands focus on the bare window. Hand it on, or keys go nowhere.
@@ -859,7 +917,11 @@ fn vk_of(k: KeyCode) -> Option<u32> {
         F6 => Some(0x75),
         F11 => Some(0x7A),
         F12 => Some(0x7B),
+        // F8: translate the page, or put the original text back.
+        F8 => Some(0x77),
         Comma => Some(0xBC),
+        // Ctrl+\ puts two pages side by side.
+        Backslash => Some(0xDC),
         _ => None,
     }
 }
@@ -967,6 +1029,59 @@ impl App {
         (x, g, (w - side - g).max(1.0), (h - 2.0 * g).max(1.0))
     }
 
+    /// The stage cut in two: the active tab's rectangle, the split tab's, and the
+    /// divider strip between them. With no split, both pages get the whole stage
+    /// and there is no strip.
+    fn panes(&self) -> ((f64, f64, f64, f64), (f64, f64, f64, f64), Option<(f64, f64, f64, f64)>) {
+        let stage = self.stage();
+        if self.split.is_none() {
+            return (stage, stage, None);
+        }
+        let (l, d, r) = split::panes(stage, self.split_at);
+        // The focused half is the one the person last worked in.
+        if self.pane_right { (r, l, Some(d)) } else { (l, r, Some(d)) }
+    }
+
+    /// A tab that is on screen right now: the active one, or the other half of a split.
+    /// Hidden-tab policies (freeze, discard, RAM) leave these alone.
+    fn on_stage(&self, id: u64) -> bool {
+        id == self.active || self.split == Some(id)
+    }
+
+    /// Which page windows are on screen: the two panes, and nothing else. A panel
+    /// covers the stage, so nothing is.
+    fn sync_panes(&mut self) {
+        let on = self.panel == Panel::None && !self.ui_full();
+        let split = self.split;
+        let active = self.active;
+        for i in 0..self.tabs.len() {
+            let t = &mut self.tabs[i];
+            let want = on && (t.id == active || split == Some(t.id)) && t.view.is_some();
+            if want == t.visible {
+                continue;
+            }
+            if let Some(v) = &t.view {
+                let _ = v.set_visible(want);
+                t.visible = want;
+            } else {
+                t.visible = false;
+            }
+        }
+    }
+
+    /// The strip between the panes takes the gap color and a grip a step off it.
+    fn divider_theme(&mut self) {
+        let dark = self.ctx.dark.get();
+        let (r, g, b) = self.bg;
+        let step = |v: u8| if dark { v.saturating_add(36) } else { v.saturating_sub(26) };
+        let c = ((r, g, b), (step(r), step(g), step(b)));
+        if self.div_colors == c {
+            return;
+        }
+        self.div_colors = c;
+        self.divider.set_colors(c.0, c.1);
+    }
+
     fn layout(&mut self) {
         let (w, h) = logical_size(&self.ctx);
         let fs = self.fullscreen();
@@ -982,18 +1097,42 @@ impl App {
             };
             self.chrome.set_bounds(x, 0.0, cw, h);
         }
-        let (x, y, sw, sh) = self.stage();
+        self.sync_panes();
+        let (act, other, div) = self.panes();
         let scale = self.ctx.window.scale_factor();
         let radius = if fs { 0 } else { (self.settings.radius as f64 * scale).round() as i32 };
-        let i = self.active_idx();
-        if let Some(t) = self.tabs.get(i)
-            && let Some(v) = &t.view
-        {
-            let _ = v.set_bounds(logical_rect(x, y, sw, sh));
-            // The corner clip is a region rebuild and a repaint. Only when size changed.
-            let key = (t.id, (sw * scale) as u32, (sh * scale) as u32 + radius as u32);
-            if self.rounded != Some(key) {
-                self.rounded = Some(key);
+        // The divider only shows when the pages do.
+        match div.filter(|_| !self.ui_full()) {
+            Some((x, y, dw, dh)) => {
+                self.divider_theme();
+                self.divider.set_bounds(x, y, dw, dh);
+                self.divider.set_visible(true);
+            }
+            None => self.divider.set_visible(false),
+        }
+        let mut place: Vec<(u64, (f64, f64, f64, f64))> = vec![(self.active, act)];
+        if let Some(id) = self.split {
+            place.push((id, other));
+        }
+        let mut clips: Vec<(u64, u32, u32)> = Vec::new();
+        for (id, (x, y, pw, ph)) in place {
+            if pw < 1.0 || ph < 1.0 {
+                continue;
+            }
+            let Some(i) = self.idx(id) else { continue };
+            let Some(v) = &self.tabs[i].view else { continue };
+            let _ = v.set_bounds(logical_rect(x, y, pw, ph));
+            clips.push((id, (pw * scale) as u32, (ph * scale) as u32));
+        }
+        // The corner clip is a region rebuild and a repaint. Only when size changed.
+        for (id, cw, ch) in clips {
+            let key = (cw, ch + radius as u32);
+            if self.rounded.get(&id) == Some(&key) {
+                continue;
+            }
+            self.rounded.insert(id, key);
+            let v = self.idx(id).and_then(|i| self.tabs[i].view.as_ref());
+            if let Some(v) = v {
                 engine::round_corners(v, radius);
             }
         }
@@ -1044,6 +1183,9 @@ impl App {
                         agent: t.agent,
                         reader: t.reader.is_some(),
                         private: t.private,
+                        split: self.split.is_some() && self.on_stage(t.id),
+                        translated: t.translated.is_some(),
+                        translating: t.translating,
                     })
                     .collect(),
                 active: self.active,
@@ -1193,11 +1335,18 @@ impl App {
 
     fn activate(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
+        // The other half of a split: the pages stay where they are, the focus (and
+        // the sidebar highlight) moves to this one.
+        if self.split == Some(id) {
+            self.split = Some(self.active);
+            self.pane_right = !self.pane_right;
+        }
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
         self.leave_panel();
         self.ensure_view(i);
         // Show the new page first, then hide the old. No flash of empty stage between.
+        self.wake(i);
         self.layout();
         // A dead page comes back on click: load it again. (A dead browser
         // process left no view; ensure_view already built a fresh one.)
@@ -1207,26 +1356,92 @@ impl App {
                 let _ = v.load_url(&self.tabs[i].url);
             }
         }
-        let t = &mut self.tabs[i];
-        t.hidden_at = None;
-        t.suspended = false;
-        if let Some(v) = &t.view {
-            if t.trimmed {
-                let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
-                t.trimmed = false;
-            }
-            let _ = v.set_visible(true);
-        }
         if let Some(p) = prev {
             let p = &mut self.tabs[p];
-            if let Some(v) = &p.view {
-                let _ = v.set_visible(false);
+            // It stops being the page being read unless it is the split's other half.
+            if self.split != Some(p.id) {
+                p.hidden_at = Some(Instant::now());
             }
-            p.hidden_at = Some(Instant::now());
         }
         self.focus_page();
         self.dirty = true;
         self.push();
+    }
+
+    /// A page that is on screen must be neither frozen nor trimmed, however long
+    /// it has been since it was last the active tab.
+    fn wake(&mut self, i: usize) {
+        let t = &mut self.tabs[i];
+        t.hidden_at = None;
+        t.suspended = false;
+        if let Some(v) = &t.view
+            && t.trimmed
+        {
+            let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
+            t.trimmed = false;
+        }
+    }
+
+    /// Two pages in one stage, `left` focused. Replaces any split there was.
+    fn set_split(&mut self, left: u64, right: u64) {
+        if left == right || self.idx(left).is_none() || self.idx(right).is_none() {
+            return;
+        }
+        self.split = Some(right);
+        self.pane_right = false;
+        self.activate(left);
+        // The page on the other side is on screen from now on: build it if it never
+        // had one, and take it out of sleep if it had.
+        if let Some(i) = self.idx(right) {
+            self.ensure_view(i);
+            self.limit_tab(i);
+            self.wake(i);
+        }
+        self.layout();
+        self.push();
+    }
+
+    /// Back to one page: the other half goes back to being a hidden tab.
+    fn unsplit(&mut self) {
+        let Some(id) = self.split.take() else { return };
+        self.pane_right = false;
+        if let Some(i) = self.idx(id) {
+            self.tabs[i].hidden_at = Some(Instant::now());
+        }
+        self.layout();
+        self.push();
+    }
+
+    /// Ctrl+\: the active tab and the next one share the stage, or one page again.
+    /// A window with one tab has no next tab to share with.
+    fn toggle_split(&mut self) {
+        if self.split.is_some() {
+            self.unsplit();
+            return;
+        }
+        let n = self.tabs.len();
+        if n < 2 {
+            return;
+        }
+        let other = self.tabs[(self.active_idx() + 1) % n].id;
+        let left = self.active;
+        self.set_split(left, other);
+    }
+
+    /// The tab menu's "Split with next tab", on any tab: it shares the stage with
+    /// the tab after it, or the split it is already half of goes away.
+    fn split_next(&mut self, id: u64) {
+        if self.split.is_some() && (self.split == Some(id) || id == self.active) {
+            self.unsplit();
+            return;
+        }
+        let n = self.tabs.len();
+        let Some(i) = self.idx(id) else { return };
+        if n < 2 {
+            return;
+        }
+        let other = self.tabs[(i + 1) % n].id;
+        self.set_split(id, other);
     }
 
     fn new_tab(&mut self, url: Option<String>, after: Option<usize>) -> u64 {
@@ -1275,6 +1490,15 @@ impl App {
 
     fn close(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
+        // Closing either half of a split leaves one page again. When the focused half
+        // goes, the other one takes the whole stage instead of being left behind.
+        let keep = if id == self.active { self.split.take() } else { None };
+        if self.split == Some(id) {
+            self.split = None;
+        }
+        if self.split.is_none() {
+            self.pane_right = false;
+        }
         let t = self.tabs.remove(i);
         self.agent_logs.borrow_mut().remove(&id);
         if self.handoff.as_ref().is_some_and(|h| h.0 == id) {
@@ -1302,10 +1526,11 @@ impl App {
             return;
         }
         if id == self.active {
-            let next = self.tabs[i.min(self.tabs.len() - 1)].id;
+            let next = keep.filter(|k| self.idx(*k).is_some()).unwrap_or_else(|| self.tabs[i.min(self.tabs.len() - 1)].id);
             self.active = 0;
             self.activate(next);
         } else {
+            self.layout();
             self.dirty = true;
             self.push();
         }
@@ -1326,6 +1551,7 @@ impl App {
         t.trimmed = false;
         t.loading = false;
         t.audio = false;
+        t.visible = false;
     }
 
     /// Someone started lumen.exe while this one runs. Headless becomes a normal window:
@@ -1732,9 +1958,6 @@ impl App {
         if p == Panel::Control && was != Panel::Control {
             self.start_monitor();
         }
-        if let Some(v) = self.active_tab().and_then(|t| t.view.as_ref()) {
-            let _ = v.set_visible(p == Panel::None);
-        }
         self.layout();
         self.focus_page();
         self.push();
@@ -1858,7 +2081,7 @@ impl App {
     fn set_fullscreen(&mut self) {
         let on = self.fullscreen();
         self.ctx.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
-        self.rounded = None;
+        self.rounded.clear();
         self.layout();
         self.push();
     }
@@ -1867,11 +2090,12 @@ impl App {
 
     /// The window behind the page gaps takes the sidebar's color.
     /// The native chrome is solid; an opaque window is the cheapest thing Windows draws.
-    fn apply_backdrop(&self) {
+    fn apply_backdrop(&mut self) {
         let (r, g, b) = self.bg;
-        let w = &*self.ctx.window;
+        let w = self.ctx.window.clone();
         w.set_background_color(Some((r, g, b, 255)));
         engine::set_glass(w.hwnd(), false);
+        self.divider_theme();
     }
 
     fn retheme(&mut self) {
@@ -1901,7 +2125,7 @@ impl App {
             }
         }
         if old.radius != self.settings.radius {
-            self.rounded = None;
+            self.rounded.clear();
         }
         self.blocker.set_enabled(self.settings.adblock);
         self.blocker.set_cosmetic(self.settings.cosmetic);
@@ -1963,6 +2187,15 @@ impl App {
                     // Agents browse off the record, and so do private tabs.
                     if !self.off_record(&self.tabs[i]) {
                         self.library.visit(&u, &self.tabs[i].title);
+                    }
+                    // Another page: the original text went with the old document, and
+                    // a translation still in the air is for a page that is gone.
+                    if self.tabs[i].url != u {
+                        self.tabs[i].translated = None;
+                        self.tabs[i].translating = false;
+                        if self.tr_busy == Some(id) {
+                            self.stop_translating(id);
+                        }
                     }
                     self.tabs[i].url = u;
                     self.dirty = true;
@@ -2075,6 +2308,34 @@ impl App {
                 }
                 self.push();
             }
+            Ev::PaneFocus(id) => {
+                // A click landed in one half of the split. Anything else that takes
+                // focus (a page loading on its own) leaves the panes where they are.
+                if self.split == Some(id) {
+                    self.activate(id);
+                }
+            }
+            Ev::SplitDrag(x) => {
+                if self.split.is_none() {
+                    return;
+                }
+                let (sx, _, sw, _) = self.stage();
+                let at = split::fraction(sx, sw, x);
+                if (at - self.split_at).abs() > 0.002 {
+                    self.split_at = at;
+                    self.layout();
+                }
+            }
+            Ev::SplitDrop => {}
+            Ev::SplitReset => {
+                if self.split.is_some() {
+                    self.split_at = 0.5;
+                    self.layout();
+                }
+            }
+            Ev::TrPage(id, target, out) => self.on_tr_page(id, &target, &out),
+            Ev::TrModel(id, ok, why) => self.on_tr_model(id, ok, why),
+            Ev::TrMsg(msg) => self.on_tr_msg(&msg),
             Ev::FullScreen(id, on) => {
                 if id == self.active {
                     self.page_fs = on;
@@ -2427,6 +2688,7 @@ impl App {
                         t.title.clear();
                         t.favicon.clear();
                         t.loading = false;
+                        t.visible = false;
                         self.dirty = true;
                         self.layout();
                         self.push();
@@ -2562,6 +2824,8 @@ impl App {
             },
             Action::Reader => self.toggle_reader(i),
             Action::DarkSite => self.toggle_dark_site(i),
+            Action::Split => self.toggle_split(),
+            Action::TranslatePage => self.toggle_translate(i),
         }
     }
 
@@ -2615,6 +2879,12 @@ impl App {
             "darksite" => {
                 if let Some(i) = self.idx(id) {
                     self.toggle_dark_site(i);
+                }
+            }
+            "split" => self.split_next(id),
+            "translate" => {
+                if let Some(i) = self.idx(id) {
+                    self.toggle_translate(i);
                 }
             }
             "mute" => {
@@ -2953,6 +3223,168 @@ impl App {
         }
     }
 
+    // ---------------------------------------------------------- translation
+
+    /// F8, or "Translate page" in the tab menu: the page's text in the target
+    /// language, or the page as it was.
+    fn toggle_translate(&mut self, i: usize) {
+        // Already translated: the original text is still in the page.
+        if self.tabs[i].translated.take().is_some() {
+            if let Some(v) = &self.tabs[i].view {
+                let _ = v.evaluate_script(translate::RESTORE);
+            }
+            self.tabs[i].translating = false;
+            self.push();
+            return;
+        }
+        if self.tabs[i].translating || self.tr_busy.is_some() {
+            return;
+        }
+        let url = self.tabs[i].url.clone();
+        if !url.starts_with("http") || self.tabs[i].view.is_none() {
+            return;
+        }
+        let id = self.tabs[i].id;
+        let target = self.settings.translate_to.clone();
+        self.tabs[i].translating = true;
+        self.tr_busy = Some(id);
+        self.push();
+        // Ask the page what language it is in and what its text is.
+        let proxy = self.ctx.proxy.clone();
+        if let Some(v) = &self.tabs[i].view {
+            let _ = v.evaluate_script_with_callback(translate::COLLECT, move |out| {
+                let _ = proxy.send_event(Ev::TrPage(id, target.clone(), out));
+            });
+        }
+    }
+
+    /// The page came back with its language and its text. Find the pair that
+    /// translates it into what the person reads, and get its model.
+    fn on_tr_page(&mut self, id: u64, target: &str, out: &str) {
+        if self.tr_busy != Some(id) {
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(out) else {
+            self.stop_translating(id);
+            return;
+        };
+        let texts = v.get("texts").cloned().unwrap_or(Value::Null);
+        if !texts.as_array().is_some_and(|a| !a.is_empty()) {
+            self.stop_translating(id);
+            return;
+        }
+        let src = translate::page_lang(v.get("lang").and_then(|l| l.as_str()).unwrap_or(""));
+        let Some(p) = translate::pair(&src, target) else {
+            eprintln!("lumen: no translation model for {src} -> {target}");
+            self.stop_translating(id);
+            return;
+        };
+        self.tr_pair = Some(p);
+        self.tr_texts = Some(texts.to_string());
+        // 15-25 MB the first time a pair is asked for. The rest of the app keeps going.
+        let proxy = self.ctx.proxy.clone();
+        let note = format!("{} -> {}", p.src, p.dst);
+        std::thread::Builder::new()
+            .name("lumen-translate".into())
+            .spawn(move || {
+                let (ok, why) = match translate::fetch(p) {
+                    Ok(()) => (true, String::new()),
+                    Err(e) => (false, format!("{note}: {e}")),
+                };
+                let _ = proxy.send_event(Ev::TrModel(id, ok, why));
+            })
+            .ok();
+    }
+
+    /// The model is on disk (or is not). Open the translator page and let it load.
+    fn on_tr_model(&mut self, id: u64, ok: bool, why: String) {
+        if self.tr_busy != Some(id) {
+            return;
+        }
+        if !ok {
+            eprintln!("lumen: translation model: {why}");
+            self.stop_translating(id);
+            return;
+        }
+        let Some(p) = self.tr_pair else { return };
+        if self.idx(id).is_none() {
+            self.stop_translating(id);
+            return;
+        }
+        match translate::Page::open(&self.ctx, p) {
+            Some(page) => self.translator = Some(page),
+            None => {
+                eprintln!("lumen: the translator page would not open");
+                self.stop_translating(id);
+            }
+        }
+    }
+
+    /// Word from the translator page: it is up, it is working, or it is done.
+    fn on_tr_msg(&mut self, msg: &str) {
+        let Ok(m) = serde_json::from_str::<Value>(msg) else { return };
+        if m["lumen"] != "tr" {
+            return;
+        }
+        if m["ready"] == 1 {
+            // The page is up: hand it the text it is to work on.
+            let texts = self.tr_texts.take();
+            if let (Some(texts), Some(page)) = (texts, self.translator.as_ref()) {
+                page.run(&texts);
+            }
+            return;
+        }
+        if let Some(err) = m["err"].as_str() {
+            eprintln!("lumen: translation: {err}");
+            if let Some(id) = self.tr_busy {
+                self.stop_translating(id);
+            }
+            return;
+        }
+        if let Some(texts) = m["texts"].as_array() {
+            let texts = Value::Array(texts.clone()).to_string();
+            self.show_translation(&texts);
+        }
+    }
+
+    /// The translations came back. Put them in the page; the page keeps the
+    /// originals, so F8 goes back. The translator page goes away with them.
+    fn show_translation(&mut self, texts_json: &str) {
+        let Some(id) = self.tr_busy.take() else { return };
+        // The wasm, the worker, the model in memory and a renderer: all of it goes.
+        self.translator = None;
+        self.tr_pair = None;
+        self.tr_texts = None;
+        let Some(i) = self.idx(id) else { return };
+        self.tabs[i].translating = false;
+        self.tabs[i].translated = Some(self.settings.translate_to.clone());
+        if let Some(v) = &self.tabs[i].view {
+            let _ = v.evaluate_script(&translate::apply(texts_json));
+            // Test hook: say what the page reads now, and that going back works.
+            if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_TRANSLATE").is_some() {
+                let _ = v.evaluate_script_with_callback("document.body.innerText.slice(0,200)", |out| {
+                    eprintln!("lumen: translated page text: {out}");
+                });
+                let _ = v.evaluate_script_with_callback("(window.__lumenTrRestore(),document.body.innerText.slice(0,120))", |out| {
+                    eprintln!("lumen: page text after restore: {out}");
+                });
+            }
+        }
+        self.push();
+    }
+
+    /// Give up on a translation that cannot be finished.
+    fn stop_translating(&mut self, id: u64) {
+        self.tr_busy = None;
+        self.tr_pair = None;
+        self.tr_texts = None;
+        self.translator = None;
+        if let Some(i) = self.idx(id) {
+            self.tabs[i].translating = false;
+        }
+        self.push();
+    }
+
     // ---------------------------------------------------------------- tick
 
     /// The tick runs when something waits for it, at most once per TICK. The
@@ -3011,7 +3443,7 @@ impl App {
         let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
         self.tabs
             .iter()
-            .filter(|t| t.view.is_some() && !t.audio && !t.crashed && t.id != self.active)
+            .filter(|t| t.view.is_some() && !t.audio && !t.crashed && !self.on_stage(t.id))
             .filter_map(|t| {
                 let at = t.hidden_at?;
                 let step = if !t.trimmed {
@@ -3045,8 +3477,11 @@ impl App {
         let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
         let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
         for i in 0..self.tabs.len() {
+            if self.on_stage(self.tabs[i].id) {
+                continue;
+            }
             let t = &mut self.tabs[i];
-            if t.id == self.active || t.view.is_none() || t.audio {
+            if t.view.is_none() || t.audio {
                 continue;
             }
             let Some(at) = t.hidden_at else { continue };
@@ -3090,6 +3525,17 @@ impl App {
         }
         // Debug test hook: add one magnet once aria2 is up, cancel it on schedule.
         if cfg!(debug_assertions) {
+            // Translate the first page that has settled, once.
+            if self.test_translate && self.tr_busy.is_none() {
+                let settled = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.url.starts_with("http") && !t.loading && t.view.is_some() && t.translated.is_none());
+                if let Some(i) = settled {
+                    self.test_translate = false;
+                    self.toggle_translate(i);
+                }
+            }
             if self.test_magnet && self.aria.ready() && !self.test_pending && self.test_dl.is_none() {
                 self.test_magnet = false;
                 self.test_pending = true;
@@ -3359,7 +3805,7 @@ impl App {
             .tabs
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.id != self.active && t.view.is_some() && !t.pinned && !t.audio)
+            .filter(|(_, t)| !self.on_stage(t.id) && t.view.is_some() && !t.pinned && !t.audio)
             .min_by_key(|(_, t)| t.hidden_at.unwrap_or(now))
             .map(|(i, _)| i);
         if let Some(i) = victim {
