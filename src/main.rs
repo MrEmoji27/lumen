@@ -573,6 +573,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             app.library.flush();
             app.clear_on_exit();
             app.save_session();
+            app.upnp.release();
             *cf = ControlFlow::Exit;
         } else {
             *cf = ControlFlow::WaitUntil(app.next_wake(Instant::now()));
@@ -3058,6 +3059,7 @@ impl App {
             self.library.flush();
             self.clear_on_exit();
             self.save_session();
+            self.upnp.release();
             std::process::exit(0);
         }
         self.next_tick = now + TICK;

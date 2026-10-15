@@ -102,14 +102,19 @@ impl UpnpThread {
             logged_no_gateway = true;
         }
 
+        // `handled` is the state the loop last acted on. Waiting on the condvar
+        // with a predicate means a toggle made while we were busy is never lost.
+        let mut handled = false;
         loop {
-            // Wait for a reason to do something: active toggled, or 50 min renewal timer.
-            let mut active = lock(&self.active);
-            let wait_result = self.wake.wait_timeout(active, Duration::from_secs(50 * 60));
-            active = wait_result.unwrap().0;
-
-            let now_active = *active;
-            drop(active);
+            // Wait until the torrent state changes, or 50 minutes pass (lease renewal).
+            let guard = lock(&self.active);
+            let (guard, _) = self
+                .wake
+                .wait_timeout_while(guard, Duration::from_secs(50 * 60), |a| *a == handled)
+                .unwrap_or_else(|e| e.into_inner());
+            let now_active = *guard;
+            drop(guard);
+            handled = now_active;
 
             if now_active {
                 // Torrent is active: ensure mapping exists and is fresh.
@@ -135,12 +140,17 @@ impl UpnpThread {
                     }
                 }
             } else {
-                // No active torrent: wait 10 min, then unmap and forget gateway.
-                thread::sleep(Duration::from_secs(10 * 60));
-                // Double-check we're still inactive.
-                if *lock(&self.active) {
-                    continue; // Became active again during the wait.
+                // No active torrent: give it 10 minutes, woken at once if one starts.
+                let guard = lock(&self.active);
+                let (guard, _) = self
+                    .wake
+                    .wait_timeout_while(guard, Duration::from_secs(10 * 60), |a| !*a)
+                    .unwrap_or_else(|e| e.into_inner());
+                if *guard {
+                    handled = false; // active again: the next turn maps or renews at once
+                    continue;
                 }
+                drop(guard);
                 if mapped {
                     if let Some(gw) = &gateway {
                         let _ = remove_mapping(gw, self.port);
@@ -164,7 +174,9 @@ use igd_next::SearchOptions;
 fn discover_gateway() -> Option<Gateway> {
     // search_gateway has its own timeout logic. We run it in a thread
     // with a 5 s join timeout to enforce our deadline.
-    let handle = thread::spawn(|| search_gateway(SearchOptions::default()));
+    let mut opts = SearchOptions::default();
+    opts.timeout = Some(Duration::from_secs(5));
+    let handle = thread::spawn(move || search_gateway(opts));
     handle.join().ok().and_then(|r| r.ok())
 }
 
@@ -229,28 +241,31 @@ impl Upnp {
     }
 }
 
+impl Upnp {
+    /// Take both mappings off the router now, waiting at most two seconds.
+    /// Called on exit; safe to call twice (the second call finds no gateway).
+    pub fn release(&self) {
+        UpnpThread::set_active(&self.inner, false);
+        let gateway = lock(&self.inner.gateway).take();
+        let Some(gw) = gateway else { return };
+        if !self.inner.mapped.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let port = self.inner.port;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = thread::Builder::new().name("lumen-upnp-cleanup".into()).spawn(move || {
+            let _ = remove_mapping(&gw, port);
+            let _ = tx.send(());
+        });
+        if spawned.is_ok() && rx.recv_timeout(Duration::from_secs(2)).is_ok() {
+            eprintln!("lumen: upnp: unmapped port {port} on exit");
+        }
+    }
+}
+
 impl Drop for Upnp {
     fn drop(&mut self) {
-        // If we have a gateway and a mapping, remove it synchronously now.
-        // Bounded to ~2 seconds total so exit isn't delayed.
-        let gateway = {
-            let mut g = lock(&self.inner.gateway);
-            g.take()
-        };
-        if let Some(gw) = gateway {
-            if self.inner.mapped.load(std::sync::atomic::Ordering::Relaxed) {
-                let port = self.inner.port;
-                let _ = thread::Builder::new()
-                    .name("lumen-upnp-cleanup".into())
-                    .spawn(move || {
-                        let _ = remove_mapping(&gw, port);
-                        eprintln!("lumen: upnp: cleanup unmapped port {}", port);
-                    })
-                    .map(|h| h.join());
-            }
-        }
-        // Signal idle so the background thread knows we're done.
-        UpnpThread::set_active(&self.inner, false);
+        self.release();
     }
 }
 
