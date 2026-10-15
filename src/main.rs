@@ -16,6 +16,7 @@ mod pagekit;
 mod recall;
 mod video;
 mod store;
+mod trackers;
 
 use std::{
     cell::{Cell, RefCell},
