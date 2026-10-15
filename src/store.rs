@@ -84,6 +84,10 @@ pub struct Settings {
     /// Share torrents back after they finish (until ratio 1.0 or one hour).
     /// Applies on the next start.
     pub keep_seeding: bool,
+    /// The port aria2 listens on for torrents. Picked once in 20000..60000, then saved.
+    pub bt_port: u16,
+    /// Open that port on the router with UPnP so peers can reach us.
+    pub upnp: bool,
     /// Show the "Windows may ask to let aria2 through the firewall" note once.
     pub torrent_note: bool,
     /// Keep the text of opened pages so history can be searched by it.
@@ -142,6 +146,8 @@ impl Default for Settings {
             accelerate_downloads: true,
             download_limit_kbps: 0,
             keep_seeding: true,
+            bt_port: 0,
+            upnp: true,
             torrent_note: true,
             cosmetic: true,
             dark_pages: false,
@@ -171,6 +177,9 @@ impl Default for Settings {
 }
 
 const SETTINGS_VERSION: u32 = 2;
+/// Where the torrent port may live. High enough to dodge the usual listeners.
+pub(crate) const BT_PORT_MIN: u16 = 20000;
+pub(crate) const BT_PORT_MAX: u16 = 60000;
 
 impl Settings {
     /// Version 2 is the minimal redesign. Old look values were defaults, not choices.
@@ -197,9 +206,23 @@ impl Settings {
         self.cpu_limit_pct = self.cpu_limit_pct.clamp(5, 100);
         self.net_limit_kbps = self.net_limit_kbps.clamp(32, 1_000_000);
         self.download_limit_kbps = self.download_limit_kbps.min(1_000_000);
+        // 0 means "never chosen"; a real port stays inside the range.
+        if self.bt_port != 0 {
+            self.bt_port = self.bt_port.clamp(BT_PORT_MIN, BT_PORT_MAX);
+        }
         if !self.search.contains("%s") {
             self.search = Settings::default().search;
         }
+    }
+
+    /// The torrent port, chosen once and saved. 0 means it has never been chosen,
+    /// so the first call picks one and writes it; later calls return the same one.
+    pub fn ensure_bt_port(&mut self) -> u16 {
+        if self.bt_port == 0 {
+            self.bt_port = crate::upnp::random_port();
+            save_settings(self);
+        }
+        self.bt_port
     }
 }
 
