@@ -72,7 +72,8 @@ pub enum Ev {
     Reader(u64, String, String),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
-    AriaAdded(String, String),
+    /// aria2 took a download: (gid, url, headers sent, file name asked for).
+    AriaAdded(String, String, Vec<String>, Option<String>),
     AriaFailed(u64, String),
     AriaJobs(Vec<crate::aria::Job>),
     /// A request from the agent thread, answered through its channel.

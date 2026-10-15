@@ -442,8 +442,23 @@ fn fmt_bytes(b: i64) -> String {
         format!("{:.2} GB", b / 1073741824.0)
     } else if b >= 1048576.0 {
         format!("{:.1} MB", b / 1048576.0)
-    } else {
+    } else if b >= 1024.0 {
         format!("{} KB", (b / 1024.0).round())
+    } else {
+        format!("{b} B")
+    }
+}
+
+/// "3 min left", "40 s left"; empty when it cannot be known.
+fn eta(d: &super::UiDl) -> String {
+    if d.speed == 0 || d.total <= d.received {
+        return String::new();
+    }
+    let s = (d.total - d.received) as u64 / d.speed;
+    match s {
+        0..=59 => format!("{s} s left"),
+        60..=3599 => format!("{} min left", s.div_ceil(60)),
+        _ => format!("{} h {} min left", s / 3600, (s % 3600) / 60),
     }
 }
 
@@ -478,6 +493,10 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
                 if d.speed > 0 {
                     s.push_str(&format!(" · {}/s", fmt_bytes(d.speed as i64)));
                 }
+                let left = eta(d);
+                if !left.is_empty() {
+                    s.push_str(&format!(" · {left}"));
+                }
                 if !d.note.is_empty() {
                     s.push_str(&format!(" · {}", d.note));
                 }
@@ -497,9 +516,21 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
             "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
             "paused" => &[("Resume", "resume"), ("Cancel", "cancel")],
             "done" => &[("Open", "open"), ("Show in folder", "folder")],
+            "failed" if d.url.starts_with("http") => &[("Retry", "retry")],
             _ => &[],
         };
+        // Finished rows can go: a quiet x at the far right.
         let mut x = r.right();
+        if d.state == "done" || d.state == "failed" {
+            let xr = R::new(x - 26.0, r.y + 21.0, 22.0, 22.0);
+            let h = Hit::Page(PageHit::Dl("remove", d.id));
+            if i.is_hover(&h) {
+                i.gfx.round(xr, 6.0, th.press);
+            }
+            i.gfx.icon("close", xr.x + 4.0, xr.y + 4.0, 14.0, if i.is_hover(&h) { th.text } else { th.faint });
+            i.hit(xr, h);
+            x -= 30.0;
+        }
         for (label, a) in acts.iter().rev() {
             let w = i.gfx.measure(label, Font::ui(12.5, 450)) + 18.0;
             let br = R::new(x - w, r.y + 18.0, w, 28.0);

@@ -238,6 +238,26 @@ pub fn save_rules(r: &Rules) {
     save("permissions.json", r);
 }
 
+/// A finished download, kept so the Downloads page survives a restart.
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct SavedDl {
+    pub url: String,
+    pub path: String,
+    /// "done" | "failed"
+    pub state: String,
+    pub size: i64,
+    #[serde(default)]
+    pub note: String,
+}
+
+pub fn load_downloads() -> Vec<SavedDl> {
+    load("downloads.json")
+}
+
+pub fn save_downloads(d: &[SavedDl]) {
+    save("downloads.json", &d);
+}
+
 pub fn load_session() -> Session {
     load("session.json")
 }

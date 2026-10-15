@@ -228,6 +228,19 @@ fn send(proxy: &EventLoopProxy<Ev>, v: Value) {
     let _ = proxy.send_event(Ev::Ui(v.to_string()));
 }
 
+/// What a permission prompt says a site wants, in words.
+fn ask_text(kind: &str) -> String {
+    match kind {
+        "multiple downloads" => "wants to download several files".into(),
+        "notifications" => "wants to show notifications".into(),
+        "autoplay" => "wants to play sound on its own".into(),
+        "files" => "wants to edit files on this PC".into(),
+        "window placement" => "wants to place windows on your screens".into(),
+        "something" => "asks for a permission".into(),
+        k => format!("wants your {k}"),
+    }
+}
+
 fn host(url: &str) -> String {
     let rest = url.split("://").nth(1).unwrap_or("");
     let h = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -979,7 +992,7 @@ impl Inner {
             self.gfx.round_stroke(card, 10.0, th.accent.alpha(0.5), 1.0);
             let site = host(origin);
             self.gfx.text(&site, R::new(card.x + 12.0, card.y + 8.0, card.w - 24.0, 20.0), Font::ui(12.5, 600), th.text);
-            self.gfx.text(&format!("wants your {kind}"), R::new(card.x + 12.0, card.y + 28.0, card.w - 24.0, 20.0), Font::ui(12.5, 400), th.dim);
+            self.gfx.text(&ask_text(kind), R::new(card.x + 12.0, card.y + 28.0, card.w - 24.0, 20.0), Font::ui(12.5, 400), th.dim);
             let bw = (card.w - 30.0) / 2.0;
             let block = R::new(card.x + 10.0, card.bottom() - 40.0, bw, 30.0);
             let allow = R::new(block.right() + 10.0, block.y, bw, 30.0);
@@ -1100,17 +1113,8 @@ impl Inner {
         if pinned || compact {
             return;
         }
+        // Right to left, each item takes its own room: close, sound, AI badge, then the title.
         let mut right = r.right() - 6.0;
-        let mut badge_x = f32::MAX;
-        if t.agent {
-            let b = R::new(right - (if show_x { 50.0 } else { 24.0 }), r.y + 9.0, 22.0, 14.0);
-            self.gfx.round(b, 4.0, th.accent.alpha(0.22));
-            self.gfx.text("AI", b, Font::ui(9.0, 650).align(Align::Center), th.accent);
-            badge_x = b.x;
-            if !show_x {
-                right = b.x - 2.0;
-            }
-        }
         if show_x {
             let x = R::new(right - 22.0, r.y + 5.0, 22.0, 22.0);
             if self.is_hover(&Hit::TabX(t.id)) {
@@ -1129,8 +1133,12 @@ impl Inner {
             self.hit(b, Hit::TabSnd(t.id));
             right = b.x - 2.0;
         }
-        // The title stops before the AI badge, wherever the buttons put it.
-        right = right.min(badge_x - 4.0);
+        if t.agent {
+            let b = R::new(right - 24.0, r.y + 9.0, 22.0, 14.0);
+            self.gfx.round(b, 4.0, th.accent.alpha(0.22));
+            self.gfx.text("AI", b, Font::ui(9.0, 650).align(Align::Center), th.accent);
+            right = b.x - 4.0;
+        }
         let title = if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {

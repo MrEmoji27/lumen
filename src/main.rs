@@ -180,6 +180,12 @@ struct App {
     aria_poll: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Page text for searching history by content.
     recall: recall::Recall,
+    /// What aria2 was given per gid, so a failed download can be tried again.
+    aria_meta: HashMap<String, (String, Vec<String>, Option<String>)>,
+    /// Next download id for aria2, video and remembered rows. Never reused.
+    dl_seq: u64,
+    /// Finished downloads changed; write downloads.json on the next tick.
+    dl_dirty: bool,
     /// Video grabs: download id -> (page url, user agent, running yt-dlp).
     videos: HashMap<u64, (String, String, video::Slot)>,
 }
@@ -291,6 +297,9 @@ fn main() {
         aria_ids: HashMap::new(),
         aria_poll: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         videos: HashMap::new(),
+        aria_meta: HashMap::new(),
+        dl_seq: 0,
+        dl_dirty: false,
         recall: recall::Recall::start(&store::data_dir()),
     };
     {
@@ -310,6 +319,7 @@ fn main() {
     app.apply_backdrop();
     app.apply_limits(None);
     app.refresh_dark();
+    app.load_downloads();
     app.restore(session);
     app.flush();
     app.shown = true;
@@ -951,6 +961,87 @@ impl App {
         t.audio = false;
     }
 
+    // ---------------------------------------------------------- downloads
+
+    /// A download id in band `band` (1 aria2, 2 video, 3 remembered). Ids never repeat.
+    fn next_dl(&mut self, band: u64) -> u64 {
+        self.dl_seq += 1;
+        (band << 40) + self.dl_seq
+    }
+
+    fn load_downloads(&mut self) {
+        for s in store::load_downloads().into_iter().take(100) {
+            let id = self.next_dl(3);
+            let state = if s.state == "done" { "done" } else { "failed" };
+            self.downloads.push(engine::Dl { id, url: s.url, path: s.path, received: s.size, total: s.size, state, speed: 0, note: s.note });
+        }
+    }
+
+    fn save_downloads(&mut self) {
+        self.dl_dirty = false;
+        let keep: Vec<store::SavedDl> = self
+            .downloads
+            .iter()
+            .filter(|d| d.state == "done" || d.state == "failed")
+            .take(100)
+            .map(|d| store::SavedDl { url: d.url.clone(), path: d.path.clone(), state: d.state.to_string(), size: d.received, note: d.note.clone() })
+            .collect();
+        store::save_downloads(&keep);
+    }
+
+    /// Off the list, and out of whatever engine still remembers it. A running one is stopped.
+    fn remove_download(&mut self, id: u64) {
+        if let Some(gid) = self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
+            self.aria_ids.remove(&gid);
+            self.aria_meta.remove(&gid);
+            let aria = self.aria.clone();
+            std::thread::spawn(move || {
+                let _ = aria.remove(&gid);
+            });
+        } else if let Some((_, _, slot)) = self.videos.remove(&id) {
+            video::stop(&slot);
+        } else if self.downloads.iter().any(|d| d.id == id && (d.state == "progress" || d.state == "paused")) {
+            engine::dl_control(&self.ctx, id, "cancel");
+        }
+        self.ctx.downloads.borrow_mut().remove(&id);
+        self.downloads.retain(|d| d.id != id);
+        self.dl_dirty = true;
+        self.push();
+    }
+
+    /// Try a failed download again: same URL, same headers when Lumen still has them.
+    fn retry_download(&mut self, id: u64) {
+        let Some(d) = self.downloads.iter().find(|d| d.id == id) else { return };
+        if self.videos.contains_key(&id) {
+            if let Some(d) = self.downloads.iter_mut().find(|d| d.id == id) {
+                d.state = "progress";
+                d.note = "trying again".into();
+            }
+            self.run_video(id);
+            self.push();
+            return;
+        }
+        let url = d.url.clone();
+        if !url.starts_with("http") {
+            return;
+        }
+        let gid = self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone());
+        let (headers, name) = gid
+            .as_ref()
+            .and_then(|g| self.aria_meta.get(g))
+            .map(|(_, h, n)| (h.clone(), n.clone()))
+            .unwrap_or_else(|| (Vec::new(), d.path.rsplit(['\\', '/']).next().map(str::to_string).filter(|s| !s.is_empty())));
+        self.remove_download(id);
+        let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
+        let tab = self.active;
+        std::thread::spawn(move || {
+            let _ = match aria.add(&url, &headers, name.as_deref()) {
+                Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, url, headers, name)),
+                Err(_) => proxy.send_event(Ev::AriaFailed(tab, url)),
+            };
+        });
+    }
+
     // ---------------------------------------------------------- video
 
     /// Save the video on this tab's page (yt-dlp), into Downloads.
@@ -960,9 +1051,9 @@ impl App {
         if !url.starts_with("http") {
             return;
         }
-        let id = (2u64 << 40) + self.videos.len() as u64;
         let title = if t.title.is_empty() { host_of(&url) } else { t.title.clone() };
         let ua = t.view.as_ref().map(engine::user_agent).unwrap_or_default();
+        let id = self.next_dl(2);
         self.downloads.insert(
             0,
             engine::Dl { id, url: url.clone(), path: format!("{title}.mp4"), received: 0, total: 0, state: "progress", speed: 0, note: "starting".into() },
@@ -1005,6 +1096,7 @@ impl App {
                 };
             }
             video::Up::Done(f) => {
+                self.dl_dirty = true;
                 d.path = f;
                 d.state = "done";
                 d.speed = 0;
@@ -1012,6 +1104,7 @@ impl App {
                 d.received = std::fs::metadata(&d.path).map(|m| m.len() as i64).unwrap_or(d.received);
             }
             video::Up::Failed(e) => {
+                self.dl_dirty = true;
                 d.state = "failed";
                 d.speed = 0;
                 d.note = e;
@@ -1481,6 +1574,9 @@ impl App {
             Ev::CloseMe(id) => self.close(id),
             Ev::Usage(procs) => self.on_usage(procs),
             Ev::Download(d) => {
+                if matches!(d.state, "done" | "failed") {
+                    self.dl_dirty = true;
+                }
                 match self.downloads.iter_mut().find(|x| x.id == d.id) {
                     Some(x) => *x = d,
                     None => {
@@ -1521,7 +1617,7 @@ impl App {
                     std::thread::spawn(move || {
                         let name = (!name.is_empty()).then_some(name);
                         let _ = match aria.add(&u, &headers, name.as_deref()) {
-                            Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u)),
+                            Ok(gid) => proxy.send_event(Ev::AriaAdded(gid, u, headers, name)),
                             Err(_) => proxy.send_event(Ev::AriaFailed(tab, u)),
                         };
                     });
@@ -1540,9 +1636,10 @@ impl App {
                     None => start(String::new()),
                 }
             }
-            Ev::AriaAdded(gid, _url) => {
-                let id = (1u64 << 40) + self.aria_ids.len() as u64;
-                self.aria_ids.insert(gid, id);
+            Ev::AriaAdded(gid, url, headers, name) => {
+                let id = self.next_dl(1);
+                self.aria_ids.insert(gid.clone(), id);
+                self.aria_meta.insert(gid, (url, headers, name));
                 self.aria_poll.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Ev::AriaFailed(tab, url) => {
@@ -1566,8 +1663,13 @@ impl App {
                     let note = match j.status {
                         "active" => format!("{} connections", j.connections),
                         "waiting" => "queued".to_string(),
+                        "removed" => "cancelled".to_string(),
+                        "error" if !j.error.is_empty() => j.error.trim().trim_end_matches('.').to_string(),
                         _ => String::new(),
                     };
+                    if matches!(state, "done" | "failed") && self.downloads.iter().any(|x| x.id == id && x.state != state) {
+                        self.dl_dirty = true;
+                    }
                     let d = engine::Dl { id, url: j.url, path: j.path, received: j.done as i64, total: j.total as i64, state, speed: j.speed, note };
                     match self.downloads.iter_mut().find(|x| x.id == id) {
                         Some(x) => *x = d,
@@ -1858,6 +1960,8 @@ impl App {
             "dl" => {
                 let a = m["a"].as_str().unwrap_or("");
                 match a {
+                    "retry" => self.retry_download(id),
+                    "remove" => self.remove_download(id),
                     "pause" | "resume" | "cancel" if self.videos.contains_key(&id) => self.video_control(id, a),
                     "pause" | "resume" | "cancel" => match self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
                         Some(gid) => {
@@ -1880,9 +1984,10 @@ impl App {
                         }
                     }
                     "clear" => {
-                        self.downloads.retain(|d| d.state == "progress" || d.state == "paused");
-                        self.ctx.downloads.borrow_mut().retain(|k, _| self.downloads.iter().any(|d| d.id == *k));
-                        self.push();
+                        let gone: Vec<u64> = self.downloads.iter().filter(|d| d.state == "done" || d.state == "failed").map(|d| d.id).collect();
+                        for id in gone {
+                            self.remove_download(id);
+                        }
                     }
                     _ => {}
                 }
@@ -2021,6 +2126,9 @@ impl App {
 
         if self.dirty {
             self.save_session();
+        }
+        if self.dl_dirty {
+            self.save_downloads();
         }
     }
 
