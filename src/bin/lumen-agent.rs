@@ -504,7 +504,9 @@ fn secs(ms: f64) -> String {
 }
 
 fn duration(secs: u64) -> String {
-    if secs < 3600 {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
         format!("{}m", secs / 60)
     } else {
         format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
