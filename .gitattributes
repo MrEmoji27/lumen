@@ -1,3 +1,4 @@
 # Vendored libraries: keep bytes exact so pinned hashes hold.
 assets/darkreader/** -text
 assets/readability/** -text
+assets/ublock/** -text

@@ -15,7 +15,7 @@ use std::{
 };
 
 use webview2_com::{
-    ExecuteScriptCompletedHandler, Microsoft::Web::WebView2::Win32::*, WebMessageReceivedEventHandler,
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler, ExecuteScriptCompletedHandler, NavigationStartingEventHandler, Microsoft::Web::WebView2::Win32::*, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler,
 };
 use windows::{
@@ -35,7 +35,20 @@ const LISTS: &[(&str, &str)] = &[
     ("cookies-ublock.txt", "https://ublockorigin.github.io/uAssets/filters/annoyances-cookies.txt"),
     // Tracking parameters ($removeparam), the ClearURLs job done by a list.
     ("privacy-ublock.txt", "https://ublockorigin.github.io/uAssets/filters/privacy.txt"),
+    // uBlock's fast lane: YouTube and friends change weekly, fixes land here first.
+    ("quick-fixes.txt", "https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt"),
+    ("unbreak.txt", "https://ublockorigin.github.io/uAssets/filters/unbreak.txt"),
 ];
+
+/// uBlock's own lists may use uBlock's trusted scriptlets (`trusted-*`), as they do in uBlock.
+const TRUSTED: &[&str] = &["ublock.txt", "cookies-ublock.txt", "privacy-ublock.txt", "quick-fixes.txt", "unbreak.txt"];
+/// The trust bit the scriptlets file marks `requiresTrust` scriptlets with.
+const TRUST: u8 = 1;
+
+/// uBlock Origin 1.75.0's scriptlets (GPL-3.0), as adblock-rust resources. Made by
+/// assets/ublock/export-scriptlets.mjs from the release source
+/// (tarball sha256 a518c7d6e6b3f81d1a738befeb617abba59f93bd6b1e626da079a1003e9db52b).
+const SCRIPTLETS: &str = include_str!("../assets/ublock/scriptlets.json");
 
 /// In every top-level page. Asks Lumen for the page's hiding rules at once, then sends the
 /// class names and ids it sees (new ones only, batched) so generic rules can match them.
@@ -57,7 +70,8 @@ struct PageCos {
     exceptions: HashSet<String>,
     generichide: bool,
 }
-const ENGINE_FILE: &str = "engine.dat";
+/// Bumped when what goes into the matcher changes (2: list trust for scriptlets).
+const ENGINE_FILE: &str = "engine2.dat";
 /// Four days. Older than that and the list is a rumour.
 const MAX_AGE: Duration = Duration::from_secs(4 * 24 * 60 * 60);
 const NET_TIMEOUT: Duration = Duration::from_secs(30);
@@ -109,6 +123,17 @@ impl Blocker {
         let engine = slot.as_ref()?;
         let req = adblock::request::Request::new(url, url, "document", "GET").ok()?;
         engine.check_network_request(&req).rewritten_url.filter(|u| u != url)
+    }
+
+    /// The scriptlets this page gets (`+js(...)` rules), ready to run, or empty.
+    pub fn scriptlets(&self, url: &str) -> String {
+        if !self.on.get() || !url.starts_with("http") {
+            return String::new();
+        }
+        self.pump();
+        let slot = self.engine.borrow();
+        let Some(engine) = slot.as_ref() else { return String::new() };
+        engine.url_cosmetic_resources(url).injected_script
     }
 
     /// CSS for one page. First call: the site's own rules. Every call: generic rules that
@@ -177,10 +202,55 @@ impl Blocker {
             if !hooked {
                 return;
             }
+            // Scriptlets must run before the page's own scripts. At navigation start the URL is
+            // known and no document exists yet: register this page's scriptlets for the document
+            // about to be made, and take the last page's off. A generation number sorts out
+            // registrations that answer after the next navigation already began.
+            let w3 = Rc::downgrade(self);
+            let current: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+            let generation = Rc::new(Cell::new(0u64));
+            let mut token = 0i64;
+            let _ = core.add_NavigationStarting(
+                &NavigationStartingEventHandler::create(Box::new(move |sender, args| {
+                    let (Some(b), Some(args), Some(core)) = (w3.upgrade(), args, sender) else { return Ok(()) };
+                    let my = generation.get() + 1;
+                    generation.set(my);
+                    if let Some(old) = current.borrow_mut().take() {
+                        let _ = core.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(old));
+                    }
+                    let mut u = PWSTR::null();
+                    args.Uri(&mut u)?;
+                    let url = take(u);
+                    let js = b.scriptlets(&url);
+                    if js.is_empty() {
+                        return Ok(());
+                    }
+                    let host = url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#', ':']).next()).unwrap_or("");
+                    let wrapped = format!(
+                        "(()=>{{if(window!==window.top||location.hostname!=={})return;\nconst scriptletGlobals={{}};\n{js}\n}})();",
+                        serde_json::to_string(host).unwrap_or_default()
+                    );
+                    let (gen2, cur2, c2) = (generation.clone(), current.clone(), core.clone());
+                    let _ = core.AddScriptToExecuteOnDocumentCreated(
+                        &HSTRING::from(wrapped),
+                        &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |hr, id| {
+                            if hr.is_ok() {
+                                if gen2.get() == my {
+                                    *cur2.borrow_mut() = Some(id);
+                                } else {
+                                    let _ = c2.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(id));
+                                }
+                            }
+                            Ok(())
+                        })),
+                    );
+                    Ok(())
+                })),
+                &mut token,
+            );
             // Cosmetic rules: the page script asks, this answers with CSS.
             let w2 = Rc::downgrade(self);
             let state = Rc::new(RefCell::new(PageCos::default()));
-            let mut token = 0i64;
             let _ = core.add_WebMessageReceived(
                 &WebMessageReceivedEventHandler::create(Box::new(move |sender, args| {
                     let (Some(b), Some(args), Some(sender)) = (w2.upgrade(), args, sender) else { return Ok(()) };
@@ -240,6 +310,7 @@ impl Blocker {
         let Some(bytes) = latest else { return };
         let mut engine = adblock::Engine::new_with_filter_set(adblock::FilterSet::new(false));
         if engine.deserialize(&bytes).is_ok() {
+            engine.use_resources(scriptlet_resources());
             *self.engine.borrow_mut() = Some(engine);
             return;
         }
@@ -356,12 +427,18 @@ fn map_context(ctx: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> Option<&'static str> {
 
 /// Rules in, serialized matcher out. This is the slow part, so it happens on
 /// a background thread or never at all.
-fn serialize_engine(lists: &[String]) -> Vec<u8> {
+/// (list text, trusted). Trusted lists may use scriptlets that need trust.
+fn serialize_engine(lists: &[(String, bool)]) -> Vec<u8> {
     let mut set = adblock::FilterSet::new(false);
-    for text in lists {
-        set.add_filter_list(text.clone(), adblock::lists::ParseOptions::default());
+    for (text, trusted) in lists {
+        let permissions = adblock::resources::PermissionMask::from_bits(if *trusted { TRUST } else { 0 });
+        set.add_filter_list(text.clone(), adblock::lists::ParseOptions { permissions, ..Default::default() });
     }
     adblock::Engine::new_with_filter_set(set).serialize()
+}
+
+fn scriptlet_resources() -> Vec<adblock::resources::Resource> {
+    serde_json::from_str(SCRIPTLETS).unwrap_or_default()
 }
 
 fn build_engine(data_dir: &Path, tx: Sender<Vec<u8>>, force: bool) {
@@ -389,9 +466,9 @@ fn build_engine(data_dir: &Path, tx: Sender<Vec<u8>>, force: bool) {
             eprintln!("lumen: blocker: {name} did not download");
         }
     }
-    let lists: Vec<String> = LISTS
+    let lists: Vec<(String, bool)> = LISTS
         .iter()
-        .filter_map(|(name, _)| fs::read_to_string(dir.join(name)).ok())
+        .filter_map(|(name, _)| fs::read_to_string(dir.join(name)).ok().map(|t| (t, TRUSTED.contains(name))))
         .collect();
     if lists.is_empty() {
         eprintln!("lumen: blocker: no lists at all, nothing gets blocked");
@@ -517,11 +594,27 @@ mod tests {
     }
 
     #[test]
+    fn scriptlets_need_trust_and_resolve() {
+        assert!(scriptlet_resources().len() > 100, "the vendored scriptlets parse");
+        let rule = "www.youtube.com##+js(trusted-rpfr, '\"adPlacements\"', '\"no_ads\"', player?)\nexample.com##+js(set-constant, foo, true)";
+        for (trusted, want) in [(true, true), (false, false)] {
+            let mut e = adblock::Engine::new_with_filter_set(adblock::FilterSet::new(false));
+            e.deserialize(&serialize_engine(&[(rule.into(), trusted)])).unwrap();
+            e.use_resources(scriptlet_resources());
+            let yt = e.url_cosmetic_resources("https://www.youtube.com/watch?v=x").injected_script;
+            assert_eq!(yt.contains("trustedReplaceFetchResponse("), want, "trusted={trusted}");
+            // Plain scriptlets need no trust.
+            assert!(e.url_cosmetic_resources("https://example.com/").injected_script.contains("setConstant("));
+        }
+    }
+
+    #[test]
     fn engine_survives_a_round_trip() {
-        let bytes = serialize_engine(&["||ads.example.com^".into()]);
+        let bytes = serialize_engine(&[("||ads.example.com^".into(), false)]);
         let mut e = adblock::Engine::new_with_filter_set(adblock::FilterSet::new(false));
         e.deserialize(&bytes).expect("serialized matcher loads");
         assert!(blocks(&e, "https://ads.example.com/x.js", "https://site.com", "script"));
         assert!(!blocks(&e, "https://site.com/app.js", "https://site.com", "script"));
     }
 }
+
