@@ -7,10 +7,12 @@
 mod aria;
 mod agent;
 mod agentkit;
+mod aloud;
 mod blocker;
 mod chrome;
 mod engine;
 mod glance;
+mod kdbx;
 mod library;
 mod monitor;
 mod pagekit;
@@ -23,6 +25,7 @@ mod upnp;
 mod video;
 mod workspaces;
 mod store;
+mod sponsorblock;
 mod trackers;
 
 use std::{
@@ -181,6 +184,14 @@ impl Tab {
     }
 }
 
+/// A reader-view article being read aloud: which tab, where each sentence
+/// starts and ends in the page's text, and whether the voice is running.
+struct Aloud {
+    tab: u64,
+    ranges: Vec<(usize, usize)>,
+    playing: bool,
+}
+
 struct App {
     ctx: Rc<Ctx>,
     chrome: chrome::Chrome,
@@ -308,6 +319,15 @@ struct App {
     /// "Clear history on exit" owed a WebView2 clear it could not make in time.
     /// Done at the next start, as soon as a page exists to ask.
     clear_pending: bool,
+    /// Read aloud: the reader-view tab being spoken, if any.
+    aloud: Option<Aloud>,
+    /// SponsorBlock: a fetched skip script waiting for its tab to finish
+    /// loading, so it lands in the new document and not the one going away.
+    spb: HashMap<u64, String>,
+    /// The open KeePass database: memory only, dropped after ten idle minutes.
+    vault: Option<kdbx::Vault>,
+    /// When the vault was last used; the idle lock counts from here.
+    vault_seen: Instant,
 }
 
 /// Headless: a real Lumen whose window lives off-screen, never takes focus, has no taskbar
@@ -538,6 +558,10 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         test_dl: None,
         test_translate: false,
         clear_pending: false,
+        aloud: None,
+        spb: HashMap::new(),
+        vault: None,
+        vault_seen: Instant::now(),
     };
     {
         // One small thread asks aria2 about its jobs. It sleeps on a condvar
@@ -919,7 +943,9 @@ fn should_auto_resume(person: bool, status: &str, named: bool, partial: bool) ->
 /// Events that fire in a stream (download progress, aria2 polls) would drown the
 /// debug log in repeats. Everything else is worth one line.
 fn quiet_event(ev: &Ev) -> bool {
-    matches!(ev, Ev::Download(_) | Ev::AriaJobs(_) | Ev::Usage(_))
+    // Vault events carry a master password or the secrets behind it: never
+    // let the debug log see them.
+    matches!(ev, Ev::Download(_) | Ev::AriaJobs(_) | Ev::Usage(_) | Ev::VaultOpen(..) | Ev::VaultReady(_))
 }
 
 /// Debug builds only: append every engine event to %APPDATA%\Lumen\debug.log.
@@ -1338,6 +1364,20 @@ impl App {
                 upnp_port_open: self.upnp.is_mapped(),
                 agent_busy: self.agent_seen.is_some(),
                 bookmarked: self.active_tab().is_some_and(|t| !t.url.is_empty() && self.library.is_bookmarked(&t.url)),
+                listen: match self.tabs.iter().find(|t| t.id == self.active) {
+                    Some(t) if t.reader.is_some() && !t.agent => match &self.aloud {
+                        Some(a) if a.tab == t.id && a.playing => "playing",
+                        Some(a) if a.tab == t.id => "paused",
+                        _ => "ready",
+                    },
+                    _ => "",
+                },
+                // Labels only; passwords never reach the chrome.
+                kdbx: match (self.vault.as_ref(), self.active_tab()) {
+                    (Some(v), Some(t)) if t.url.starts_with("http") => v.matches(&t.url).into_iter().take(8).map(|n| v.label(n)).collect(),
+                    _ => Vec::new(),
+                },
+                vault: self.vault.as_ref().map_or(0, |v| v.len()),
                 history: if self.panel == Panel::History {
                     self.library
                         .recent("", 0, 400)
@@ -1483,6 +1523,10 @@ impl App {
         let Some(i) = self.idx(id) else { return };
         // The card covered the page being left; a new page under it means it is done.
         self.drop_glance();
+        // A voice follows the tab it was reading; leaving that tab stops it.
+        if self.aloud.as_ref().is_some_and(|a| a.tab != id) {
+            self.listen_stop();
+        }
         // The other half of a split: the pages stay where they are, the focus (and
         // the sidebar highlight) moves to this one.
         if self.split == Some(id) {
@@ -1640,6 +1684,10 @@ impl App {
 
     fn close(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
+        if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
+            self.listen_stop();
+        }
+        self.spb.remove(&id);
         // Closing either half of a split leaves one page again. When the focused half
         // goes, the other one takes the whole stage instead of being left behind.
         let keep = if id == self.active { self.split.take() } else { None };
@@ -2065,10 +2113,11 @@ impl App {
         let tools = store::data_dir().join("tools");
         let out = store::download_dir();
         let proxy = self.ctx.proxy.clone();
+        let sponsorblock = self.settings.sponsorblock;
         std::thread::Builder::new()
             .name("lumen-video".into())
             .spawn(move || {
-                video::grab(&tools, &out, &url, &ua, &slot, |u| {
+                video::grab(&tools, &out, &url, &ua, &slot, sponsorblock, |u| {
                     let _ = proxy.send_event(Ev::Video(id, u));
                 })
             })
@@ -2144,20 +2193,85 @@ impl App {
 
     /// Reader view on, or back to the page.
     fn toggle_reader(&mut self, i: usize) {
-        let t = &mut self.tabs[i];
-        let Some(v) = &t.view else { return };
-        if let Some(orig) = t.reader.take() {
-            let _ = v.load_url(&orig);
+        let id = self.tabs[i].id;
+        if let Some(orig) = self.tabs[i].reader.take() {
+            if let Some(v) = &self.tabs[i].view {
+                let _ = v.load_url(&orig);
+            }
+            // Out of reader view: the reading goes with it.
+            if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
+                self.listen_stop();
+            }
             self.push();
             return;
         }
-        if !t.url.starts_with("http") {
+        if !self.tabs[i].url.starts_with("http") {
             return;
         }
+        let t = &self.tabs[i];
+        let Some(v) = &t.view else { return };
         let (id, url, proxy) = (t.id, t.url.clone(), self.ctx.proxy.clone());
         let _ = v.evaluate_script_with_callback(&pagekit::extract_script(), move |out| {
             let _ = proxy.send_event(Ev::Reader(id, url.clone(), out));
         });
+    }
+
+    /// F7 or the chip: start, pause, or resume — whichever fits where it stands.
+    fn listen_toggle(&mut self) {
+        match self.aloud.as_mut() {
+            Some(a) if a.playing => {
+                aloud::pause();
+                a.playing = false;
+            }
+            Some(a) => {
+                aloud::resume();
+                a.playing = true;
+            }
+            None => self.listen_start(),
+        }
+        self.push();
+    }
+
+    /// Reading starts from the article on screen: split it into sentences in
+    /// the page, then hand the list to the speaker thread.
+    fn listen_start(&mut self) {
+        let i = self.active_idx();
+        let t = &self.tabs[i];
+        if t.reader.is_none() || t.agent {
+            return;
+        }
+        let Some(v) = &t.view else { return };
+        let (id, proxy) = (t.id, self.ctx.proxy.clone());
+        let _ = v.evaluate_script_with_callback(&aloud::prep_script(), move |out| {
+            let _ = proxy.send_event(Ev::AloudPrep(id, out));
+        });
+    }
+
+    /// Stop speaking and wipe the highlight. Called on tab switch, navigation,
+    /// reader exit, close — anywhere the page under the voice is going away.
+    fn listen_stop(&mut self) {
+        let Some(a) = self.aloud.take() else { return };
+        aloud::stop();
+        if let Some(i) = self.idx(a.tab)
+            && let Some(v) = &self.tabs[i].view
+        {
+            let _ = v.evaluate_script(&aloud::highlight_script(None));
+        }
+        self.push();
+    }
+
+    /// Put the chosen KeePass login into the password box on screen. The
+    /// values exist only inside the script string, handed straight to the page.
+    fn kdbx_fill(&mut self, n: usize) {
+        let Some(i) = self.idx(self.active) else { return };
+        let Some(v) = &self.vault else { return };
+        let Some(k) = v.matches(&self.tabs[i].url).get(n).copied() else { return };
+        let Some((user, pass)) = v.get(k) else { return };
+        let js = kdbx::fill_js(user, pass);
+        if let Some(view) = &self.tabs[i].view {
+            let _ = view.evaluate_script(&js);
+        }
+        self.vault_seen = Instant::now();
     }
 
     fn show_reader(&mut self, id: u64, url: &str, out: &str) {
@@ -2500,6 +2614,31 @@ impl App {
                             return;
                         }
                         self.tabs[i].reader = None;
+                        // The reader page is gone; so is the reading.
+                        let id = self.tabs[i].id;
+                        if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
+                            self.listen_stop();
+                        }
+                    }
+                    // SponsorBlock: on a YouTube watch page, fetch segments and
+                    // inject the skip script. One background fetch per video;
+                    // whatever was pending for this tab is about the old page.
+                    // Nothing is stored and the video ID never leaves the
+                    // machine in the clear, so agent and private tabs get it too.
+                    self.spb.remove(&self.tabs[i].id);
+                    if self.settings.sponsorblock && sponsorblock::is_youtube_watch(&u) {
+                        if let Some(vid) = sponsorblock::video_id(&u) {
+                            if self.tabs[i].view.is_some() {
+                                let tab_id = self.tabs[i].id;
+                                let proxy = self.ctx.proxy.clone();
+                                std::thread::spawn(move || {
+                                    let segs = sponsorblock::fetch_segments(&vid);
+                                    let json = serde_json::json!(segs.iter().map(|s| [s.start, s.end]).collect::<Vec<_>>());
+                                    let script = sponsorblock::init_script(&json.to_string());
+                                    let _ = proxy.send_event(Ev::SponsorBlock(tab_id, script));
+                                });
+                            }
+                        }
                     }
                     // Agents browse off the record, and so do private tabs.
                     if !self.off_record(&self.tabs[i]) {
@@ -2529,6 +2668,13 @@ impl App {
                     if self.tabs[i].loading != on {
                         self.tabs[i].loading = on;
                         self.push();
+                        // The document is here: a skip script that was waiting
+                        // for it can go in now.
+                        if !on && let Some(script) = self.spb.remove(&id) {
+                            if let Some(v) = &self.tabs[i].view {
+                                let _ = v.evaluate_script(&script);
+                            }
+                        }
                         // Done loading: read the page a little later, once scripts have filled it in.
                         let t = &self.tabs[i];
                         if !on && self.settings.remember_text && !self.off_record(t) && t.reader.is_none() && t.url.starts_with("http") {
@@ -3052,6 +3198,87 @@ impl App {
                 self.push();
             }
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
+            Ev::SponsorBlock(id, script) => {
+                // A page still loading is about to become another document:
+                // hold the script until it is there, or it runs in the old one
+                // and the player never hears of it.
+                let loading = self.idx(id).is_some_and(|i| self.tabs[i].loading);
+                if loading {
+                    self.spb.insert(id, script);
+                } else {
+                    self.spb.remove(&id);
+                    if let Some(i) = self.idx(id) {
+                        if let Some(v) = &self.tabs[i].view {
+                            let _ = v.evaluate_script(&script);
+                        }
+                    }
+                }
+            }
+            Ev::AloudPrep(id, out) => {
+                let Ok(rows) = serde_json::from_str::<Vec<(usize, usize, String)>>(&out) else { return };
+                if rows.is_empty() {
+                    return;
+                }
+                let ranges: Vec<(usize, usize)> = rows.iter().map(|r| (r.0, r.1)).collect();
+                let texts: Vec<String> = rows.into_iter().map(|r| r.2).collect();
+                let (tab, proxy) = (id, self.ctx.proxy.clone());
+                let back = proxy.clone();
+                let ok = aloud::speak(
+                    texts,
+                    move |n| {
+                        let _ = proxy.send_event(Ev::AloudLine(tab, n));
+                    },
+                    move || {
+                        let _ = back.send_event(Ev::AloudLine(tab, usize::MAX));
+                    },
+                );
+                if ok {
+                    self.aloud = Some(Aloud {
+                        tab,
+                        ranges,
+                        playing: true,
+                    });
+                    self.push();
+                }
+            }
+            Ev::AloudLine(tab, n) => {
+                if !self.aloud.as_ref().is_some_and(|a| a.tab == tab) {
+                    return;
+                }
+                let Some(i) = self.idx(tab) else { return };
+                if n == usize::MAX {
+                    // Spoken through: no state left, no highlight left.
+                    self.aloud = None;
+                    if let Some(v) = &self.tabs[i].view {
+                        let _ = v.evaluate_script(&aloud::highlight_script(None));
+                    }
+                } else if self.aloud.as_ref().is_some_and(|a| a.ranges.get(n).is_some())
+                    && let Some(v) = &self.tabs[i].view
+                {
+                    let _ = v.evaluate_script(&aloud::highlight_script(Some(n)));
+                }
+                self.push();
+            }
+            Ev::VaultOpen(path, pw) => {
+                // Parsing is slow and must stay off the UI thread. The pair
+                // rides on a quiet event: never logged, never written.
+                let proxy = self.ctx.proxy.clone();
+                std::thread::spawn(move || {
+                    let r = kdbx::Vault::open(std::path::Path::new(&path), &pw).map(Box::new);
+                    let _ = proxy.send_event(Ev::VaultReady(r));
+                });
+            }
+            Ev::VaultReady(r) => match r {
+                Ok(v) => {
+                    self.vault = Some(*v);
+                    self.vault_seen = Instant::now();
+                    self.push();
+                }
+                Err(e) => {
+                    // Wrong password or not a .kdbx: say it where the button was.
+                    self.chrome.flash(format!("Couldn't open that file: {e}"));
+                }
+            },
             Ev::Video(id, up) => self.on_video(id, up),
             Ev::ShowMe => self.show_me(),
             Ev::Glance(id, url) => {
@@ -3235,6 +3462,7 @@ impl App {
                 None => {}
             },
             Action::Reader => self.toggle_reader(i),
+            Action::Listen => self.listen_toggle(),
             Action::DarkSite => self.toggle_dark_site(i),
             Action::Workspace(n) => {
                 if n < self.workspaces.len() {
@@ -3688,6 +3916,13 @@ impl App {
                 }
             }
             "bookmark" => self.toggle_bookmark(),
+            "listen" => self.listen_toggle(),
+            "listenStop" => self.listen_stop(),
+            "kdbxFill" => self.kdbx_fill(m["n"].as_u64().unwrap_or(0) as usize),
+            "kdbxLock" => {
+                self.vault = None;
+                self.push();
+            }
             "unbookmark" => {
                 self.library.unbookmark(m["url"].as_str().unwrap_or(""));
                 // Written now, not on a later tick: a bookmark is worth a write.
@@ -4117,6 +4352,12 @@ impl App {
         self.library.flush();
         if self.agent_seen.is_some_and(|t| now - t > Duration::from_secs(6)) {
             self.agent_seen = None;
+            self.push();
+        }
+
+        // KeePass: ten minutes untouched and the database leaves memory.
+        if self.vault.is_some() && now - self.vault_seen > Duration::from_secs(600) {
+            self.vault = None;
             self.push();
         }
 

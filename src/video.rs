@@ -37,7 +37,7 @@ pub enum Up {
 pub type Slot = Arc<Mutex<Option<Child>>>;
 
 /// Fetch the tools if needed, then the video. Blocks; run it on its own thread.
-pub fn grab(tools: &Path, out: &Path, url: &str, ua: &str, slot: &Slot, send: impl Fn(Up)) {
+pub fn grab(tools: &Path, out: &Path, url: &str, ua: &str, slot: &Slot, sponsorblock: bool, send: impl Fn(Up)) {
     let _ = fs::create_dir_all(tools);
     let exe = tools.join("yt-dlp.exe");
     if !verified(&exe, YTDLP_SHA256) {
@@ -74,6 +74,10 @@ pub fn grab(tools: &Path, out: &Path, url: &str, ua: &str, slot: &Slot, send: im
         .creation_flags(CREATE_NO_WINDOW);
     if !ua.is_empty() {
         cmd.arg("--user-agent").arg(ua);
+    }
+    // SponsorBlock: skip sponsor segments when the setting is on.
+    if sponsorblock {
+        cmd.args(["--sponsorblock-remove", "sponsor"]);
     }
     // YouTube wants a JavaScript runtime now. Node, if the machine has it.
     if has_node() {

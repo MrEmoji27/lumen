@@ -593,6 +593,11 @@ impl Gfx {
                 l(p(8.0, 10.0), p(8.0, 14.0));
                 self.polyline(&[p(5.0, 10.0), p(11.0, 10.0), p(10.0, 7.0), p(10.0, 3.0), p(6.0, 3.0), p(6.0, 7.0)], c, w, true);
             }
+            "play" => self.polyline(&[p(5.5, 3.5), p(12.5, 8.0), p(5.5, 12.5)], c, w, true),
+            "pause" => {
+                l(p(6.0, 3.5), p(6.0, 12.5));
+                l(p(10.0, 3.5), p(10.0, 12.5));
+            }
             "split" => {
                 // Two pages side by side, one focus: the split view's mark.
                 let (a, b) = (p(2.4, 3.4), p(7.6, 12.6));

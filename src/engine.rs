@@ -90,6 +90,17 @@ pub enum Ev {
     Video(u64, crate::video::Up),
     /// Reader mode extract came back: (tab, page url, JSON or "null").
     Reader(u64, String, String),
+    /// SponsorBlock init script for this tab: (tab id, script).
+    SponsorBlock(u64, String),
+    /// Read aloud: the article's sentences came back: (tab, JSON [[a,b,"text"],..]).
+    AloudPrep(u64, String),
+    /// Read aloud: (tab, sentence index; usize::MAX means "spoken through").
+    AloudLine(u64, usize),
+    /// The KeePass dialogs came back: (path, master password). Quiet: a
+    /// password must never reach the debug log.
+    VaultOpen(String, String),
+    /// The KeePass file was parsed: the vault, or why it failed. Quiet too.
+    VaultReady(Result<Box<crate::kdbx::Vault>, String>),
     /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
     /// aria2 took a download; `Added` says how it was started.
@@ -192,6 +203,7 @@ pub enum Action {
     Bookmarks,
     DevTools,
     Reader,
+    Listen,
     DarkSite,
     /// Ctrl+Alt+1..4: switch to workspace N.
     Workspace(usize),
@@ -691,6 +703,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
     const RIGHT: u32 = 0x27;
     const F5: u32 = 0x74;
     const F6: u32 = 0x75;
+    const F7: u32 = 0x76;
     const F8: u32 = 0x77;
     const F9: u32 = 0x78;
     const F11: u32 = 0x7A;
@@ -720,6 +733,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, false, false, COMMA) => Settings,
         (false, false, false, F12) => DevTools,
         (false, false, false, F9) => Reader,
+        (false, false, false, F7) => Listen,
         (false, false, false, F8) => TranslatePage,
         (false, true, false, F9) => DarkSite,
         (false, true, false, ESC) => Control,
