@@ -17,7 +17,7 @@ use webview2_com::{
     FocusChangedEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
     StateChangedEventHandler,
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
-    IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
+    IsDocumentPlayingAudioChangedEventHandler, LaunchingExternalUriSchemeEventHandler, Microsoft::Web::WebView2::Win32::*,
     SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
 };
 use windows::{
@@ -79,6 +79,11 @@ pub enum Ev {
     Download(Dl),
     /// A site asks for a permission. Answer with `answer_permission(pid, ..)`.
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
+    /// A page tried to open an app (mailto:, spotify:, ...): the tab, the page's origin, the
+    /// address, and whether a click or key started it. WebView2's own box was already cancelled.
+    ExternalUri { tab: u64, origin: String, uri: String, user: bool },
+    /// The person answered the question about opening an app.
+    ExternalAnswer { origin: String, uri: String, answer: crate::extlink::Answer },
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
     /// A magnet link was cancelled out of a page; hand it to aria2.
@@ -435,6 +440,7 @@ fn build_tab_in(
     hook_downloads(ctx, &wv, id, private);
     hook_crash(&wv, id, ctx.proxy.clone());
     hook_permissions(ctx, &wv, id, isolated);
+    hook_external(&wv, id, ctx.proxy.clone(), isolated);
     // Password saving is per profile. The agent's profile never saves passwords,
     // and InPrivate keeps nothing anyway, so private pages get it off too.
     set_passwords(&wv, ctx.passwords.get() && !isolated && !private);
@@ -1017,6 +1023,33 @@ fn hook_permissions(ctx: &Rc<Ctx>, wv: &WebView, id: u64, isolated: bool) {
                 let pid = NEXT_PERM.fetch_add(1, Ordering::Relaxed);
                 ctx.perms.borrow_mut().insert(pid, (args.clone(), deferral));
                 let _ = ctx.proxy.send_event(Ev::Permission { pid, tab: id, origin: origin_of(&take(u)), kind: perm_name(kind) });
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+/// A page tries to open an app (mailto:, zoommtg:, spotify:...). WebView2 would show a box of its
+/// own; Lumen cancels it and sends the request to the main loop, which asks the person (or
+/// remembers they said always). An agent's profile never launches anything.
+fn hook_external(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, isolated: bool) {
+    let Ok(c18) = wv.webview().cast::<ICoreWebView2_18>() else { return };
+    let mut token = 0i64;
+    unsafe {
+        let _ = c18.add_LaunchingExternalUriScheme(
+            &LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                args.SetCancel(true)?;
+                if isolated {
+                    return Ok(());
+                }
+                let (mut u, mut o) = (PWSTR::null(), PWSTR::null());
+                args.Uri(&mut u)?;
+                let _ = args.InitiatingOrigin(&mut o);
+                let mut user = windows::core::BOOL::default();
+                let _ = args.IsUserInitiated(&mut user);
+                let _ = proxy.send_event(Ev::ExternalUri { tab: id, origin: origin_of(&take(o)), uri: take(u), user: user.as_bool() });
                 Ok(())
             })),
             &mut token,
