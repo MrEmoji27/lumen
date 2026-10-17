@@ -16,6 +16,8 @@ pub struct Kind {
 
 /// Every kind there is, the common ones first. The popover under the lock shows the first
 /// `COMMON` of them for any site; the rest only appear once a site has been given an answer.
+/// The app launcher's own rules ("open mailto", see `extlink`) are not here: they are per
+/// scheme, they are listed with the site's other answers, and only that page edits them.
 pub const KINDS: &[Kind] = &[
     Kind { key: "camera", label: "Camera" },
     Kind { key: "microphone", label: "Microphone" },
@@ -29,14 +31,17 @@ pub const KINDS: &[Kind] = &[
     Kind { key: "fonts", label: "Local fonts" },
     Kind { key: "window placement", label: "Window placement" },
     Kind { key: "autoplay", label: "Sound autoplay" },
-    Kind { key: "external protocols", label: "Opening other apps" },
 ];
 
 /// How many of `KINDS` the lock's popover always lists.
 pub const COMMON: usize = 5;
 
-/// The words for a kind, or the key itself for one Lumen does not know.
+/// The words for a kind, or the key itself for one Lumen does not know. An "open <scheme>"
+/// answer, which the app launcher writes, reads as the app it opens.
 pub fn label(key: &str) -> String {
+    if let Some(scheme) = key.strip_prefix("open ") {
+        return format!("Open with {}", crate::extlink::app_name(scheme));
+    }
     KINDS.iter().find(|k| k.key == key).map_or_else(|| key.to_string(), |k| k.label.to_string())
 }
 
@@ -362,6 +367,9 @@ mod tests {
         }
         assert_eq!(label("camera"), "Camera");
         assert_eq!(label("something"), "something");
+        // The app launcher's per-scheme answers read as the app they open.
+        assert_eq!(label("open mailto"), "Open with your mail app");
+        assert_eq!(label("open spotify"), "Open with Spotify");
     }
 
     #[test]

@@ -15,9 +15,9 @@ use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
     FocusChangedEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
-    StateChangedEventHandler, ZoomFactorChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler, LaunchingExternalUriSchemeEventHandler,
+    StateChangedEventHandler, ZoomFactorChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler,
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
-    IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
+    IsDocumentPlayingAudioChangedEventHandler, LaunchingExternalUriSchemeEventHandler, Microsoft::Web::WebView2::Win32::*,
     SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
 };
 use windows::{
@@ -79,6 +79,11 @@ pub enum Ev {
     Download(Dl),
     /// A site asks for a permission. Answer with `answer_permission(pid, ..)`.
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
+    /// A page tried to open an app (mailto:, spotify:, ...): the tab, the page's origin, the
+    /// address, and whether a click or key started it. WebView2's own box was already cancelled.
+    ExternalUri { tab: u64, origin: String, uri: String, user: bool },
+    /// The person answered the question about opening an app.
+    ExternalAnswer { origin: String, uri: String, answer: crate::extlink::Answer },
     /// The zoom of a page changed (a key, the wheel, or Lumen itself): (tab, factor).
     Zoom(u64, f64),
     /// A plain http page was stopped to try https: (tab, the https address, the http one).
@@ -265,18 +270,8 @@ pub struct Ctx {
     pub dark_ids: Rc<RefCell<HashMap<u64, String>>>,
     /// Plain http pages: whether to try https first, and the hosts left alone.
     pub https: Rc<RefCell<crate::sites::HttpsPolicy>>,
-    /// Remembered permission answers and the defaults, read by the permission hooks.
-    pub perms_policy: Rc<RefCell<PermPolicy>>,
     /// Send the Global Privacy Control signal to pages (the header lives in the blocker).
     pub gpc: Cell<bool>,
-}
-
-/// What the hooks need to answer a site without asking the main loop: its remembered answers
-/// and the defaults. Kept in step by the main loop whenever either changes.
-#[derive(Default)]
-pub struct PermPolicy {
-    pub rules: crate::store::Rules,
-    pub defaults: std::collections::BTreeMap<String, String>,
 }
 
 impl Ctx {
@@ -465,11 +460,11 @@ fn build_tab_in(
     set_tracking(&wv, &ctx.tracking.borrow());
     hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone());
     hook_zoom(&wv, id, ctx.proxy.clone());
-    hook_external(ctx, &wv, id, isolated || private);
     crate::glance::hook(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv, id, private);
     hook_crash(&wv, id, ctx.proxy.clone());
     hook_permissions(ctx, &wv, id, isolated);
+    hook_external(&wv, id, ctx.proxy.clone(), isolated);
     // Password saving is per profile. The agent's profile never saves passwords,
     // and InPrivate keeps nothing anyway, so private pages get it off too.
     set_passwords(&wv, ctx.passwords.get() && !isolated && !private);
@@ -832,54 +827,6 @@ pub fn set_zoom_factor(wv: &WebView, f: f64) -> bool {
     unsafe { wv.controller().SetZoomFactor(f).is_ok() }
 }
 
-// ------------------------------------------------------------ other apps
-
-/// A page asks to open another app (mailto:, a meeting link). WebView2 asks the person with
-/// its own box unless the answer is already known: Block cancels the launch; Allow launches
-/// it here, only when the person started it (a click, not a script), and cancels the box.
-/// With no answer it shows its box. Pages of agents and private tabs get no memory.
-fn hook_external(ctx: &Rc<Ctx>, wv: &WebView, _id: u64, no_memory: bool) {
-    let Ok(c18) = wv.webview().cast::<ICoreWebView2_18>() else { return };
-    let policy = ctx.perms_policy.clone();
-    let mut token = 0i64;
-    unsafe {
-        let _ = c18.add_LaunchingExternalUriScheme(
-            &LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
-                let Some(args) = args else { return Ok(()) };
-                let (mut uri, mut origin, mut user) = (PWSTR::null(), PWSTR::null(), Default::default());
-                args.Uri(&mut uri)?;
-                args.InitiatingOrigin(&mut origin)?;
-                args.IsUserInitiated(&mut user)?;
-                let (uri, origin) = (take(uri), take(origin));
-                let p = policy.borrow();
-                let v = if no_memory {
-                    crate::sites::default_for(&p.defaults, "external protocols")
-                } else {
-                    crate::sites::verdict(&p.rules, &p.defaults, &origin_of(&origin), "external protocols")
-                };
-                match v {
-                    crate::sites::Verdict::Block => args.SetCancel(true)?,
-                    crate::sites::Verdict::Allow if user.as_bool() && !no_memory => {
-                        args.SetCancel(true)?;
-                        open_external(&uri);
-                    }
-                    _ => {}
-                }
-                Ok(())
-            })),
-            &mut token,
-        );
-    }
-}
-
-/// Hand an address to Windows, the way a click in the shell would.
-fn open_external(uri: &str) {
-    use windows::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
-    unsafe {
-        ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(uri), None, None, SW_SHOWNORMAL);
-    }
-}
-
 // ------------------------------------------------------------ site data
 
 /// How many cookies this profile would send to `url`. Never blocks; 0 when it cannot be asked.
@@ -1232,6 +1179,33 @@ fn hook_permissions(ctx: &Rc<Ctx>, wv: &WebView, id: u64, isolated: bool) {
                 let pid = NEXT_PERM.fetch_add(1, Ordering::Relaxed);
                 ctx.perms.borrow_mut().insert(pid, (args.clone(), deferral));
                 let _ = ctx.proxy.send_event(Ev::Permission { pid, tab: id, origin: origin_of(&take(u)), kind: perm_name(kind) });
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+/// A page tries to open an app (mailto:, zoommtg:, spotify:...). WebView2 would show a box of its
+/// own; Lumen cancels it and sends the request to the main loop, which asks the person (or
+/// remembers they said always). An agent's profile never launches anything.
+fn hook_external(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, isolated: bool) {
+    let Ok(c18) = wv.webview().cast::<ICoreWebView2_18>() else { return };
+    let mut token = 0i64;
+    unsafe {
+        let _ = c18.add_LaunchingExternalUriScheme(
+            &LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                args.SetCancel(true)?;
+                if isolated {
+                    return Ok(());
+                }
+                let (mut u, mut o) = (PWSTR::null(), PWSTR::null());
+                args.Uri(&mut u)?;
+                let _ = args.InitiatingOrigin(&mut o);
+                let mut user = windows::core::BOOL::default();
+                let _ = args.IsUserInitiated(&mut user);
+                let _ = proxy.send_event(Ev::ExternalUri { tab: id, origin: origin_of(&take(o)), uri: take(u), user: user.as_bool() });
                 Ok(())
             })),
             &mut token,

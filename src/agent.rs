@@ -68,10 +68,13 @@ pub enum Op {
     /// The facts `agent_policy::authorize` needs: tabs, owners, grants, settings.
     Policy,
     /// Test hook, debug builds only: press Done on the waiting handoff.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     TestDone,
     /// Test hook, debug builds only: every tab, whoever's it is.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     TestState,
     /// Test hook, debug builds only: the right-click "Let agents use this tab", on a tab by id.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     TestGrant { tab: u64 },
 }
 
