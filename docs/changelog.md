@@ -25,6 +25,18 @@ digit. A batch of new features bumps the middle one.
   select, submit, the stage, watching), and `tools/release.ps1` runs it before every release
   build.
 
+## 0.2.1 — 2026-10-18
+
+- Memory: idle back from 24.6 MB to 18.5 MB. The ad blocker's matcher had been built in debug
+  mode for the privacy report; a 380 KB tracker host table answers "ad or tracker" instead.
+  Old matcher files (about 31 MB on disk) are deleted.
+- Privacy report: three sections (blocked, saved, privacy stats) with trends against the period
+  before. Pop-ups without a click are blocked, and so are hosts that `$popup` rules name.
+  Malware and phishing sites (URLhaus and phishing lists, weekly, checked by SHA-256) get a
+  warning page with Back and Continue. WebRTC no longer shows local IP addresses, and leaks,
+  wrong KeePass passwords and https upgrades are counted. Those lists cost 0.5 MB: their 81,000
+  hosts are kept as hashes.
+
 ## 0.2.0 — 2026-10-18
 
 - Agents: per-agent profiles, frames, response bodies, saved state, record and replay, the Drive

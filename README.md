@@ -1,6 +1,8 @@
 # Lumen
 
-A browser for one person. It does two things well: it looks good, and it does not eat your RAM.
+A native Windows shell around WebView2, written in Rust, built to keep memory low.
+
+What Lumen is so far and where it goes next: [docs/lumen.md](docs/lumen.md).
 
 ## Run it
 

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 396" width="780" height="396" role="img" aria-label="Idle memory: 18.2 MB on 15 Oct, 24.6 MB at 0.2.0, 18.5 MB at 0.2.1" font-family='system-ui, -apple-system, "Segoe UI", sans-serif'>
+<rect x="0.5" y="0.5" width="779" height="395" rx="12" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
+<text x="28" y="38" font-size="17" font-weight="600" fill="#0b0b0b">Idle memory crept up 6 MB over three days, then came back</text>
+<text x="28" y="60" font-size="12.5" fill="#52514e">lumen.exe private working set at idle, start page, headless, release builds, in build order</text>
+<line x1="84" x2="752" y1="310.0" y2="310.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="74.0" y="314.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">0</text>
+<line x1="84" x2="752" y1="238.7" y2="238.7" stroke="#e1e0d9" stroke-width="1"/>
+<text x="74.0" y="242.7" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">10</text>
+<line x1="84" x2="752" y1="167.3" y2="167.3" stroke="#e1e0d9" stroke-width="1"/>
+<text x="74.0" y="171.3" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">20</text>
+<line x1="84" x2="752" y1="96.0" y2="96.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="74.0" y="100.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">30</text>
+<text x="74.0" y="82.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">MB</text>
+<path d="M127.7,310.0 L127.7,184.2 Q127.7,180.2 131.7,180.2 L147.7,180.2 Q151.7,180.2 151.7,184.2 L151.7,310.0 Z" fill="#b9b8b0"><title>15 Oct: 18.2 MB</title></path>
+<text x="139.7" y="332.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="middle">15 Oct</text>
+<text x="139.7" y="170.2" font-size="12.5" font-weight="600" fill="#0b0b0b" text-anchor="middle">18.2 MB</text>
+<path d="M239.0,310.0 L239.0,162.1 Q239.0,158.1 243.0,158.1 L259.0,158.1 Q263.0,158.1 263.0,162.1 L263.0,310.0 Z" fill="#b9b8b0"><title>UI rework, wake fix,: 21.3 MB</title></path>
+<text x="251.0" y="332.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="middle">UI rework, wake fix,</text>
+<text x="251.0" y="348.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="middle">agent security</text>
+<path d="M350.3,310.0 L350.3,160.6 Q350.3,156.6 354.3,156.6 L370.3,156.6 Q374.3,156.6 374.3,160.6 L374.3,310.0 Z" fill="#b9b8b0"><title>Pins, icons: 21.5 MB</title></path>
+<text x="362.3" y="332.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="middle">Pins, icons</text>
+<path d="M461.7,310.0 L461.7,152.8 Q461.7,148.8 465.7,148.8 L481.7,148.8 Q485.7,148.8 485.7,152.8 L485.7,310.0 Z" fill="#b9b8b0"><title>Customize: 22.6 MB</title></path>
+<text x="473.7" y="332.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="middle">Customize</text>
+<path d="M573.0,310.0 L573.0,138.5 Q573.0,134.5 577.0,134.5 L593.0,134.5 Q597.0,134.5 597.0,138.5 L597.0,310.0 Z" fill="#eb6834"><title>0.2.0: 24.6 MB</title></path>
+<text x="585.0" y="332.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="middle">0.2.0</text>
+<text x="585.0" y="124.5" font-size="12.5" font-weight="600" fill="#0b0b0b" text-anchor="middle">24.6 MB</text>
+<path d="M684.3,310.0 L684.3,182.0 Q684.3,178.0 688.3,178.0 L704.3,178.0 Q708.3,178.0 708.3,182.0 L708.3,310.0 Z" fill="#2a78d6"><title>0.2.1: 18.5 MB</title></path>
+<text x="696.3" y="332.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="middle">0.2.1</text>
+<text x="696.3" y="168.0" font-size="12.5" font-weight="600" fill="#0b0b0b" text-anchor="middle">18.5 MB</text>
+<text x="84.0" y="382.0" font-size="12" font-weight="400" fill="#898781" text-anchor="start">The 6 MB was one block: the ad matcher built in debug mode for the privacy report. 0.2.1 builds it lean.</text>
+</svg>

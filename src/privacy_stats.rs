@@ -108,6 +108,20 @@ pub struct Counts {
     #[serde(skip_serializing_if = "is_zero")]
     pub sponsor: u64,
     #[serde(skip_serializing_if = "is_zero")]
+    pub popups: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub webrtc: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub signals: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub wrong_password: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub malicious: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub danger: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub https_up: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub bytes: u64,
     #[serde(skip_serializing_if = "is_zero")]
     pub ms: u64,
@@ -132,6 +146,13 @@ impl Counts {
         self.removeparam += o.removeparam;
         self.scriptlets += o.scriptlets;
         self.sponsor += o.sponsor;
+        self.popups += o.popups;
+        self.webrtc += o.webrtc;
+        self.signals += o.signals;
+        self.wrong_password += o.wrong_password;
+        self.malicious += o.malicious;
+        self.danger += o.danger;
+        self.https_up += o.https_up;
         self.bytes += o.bytes;
         self.ms += o.ms;
     }
@@ -174,6 +195,8 @@ pub struct Snapshot {
     pub range: String,
     /// The same as `today`/`week`/`month`/`all`, whichever `range` picked.
     pub totals: Counts,
+    /// The range immediately before the chosen one, for trends. Zero for "all".
+    pub prev: Counts,
     /// Oldest first, gaps included, so the bars line up with the dates.
     pub bars: Vec<Bar>,
     /// Top sites of the range, busiest first.
@@ -315,6 +338,18 @@ impl Stats {
         }
     }
 
+    /// A subresource from the malicious lists: blocked at the door. The domain
+    /// joins the all-time list like any other blocked name.
+    fn malicious(&mut self, day: &str, site: &str, domain: &str, who: Who) {
+        let domain = if who.private || who.agent { "" } else { domain };
+        self.put(day, site, who, true, |c| c.malicious += 1);
+        if !domain.is_empty() {
+            *self.file.domains.entry(domain.to_string()).or_default() += 1;
+            evict(&mut self.file.domains, MAX_DOMAINS, |n| *n);
+            self.dirty = true;
+        }
+    }
+
     fn estimate(&self, kind: &str) -> (u64, u64) {
         let speed = if self.file.speed > 0.0 { self.file.speed } else { SEED_SPEED };
         let bytes = self.file.avg[kind_index(kind)].round().max(1.0) as u64;
@@ -402,7 +437,15 @@ impl Stats {
             }),
             _ => None,
         };
-        Snapshot { today: self.sum(|d| d == today_n), week: self.sum(|d| d > today_n - 7), month: self.sum(|d| d > today_n - 30), all: self.sum(|_| true), agent: self.file.agent, range: range.to_string(), totals, bars: bars(&self.file, today_n, range), sites: rows, domains, site }
+        // The period immediately before the chosen one, for trends. "all" has
+        // no previous period and stays zero.
+        let prev = match range {
+            "today" => self.sum(|d| d == today_n - 1),
+            "7" => self.sum(|d| d > today_n - 14 && d <= today_n - 7),
+            "30" => self.sum(|d| d > today_n - 60 && d <= today_n - 30),
+            _ => Counts::default(),
+        };
+        Snapshot { today: self.sum(|d| d == today_n), week: self.sum(|d| d > today_n - 7), month: self.sum(|d| d > today_n - 30), all: self.sum(|_| true), agent: self.file.agent, range: range.to_string(), totals, prev, bars: bars(&self.file, today_n, range), sites: rows, domains, site }
     }
 
     /// Every day the predicate takes, added up.
@@ -641,6 +684,51 @@ pub fn sponsor(site: &str, n: u64, who: Who) {
     }
     let day = local_date(now_secs());
     with(|s| s.put(&day, site, who, false, |c| c.sponsor += n));
+}
+
+/// A popup the page tried to open and Lumen stopped: no user gesture, or a
+/// `$popup` rule said so.
+pub fn popup(site: &str, who: Who) {
+    let day = local_date(now_secs());
+    with(|s| s.put(&day, site, who, true, |c| c.popups += 1));
+}
+
+/// An RTCPeerConnection the page made. Lumen forced the public interface only,
+/// so the local IP never left; this counts the attempt.
+pub fn rtc(site: &str, who: Who) {
+    let day = local_date(now_secs());
+    with(|s| s.put(&day, site, who, false, |c| c.webrtc += 1));
+}
+
+/// A third-party request that carried Lumen's GPC / DNT headers.
+pub fn signal(site: &str, who: Who) {
+    let day = local_date(now_secs());
+    with(|s| s.put(&day, site, who, false, |c| c.signals += 1));
+}
+
+/// A KeePass unlock with the wrong password. No site: it is the vault itself.
+pub fn wrong_password() {
+    let day = local_date(now_secs());
+    with(|s| s.put(&day, "", Who::new(0, false, false), false, |c| c.wrong_password += 1));
+}
+
+/// A top-level navigation to a dangerous site: the warning page showed.
+pub fn danger(site: &str, who: Who) {
+    let day = local_date(now_secs());
+    with(|s| s.put(&day, site, who, false, |c| c.danger += 1));
+}
+
+/// A subresource from the malicious lists: blocked at the door. The domain
+/// joins the all-time list like any other blocked name.
+pub fn malicious_block(site: &str, domain: &str, who: Who) {
+    let day = local_date(now_secs());
+    with(|s| s.malicious(&day, site, domain, who));
+}
+
+/// A navigation HTTPS-first upgraded.
+pub fn https_upgrade(site: &str, who: Who) {
+    let day = local_date(now_secs());
+    with(|s| s.put(&day, site, who, false, |c| c.https_up += 1));
 }
 
 /// A request that went through, with its size: where the averages come from.
@@ -937,5 +1025,102 @@ mod tests {
         assert!(s.snapshot("7", Some("gone.example")).site.is_none());
         // Domains are all time, busiest first.
         assert_eq!(snap.domains[0].0, "a.example");
+    }
+
+    /// Every new counter lands in the day's totals and, unless the tab is
+    /// private or the agent's, on the site.
+    #[test]
+    fn the_new_counters_go_where_the_tab_allows_them() {
+        let mut s = Stats::open(tmp("new"));
+        let d = day(20_000);
+        let me = Who::new(1, false, false);
+        let secret = Who::new(2, true, false);
+        let agent = Who::new(3, false, true);
+        s.put(&d, "news.example", me, true, |c| c.popups += 1);
+        s.put(&d, "news.example", me, false, |c| c.webrtc += 2);
+        s.put(&d, "news.example", me, false, |c| c.signals += 3);
+        s.put(&d, "news.example", me, false, |c| c.wrong_password += 1);
+        s.put(&d, "evil.example", secret, false, |c| c.danger += 1);
+        s.put(&d, "agent.example", agent, false, |c| c.https_up += 4);
+        s.malicious(&d, "news.example", "bad.example", me);
+        s.malicious(&d, "secret.example", "evil.example", secret);
+        s.malicious(&d, "agent.example", "bad.example", agent);
+
+        let day_file = &s.file.days[&d];
+        assert_eq!(day_file.counts.popups, 1);
+        assert_eq!(day_file.counts.webrtc, 2);
+        assert_eq!(day_file.counts.signals, 3);
+        assert_eq!(day_file.counts.wrong_password, 1);
+        assert_eq!(day_file.counts.danger, 1, "a private tab's warning counts in the totals");
+        assert_eq!(day_file.counts.malicious, 2, "the private one counts in the totals too");
+        // The agent's own https_up and malicious went to its bucket, not the day.
+        assert_eq!(s.file.agent.https_up, 4);
+        assert_eq!(s.file.agent.malicious, 1);
+        assert_eq!(day_file.counts.https_up, 0, "the agent never touched the day's https_up");
+        assert_eq!(day_file.counts.malicious, 2, "only the two non-agent ones landed on the day");
+        // Sites: private and agent leave no site.
+        assert_eq!(day_file.sites["news.example"].popups, 1);
+        assert_eq!(day_file.sites["news.example"].malicious, 1);
+        assert!(!day_file.sites.contains_key("evil.example"));
+        assert!(!day_file.sites.contains_key("agent.example"));
+        // Domains follow the same rule as sites: only the person's non-private tab.
+        assert_eq!(s.file.domains.get("bad.example"), Some(&1), "only the person's hit is recorded");
+        assert!(!s.file.domains.contains_key("evil.example"));
+        // The chip: popup and malicious count, the rest do not. It is memory,
+        // so the private tab's own page counts in it too.
+        assert_eq!(s.tab[&1], 2, "the popup and the malicious block on this page");
+        assert_eq!(s.tab[&2], 1, "the private tab's malicious block counts in its own chip");
+    }
+
+    /// The previous period: yesterday for "today", the block before for "7"
+    /// and "30", nothing for "all".
+    #[test]
+    fn the_prev_period_is_the_one_immediately_before() {
+        let mut s = Stats::open(tmp("prev"));
+        let today_n = day_of(&local_date(now_secs())).unwrap();
+        let put = |s: &mut Stats, ago: i64| {
+            let d = day_name(today_n - ago);
+            s.block(&d, "news.example", "a.example", Cat::Ads, "script", Who::new(1, false, false));
+        };
+        put(&mut s, 0); // today
+        put(&mut s, 1); // yesterday: prev of "today"
+        put(&mut s, 8); // in the previous 7
+        put(&mut s, 9); // also in the previous 7
+        put(&mut s, 31); // in the previous 30, not the previous 7
+        put(&mut s, 40); // in the previous 30
+
+        let snap = s.snapshot("today", None);
+        assert_eq!(snap.totals.blocked(), 1);
+        assert_eq!(snap.prev.blocked(), 1, "yesterday is the previous day");
+
+        let snap = s.snapshot("7", None);
+        assert_eq!(snap.totals.blocked(), 2, "today and yesterday are both in the last 7");
+        assert_eq!(snap.prev.blocked(), 2, "the two days in the block before the 7");
+
+        let snap = s.snapshot("30", None);
+        assert_eq!(snap.totals.blocked(), 4, "today, yesterday and the two inside 30");
+        assert_eq!(snap.prev.blocked(), 2, "the two in the block before the 30");
+
+        let snap = s.snapshot("all", None);
+        assert_eq!(snap.totals.blocked(), 6);
+        assert_eq!(snap.prev.blocked(), 0, "all has no previous period");
+    }
+
+    /// An older file loads and the new fields read zero.
+    #[test]
+    fn an_older_file_loads_with_the_new_fields_zero() {
+        let dir = tmp("old");
+        // As version 1 wrote it before the new counters existed.
+        let old = r#"{"v":1,"days":{"2026-10-15":{"counts":{"ads":5,"trackers":3,"bytes":1000,"ms":50},"sites":{"a.example":{"ads":5}}}},"domains":{"x.example":5},"agent":{},"avg":[80000,120000,30000,1500000,40000,40000],"speed":0}"#;
+        fs::write(dir.join(FILE), old).unwrap();
+        let s = Stats::open(dir);
+        let d = &s.file.days["2026-10-15"];
+        assert_eq!(d.counts.ads, 5);
+        assert_eq!(d.counts.trackers, 3);
+        assert_eq!(d.counts.popups, 0, "new fields default to zero");
+        assert_eq!(d.counts.webrtc, 0);
+        assert_eq!(d.counts.danger, 0);
+        assert_eq!(d.counts.malicious, 0);
+        assert_eq!(s.file.agent.https_up, 0);
     }
 }

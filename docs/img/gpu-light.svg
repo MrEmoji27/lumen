@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 390" width="780" height="390" role="img" aria-label="In-process: 639 MB, 122% CPU, 6.8% dropped; separate: 726 MB, 75% CPU, 0% dropped" font-family='system-ui, -apple-system, "Segoe UI", sans-serif'>
+<rect x="0.5" y="0.5" width="779" height="389" rx="12" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
+<text x="28" y="38" font-size="17" font-weight="600" fill="#0b0b0b">One GPU setting trades 90 MB of memory for smoother video</text>
+<text x="28" y="60" font-size="12.5" fill="#52514e">A 1080p video in one tab, release build, WebView2's GPU work in its main process against in a process of its own</text>
+<rect x="28" y="75" width="12" height="12" rx="3" fill="#2a78d6"/>
+<text x="46.0" y="85.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">GPU in WebView2's main process</text>
+<rect x="270.0" y="75" width="12" height="12" rx="3" fill="#eb6834"/>
+<text x="288.0" y="85.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Separate GPU process</text>
+<text x="28.0" y="116.0" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="start">Private memory, MB</text>
+<line x1="72" x2="256" y1="318.0" y2="318.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="62.0" y="322.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">0</text>
+<line x1="72" x2="256" y1="225.0" y2="225.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="229.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">400</text>
+<line x1="72" x2="256" y1="132.0" y2="132.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="136.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">800</text>
+<path d="M136.0,318.0 L136.0,173.4 Q136.0,169.4 140.0,169.4 L156.0,169.4 Q160.0,169.4 160.0,173.4 L160.0,318.0 Z" fill="#2a78d6"><title>Private memory, MB, in-process: 639</title></path>
+<text x="148.0" y="161.4" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="middle">639</text>
+<path d="M168.0,318.0 L168.0,153.2 Q168.0,149.2 172.0,149.2 L188.0,149.2 Q192.0,149.2 192.0,153.2 L192.0,318.0 Z" fill="#eb6834"><title>Private memory, MB, separate: 726</title></path>
+<text x="180.0" y="141.2" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="middle">726</text>
+<text x="284.0" y="116.0" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="start">CPU, % of one core</text>
+<line x1="328" x2="512" y1="318.0" y2="318.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="318.0" y="322.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">0</text>
+<line x1="328" x2="512" y1="256.0" y2="256.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="318.0" y="260.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">50</text>
+<line x1="328" x2="512" y1="194.0" y2="194.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="318.0" y="198.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">100</text>
+<line x1="328" x2="512" y1="132.0" y2="132.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="318.0" y="136.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">150</text>
+<path d="M392.0,318.0 L392.0,170.7 Q392.0,166.7 396.0,166.7 L412.0,166.7 Q416.0,166.7 416.0,170.7 L416.0,318.0 Z" fill="#2a78d6"><title>CPU, % of one core, in-process: 122</title></path>
+<text x="404.0" y="158.7" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="middle">122</text>
+<path d="M424.0,318.0 L424.0,229.0 Q424.0,225.0 428.0,225.0 L444.0,225.0 Q448.0,225.0 448.0,229.0 L448.0,318.0 Z" fill="#eb6834"><title>CPU, % of one core, separate: 75</title></path>
+<text x="436.0" y="217.0" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="middle">75</text>
+<text x="540.0" y="116.0" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="start">Dropped frames, %</text>
+<line x1="584" x2="768" y1="318.0" y2="318.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="574.0" y="322.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">0</text>
+<line x1="584" x2="768" y1="225.0" y2="225.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="574.0" y="229.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">5</text>
+<line x1="584" x2="768" y1="132.0" y2="132.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="574.0" y="136.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">10</text>
+<path d="M648.0,318.0 L648.0,195.5 Q648.0,191.5 652.0,191.5 L668.0,191.5 Q672.0,191.5 672.0,195.5 L672.0,318.0 Z" fill="#2a78d6"><title>Dropped frames, %, in-process: 6.8</title></path>
+<text x="660.0" y="183.5" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="middle">6.8</text>
+<text x="692.0" y="310.0" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="middle">0</text>
+<text x="28.0" y="374.0" font-size="12" font-weight="400" fill="#898781" text-anchor="start">Same 1080p video, two runs each, mean shown. In-process is the default; the setting trades about 90 MB for smoother video.</text>
+</svg>
