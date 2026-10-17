@@ -58,15 +58,66 @@ URL: http://127.0.0.1:8765/agent.html
 
 Act by ref. Take a new snapshot after the page changes; refs are made fresh each time.
 
+### Frames
+
+Iframes are looked inside, same-origin and cross-origin. Their controls are listed under a Frame
+heading and their refs carry the frame's number:
+
+```
+Frame 1: https://shop.example/pay
+  - textbox "Card number" [ref=f1e7]
+  - button "Pay" [ref=f1e9]
+Frame 2: https://widget.example/chat
+  - button "Send" [ref=f2e3]
+```
+
+An `f2e5` ref acts inside frame 2: clicking and typing run there, with the point moved into the
+page's own coordinates. Frames are numbered by the snapshot that listed them, so take a new
+snapshot before using a frame ref. `frames=false` skips them; the snapshot then says how many were
+left alone.
+
+### Waiting
+
+`click`, `hover`, `type`, `select` and `drag` wait for their element the way a person would: it has
+to be in the page, visible, enabled, and standing still (up to 5 s), and they wait for the page to
+stop fetching (up to 2.5 s) after the action. A covered element is clicked directly, as before.
+
+### Response bodies
+
+`browser_network` lists requests with a `#number`; `browser_network_body` takes that number (`index`),
+a `request_id`, or a word in the URL, and returns the response body, capped at 200 KB. Binary
+responses come back base64-encoded. Bodies are kept for the tab while it lives, up to about 4 MB per
+resource.
+
+### Popups
+
+A popup or new tab a page opens (`window.open`, `target=_blank`) becomes one of the agent's own
+tabs, and the tool answer says so: `new tab 7 opened by the page: Plain page (127.0.0.1)`. No
+guessing where a click went.
+
+### Saved state and recordings
+
+- `browser_state_save` writes this agent's cookies and the tab's localStorage to
+  `Agent downloads\state\<name>.json`. `browser_state_load` puts them back, in any agent's own
+  profile: a worker that comes back does not start at the login page. Refused when the person
+  shares their profile: those cookies would be the person's.
+- `browser_record_start` / `browser_record_stop` save the calls that were made
+  (`Agent downloads\recordings\<name>.json`), and `browser_replay` runs them again. Tabs the
+  recording opened are opened again; a recording that starts on a tab it did not open takes `tab=`.
+- `screenshots=true` on a snapshot adds a small picture of the controls whose name is not unique:
+  three buttons all called "Edit" can be told apart by looking.
+
 ## The tools
 
 | Read | Act | Watch | Other |
 |---|---|---|---|
-| snapshot | click (left, right, double, x/y) | console (logs, errors, dialogs) | open, navigate, back, forward, reload |
-| read (snapshot + text) | type (real keyboard text) | network (method, status, URL) | tabs, show, close |
-| article (Readability) | press (Enter, Control+A...) | wait (text, gone, selector, URL) | screenshot (viewport, full, element) |
-| find | select, scroll, hover, drag | dialogs (accept or dismiss) | pdf, download, downloads |
-| eval (awaits promises) | upload (files into a file input) | resize (mobile, tablet, any) | handoff (to the person) |
+| snapshot (iframes too) | click (left, right, double, x/y) | console (logs, errors, dialogs) | open, navigate, back, forward, reload |
+| read (snapshot + text) | type (real keyboard text) | network (method, status, URL, #number) | tabs, show, close |
+| article (Readability) | press (Enter, Control+A...) | network_body (one response body) | screenshot (viewport, full, element) |
+| find | select, scroll, hover | wait (text, gone, selector, URL) | pdf, download, downloads |
+| eval (awaits promises) | drag (native=true for HTML5) | dialogs (accept or dismiss) | handoff (to the person) |
+| | upload (files into a file input) | resize (mobile, tablet, any) | state_save, state_load |
+| | | | record_start, record_stop, replay |
 
 Clicks, keys and typing go through the DevTools Protocol, so the page sees trusted events, the
 same as a person's. A synthetic `element.click()` is only used when something covers the element.
@@ -87,6 +138,29 @@ says goodbye, its tabs close. When it does not (the bridge was killed), Lumen cl
 minutes of silence, unless a handoff is waiting. Workers can browse side by side without stepping
 on each other.
 
+### One profile per agent
+
+Every session gets its own WebView2 profile (`agent-<key>`): its own cookies, localStorage,
+IndexedDB, cache and permission state. Two agents logging into the same site never see each other's
+login. Each session also gets its own folder under "Agent downloads", its own console, network log,
+dialog answers and screen emulation (those are per tab, and a session's tabs are its own).
+
+- **Ephemeral by default.** A session that was not asked to stay is over when it ends: Lumen wipes
+  the profile's cookies, storage and cache at once, and its profile folder is deleted — right away
+  when the agent has its own environment, at the next start otherwise, because WebView2 keeps a
+  live profile's files open for the browser's whole life.
+- **A kept profile.** `lumen-agent --session NAME` (or `_meta.lumen.profile` in an `initialize`)
+  keeps the profile `agent-NAME` and the folder `Agent downloads\NAME`: the next run under that
+  name starts with its cookies. A name is still not a key: Lumen cleans it and hands out ids.
+- **Strict isolation** (Settings > AI agent) gives every agent its own WebView2 environment: its own
+  user-data folder under `agent_envs\`, so its own browser process, and its folder is deleted the
+  moment the session ends. Measured on this laptop, one headless agent page: about 130 MB more
+  working set (about 50 MB of it private) and two more processes than the same page in the shared
+  browser. Off, agents still have separate profiles; they share one browser process.
+- **Per-agent Stop.** The sidebar groups agent tabs per session, with a colour dot, the client's
+  name and a Stop button. Stop ends that one session: its id stops working, its tabs close, its
+  profile data is deleted.
+
 ## Your own tabs
 
 Your tabs are off limits. Not even "Agents use my profile" opens them. To lend one tab, right-click
@@ -94,6 +168,26 @@ it and choose **Let agents use this tab**. It gets a small outlined AI mark. The
 the tab goes to another site, when it closes, or when you choose **Stop letting agents use this
 tab**. A lent tab can be read and steered. It can never be scripted (no eval), never get uploads,
 never be closed or resized by an agent.
+
+## The Drive panel
+
+The sidebar's arrow opens Drive: type a task once ("find the cheapest kettle and put it in the
+cart, stop before paying") and press Run. Lumen starts an agent CLI of its own with Lumen as its
+MCP server, and shows the run: its tool calls as a step list, and what the agent says, line by
+line.
+
+- **The command** is a setting (Settings > AI agent > Drive panel's command): `{task}` is replaced
+  by the task plus the safety rule. Presets: opencode (default), cmdc, claude. Anything else goes
+  in `drive_cmd` in settings.json.
+- **Each run is its own session** with its own profile, tabs and download folder (`drive-1`,
+  `drive-2`, ...). Stop ends it: the CLI is killed, its tabs close, its profile data is deleted.
+  What it downloaded stays.
+- **Pause and take over** brings the run's tab to the front and hands it to the person. While it is
+  paused the agent may only call `browser_handoff`; pressing Done gives the tab back and the run
+  goes on.
+- **Safety in the task.** Every task Lumen sends ends with: before you pay, send a message, delete
+  anything, or log in, stop and call `browser_handoff` with one line, and wait. The same rule is in
+  the MCP instructions every agent reads at `initialize`.
 
 ## Out of the way
 
@@ -121,9 +215,14 @@ centred, in the taskbar, with sound. One Lumen per profile, always.
   network or device paths, no symlink or junction out. Files only.
 - Agents open http(s) pages, data: pages and search words. Not `file:`, `edge:`, `about:` (except
   blank) or `magnet:`. Otherwise an agent could read any file by opening it as a page.
-- Downloads and PDFs go to `Agent downloads` inside your download folder. Only http(s) URLs.
-  A torrent that an agent's download or page starts arrives paused until you press Resume.
-  `browser_downloads` lists only the agents' own.
+- Downloads and PDFs go to `Agent downloads` inside your download folder, each session in its own
+  folder inside that. Only http(s) URLs. A torrent that an agent's download or page starts arrives
+  paused until you press Resume. `browser_downloads` lists only the agents' own.
+- Saved states (`browser_state_save`) hold cookies and localStorage of an agent's own profile, in
+  `Agent downloads\state`. They are readable by other agents of yours by name: that is the point of
+  a state. They never hold your own profile's cookies, and a shared profile refuses them.
+- Recordings (`browser_record_stop`) are files of tool calls in `Agent downloads\recordings`.
+  `browser_replay` runs one again; it authorizes every step the same way a live call is authorized.
 - Agent tabs never go into history, never save passwords, get no site permissions.
 - The "Agent working · Stop" chip in the sidebar shuts the door and closes every agent tab.
 
@@ -131,12 +230,11 @@ centred, in the taskbar, with sound. One Lumen per profile, always.
 
 What I, an agent, would want next, in order:
 
-1. **Network bodies.** `browser_network` shows URL and status; for debugging an API I want the
-   response body of one request (DevTools `Network.getResponseBody`).
-2. **Element screenshots in the snapshot.** A tiny image per ambiguous control (three buttons all
-   called "Edit") would save a round of guessing.
-3. **Recording.** Save a sequence of tool calls and replay it: a test, written by browsing once.
-4. **Cookies and storage in and out.** Save a logged-in state and load it in another session
-   (agent-browser's `state save`), so a worker does not need a handoff every time.
-5. **Frames.** Snapshots stop at iframes. Payment forms and embeds live in them.
-6. **Native drag and drop.** HTML5 drag events need DevTools' drag interception; mouse drags work today.
+1. **Closed shadow roots.** The snapshot walks open shadow DOM only; a page that closes its roots is
+   still a wall.
+2. **A per-agent setting for uploads and downloads** (a prompt per call), instead of one switch for
+   every agent.
+3. **Page text marked as untrusted** in tool output, so a page that says "ignore your task" is read
+   as a page talking, not the person.
+4. **Multi-file downloads and torrent picks** from the tools; today only start and list.
+5. **A week of journal data** on the fixed event loop with no unclean exits.
