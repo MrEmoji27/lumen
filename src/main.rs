@@ -9,7 +9,9 @@ mod aria;
 mod agent;
 mod agent_policy;
 mod agentkit;
-mod aloud;
+mod agent_result;
+mod agent_tasks;
+mod agent_consent;mod aloud;
 mod blocker;
 mod bookmarks;
 mod chrome;
@@ -407,7 +409,7 @@ struct App {
     agent_logs: agentkit::Logs,
     /// An agent waiting for the person: (tab, agent name, message, where to say Done).
     handoff: Option<(u64, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,
-    /// URLs agents asked to download: they land in "Agent downloads" and show in browser_downloads.
+    consent: Option<(u64, String, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,    /// URLs agents asked to download: they land in "Agent downloads" and show in browser_downloads.
     agent_dl: HashSet<String>,
     /// What aria2 was given per gid, so a failed download can be tried again.
     aria_meta: HashMap<String, (String, Vec<String>, Option<String>)>,
@@ -727,7 +729,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         recall: recall::Recall::start(&store::data_dir()),
         agent_logs: Default::default(),
         handoff: None,
-        agent_dl: HashSet::new(),
+        consent: None,        agent_dl: HashSet::new(),
         aria_meta: HashMap::new(),
         aria_person: HashSet::new(),
         aria_page: HashSet::new(),
@@ -4849,7 +4851,24 @@ impl App {
                 }
                 self.push();
             }
-            "agentStop" => {
+            "handoffDecline" => {
+                if let Some((_, _, _, r)) = self.handoff.take() {
+                    let _ = r.send(Err("declined".into()));
+                }
+                self.push();
+            }
+            "consentApprove" => {
+                if let Some((_, _, _, _, r)) = self.consent.take() {
+                    let _ = r.send(Ok(Value::Null));
+                }
+                self.push();
+            }
+            "consentDecline" => {
+                if let Some((_, _, _, _, r)) = self.consent.take() {
+                    let _ = r.send(Err("declined".into()));
+                }
+                self.push();
+            }            "agentStop" => {
                 if let Some((_, _, _, r)) = self.handoff.take() {
                     let _ = r.send(Err("the person stopped the agents".into()));
                 }
@@ -5409,7 +5428,39 @@ impl App {
                 };
                 let _ = reply.send(r);
             }
-            Op::TestDone => {
+            Op::TestDecline => {
+                if cfg!(debug_assertions) {
+                    if let Some((_, _, _, r)) = self.handoff.take() {
+                        let _ = r.send(Err("declined".into()));
+                    }
+                    let _ = reply.send(Ok(Value::Null));
+                    self.push();
+                } else {
+                    let _ = reply.send(Err("no such thing".into()));
+                }
+            }
+            Op::TestConsentApprove => {
+                if cfg!(debug_assertions) {
+                    if let Some((_, _, _, _, r)) = self.consent.take() {
+                        let _ = r.send(Ok(Value::Null));
+                    }
+                    let _ = reply.send(Ok(Value::Null));
+                    self.push();
+                } else {
+                    let _ = reply.send(Err("no such thing".into()));
+                }
+            }
+            Op::TestConsentDecline => {
+                if cfg!(debug_assertions) {
+                    if let Some((_, _, _, _, r)) = self.consent.take() {
+                        let _ = r.send(Err("declined".into()));
+                    }
+                    let _ = reply.send(Ok(Value::Null));
+                    self.push();
+                } else {
+                    let _ = reply.send(Err("no such thing".into()));
+                }
+            }            Op::TestDone => {
                 // Debug builds only: stands in for the person pressing Done.
                 match self.handoff.take() {
                     Some((_, _, _, r)) if cfg!(debug_assertions) => {
@@ -5590,7 +5641,7 @@ impl App {
                 self.activate(tab);
                 let _ = reply.send(Ok(Value::Null));
             }
-            Op::Handoff { tab, message } => {
+            Op::Handoff { tab, message, .. } => {
                 if mine(self, tab).is_none() {
                     let _ = reply.send(no_tab(tab));
                     return;
@@ -5602,6 +5653,24 @@ impl App {
                 }
                 self.activate(tab);
                 self.handoff = Some((tab, who.name.clone(), message, reply));
+                self.push();
+            }
+            Op::Status => {
+                let tabs: Vec<Value> = self.tabs.iter().map(|t| json!({"tab": t.id, "title": t.title, "url": t.url, "agent": t.agent, "owner": t.owner, "crashed": t.crashed, "granted": self.agent_granted(t)})).collect();                let handoff = self.handoff.as_ref().map(|h| json!({"tab": h.0, "who": h.1, "message": h.2}));
+                let downloads: Vec<Value> = self.downloads.iter().filter(|d| !d.private).map(|d| json!({"url": d.url, "path": d.path, "state": d.state, "size": d.received})).collect();
+                let _ = reply.send(Ok(json!({"tabs": tabs, "handoff": handoff, "downloads": downloads})));
+            }
+            Op::Consent { tab, kind, message } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                if self.handoff.is_some() || self.consent.is_some() {
+                    let _ = reply.send(Err("the person is already helping another agent; try again in a minute".into()));
+                    return;
+                }
+                self.activate(tab);
+                self.consent = Some((tab, who.name.clone(), kind, message, reply));
                 self.push();
             }
             Op::Close { tab } => {
