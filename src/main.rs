@@ -30,6 +30,8 @@ mod upnp;
 mod video;
 mod workspaces;
 mod store;
+mod sitefavs;
+mod speeddial;
 mod sponsorblock;
 mod trackers;
 
@@ -302,6 +304,9 @@ struct App {
     ui_dirty: bool,
     /// Favicons are big. They travel alone, only when they change.
     fav_queue: Vec<u64>,
+    /// One favicon per site, for the speed dial's tiles. Kept in favicons.json.
+    site_favs: sitefavs::Favs,
+    site_favs_dirty: bool,
     /// Sidebar color reported by the UI. Paints the gaps around the page.
     bg: (u8, u8, u8),
     /// Two pages side by side: the tab in the other half of the stage.
@@ -603,6 +608,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         ui_ready: true,
         ui_dirty: false,
         fav_queue: Vec::new(),
+        site_favs: sitefavs::load(),
+        site_favs_dirty: false,
         bg,
         split: None,
         pane_right: false,
@@ -1583,6 +1590,7 @@ impl App {
                 } else {
                     Vec::new()
                 },
+                suggestions: self.speed_dial_suggestions(),
                 mark: self.active_tab().filter(|t| !t.url.is_empty()).and_then(|t| self.library.mark_for_url(&t.url)).map(ui_mark),
                 bm_folders: self.library.folders(),
                 handoff: self.handoff.as_ref().map(|h| (h.1.clone(), h.2.clone())),
@@ -2989,6 +2997,15 @@ impl App {
                     && self.tabs[i].reader.is_none()
                     && self.tabs[i].favicon != f
                 {
+                    // The site's icon for the speed dial, kept past this tab. Not for private tabs:
+                    // that would write down that the site was visited.
+                    if !self.tabs[i].private
+                        && !self.tabs[i].agent
+                        && sitefavs::remember(&mut self.site_favs, &self.tabs[i].url, &f)
+                    {
+                        self.site_favs_dirty = true;
+                        self.chrome.set_site_fav(&speeddial::host_of(&self.tabs[i].url), &f);
+                    }
                     self.tabs[i].favicon = f;
                     self.fav_queue.push(id);
                     self.dirty = true;
@@ -3806,6 +3823,9 @@ impl App {
             "ready" => {
                 self.ui_ready = true;
                 self.fav_queue = self.tabs.iter().filter(|t| !t.favicon.is_empty()).map(|t| t.id).collect();
+                for (host, uri) in &self.site_favs {
+                    self.chrome.set_site_fav(host, uri);
+                }
                 self.push();
                 if !self.shown {
                     self.shown = true;
@@ -4363,6 +4383,7 @@ impl App {
                 // Seconds since the epoch; missing or null means everything.
                 let since = m["since"].as_u64();
                 self.library.clear_history(since);
+                self.forget_site_favs(since);
                 self.recall.clear(since);
                 self.library.flush();
                 // WebView2 keeps a history of its own in the profile; it goes too.
@@ -4375,6 +4396,7 @@ impl App {
                 let since = m["since"].as_u64();
                 let more = m["more"].as_bool().unwrap_or(false);
                 self.library.clear_history(since);
+                self.forget_site_favs(since);
                 self.recall.clear(since);
                 self.library.flush();
                 if let Some(v) = self.plain_view() {
@@ -5121,6 +5143,27 @@ impl App {
         }
     }
 
+    /// Clearing everything also clears the site icons: they are a list of the sites that were
+    /// visited. A partial clear leaves them (they carry no times to cut by).
+    fn forget_site_favs(&mut self, since: Option<u64>) {
+        if since.is_none() && !self.site_favs.is_empty() {
+            self.site_favs.clear();
+            sitefavs::save(&self.site_favs);
+        }
+    }
+
+    /// Sites to offer on the new tab page while it has no tiles: the ones seen most. Only worked
+    /// out when the page is showing and has nothing else to show.
+    fn speed_dial_suggestions(&self) -> Vec<store::Shortcut> {
+        let showing = self.panel == Panel::None && self.active_tab().is_some_and(|t| t.status() == "new");
+        if !showing || !self.settings.speed_dial || !self.settings.shortcuts.is_empty() {
+            return Vec::new();
+        }
+        let seen: Vec<speeddial::Seen> =
+            self.library.top_visits(60).into_iter().filter(|v| !v.url.is_empty()).map(|v| speeddial::Seen { url: v.url }).collect();
+        speeddial::suggest(&seen, &self.settings.shortcuts, 8)
+    }
+
     fn toggle_bookmark(&mut self) {
         let Some(t) = self.active_tab() else { return };
         if t.url.is_empty() || t.agent {
@@ -5171,7 +5214,8 @@ impl App {
             return;
         }
         self.library.clear_history(None);
-        self.recall.clear(None);
+        self.library.clear_history(None);
+        self.forget_site_favs(None);
         self.library.flush();
         // WebView2 finishes the wipe on its own time and Lumen is closing, so ask now
         // and again at the next start: clearing twice costs nothing, missing it would.
@@ -5198,6 +5242,9 @@ impl App {
 
     fn save_session(&mut self) {
         self.dirty = false;
+        if std::mem::take(&mut self.site_favs_dirty) {
+            sitefavs::save(&self.site_favs);
+        }
         let (width, height) = logical_size(&self.ctx);
         let maximized = self.ctx.window.is_maximized();
         let keep: Vec<&Tab> = keepable(&self.tabs, self.active);

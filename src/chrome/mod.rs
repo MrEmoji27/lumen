@@ -42,7 +42,11 @@ use windows::{
     core::{HSTRING, PCSTR, PCWSTR, w},
 };
 
-use crate::{engine::Ev, store::Settings};
+use crate::{
+    engine::Ev,
+    speeddial,
+    store::{Settings, Shortcut},
+};
 use gfx::{Align, Font, Gfx, R};
 use theme::Theme;
 
@@ -129,6 +133,8 @@ pub struct UiState {
     pub glance: bool,
     /// The active page is bookmarked.
     pub bookmarked: bool,
+    /// Sites seen most, for the new tab page while it has no tiles. Filled only then.
+    pub suggestions: Vec<Shortcut>,
     /// The active page's bookmark, for the star's menu.
     pub mark: Option<UiMark>,
     /// Bookmark folder names, in order. "Unsorted" is not one: it is the empty name.
@@ -215,6 +221,11 @@ pub enum Hit {
     KdbxFill,
     Sugg(usize),
     Shortcut(usize),
+    /// A suggested site on the speed dial, and its "keep it" button.
+    DialSugg(usize),
+    DialPin(usize),
+    /// The "+" cell of the speed dial.
+    DialAdd,
     NtpSearch,
     /// Page widgets (settings and Control live in pages.rs).
     Page(pages::PageHit),
@@ -243,6 +254,48 @@ enum SuggKind {
     Url(String, bool),
 }
 
+/// One cell of the speed dial.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Cell {
+    /// A tile you keep (index into the settings' shortcuts).
+    Tile(usize),
+    /// A site you visit a lot, offered while you keep none (index into the suggestions).
+    Sugg(usize),
+    /// The "+" cell.
+    Add,
+}
+
+struct NtpGeo {
+    field: R,
+    grid: speeddial::Grid,
+    /// Where the first row of cells starts.
+    top: f32,
+    cells: Vec<Cell>,
+}
+
+/// What the speed dial shows: nothing when it is switched off, your tiles, or, with none, the
+/// sites seen most; then the "+" while there is room for one more.
+fn dial_cells(s: &UiState) -> Vec<Cell> {
+    if !s.settings.speed_dial {
+        return Vec::new();
+    }
+    let mine = s.settings.shortcuts.len().min(speeddial::MAX_TILES);
+    // Five suggestions and the "+" make one full row of six.
+    let mut cells: Vec<Cell> = if mine > 0 { (0..mine).map(Cell::Tile).collect() } else { (0..s.suggestions.len().min(5)).map(Cell::Sugg).collect() };
+    if mine < speeddial::MAX_TILES {
+        cells.push(Cell::Add);
+    }
+    cells
+}
+
+/// A tile picked up on the new tab page: it moves when let go over another one.
+struct DialDrag {
+    from: usize,
+    x0: f32,
+    y0: f32,
+    moved: bool,
+}
+
 struct Drag {
     id: u64,
     x0: f32,
@@ -266,6 +319,9 @@ pub(crate) struct Inner {
     list_max: f32,
     drag: Option<Drag>,
     favs: HashMap<u64, Vec<u8>>,
+    /// One icon per site (png bytes, by host), for the speed dial's tiles.
+    site_favs: HashMap<String, Vec<u8>>,
+    dial_drag: Option<DialDrag>,
     edit: HWND,
     ntp_edit: HWND,
     /// The Bookmarks page's search box.
@@ -325,6 +381,18 @@ fn ask_text(kind: &str) -> String {
         "something" => "asks for a permission".into(),
         k => format!("wants your {k}"),
     }
+}
+
+/// The tile's name under it.
+const SMALL_TILE: Font = Font::ui(12.0, 450);
+
+/// The bitmap cache key of a site's icon. Tab ids are small; a site's key has the top bit set,
+/// so the two never meet in the cache.
+fn site_key(host: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    host.hash(&mut h);
+    h.finish() | (1 << 63)
 }
 
 fn host(url: &str) -> String {
@@ -460,6 +528,8 @@ impl Chrome {
                 list_max: 0.0,
                 drag: None,
                 favs: HashMap::new(),
+                site_favs: HashMap::new(),
+                dial_drag: None,
                 edit,
                 ntp_edit,
                 bm_edit,
@@ -585,6 +655,20 @@ impl Chrome {
         i.gfx.bitmaps.remove(&id);
         i.favs.insert(id, png);
         i.invalidate();
+    }
+
+    /// A site's icon for the speed dial's tiles.
+    pub fn set_site_fav(&self, host: &str, data_uri: &str) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        let png = data_uri
+            .split_once("base64,")
+            .and_then(|(_, b)| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
+            .unwrap_or_default();
+        i.gfx.bitmaps.remove(&site_key(host));
+        i.site_favs.insert(host.to_string(), png);
+        if i.ntp_visible() {
+            i.invalidate();
+        }
     }
 
     /// History and bookmark matches for `q`, from the main loop. Merged if still current.
@@ -833,10 +917,25 @@ impl Inner {
     }
 
     fn ntp_field(&self) -> R {
+        self.ntp_geometry().field
+    }
+
+    /// The new tab page's parts: the search field, and the speed dial's cells under it. With
+    /// many rows of tiles the whole composition rises, so the last row is not cut off, but never
+    /// so far that the clock above the field runs out of room.
+    fn ntp_geometry(&self) -> NtpGeo {
         let s = self.state.as_ref().unwrap();
         let (x, y, w, h) = s.stage;
         let fw = (w * 0.82).min(560.0);
-        R::new(x + (w - fw) / 2.0, y + h * 0.5 - 23.0, fw, 46.0)
+        let cells = dial_cells(s);
+        let dial_w = (w - 64.0).clamp(280.0, 620.0);
+        let grid = speeddial::grid_in(x + (w - dial_w) / 2.0, dial_w, cells.len());
+        let mut fy = y + h * 0.5 - 23.0;
+        if !cells.is_empty() {
+            fy = fy.min(y + h - 30.0 - grid.height() - 28.0 - 46.0).max(y + 210.0);
+        }
+        let field = R::new(x + (w - fw) / 2.0, fy, fw, 46.0);
+        NtpGeo { field, grid, top: field.bottom() + 28.0, cells }
     }
 
     /// Edit boxes are real windows; keep them on top of what is drawn under them.
@@ -1588,29 +1687,105 @@ impl Inner {
             self.gfx.text("Search or enter address", R::new(field.x + 42.0, field.y, field.w - 58.0, field.h), Font::ui(15.0, 400), th.faint);
         }
         self.hit(field, Hit::NtpSearch);
-        // Shortcuts: a quiet row of names.
-        let mut x = field.x;
-        let mut y = field.bottom() + 18.0 + (1.0 - t3) * 10.0;
-        for (i, sc) in s.settings.shortcuts.iter().enumerate() {
-            let name = if sc.title.is_empty() { host(&sc.url) } else { sc.title.clone() };
-            let tw = self.gfx.measure(&name, Font::ui(13.0, 450));
-            let w = tw + 40.0;
-            if x + w > field.right() + 20.0 {
-                x = field.x;
-                y += 38.0;
+        self.draw_dial(s, t3);
+    }
+
+    /// The speed dial: a grid of tiles, a favicon in a rounded square with its name under it.
+    /// Kept tiles are bright; with none kept, the sites seen most are offered, dimmed, each with
+    /// a small button to keep it. The last cell is "+".
+    fn draw_dial(&mut self, s: &UiState, t3: f32) {
+        let th = self.theme;
+        let geo = self.ntp_geometry();
+        let top = geo.top + (1.0 - t3) * 10.0;
+        // A short note about the last thing that did not work (an address that was not one).
+        if let Some((msg, at)) = &self.page.flash
+            && at.elapsed().as_secs_f32() < 5.0
+        {
+            self.gfx.text(msg, R::new(geo.field.x + 2.0, geo.field.bottom() + 6.0, geo.field.w, 18.0), Font::ui(12.0, 450), th.faint);
+        }
+        let lifted = self.dial_drag.as_ref().filter(|d| d.moved).map(|d| d.from);
+        // Where a lifted tile would land, so the target can be marked.
+        let target = lifted.and_then(|_| geo.grid.index_at(self.mouse.0, self.mouse.1 - geo.top)).filter(|n| matches!(geo.cells.get(*n), Some(Cell::Tile(_))));
+        let tile_size = 60.0;
+        for (n, cell) in geo.cells.iter().enumerate() {
+            let (ox, oy) = geo.grid.origin(n);
+            let cr = R::new(ox, top + oy, geo.grid.cell_w, speeddial::ROW_H);
+            let tile = R::new(cr.x + (cr.w - tile_size) / 2.0, cr.y + 4.0, tile_size, tile_size);
+            let (hit, name, url, dim) = match *cell {
+                Cell::Tile(i) => {
+                    let sc = &s.settings.shortcuts[i];
+                    (Hit::Shortcut(i), speeddial::label(sc), sc.url.clone(), false)
+                }
+                Cell::Sugg(i) => {
+                    let sc = &s.suggestions[i];
+                    (Hit::DialSugg(i), speeddial::label(sc), sc.url.clone(), true)
+                }
+                Cell::Add => (Hit::DialAdd, "Add".to_string(), String::new(), false),
+            };
+            let pin = if let Cell::Sugg(i) = *cell { Some(Hit::DialPin(i)) } else { None };
+            let hov = self.is_hover(&hit) || pin.as_ref().is_some_and(|p| self.is_hover(p));
+            let me = lifted == Some(n) && matches!(cell, Cell::Tile(_));
+            let a = t3 * if me { 0.3 } else if dim && !hov { 0.6 } else { 1.0 };
+            self.draw_dial_tile(tile, &name, &url, matches!(cell, Cell::Add), hov && !me, a);
+            self.gfx.text(
+                &name,
+                R::new(cr.x, tile.bottom() + 8.0, cr.w, 18.0),
+                SMALL_TILE.align(Align::Center),
+                if hov { th.text.alpha(a) } else { th.dim.alpha(a) },
+            );
+            if target == Some(n) && !me {
+                self.gfx.round_stroke(tile.inset(-3.0, -3.0), 17.0, th.accent, 1.5);
             }
-            let r = R::new(x, y, w, 32.0);
-            let hov = self.is_hover(&Hit::Shortcut(i));
-            if hov {
-                self.gfx.round(r, 9.0, th.hover);
+            self.hit(R::new(cr.x, cr.y, cr.w, tile_size + 30.0), hit);
+            if let (Some(p), true) = (pin, hov) {
+                // "Keep it": a small button on the corner.
+                let b = R::new(tile.right() - 11.0, tile.y - 7.0, 22.0, 22.0);
+                let bh = self.is_hover(&p);
+                self.gfx.circle(b.x + 11.0, b.y + 11.0, 11.0, if bh { th.accent } else { th.press });
+                self.gfx.icon("plus", b.x + 4.0, b.y + 4.0, 14.0, if bh { th.bg } else { th.text });
+                self.hit(b, p);
             }
-            let m = R::new(r.x + 8.0, r.y + 8.0, 16.0, 16.0);
-            self.gfx.round(m, 5.0, th.press.mix(th.accent, 0.3));
-            let letter = name.chars().next().unwrap_or('?').to_uppercase().to_string();
-            self.gfx.text(&letter, m, Font::ui(9.5, 650).align(Align::Center), th.text);
-            self.gfx.text(&name, R::new(r.x + 32.0, r.y, tw + 4.0, r.h), Font::ui(13.0, 450), if hov { th.text } else { th.dim.alpha(t3) });
-            self.hit(r, Hit::Shortcut(i));
-            x += w + 6.0;
+        }
+        if geo.cells.iter().any(|c| matches!(c, Cell::Sugg(_))) {
+            let y = top + geo.grid.height() + 2.0;
+            self.gfx.text(
+                "Your most visited sites. Hover one to keep it here.",
+                R::new(geo.field.x, y, geo.field.w, 18.0),
+                Font::ui(12.0, 450).align(Align::Center),
+                th.faint.alpha(t3),
+            );
+        }
+        // The lifted tile follows the pointer.
+        if let Some(from) = lifted
+            && let Some(sc) = s.settings.shortcuts.get(from)
+        {
+            let t = R::new(self.mouse.0 - tile_size / 2.0, self.mouse.1 - tile_size / 2.0, tile_size, tile_size);
+            self.draw_dial_tile(t, &speeddial::label(sc), &sc.url, false, true, 0.95);
+        }
+    }
+
+    /// The square of a tile: the site's icon when it is known, its first letter on a tint when not.
+    fn draw_dial_tile(&mut self, r: R, name: &str, url: &str, plus: bool, hov: bool, a: f32) {
+        let th = self.theme;
+        self.gfx.round(r, 16.0, if hov { th.press.alpha(a) } else { th.bg.alpha(a) });
+        if plus {
+            self.gfx.round_stroke(r, 16.0, th.line.alpha(a), 1.0);
+            self.gfx.icon("plus", r.x + (r.w - 20.0) / 2.0, r.y + (r.h - 20.0) / 2.0, 20.0, if hov { th.text.alpha(a) } else { th.faint.alpha(a) });
+            return;
+        }
+        let icon = R::new(r.x + (r.w - 28.0) / 2.0, r.y + (r.h - 28.0) / 2.0, 28.0, 28.0);
+        let host = speeddial::host_of(url);
+        let key = site_key(&host);
+        let png = self.site_favs.get(&host).cloned();
+        match png.and_then(|p| self.gfx.bitmap(key, &p)) {
+            Some(b) => self.gfx.draw_bitmap(&b, icon, a),
+            None => {
+                // No icon yet (it arrives when the site has been opened): the first letter, tinted.
+                let tint = th.press.mix(th.accent, 0.3);
+                self.gfx.round(icon, 8.0, tint.alpha(a));
+                let letter = name.chars().next().or_else(|| host.chars().next()).unwrap_or('?').to_uppercase().to_string();
+                self.gfx.text(&letter, icon, Font::ui(15.0, 650).align(Align::Center), th.text.alpha(a));
+            }
         }
     }
 
@@ -1633,6 +1808,15 @@ impl Inner {
                 self.invalidate();
             }
             return;
+        }
+        if let Some(d) = &mut self.dial_drag {
+            if !d.moved && ((x - d.x0).powi(2) + (y - d.y0).powi(2)).sqrt() > 6.0 {
+                d.moved = true;
+            }
+            if d.moved {
+                self.invalidate();
+                return;
+            }
         }
         if pages::drag_move(self, x, y) {
             return;
@@ -1677,6 +1861,13 @@ impl Inner {
                     }
                 }
             }
+            Some(Hit::Shortcut(from)) => {
+                // Pressed on a tile: a click opens it, a drag moves it.
+                self.dial_drag = Some(DialDrag { from, x0: x, y0: y, moved: false });
+                unsafe {
+                    SetCapture(self.hwnd);
+                }
+            }
             Some(Hit::NtpSearch) => self.focus_ntp(),
             Some(Hit::Page(p)) => pages::press(self, p, x, y),
             _ => {}
@@ -1691,6 +1882,25 @@ impl Inner {
             }
             if d.moved {
                 self.drop_tab(d, x, y);
+                self.invalidate();
+                return;
+            }
+        }
+        if let Some(d) = self.dial_drag.take() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            if d.moved {
+                // Let go over another tile: the lifted one takes its place.
+                let geo = self.ntp_geometry();
+                if let Some(Cell::Tile(to)) = geo.grid.index_at(x, y - geo.top).and_then(|n| geo.cells.get(n).copied())
+                    && let Some(s) = &self.state
+                {
+                    let mut st = s.settings.clone();
+                    speeddial::reorder(&mut st.shortcuts, d.from, to);
+                    send(&self.proxy, json!({"t": "settings", "v": st}));
+                }
+                self.press = None;
                 self.invalidate();
                 return;
             }
@@ -1780,6 +1990,34 @@ impl Inner {
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {
                     send(p, json!({"t": "nav", "url": sc.url}));
+                }
+            }
+            Hit::DialSugg(i) => {
+                if let Some(sc) = self.state.as_ref().and_then(|s| s.suggestions.get(i)) {
+                    send(p, json!({"t": "nav", "url": sc.url}));
+                }
+            }
+            Hit::DialPin(i) => {
+                if let Some(s) = &self.state
+                    && let Some(sc) = s.suggestions.get(i)
+                {
+                    let mut st = s.settings.clone();
+                    if speeddial::add(&mut st.shortcuts, &sc.title, &sc.url) {
+                        send(p, json!({"t": "settings", "v": st}));
+                    }
+                }
+            }
+            Hit::DialAdd => {
+                // The address, and a name if you want one; blank means the site's own name.
+                if let Some(a) = dialog::ask_fields(self.hwnd, "Add to speed dial", &[("Address", ""), ("Name (optional)", "")])
+                    && let Some(s) = &self.state
+                {
+                    let mut st = s.settings.clone();
+                    if speeddial::add(&mut st.shortcuts, &a[1], &a[0]) {
+                        send(p, json!({"t": "settings", "v": st}));
+                    } else {
+                        self.page.flash = Some(("Not added: that is not an address, it is already a tile, or the page is full".into(), Instant::now()));
+                    }
                 }
             }
             Hit::Page(ph) => pages::click(self, ph),
@@ -1890,8 +2128,9 @@ impl Inner {
                     7 => {
                         let mut st = s.settings.clone();
                         let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
-                        st.shortcuts.push(crate::store::Shortcut { title, url: t.url.clone() });
-                        send(&self.proxy, json!({"t": "settings", "v": st}));
+                        if speeddial::add(&mut st.shortcuts, &title, &t.url) {
+                            send(&self.proxy, json!({"t": "settings", "v": st}));
+                        }
                         return;
                     }
                     20..=23 => {
@@ -1929,6 +2168,16 @@ impl Inner {
                 }
             }
             Hit::WorkspaceAdd => send(&self.proxy, json!({"t": "workspaceAdd"})),
+            Hit::DialSugg(i) | Hit::DialPin(i) => {
+                if self.popup(&[(1, "Add to speed dial".into())], x, y) == 1
+                    && let Some(sc) = s.suggestions.get(i)
+                {
+                    let mut st = s.settings.clone();
+                    if speeddial::add(&mut st.shortcuts, &sc.title, &sc.url) {
+                        send(&self.proxy, json!({"t": "settings", "v": st}));
+                    }
+                }
+            }
             Hit::Page(pages::PageHit::Bm(id) | pages::PageHit::BmDel(id)) => {
                 if let Some(m) = s.bookmarks.iter().find(|m| m.id == id) {
                     self.mark_menu(m, true, x, y);
@@ -1946,12 +2195,24 @@ impl Inner {
                 }
             }
             Hit::Shortcut(i) => {
-                if self.popup(&[(1, "Remove from new tab page".into())], x, y) == 1 {
-                    let mut st = s.settings.clone();
-                    if i < st.shortcuts.len() {
-                        st.shortcuts.remove(i);
-                        send(&self.proxy, json!({"t": "settings", "v": st}));
+                match self.popup(&[(1, "Edit…".into()), (2, "Remove".into())], x, y) {
+                    1 => {
+                        let Some(sc) = s.settings.shortcuts.get(i) else { return };
+                        if let Some(a) = dialog::ask_fields(self.hwnd, "Edit tile", &[("Address", &sc.url), ("Name (optional)", &sc.title)]) {
+                            let mut st = s.settings.clone();
+                            if speeddial::edit(&mut st.shortcuts, i, &a[1], &a[0]) {
+                                send(&self.proxy, json!({"t": "settings", "v": st}));
+                            }
+                        }
                     }
+                    2 => {
+                        let mut st = s.settings.clone();
+                        if i < st.shortcuts.len() {
+                            st.shortcuts.remove(i);
+                            send(&self.proxy, json!({"t": "settings", "v": st}));
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}

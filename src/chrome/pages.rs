@@ -166,6 +166,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("dark_pages", "Darken light sites", "When Lumen is dark, Dark Reader repaints sites that have no dark mode. Shift+F9 skips a site."),
             Seg("ui_font", "Interface font", "Atkinson Hyperlegible is designed for easy reading.", &[("segoe", "Segoe"), ("instrument", "Instrument"), ("figtree", "Figtree"), ("atkinson", "Atkinson")]),
             Seg("display_font", "Display font", "The clock and page titles.", &[("instrument", "Instrument Serif"), ("fraunces", "Fraunces"), ("newsreader", "Newsreader")]),
+            Toggle("speed_dial", "Speed dial on the new tab page", "Sites you keep as tiles under the search box. Off: just the clock and the search box."),
             Seg("sidebar_side", "Sidebar", "", &[("left", "Left"), ("right", "Right")]),
             Range("sidebar_width", "Sidebar width", "", Scale::Linear(232.0, 400.0, 4.0), "px"),
             Toggle("compact", "Compact sidebar", "Icons only. Ctrl+B toggles it."),
