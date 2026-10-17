@@ -204,6 +204,11 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         let vk: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                         let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
                     }
+                    "char" => {
+                        // A character to the chrome window, as typing would send it.
+                        let ch: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let _ = PostMessageW(Some(hwnd), WM_CHAR, WPARAM(ch), LPARAM(0));
+                    }
                     _ => {}
                 }
             }
