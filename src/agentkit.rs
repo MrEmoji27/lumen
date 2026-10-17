@@ -6,6 +6,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     rc::Rc,
+    time::Instant,
 };
 
 use serde_json::{Value, json};
@@ -15,7 +16,7 @@ use webview2_com::{
 };
 use windows::{
     Win32::System::Com::CoTaskMemFree,
-    core::{HSTRING, PWSTR},
+    core::{HSTRING, Interface, PWSTR},
 };
 use wry::{WebView, WebViewExtWindows};
 
@@ -29,6 +30,21 @@ pub struct Log {
     /// How the next dialogs are answered: accept, and the text for a prompt.
     pub accept: bool,
     pub prompt_text: Option<String>,
+    /// When the page last fetched anything. Network idle is measured from here.
+    pub last_net: Option<std::time::Instant>,
+    /// Execution contexts by frame: frameId -> contextId. Same-process iframes are
+    /// entered through these; a cross-origin one has a target of its own instead.
+    pub contexts: HashMap<String, u64>,
+    /// The last drag the page started, intercepted: what a native HTML5 drop carries.
+    pub drag: Option<Value>,
+}
+
+impl Log {
+    /// Nothing in flight and quiet for `idle`: the page has stopped fetching.
+    pub fn net_idle(&self, idle: std::time::Duration) -> bool {
+        let pending = self.net.iter().any(|n| n.status == 0 && n.failed.is_empty());
+        !pending && self.last_net.is_none_or(|t| t.elapsed() >= idle)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +55,8 @@ pub struct Net {
     pub kind: String,
     pub status: u32,
     pub failed: String,
+    /// Response Content-Type, for browser_network_body: text or bytes.
+    pub mime: String,
 }
 
 pub type Logs = Rc<RefCell<HashMap<u64, Log>>>;
@@ -84,6 +102,41 @@ pub fn cdp(wv: &WebView, method: &str, params: &Value, done: impl FnOnce(Result<
     }
 }
 
+/// One DevTools call inside a target of its own (a cross-origin iframe): the flattened
+/// session id from `Target.attachToTarget`.
+pub fn cdp_session(wv: &WebView, session: &str, method: &str, params: &Value, done: impl FnOnce(Result<Value, String>) + 'static) {
+    let done = Rc::new(RefCell::new(Some(done)));
+    let d2 = done.clone();
+    let r = unsafe {
+        wv.webview()
+            .cast::<ICoreWebView2_11>()
+            .and_then(|core| {
+                core.CallDevToolsProtocolMethodForSession(
+                    &HSTRING::from(session),
+                    &HSTRING::from(method),
+                    &HSTRING::from(params.to_string()),
+                    &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |hr, out| {
+                        let v = serde_json::from_str::<Value>(&out).unwrap_or(Value::String(out));
+                        let res = if hr.is_ok() { Ok(v) } else { Err(v["message"].as_str().map(str::to_string).unwrap_or_else(|| v.to_string())) };
+                        if let Some(f) = d2.borrow_mut().take() {
+                            f(res);
+                        }
+                        Ok(())
+                    })),
+                )
+            })
+    };
+    let err = match r {
+        Ok(()) => None,
+        Err(e) => Some(format!("this build of WebView2 cannot talk to a frame of its own: {e}")),
+    };
+    if let Some(e) = err
+        && let Some(f) = done.borrow_mut().take()
+    {
+        f(Err(e));
+    }
+}
+
 fn fire(wv: &WebView, method: &str) {
     cdp(wv, method, &json!({}), |_| {});
 }
@@ -126,9 +179,36 @@ fn clip(s: &str, n: usize) -> String {
 /// since a modal alert would freeze every script the agent runs.
 pub fn watch(wv: &WebView, tab: u64, logs: &Logs) {
     logs.borrow_mut().entry(tab).or_insert_with(|| Log { accept: true, ..Default::default() });
-    for m in ["Runtime.enable", "Network.enable", "Log.enable"] {
+    for m in ["Runtime.enable", "Log.enable"] {
         fire(wv, m);
     }
+    // Response bodies are kept for browser_network_body: a few MB of them, no more.
+    cdp(wv, "Network.enable", &json!({"maxTotalBufferSize": 32 * 1024 * 1024, "maxResourceBufferSize": 4 * 1024 * 1024, "maxPostDataSize": 65536}), |_| {});
+    // Same-process iframes run in execution contexts of this renderer. Their frameId is
+    // what an entry in the snapshot's frame list is entered through.
+    let l = logs.clone();
+    on_event(wv, "Runtime.executionContextCreated", move |v| {
+        let c = &v["context"];
+        let (Some(frame), Some(id)) = (c["auxData"]["frameId"].as_str(), c["id"].as_u64()) else { return };
+        if let Some(log) = l.borrow_mut().get_mut(&tab) {
+            log.contexts.insert(frame.to_string(), id);
+        }
+    });
+    let l = logs.clone();
+    on_event(wv, "Runtime.executionContextDestroyed", move |v| {
+        let Some(id) = v["executionContextId"].as_u64() else { return };
+        if let Some(log) = l.borrow_mut().get_mut(&tab) {
+            log.contexts.retain(|_, c| *c != id);
+        }
+    });
+    // A drag the page started (HTML5 draggable): the browser holds it until we say
+    // where it goes, or let it go.
+    let l = logs.clone();
+    on_event(wv, "Input.dragIntercepted", move |v| {
+        if let Some(log) = l.borrow_mut().get_mut(&tab) {
+            log.drag = Some(v["data"].clone());
+        }
+    });
     let l = logs.clone();
     on_event(wv, "Runtime.consoleAPICalled", move |v| {
         let args: Vec<String> = v["args"].as_array().map(|a| a.iter().map(arg_text).collect()).unwrap_or_default();
@@ -163,30 +243,35 @@ pub fn watch(wv: &WebView, tab: u64, logs: &Logs) {
             kind: v["type"].as_str().unwrap_or("").into(),
             status: 0,
             failed: String::new(),
+            mime: String::new(),
         };
         if n.url.starts_with("data:") {
             return;
         }
         if let Some(log) = l.borrow_mut().get_mut(&tab) {
+            log.last_net = Some(Instant::now());
             push(&mut log.net, n);
         }
     });
     let l = logs.clone();
     on_event(wv, "Network.responseReceived", move |v| {
         let id = v["requestId"].as_str().unwrap_or("");
-        if let Some(log) = l.borrow_mut().get_mut(&tab)
-            && let Some(n) = log.net.iter_mut().rev().find(|n| n.id == id)
-        {
-            n.status = v["response"]["status"].as_u64().unwrap_or(0) as u32;
+        if let Some(log) = l.borrow_mut().get_mut(&tab) {
+            log.last_net = Some(Instant::now());
+            if let Some(n) = log.net.iter_mut().rev().find(|n| n.id == id) {
+                n.status = v["response"]["status"].as_u64().unwrap_or(0) as u32;
+                n.mime = v["response"]["mimeType"].as_str().unwrap_or("").to_string();
+            }
         }
     });
     let l = logs.clone();
     on_event(wv, "Network.loadingFailed", move |v| {
         let id = v["requestId"].as_str().unwrap_or("");
-        if let Some(log) = l.borrow_mut().get_mut(&tab)
-            && let Some(n) = log.net.iter_mut().rev().find(|n| n.id == id)
-        {
-            n.failed = v["blockedReason"].as_str().or(v["errorText"].as_str()).unwrap_or("failed").into();
+        if let Some(log) = l.borrow_mut().get_mut(&tab) {
+            log.last_net = Some(Instant::now());
+            if let Some(n) = log.net.iter_mut().rev().find(|n| n.id == id) {
+                n.failed = v["blockedReason"].as_str().or(v["errorText"].as_str()).unwrap_or("failed").into();
+            }
         }
     });
     // Dialogs: Lumen answers them, the agent reads what they said.

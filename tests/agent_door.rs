@@ -75,13 +75,20 @@ impl Resp {
 
 /// One HTTP request, one response. Whatever the server does with the connection afterwards.
 fn http(port: u16, head: &str, body: &str, declared_len: Option<usize>) -> Resp {
+    let t0 = Instant::now();
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("the door is not listening");
     s.set_read_timeout(Some(Duration::from_secs(120))).ok();
+    let t1 = Instant::now();
     let len = declared_len.unwrap_or(body.len());
     let req = format!("{head}Content-Length: {len}\r\nConnection: close\r\n\r\n{body}");
     s.write_all(req.as_bytes()).unwrap();
+    let t2 = Instant::now();
     let mut raw = Vec::new();
-    let _ = s.read_to_end(&mut raw);
+    let out = s.read_to_end(&mut raw);
+    let t3 = Instant::now();
+    if t3 - t0 > Duration::from_secs(2) {
+        eprintln!("  (http: connect {:?}, write {:?}, read {:?} -> {out:?}, {} bytes)", t1 - t0, t2 - t1, t3 - t2, raw.len());
+    }
     let text = String::from_utf8_lossy(&raw).to_string();
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
     let mut lines = head.lines();
@@ -182,6 +189,8 @@ struct Lumen {
     child: Child,
     dir: PathBuf,
     downloads: PathBuf,
+    /// The extra environment the first start was given, for a relaunch.
+    env: Vec<(String, String)>,
     /// aria2c.exe was put in place, so downloads should work here.
     aria_seeded: bool,
     door: Door,
@@ -218,10 +227,32 @@ impl Lumen {
         for (k, v) in env {
             cmd.env(k, v);
         }
+        let saved_env: Vec<(String, String)> = env.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
         let child = cmd.spawn().expect("could not start lumen.exe");
-        let mut l = Lumen { child, dir, downloads, aria_seeded, door: Door { port, token: String::new() } };
+        let mut l = Lumen { child, dir, downloads, env: saved_env, aria_seeded, door: Door { port, token: String::new() } };
         l.wait_for_door();
         l
+    }
+
+    /// Close it and start it again on the same data folder, as a person would. The next
+    /// start deletes whatever the last run left queued.
+    fn relaunch(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        thread::sleep(Duration::from_millis(1500));
+        let mut cmd = Command::new(LUMEN);
+        cmd.arg("--headless")
+            .env("LUMEN_HEADLESS", "1")
+            .env("LUMEN_DATA", &self.dir)
+            .env("LUMEN_DOWNLOADS", &self.downloads)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        self.child = cmd.spawn().expect("could not start lumen.exe again");
+        self.wait_for_door();
     }
 
     /// The token appears with the first start; the door answers (200 on, 503 off) when it is up.
@@ -304,6 +335,8 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
             match role.as_str() {
                 "normal" => extra += "Set-Cookie: n=1; Path=/\r\n",
                 "agent" => extra += "Set-Cookie: a=1; Path=/\r\n",
+                // Any other role gets a cookie named after itself: one agent = one role.
+                _ if !role.is_empty() => extra += &format!("Set-Cookie: {role}=1; Path=/\r\n"),
                 _ => {}
             }
             (
@@ -316,6 +349,30 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
             ("text/plain", b"ok".to_vec())
         }
         "/plain" => ("text/html", b"<title>Plain page</title><h1>Hello</h1><button>Go</button>".to_vec()),
+        "/frames" => {
+            // Two iframes: one of this origin, one of the other server (cross-origin,
+            // so WebView2 gives it a target of its own).
+            let other: u16 = query.split('&').find_map(|kv| kv.strip_prefix("other=")).and_then(|v| v.parse().ok()).unwrap_or(0);
+            (
+                "text/html",
+                format!(
+                    "<title>Frames page</title><h1>Outer</h1><iframe src=\"/inner\"></iframe>\
+                     <iframe src=\"http://127.0.0.1:{other}/inner?tag=cross\"></iframe>"
+                )
+                .into_bytes(),
+            )
+        }
+        "/inner" => (
+            "text/html",
+            b"<title>Inner</title><input aria-label=\"Card number\" id=\"card\"><button id=\"pay\" onclick=\"localStorage.setItem('clicked','yes')\">Pay</button>".to_vec(),
+        ),
+        "/popup" => ("text/html", b"<title>Popup page</title><button onclick=\"window.open('/plain','_blank')\">Open one</button>".to_vec()),
+        "/fetch" => ("text/html", b"<title>Fetch page</title><script>fetch('/api').then(r=>r.text())</script>".to_vec()),
+        "/api" => ("application/json", br#"{"ok":true,"items":[1,2,3]}"#.to_vec()),
+        "/state" => {
+            extra += "Set-Cookie: s=1; Path=/\r\n";
+            ("text/html", b"<title>State page</title><script>localStorage.setItem('who','agent')</script>".to_vec())
+        }
         "/upload" => ("text/html", b"<title>Upload page</title><input type=file id=f name=f aria-label=Pick><div id=out></div>".to_vec()),
         "/file.bin" => {
             extra += "Content-Disposition: attachment; filename=\"file.bin\"\r\n";
@@ -323,7 +380,14 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
         }
         _ => ("text/plain", b"not found".to_vec()),
     };
-    let code = if matches!(path, "/page" | "/probe" | "/plain" | "/upload" | "/file.bin") { "200 OK" } else { "404 Not Found" };
+    let code = if matches!(
+        path,
+        "/page" | "/probe" | "/plain" | "/upload" | "/file.bin" | "/frames" | "/inner" | "/popup" | "/fetch" | "/api" | "/state"
+    ) {
+        "200 OK"
+    } else {
+        "404 Not Found"
+    };
     let head = format!("HTTP/1.1 {code}\r\nContent-Type: {ctype}\r\n{extra}Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     let _ = s.write_all(head.as_bytes());
     let _ = s.write_all(&body);
@@ -521,6 +585,234 @@ fn the_agent_door() {
         assert!(js.contains("a=1") && !js.contains("n=1"), "document.cookie in the agent tab: {js}");
         say(&format!("{} agent probes carried a=1 only; {} person probes carried n=1 only", agent.len(), person.len()));
         d.tool(&a, "browser_close", json!({"tab": tab})).unwrap();
+    }
+
+    head("7b. one profile per agent: its own cookies, its own folder, gone when the session ends");
+    {
+        let one = d.init("agent-one");
+        let two = d.init("agent-two");
+        alive.add(&one);
+        alive.add(&two);
+        // Both log into the same site, each in a tab of its own.
+        let t1 = d.open(&one, &page(p1, "/page?role=one"));
+        let t2 = d.open(&two, &page(p1, "/page?role=two"));
+        let cookie = |sid: &str, tab: u64| d.tool(sid, "browser_eval", json!({"tab": tab, "script": "return document.cookie"})).unwrap_or_default();
+        poll("agent one's cookie", 30, || cookie(&one, t1).contains("one=1"));
+        poll("agent two's cookie", 30, || cookie(&two, t2).contains("two=1"));
+        assert!(!cookie(&one, t1).contains("two=1"), "one carries two's cookie: {}", cookie(&one, t1));
+        assert!(!cookie(&two, t2).contains("one=1"), "two carries one's cookie: {}", cookie(&two, t2));
+        // The wire says the same: each agent's requests carry its own cookie and no other's.
+        poll("both agents' probes", 45, || {
+            let log = probes.lock().unwrap();
+            log.iter().any(|(w, c)| w == "one" && c.contains("one=1")) && log.iter().any(|(w, c)| w == "two" && c.contains("two=1"))
+        });
+        let log = probes.lock().unwrap().clone();
+        let mine: Vec<&(String, String)> = log.iter().filter(|(w, _)| w == "one" || w == "two").collect();
+        for (who, c) in &mine {
+            let other = if who == "one" { "two=1" } else { "one=1" };
+            assert!(!c.contains(other), "{who} carried {other}: {c}");
+        }
+        say(&format!("{} probes: two agents, two cookie jars, no cookie of the other's", mine.len()));
+        // Their files land in folders of their own: this one's downloads, not the other's.
+        let pdf = |sid: &str, tab: u64| -> String {
+            let out = d.tool(sid, "browser_pdf", json!({"tab": tab})).expect("pdf");
+            out.strip_prefix("saved ").and_then(|s| s.rsplit_once(" (")).map(|(p, _)| p.to_string()).unwrap_or_else(|| panic!("{out}"))
+        };
+        let f1 = pdf(&one, t1);
+        let f2 = pdf(&two, t2);
+        let root = lumen.downloads.join("Agent downloads");
+        assert!(Path::new(&f1).starts_with(&root), "{f1} is not under {}", root.display());
+        assert!(Path::new(&f2).starts_with(&root), "{f2} is not under {}", root.display());
+        assert_ne!(Path::new(&f1).parent(), Path::new(&f2).parent(), "two agents, two folders: {f1} and {f2}");
+        say(&format!("pdfs went to {} and {} — one folder each", Path::new(&f1).parent().unwrap().display(), Path::new(&f2).parent().unwrap().display()));
+        // Ending a session deletes its profile folder.
+        let prof = d.tool(&two, "browser_test_profile", json!({"tab": t2})).expect("profile");
+        let prof: Value = serde_json::from_str(&prof).unwrap_or(Value::Null);
+        let path = prof["path"].as_str().unwrap_or_default().to_string();
+        assert!(path.contains("WebView2") && path.contains(&lumen.dir.display().to_string()), "the profile lives in this test's own data folder: {prof}");
+        let head = d.head("DELETE", "/mcp", &d.host(), Some(&d.auth()), None, Some(&two));
+        assert_eq!(http(d.port, &head, "", None).code, 200, "goodbye");
+        assert_eq!(d.ping(&two), 404, "an ended session is unknown");
+        // Its cookies, storage and cache are wiped at once (WebView2's own clearing), and
+        // the folder itself is queued: the browser holds a live profile's files for its
+        // whole life, so the folder goes at the next start (scenario 17 proves that).
+        let key = &two[..12];
+        poll("the ended profile to be queued for deletion", 20, || {
+            std::fs::read_to_string(lumen.state_file("agent_purge.json")).map(|t| t.contains(key)).unwrap_or(false)
+        });
+        assert!(!d.tabs(&a).is_empty(), "the other agent is untouched");
+        say(&format!("ending agent two wiped its profile data now and queued {path} for deletion at the next start"));
+        // Agent one is untouched: still logged in, its own folder still there.
+        assert!(cookie(&one, t1).contains("one=1"), "agent one lost its cookie with agent two's folder");
+        assert!(Path::new(&f1).exists());
+        // A named session keeps its profile: log in once, come back logged in.
+        let run = |args: &[&str]| -> (i32, String) {
+            let out = Command::new(LUMEN_AGENT).args(args).env("LUMEN_DATA", &lumen.dir).stdin(Stdio::null()).output().expect("lumen-agent");
+            (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr))
+        };
+        let tab_of = |out: &str| -> u64 { out.lines().next().and_then(|l| l.strip_prefix("tab ")).and_then(|n| n.trim().parse().ok()).unwrap_or_else(|| panic!("{out}")) };
+        let (code, out) = run(&["--session", "kept", "open", &format!("url={}", page(p1, "/page?role=keep")), "background=true"]);
+        assert_eq!(code, 0, "{out}");
+        let kt = tab_of(&out);
+        let (_, seen) = run(&["--session", "kept", "eval", &format!("tab={kt}"), "script=return document.cookie"]);
+        assert!(seen.contains("keep=1"), "the kept session logged in: {seen}");
+        // The session ends (the CLI files id goes with it), and the profile stays.
+        let id_file = lumen.state_file("agent_sessions").join("kept.id");
+        let kept_id = std::fs::read_to_string(&id_file).expect("the named session's id file").trim().to_string();
+        let head = d.head("DELETE", "/mcp", &d.host(), Some(&d.auth()), None, Some(&kept_id));
+        assert_eq!(http(d.port, &head, "", None).code, 200);
+        thread::sleep(Duration::from_millis(600));
+        let (code, out) = run(&["--session", "kept", "open", &format!("url={}", page(p1, "/page?role=keep")), "background=true"]);
+        assert_eq!(code, 0, "{out}");
+        let kt2 = tab_of(&out);
+        poll("the kept profile's cookie", 30, || {
+            let (_, c) = run(&["--session", "kept", "eval", &format!("tab={kt2}"), "script=return document.cookie"]);
+            c.contains("keep=1")
+        });
+        say("a named session (--session NAME) kept its profile: the next run started logged in");
+        let _ = run(&["--session", "kept", "close", &format!("tab={kt2}")]);
+        d.tool(&one, "browser_close", json!({"tab": t1})).unwrap();
+    }
+
+    head("7c. frames, response bodies, saved state, popups, records, pause");
+    {
+        // Frames: the snapshot walks into a same-origin and a cross-origin iframe, and
+        // a ref of theirs acts inside that frame.
+        let f = d.open(&a, &format!("{}?other={p2}", page(p1, "/frames")));
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": f})).expect("snapshot with frames");
+        assert!(snap.contains("Frame 1:") && snap.contains("Frame 2:"), "both frames are in it:\n{snap}");
+        assert!(snap.contains("Card number"), "{snap}");
+        // The frame of this test site's own port: its storage is the page's own, so what
+        // happens in it can be seen from the page. The other one is p2's (cross-origin).
+        let mine = snap
+            .lines()
+            .find(|l| l.starts_with("Frame ") && l.contains(&format!(":{p1}/inner")))
+            .unwrap_or_else(|| panic!("no frame of {p1} in:\n{snap}"));
+        let num = mine.trim_start_matches("Frame ").split(':').next().unwrap_or("1").trim();
+        let line = snap
+            .lines()
+            .find(|l| l.contains(&format!("[ref=f{num}e")) && l.contains("Card number"))
+            .unwrap_or_else(|| panic!("no Card number field in frame {num}:\n{snap}"));
+        let fref = line.split("[ref=").nth(1).unwrap().trim_end_matches(']').to_string();
+        assert!(fref.starts_with(&format!("f{num}e")), "a frame ref wears its frame number: {fref}");
+        d.tool(&a, "browser_type", json!({"tab": f, "ref": fref, "text": "4242"})).expect("type into a frame");
+        let again = d.tool(&a, "browser_snapshot", json!({"tab": f})).expect("snapshot again");
+        assert!(again.contains("value=\"4242\""), "the frame's field holds it:\n{again}");
+        let pay = again
+            .lines()
+            .find(|l| l.contains("button \"Pay\"") && l.contains(&format!("[ref=f{num}e")))
+            .unwrap_or_else(|| panic!("no Pay button in frame {num}:\n{again}"));
+        let pref = pay.split("[ref=").nth(1).unwrap().trim_end_matches(']').to_string();
+        // The tab is in the background (opened that way): a mouse action brings it to the
+        // front by itself, because Chromium drops mouse input to a page that is not
+        // rendering. No browser_show needed here on purpose: this checks that.
+        d.tool(&a, "browser_click", json!({"tab": f, "ref": pref})).expect("click in a frame");
+        let clicked = d.tool(&a, "browser_eval", json!({"tab": f, "script": "return localStorage.getItem('clicked')"})).unwrap_or_default();
+        assert!(clicked.contains("yes"), "the frame's button ran: {clicked}");
+        say("the snapshot entered a same-origin and a cross-origin iframe; typing and clicking by a frame ref worked");
+        d.tool(&a, "browser_close", json!({"tab": f})).unwrap();
+
+        // Response bodies: the JSON one fetch asked for, by the #number browser_network gave it.
+        let fetch = d.open(&a, &page(p1, "/fetch"));
+        poll("the fetch to be recorded", 20, || {
+            d.tool(&a, "browser_network", json!({"tab": fetch})).unwrap_or_default().contains("/api")
+        });
+        let list = d.tool(&a, "browser_network", json!({"tab": fetch})).unwrap();
+        let num: u64 = list
+            .lines()
+            .find(|l| l.contains("/api"))
+            .and_then(|l| l.trim_start().strip_prefix('#'))
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no #number for /api in:\n{list}"));
+        let body = d.tool(&a, "browser_network_body", json!({"tab": fetch, "index": num})).expect("response body");
+        assert!(body.contains("\"ok\":true") && body.contains("json"), "{body}");
+        let e = d.tool(&a, "browser_network_body", json!({"tab": fetch, "url": "nothing-like-this"})).expect_err("no such request");
+        assert!(e.contains("no such request"), "{e}");
+        say(&format!("browser_network_body #{num}: {}", body.lines().next().unwrap_or("")));
+        d.tool(&a, "browser_close", json!({"tab": fetch})).unwrap();
+
+        // A saved state moves a login into another session of its own.
+        let st = d.open(&a, &page(p1, "/state"));
+        let saved = d.tool(&a, "browser_state_save", json!({"tab": st, "name": "logged-in"})).expect("save state");
+        assert!(saved.contains("cookies") && saved.contains("storage"), "{saved}");
+        let loader = d.init("state-loader");
+        alive.add(&loader);
+        let st2 = d.open(&loader, &page(p1, "/state"));
+        poll("the loader to have its own cookie", 20, || {
+            d.tool(&loader, "browser_eval", json!({"tab": st2, "script": "return document.cookie"})).unwrap_or_default().contains("s=1")
+        });
+        // It starts from a fresh profile: forget that cookie, then load the saved state.
+        d.tool(&loader, "browser_eval", json!({"tab": st2, "script": "document.cookie='s=; Max-Age=0; path=/'; localStorage.clear(); return 1"})).unwrap();
+        let loaded = d.tool(&loader, "browser_state_load", json!({"tab": st2, "name": "logged-in"})).expect("load state");
+        assert!(loaded.contains("cookies loaded") && loaded.contains("storage keys"), "{loaded}");
+        poll("the loaded cookie", 20, || {
+            d.tool(&loader, "browser_eval", json!({"tab": st2, "script": "return document.cookie"})).unwrap_or_default().contains("s=1")
+        });
+        let stored = d.tool(&loader, "browser_eval", json!({"tab": st2, "script": "return localStorage.getItem('who')"})).unwrap_or_default();
+        assert!(stored.contains("agent"), "the storage key came too: {stored}");
+        say("a state saved by one agent loaded into another session's own profile");
+        d.tool(&loader, "browser_close", json!({"tab": st2})).unwrap();
+        d.tool(&a, "browser_close", json!({"tab": st})).unwrap();
+
+        // A popup a page opens is reported and is the agent's tab.
+        let pop = d.open(&a, &page(p1, "/popup"));
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": pop})).unwrap();
+        let bref = snap.lines().find(|l| l.contains("Open one")).and_then(|l| l.split("[ref=").nth(1)).map(|r| r.trim_end_matches(']').to_string()).unwrap_or_else(|| panic!("{snap}"));
+        let clicked = d.tool(&a, "browser_click", json!({"tab": pop, "ref": bref})).expect("the popup button");
+        assert!(clicked.contains("new tab"), "the popup is reported: {clicked}");
+        let new_tab: u64 = clicked
+            .lines()
+            .find_map(|l| l.strip_prefix("new tab "))
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no tab id in: {clicked}"));
+        assert!(d.has_tab(&a, new_tab), "the popup is this agent's tab");
+        assert!(d.tool(&a, "browser_snapshot", json!({"tab": new_tab})).unwrap().contains("Plain page"));
+        say(&format!("the click opened tab {new_tab}: reported in the answer and owned by the same session"));
+        d.tool(&a, "browser_close", json!({"tab": new_tab})).unwrap();
+        d.tool(&a, "browser_close", json!({"tab": pop})).unwrap();
+
+        // Record and replay: the same calls, on tabs the replay opens again.
+        d.tool(&a, "browser_record_start", json!({"name": "checkout"})).expect("record");
+        let rec_tab = d.open(&a, &page(p1, "/plain"));
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": rec_tab})).unwrap();
+        let gref = snap.lines().find(|l| l.contains("Go")).and_then(|l| l.split("[ref=").nth(1)).map(|r| r.trim_end_matches(']').to_string()).unwrap_or_else(|| panic!("{snap}"));
+        d.tool(&a, "browser_click", json!({"tab": rec_tab, "ref": gref})).expect("click in the recording");
+        let stopp = d.tool(&a, "browser_record_stop", json!({})).expect("stop");
+        assert!(stopp.contains("checkout.json") && stopp.contains("3 steps"), "{stopp}");
+        let replayed = d.tool(&a, "browser_replay", json!({"name": "checkout"})).expect("replay");
+        assert!(replayed.contains("replayed 3 steps"), "{replayed}");
+        // The replay opened its own tab: the recording's tab id was mapped onto it.
+        assert!(d.tabs(&a).len() >= 2, "the replay's tab is here");
+        say("three recorded calls replayed onto a tab the replay opened itself");
+        for t in d.tabs(&a) {
+            let id = t["tab"].as_u64().unwrap_or(0);
+            if id != rec_tab {
+                let _ = d.tool(&a, "browser_close", json!({"tab": id}));
+            }
+        }
+
+        // Pause and take over: a paused run may only ask for the tab back.
+        let pz = d.init("paused-run");
+        alive.add(&pz);
+        let pt = d.open(&pz, &page(p1, "/plain"));
+        d.tool(&pz, "browser_test_pause", json!({"paused": true})).expect("pause");
+        for (tool, args) in [("browser_snapshot", json!({"tab": pt})), ("browser_click", json!({"tab": pt, "x": 1, "y": 1})), ("browser_eval", json!({"tab": pt, "script": "return 1"}))] {
+            let e = d.tool(&pz, tool, args).expect_err(tool);
+            assert!(e.contains("paused") && e.contains("browser_handoff"), "{tool}: {e}");
+        }
+        // browser_handoff still gets through, and Done hands the tab back.
+        let waiter = {
+            let (d, pz) = (d.clone(), pz.clone());
+            thread::spawn(move || d.tool(&pz, "browser_handoff", json!({"tab": pt, "message": "may I have it back?"})))
+        };
+        poll("the paused run's handoff to be waiting", 20, || d.tool(&b, "browser_test_done", json!({})).is_ok());
+        assert!(waiter.join().unwrap().is_ok(), "handoff from a paused run");
+        d.tool(&pz, "browser_test_pause", json!({"paused": false})).expect("resume");
+        assert!(d.tool(&pz, "browser_snapshot", json!({"tab": pt})).is_ok());
+        say("a paused run got drive_paused on everything but browser_handoff, and went on after Done");
+        d.tool(&pz, "browser_close", json!({"tab": pt})).unwrap();
     }
 
     head("8. the person's tab: nothing until granted, then steering but never scripting");
@@ -778,6 +1070,65 @@ fn the_agent_door() {
             assert!(d.tool(&s, "browser_snapshot", json!({"tab": t["id"]})).is_err(), "the shared profile must not open the person's tabs");
         }
         say("shared profile: the person's tabs stay shut");
+    }
+
+    // ------------------------------------------------------- 4. strict isolation
+    head("16. strict isolation: an agent gets a browser of its own, and it goes with the session");
+    {
+        let strict = Lumen::start("strict", 47634, json!({"agent": true, "agent_strict_isolation": true}), &[], &[], false);
+        let d = &strict.door;
+        let s = d.init("strict-agent");
+        let tab = d.open(&s, &page(p1, "/plain"));
+        let prof = d.tool(&s, "browser_test_profile", json!({"tab": tab})).expect("profile");
+        let prof: Value = serde_json::from_str(&prof).unwrap_or(Value::Null);
+        let path = prof["path"].as_str().unwrap_or_default().to_string();
+        // Its own environment: the default profile inside a user-data folder of its own.
+        assert_eq!(prof["profile"].as_str().unwrap_or("x"), "", "an own environment uses its default profile: {prof}");
+        let want = strict.dir.join("agent_envs");
+        assert!(Path::new(&path).starts_with(&want), "{path} is not under {}", want.display());
+        // Another agent gets another folder: two environments, side by side.
+        let s2 = d.init("strict-agent-two");
+        let tab2 = d.open(&s2, &page(p1, "/page?role=s2"));
+        let prof2 = d.tool(&s2, "browser_test_profile", json!({"tab": tab2})).expect("profile");
+        let prof2: Value = serde_json::from_str(&prof2).unwrap_or(Value::Null);
+        let path2 = prof2["path"].as_str().unwrap_or_default().to_string();
+        assert!(Path::new(&path2).starts_with(&want) && path2 != path, "a second environment of its own: {path2}");
+        assert!(Path::new(&path).is_dir() && Path::new(&path2).is_dir());
+        say(&format!("two strict agents, two user-data folders:\n    {path}\n    {path2}"));
+        // Each has its own cookies, as in the shared environment's profiles.
+        let cookie = |sid: &str, tab: u64| d.tool(sid, "browser_eval", json!({"tab": tab, "script": "return document.cookie"})).unwrap_or_default();
+        poll("the second strict agent's cookie", 30, || cookie(&s2, tab2).contains("s2=1"));
+        let c1 = cookie(&s, tab);
+        assert!(!c1.contains("s2=1"), "the first strict agent carries the second's cookie: {c1}");
+        // Ending a session takes its whole folder with it.
+        let head = d.head("DELETE", "/mcp", &d.host(), Some(&d.auth()), None, Some(&s));
+        assert_eq!(http(d.port, &head, "", None).code, 200);
+        poll("the strict agent's folder to go", 40, || !Path::new(&path).exists());
+        assert!(Path::new(&path2).exists(), "the other agent's folder must stay");
+        say("ending the session deleted the agent's whole user-data folder; the other's stayed");
+    }
+
+    // ------------------------------------- 5. an ephemeral profile, across a restart
+    head("17. an ephemeral session's profile folder is gone after the next start");
+    {
+        let mut purge = Lumen::start("purge", 47635, json!({"agent": true}), &[], &[], false);
+        let d = purge.door.clone();
+        let s = d.init("gone-soon");
+        let tab = d.open(&s, &page(p2, "/page?role=soon"));
+        let prof = d.tool(&s, "browser_test_profile", json!({"tab": tab})).expect("profile");
+        let prof: Value = serde_json::from_str(&prof).unwrap_or(Value::Null);
+        let path = prof["path"].as_str().unwrap_or_default().to_string();
+        assert!(Path::new(&path).is_dir(), "{prof}");
+        let head = d.head("DELETE", "/mcp", &d.host(), Some(&d.auth()), None, Some(&s));
+        assert_eq!(http(d.port, &head, "", None).code, 200);
+        // The browser holds the live profile's files, so the folder waits for the next
+        // start; the queue file names it.
+        poll("the profile to be queued", 20, || {
+            std::fs::read_to_string(purge.state_file("agent_purge.json")).map(|t| t.contains(&s[..12])).unwrap_or(false)
+        });
+        purge.relaunch();
+        poll("the queued profile folder to go", 40, || !Path::new(&path).exists());
+        say(&format!("an ephemeral profile's folder ({path}) was deleted by the next start"));
     }
 }
 
