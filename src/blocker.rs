@@ -9,12 +9,16 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        Mutex,
+        mpsc::{Receiver, Sender, channel},
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
 
 use crate::privacy_stats::{self, Cat, Who};
+use sha2::{Digest, Sha256};
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, ExecuteScriptCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler, Microsoft::Web::WebView2::Win32::*, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler, WebResourceResponseReceivedEventHandler,
@@ -45,6 +49,27 @@ const LISTS: &[(&str, &str)] = &[
 const TRUSTED: &[&str] = &["ublock.txt", "cookies-ublock.txt", "privacy-ublock.txt", "quick-fixes.txt", "unbreak.txt"];
 /// The trust bit the scriptlets file marks `requiresTrust` scriptlets with.
 const TRUST: u8 = 1;
+
+/// Malware and phishing, one host per line in AdGuard form (`||host^$all`). Not gated on the
+/// ad-block toggle: dangerous is dangerous whether or not ads are blocked.
+const MALICIOUS: &[(&str, &str)] = &[
+    ("malicious-urlhaus.txt", "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-ag-online.txt"),
+    ("malicious-phishing.txt", "https://malware-filter.gitlab.io/malware-filter/phishing-filter-ag.txt"),
+];
+/// The malicious lists are refreshed weekly, a little more room than the ad lists.
+const MALICIOUS_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// A list under this many hosts is a stub or an error page, not the list.
+const MALICIOUS_MIN: usize = 500;
+/// The lists are a few hundred KB each. A body this big is not one of them.
+const MALICIOUS_MAX_BODY: usize = 4 << 20;
+
+/// Hosts named by `$popup` filter rules, scanned out of the list texts at build time.
+/// Lumen's honest subset: host-anchored `||host^$popup` only, not the full uBO grammar.
+static POPUP_HOSTS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+/// Hosts on the malware/phishing lists. Loaded once from disk, refreshed weekly.
+static DANGER_HOSTS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+/// Hosts the person chose to open once this session (Continue anyway). Session-only.
+static DANGER_PASS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /// uBlock Origin 1.75.0's scriptlets (GPL-3.0), as adblock-rust resources. Made by
 /// assets/ublock/export-scriptlets.mjs from the release source
@@ -526,6 +551,24 @@ fn on_request(
             return Ok(());
         }
         let source = take(top);
+        let site = privacy_stats::host(&source);
+        // A subresource from the malware/phishing lists: blocked at the door
+        // and counted, whatever the ad toggle says.
+        if danger_host(&url) {
+            let reason = HSTRING::from("Blocked");
+            let headers = HSTRING::new();
+            if let Ok(reply) = environment.CreateWebResourceResponse(None, 403, &reason, &headers) {
+                let _ = args.SetResponse(&reply);
+                b.blocked.set(b.blocked.get() + 1);
+                let domain = privacy_stats::registrable(&privacy_stats::host(&url));
+                privacy_stats::malicious_block(&site, &domain, who);
+                return Ok(());
+            }
+        }
+        // A third-party request that carried Lumen's GPC / DNT: one signal.
+        if b.gpc.get() && privacy_stats::registrable(&privacy_stats::host(&url)) != privacy_stats::registrable(&site) {
+            privacy_stats::signal(&site, who);
+        }
         let Some(cat) = b.check(&url, &source, kind) else {
             return Ok(());
         };
@@ -537,7 +580,6 @@ fn on_request(
         let _ = args.SetResponse(&reply);
         b.blocked.set(b.blocked.get() + 1);
         // The page it happened on, and the name behind the request that died.
-        let site = privacy_stats::host(&source);
         let domain = privacy_stats::registrable(&privacy_stats::host(&url));
         privacy_stats::blocked(&site, &domain, cat, kind, who);
         Ok(())
@@ -688,6 +730,10 @@ fn build_engine(data_dir: &Path, tx: Sender<Built>, force: bool) {
         eprintln!("lumen: blocker: no filter dir at {}", dir.display());
     }
     ensure_cookie_file(&dir);
+    // Malware/phishing lists and the `$popup` hosts are not gated on the ad
+    // toggle: dangerous is dangerous whether or not ads are blocked.
+    ensure_malicious(&dir);
+    load_popup_hosts(&dir);
     let fresh = !force && is_fresh(&dir);
     // Fast start: young lists and a matcher already built. Milliseconds.
     if let Ok(bytes) = fs::read(dir.join(ENGINE_FILE)) && !bytes.is_empty() && !force {
@@ -772,6 +818,186 @@ fn is_fresh(dir: &Path) -> bool {
         .map(|(name, _)| fs::metadata(dir.join(name)).and_then(|m| m.modified()).ok())
         .collect();
     cache_is_fresh(&stamps, SystemTime::now(), MAX_AGE)
+}
+
+// ------------------------------------------------------- popups and dangerous
+
+/// Hosts named by `$popup` rules in one list's text. Lumen's honest subset:
+/// host-anchored `||host^$popup` only, not uBO's whole grammar. Comments,
+/// exceptions and rules without `||` fall out.
+fn scan_popup_hosts(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.contains("$popup") || line.starts_with('!') || line.starts_with("@@") {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("||") else { continue };
+        let host = rest.split(['^', '$']).next().unwrap_or("").split('/').next().unwrap_or("").trim().to_ascii_lowercase();
+        if !host.is_empty() {
+            out.push(host);
+        }
+    }
+    out
+}
+
+/// Every list on disk, scanned for `$popup` hosts. Runs on the build thread
+/// once per start; the set is small (a few hundred hosts).
+fn load_popup_hosts(dir: &Path) {
+    let mut set = HashSet::new();
+    for (name, _) in LISTS {
+        if let Ok(text) = fs::read_to_string(dir.join(name)) {
+            set.extend(scan_popup_hosts(&text));
+        }
+    }
+    *POPUP_HOSTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(set);
+}
+
+/// A popup aimed at a host a `$popup` rule names: blocked even with a gesture.
+pub fn popup_rule(url: &str) -> bool {
+    let host = privacy_stats::host(url);
+    if host.is_empty() {
+        return false;
+    }
+    let guard = POPUP_HOSTS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().is_some_and(|set| host_matches(&host, set))
+}
+
+/// One host of a malicious list: `||host^$all` (AdGuard) or plainer. Comments,
+/// section headers and anything that is not a host fall out.
+fn parse_malicious_hosts(text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('!') || line.starts_with('[') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("||") else { continue };
+        let host = rest.split(['^', '$']).next().unwrap_or("").split('/').next().unwrap_or("").trim().to_ascii_lowercase();
+        if host.is_empty() || (!host.contains('.') && host.parse::<std::net::IpAddr>().is_err()) {
+            continue;
+        }
+        out.insert(host);
+    }
+    out
+}
+
+/// A parse worth keeping: the list has to hold a real number of hosts, or it
+/// was an error page or a stub.
+fn parse_malicious_checked(body: &str) -> Option<HashSet<String>> {
+    let hosts = parse_malicious_hosts(body);
+    (hosts.len() >= MALICIOUS_MIN).then_some(hosts)
+}
+
+/// SHA-256 of some bytes, lower-case hex. The sidecar that proves the file on
+/// disk is the file that was downloaded.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Go get a malicious list, record its SHA-256 beside it, return the body. A
+/// body that is empty or absurdly large is not the list.
+fn fetch_malicious(url: &str, path: &Path) -> Option<String> {
+    let config = ureq::config::Config::builder().timeout_global(Some(NET_TIMEOUT)).build();
+    let agent = ureq::Agent::new_with_config(config);
+    let mut reply = agent.get(url).call().ok()?;
+    let body = reply.body_mut().read_to_string().ok()?;
+    if body.is_empty() || body.len() > MALICIOUS_MAX_BODY {
+        return None;
+    }
+    let hash = sha256_hex(body.as_bytes());
+    let tmp = path.with_extension("part");
+    fs::write(&tmp, body.as_bytes()).ok()?;
+    fs::rename(&tmp, path).ok()?;
+    let _ = fs::write(path.with_extension("sha256"), &hash);
+    Some(body)
+}
+
+/// A list already on disk, with its SHA-256 verified. A hash that does not
+/// match means the file was changed after download: throw it out.
+fn load_malicious_checked(path: &Path) -> Option<HashSet<String>> {
+    let body = fs::read_to_string(path).ok()?;
+    let want = fs::read_to_string(path.with_extension("sha256")).ok()?;
+    if sha256_hex(body.as_bytes()) != want.trim() {
+        return None;
+    }
+    parse_malicious_checked(&body)
+}
+
+/// A host the malware/phishing lists name. Session passes win; the set may
+/// still be loading, in which case nothing is dangerous yet.
+pub fn danger_host(url: &str) -> bool {
+    let host = privacy_stats::host(url);
+    if host.is_empty() {
+        return false;
+    }
+    if DANGER_PASS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.contains(&host)) {
+        return false;
+    }
+    let guard = DANGER_HOSTS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().is_some_and(|set| host_matches(&host, set))
+}
+
+/// The person chose Continue anyway for this host: it stays open until Lumen
+/// closes. Session-only, never written anywhere.
+pub fn danger_pass(url: &str) {
+    let host = privacy_stats::host(url);
+    if !host.is_empty() {
+        DANGER_PASS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashSet::new).insert(host);
+    }
+}
+
+/// Does `host` sit at or under any name in `set`? Walks the labels upward, so
+/// `a.b.example.com` checks itself, `b.example.com`, `example.com`, `com` —
+/// O(labels), not O(set).
+fn host_matches(host: &str, set: &HashSet<String>) -> bool {
+    let host = host.trim_end_matches('.');
+    if set.contains(host) {
+        return true;
+    }
+    let mut rest = host;
+    while let Some((_, tail)) = rest.split_once('.') {
+        if tail.is_empty() {
+            break;
+        }
+        if set.contains(tail) {
+            return true;
+        }
+        rest = tail;
+    }
+    false
+}
+
+/// Download the malicious lists if they are older than a week (or missing),
+/// verify what is on disk, and load every host into the matcher set. Runs on
+/// the build thread, once per start, whatever the ad matcher's own state.
+fn ensure_malicious(dir: &Path) {
+    let mut all = HashSet::new();
+    let mut ok = false;
+    for (name, url) in MALICIOUS {
+        let path = dir.join(name);
+        let fresh = fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .is_some_and(|t| SystemTime::now().duration_since(t).is_ok_and(|d| d <= MALICIOUS_MAX_AGE));
+        if !fresh
+            && let Some(body) = fetch_malicious(url, &path)
+            && let Some(hosts) = parse_malicious_checked(&body)
+        {
+            all.extend(hosts);
+            ok = true;
+            continue;
+        }
+        if let Some(hosts) = load_malicious_checked(&path) {
+            all.extend(hosts);
+            ok = true;
+        }
+    }
+    if ok {
+        *DANGER_HOSTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(all);
+    }
 }
 
 #[cfg(test)]
@@ -960,6 +1186,130 @@ mod tests {
         ensure_cookie_file(&dir);
         assert!(dir.join(COOKIE_FILE).exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `$popup` rules name hosts: `||host^$popup` and friends. Comments,
+    /// exceptions and rules without `||` never land in the set.
+    #[test]
+    fn popup_rules_leave_their_hosts_behind() {
+        let text = concat!(
+            "! comment\n",
+            "||ads.example.com^$popup\n",
+            "||track.example.org^$popup,domain=news.com\n",
+            "@@||good.example.com^$popup\n",
+            "|http://plain.example.com^$popup\n",
+            "||noanchor.example.com\n",
+            "||path.example.com/path^$popup\n",
+        );
+        let set: HashSet<String> = scan_popup_hosts(text).into_iter().collect();
+        assert!(set.contains("ads.example.com"));
+        assert!(set.contains("track.example.org"));
+        assert!(set.contains("path.example.com"), "a path under the host still names the host");
+        assert!(!set.contains("good.example.com"), "an exception does not open the door");
+        assert!(!set.contains("plain.example.com"), "no || anchor means no host to match");
+        assert!(!set.contains("noanchor.example.com"), "a rule with no $popup is not a popup rule");
+    }
+
+    /// Host matching walks the labels upward: a listed name stops the host
+    /// and everything under it, at a label boundary only.
+    #[test]
+    fn a_listed_host_stops_its_subdomains_at_a_label_boundary() {
+        let mut set = HashSet::new();
+        set.insert("example.com".to_string());
+        set.insert("ads.tracker.net".to_string());
+        assert!(host_matches("example.com", &set));
+        assert!(host_matches("sub.example.com", &set));
+        assert!(host_matches("a.b.example.com", &set));
+        assert!(host_matches("ads.tracker.net", &set));
+        assert!(host_matches("sub.ads.tracker.net", &set));
+        assert!(!host_matches("notexample.com", &set), "a suffix that is not a label does not match");
+        assert!(!host_matches("badexample.com", &set));
+        assert!(!host_matches("example.org", &set));
+        assert!(!host_matches("", &set));
+        // A trailing dot (the DNS root) is the same host.
+        assert!(host_matches("example.com.", &set));
+    }
+
+    /// The malicious lists are AdGuard `||host^$all`: comments, section
+    /// headers and anything that is not a host fall out.
+    #[test]
+    fn malicious_lists_hold_hosts_and_junk_falls_out() {
+        let text = concat!(
+            "! Title: Malicious\n",
+            "[Adblock Plus 2.0]\n",
+            "||bad.example.com^$all\n",
+            "||worse.example.org^$all,important\n",
+            "||192.168.1.10^$all\n",
+            "||path.example.net/malware^$all\n",
+            "||nodot^$all\n",
+            "||\n",
+            "\n",
+        );
+        let set = parse_malicious_hosts(text);
+        assert!(set.contains("bad.example.com"));
+        assert!(set.contains("worse.example.org"));
+        assert!(set.contains("192.168.1.10"), "an address on the list is kept");
+        assert!(set.contains("path.example.net"), "the host, not the path");
+        assert!(!set.contains("nodot"), "a name with no dot is not a host");
+        assert_eq!(set.len(), 4, "junk never lands: {set:?}");
+    }
+
+    /// A list that parses but holds too little is a stub or an error page:
+    /// not a list, and not trusted.
+    #[test]
+    fn a_stub_is_not_a_list() {
+        let stub = "||only-one.example.com^$all\n";
+        assert!(parse_malicious_checked(stub).is_none(), "one host is not the list");
+        // A real-sized list is kept. MALICIOUS_MIN hosts, one per line.
+        let big: String = (0..MALICIOUS_MIN).map(|i| format!("||h{i}.example.com^$all\n")).collect();
+        assert!(parse_malicious_checked(&big).is_some());
+    }
+
+    /// The SHA-256 sidecar proves the file on disk is the file that was
+    /// downloaded. A changed file fails the check and is thrown out.
+    #[test]
+    fn the_sha_sidecar_catches_a_changed_file() {
+        let dir = std::env::temp_dir().join(format!("lumen-malicious-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("list.txt");
+        let body: String = (0..MALICIOUS_MIN).map(|i| format!("||h{i}.example.com^$all\n")).collect();
+        let hash = sha256_hex(body.as_bytes());
+        fs::write(&path, &body).unwrap();
+        fs::write(path.with_extension("sha256"), &hash).unwrap();
+        // The file as written loads.
+        let set = load_malicious_checked(&path).expect("a verified list loads");
+        assert_eq!(set.len(), MALICIOUS_MIN);
+        // Someone edits the file without updating the sidecar: out it goes.
+        fs::write(&path, format!("{body}||evil.example.com^$all\n")).unwrap();
+        assert!(load_malicious_checked(&path).is_none(), "a changed file fails the hash");
+        // A missing sidecar is also nothing to trust.
+        let _ = fs::remove_file(path.with_extension("sha256"));
+        assert!(load_malicious_checked(&path).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The popup and danger sets answer through their public doors, and a
+    /// session pass silences a dangerous host.
+    #[test]
+    fn the_public_doors_answer_for_hosts_and_passes() {
+        // Seed the sets the way the build thread would.
+        *POPUP_HOSTS.lock().unwrap() = Some(["popup.example.com".to_string()].into_iter().collect());
+        *DANGER_HOSTS.lock().unwrap() = Some(["evil.example.com".to_string()].into_iter().collect());
+        assert!(popup_rule("https://popup.example.com/"));
+        assert!(popup_rule("https://sub.popup.example.com/"));
+        assert!(!popup_rule("https://safe.example.com/"));
+        assert!(danger_host("https://evil.example.com/"));
+        assert!(danger_host("https://login.evil.example.com/"));
+        assert!(!danger_host("https://ok.example.com/"));
+        // Continue anyway: the host is open until Lumen closes.
+        danger_pass("https://evil.example.com/");
+        assert!(!danger_host("https://evil.example.com/"), "the pass silences the host");
+        assert!(danger_host("https://other.evil.example.com/"), "only that host, not its parent");
+        // Leave the globals as the tests found them.
+        *POPUP_HOSTS.lock().unwrap() = None;
+        *DANGER_HOSTS.lock().unwrap() = None;
+        *DANGER_PASS.lock().unwrap() = None;
     }
 }
 
