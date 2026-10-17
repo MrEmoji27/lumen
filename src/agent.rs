@@ -13,8 +13,8 @@
 //! checked against DNS rebinding, bodies capped at 1 MB. Off unless enabled.
 
 use std::{
-    collections::HashMap,
-    io::{BufRead, BufReader, Read, Write},
+    cell::RefCell,
+    collections::{HashMap, HashSet},    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
@@ -59,7 +59,9 @@ pub enum Op {
     /// Bring the tab to the front, so the person sees it.
     Show { tab: u64 },
     /// Hand the tab to the person until they press Done.
-    Handoff { tab: u64, message: String },
+    #[allow(dead_code)]
+    Handoff { tab: u64, message: String, reason: String, timeout_ms: u64 },    Consent { tab: u64, kind: String, message: String },
+    Status,
     Close { tab: u64 },
     /// Close every tab this session owns.
     End,
@@ -76,7 +78,9 @@ pub enum Op {
     /// Test hook, debug builds only: the right-click "Let agents use this tab", on a tab by id.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     TestGrant { tab: u64 },
-}
+    TestDecline,
+    TestConsentApprove,
+    TestConsentDecline,}
 
 /// One primitive for the UI thread, and where to send the answer.
 pub struct Call {
@@ -100,7 +104,8 @@ impl std::fmt::Debug for Call {
             Op::Dialogs { tab, accept, .. } => format!("dialogs {tab} accept={accept}"),
             Op::Show { tab } => format!("show {tab}"),
             Op::Handoff { tab, .. } => format!("handoff {tab}"),
-            Op::Close { tab } => format!("close {tab}"),
+            Op::Consent { tab, kind, .. } => format!("consent {tab} {kind}"),
+            Op::Status => "status".to_string(),            Op::Close { tab } => format!("close {tab}"),
             Op::End => "end".to_string(),
             Op::Download { url, .. } => format!("download {url}"),
             Op::Downloads => "downloads".to_string(),
@@ -108,13 +113,21 @@ impl std::fmt::Debug for Call {
             Op::TestDone => "test done".to_string(),
             Op::TestState => "test state".to_string(),
             Op::TestGrant { tab } => format!("test grant {tab}"),
-        };
+            Op::TestDecline => "test decline".to_string(),
+            Op::TestConsentApprove => "test consent approve".to_string(),
+            Op::TestConsentDecline => "test consent decline".to_string(),        };
         write!(f, "Call({name} by {})", self.who.name)
     }
 }
 
-pub struct Agent {
-    pub token: String,
+/// Request ids cancelled by the client (notifications/cancelled). Checked by long-running tools.
+static CANCELLED: std::sync::OnceLock<Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+thread_local! { static REQ_ID: RefCell<String> = RefCell::new(String::new()); }
+static LAST_SIG: std::sync::OnceLock<Mutex<HashMap<u64, String>>> = std::sync::OnceLock::new();
+
+fn cancelled_set() -> &'static Mutex<HashSet<String>> { CANCELLED.get_or_init(|| Mutex::new(HashSet::new())) }
+fn last_sig_map() -> &'static Mutex<HashMap<u64, String>> { LAST_SIG.get_or_init(|| Mutex::new(HashMap::new())) }
+pub struct Agent {    pub token: String,
     on: Arc<AtomicBool>,
     port: Option<u32>,
     /// Who is connected. Cleared when the door shuts.
@@ -540,12 +553,31 @@ pub fn tools() -> Value {
         t("browser_tabs", "List your tabs.", json!({}), &[]),
         t("browser_show", "Bring your tab to the front so the person sees it.", json!({"tab": tab}), &["tab"]),
         t("browser_handoff", "Hand the tab to the person (log in, solve a captcha, choose something). Shows them your message and waits until they press Done (up to 15 min). Returns the page snapshot after.",
-          json!({"tab": tab, "message": {"type": "string"}}), &["tab", "message"]),
-        t("browser_download", "Download a file with Lumen's downloader (aria2). With a tab, its cookies go along. wait=true waits for it to finish and returns the path.",
+          json!({"tab": tab, "message": {"type": "string"}, "reason": {"type": "string", "enum": ["captcha","login","consent","confirmation","other"]}, "timeout_ms": {"type": "integer"}}), &["tab", "message"]),        t("browser_download", "Download a file with Lumen's downloader (aria2). With a tab, its cookies go along. wait=true waits for it to finish and returns the path.",
           json!({"url": {"type": "string"}, "tab": tab, "wait": {"type": "boolean"}}), &["url"]),
         t("browser_downloads", "List downloads: state, size, path.", json!({}), &[]),
-        t("browser_close", "Close your tab.", json!({"tab": tab}), &["tab"])
-    ])
+        t("browser_close", "Close your tab.", json!({"tab": tab}), &["tab"]),
+        t("browser_help", "Short usage and examples. topic optional.", json!({"topic": {"type": "string", "description": "Tool name, e.g. browser_click"}}), &[]),
+        t("browser_status", "Session tabs, load state, running calls, pending handoff, downloads.", json!({}), &[]),
+        t("browser_whoami", "Who this session is: label, short id, profile, granted tabs, limiting settings.", json!({}), &[]),
+        t("browser_consent", "Ask the person to approve a side effect. Blocks until approved/declined/timeout.", json!({"tab": tab, "kind": {"type": "string", "enum": ["download","submit","upload","other"]}, "message": {"type": "string"}, "timeout_ms": {"type": "integer"}}), &["tab"])
+    ])}
+
+fn help_text(topic: &str) -> String {
+    let all = "Tools: browser_open, browser_navigate, browser_back, browser_forward, browser_reload, browser_snapshot, browser_read, browser_article, browser_find, browser_click, browser_hover, browser_type, browser_press, browser_select, browser_scroll, browser_drag, browser_upload, browser_wait, browser_screenshot, browser_pdf, browser_eval, browser_console, browser_network, browser_dialogs, browser_resize, browser_tabs, browser_show, browser_handoff, browser_download, browser_downloads, browser_close, browser_help, browser_status, browser_whoami, browser_consent.\n\
+Use browser_help with topic=<tool name> for details and examples.";
+    if topic.is_empty() {
+        return all.to_string();
+    }
+    match topic {
+        "browser_click" => "browser_click: tab, ref or x/y, button?, double?, screenshot?, timeout_ms?, re_resolve?. Clicks with a real mouse event via DevTools. Waits for navigation. Example: {\"tab\":3,\"ref\":\"e5\"}".into(),
+        "browser_type" => "browser_type: tab, ref, text, append?, submit?, screenshot?, re_resolve?. Types real keyboard text. Example: {\"tab\":3,\"ref\":\"e2\",\"text\":\"hello\",\"submit\":true}".into(),
+        "browser_snapshot" => "browser_snapshot: tab, scope?, interactive?, max_lines?. Fresh refs. Example: {\"tab\":3}".into(),
+        "browser_read" => "browser_read: tab, max_chars?. Snapshot plus visible text. Example: {\"tab\":3,\"max_chars\":4000}".into(),
+        "browser_wait" => "browser_wait: tab, text?/text_gone?/selector?/url?, timeout_ms?. Example: {\"tab\":3,\"text\":\"Done\",\"timeout_ms\":5000}".into(),
+        "browser_handoff" => "browser_handoff: tab, message, reason?, timeout_ms?. Hands the tab to the person. reason: captcha|login|consent|confirmation|other. Example: {\"tab\":3,\"message\":\"solve captcha\",\"reason\":\"captcha\"}".into(),
+        _ => format!("No detailed help for {topic}. {all}"),
+    }
 }
 
 fn call(proxy: &EventLoopProxy<Ev>, who: &Who, op: Op) -> Result<Value, String> {
@@ -610,15 +642,14 @@ fn text(s: String) -> Vec<Value> {
 
 /// The page script that finds a ref, first. Refs live in a Map (shadow DOM included) and
 /// as data-lumen-ref attributes (survive a script that replaced the Map).
-const EL_JS: &str = r#"const __el=(r)=>{const m=window.__lumenRefs;let e=m&&m.get(r);if(!e||!e.isConnected)e=document.querySelector('[data-lumen-ref="'+r+'"]');return e};"#;
+const EL_JS: &str = r#"const __el=(r,rr)=>{const m=window.__lumenRefs;let e=m&&m.get(r);if(!e||!e.isConnected)e=document.querySelector('[data-lumen-ref="'+r+'"]');if(e&&e.getAttribute('data-lumen-gen')!==String(window.__lumenGen||0)){if(!rr)return null;e=null}if(!e&&rr){const info=(window.__lumenRefInfo||{})[r];if(info){for(const el of document.querySelectorAll('*')){if(!el.isConnected)continue;const rr2=el.getAttribute('role')||el.tagName.toLowerCase();const nm=(el.getAttribute('aria-label')||el.innerText||el.value||el.placeholder||'').replace(/\s+/g,' ').trim();if(rr2===info.role&&nm===info.name){e=el;break}}}return e};"#;
 
-fn with_el(r: &str, body: &str) -> String {
-    format!("(()=>{{{EL_JS}const R={};const e=__el(R);if(!e)return {{error:'no element '+R+' on this page now; take a new browser_snapshot'}};{body}}})()", json!(r))
+fn with_el(r: &str, body: &str, rr: bool) -> String {
+    format!("(()=>{{{EL_JS}const R={};const e=__el(R,{rr});if(!e)return {{error:'stale_ref: no element '+R+' on this page now; take a new browser_snapshot'}};{body}}})()", json!(r), rr=if rr {"true"} else {"false"})
 }
-
 /// Scroll the element into view and say where its middle is, and what covers it if anything does.
-fn point(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64, r: &str) -> Result<(f64, f64, String), String> {
-    let v = eval(proxy, who, tab, &with_el(r, POINT_JS))?;
+fn point(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64, r: &str, rr: bool) -> Result<(f64, f64, String), String> {
+    let v = eval(proxy, who, tab, &with_el(r, POINT_JS, rr))?;
     if let Some(e) = v["error"].as_str() {
         return Err(e.to_string());
     }
@@ -726,10 +757,29 @@ fn agent_files_dir() -> PathBuf {
 }
 
 /// Every tool call passes `authorize` first. Nothing below runs for a call that does not.
+fn cancelled() -> bool {
+    REQ_ID.with(|r| cancelled_set().lock().unwrap_or_else(|e| e.into_inner()).contains(&*r.borrow()))
+}
+
+fn screenshot_content(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) -> Result<Value, String> {
+    let params = json!({"format": "jpeg", "quality": 75});    let shot = cdp(proxy, who, tab, "Page.captureScreenshot", params)?;
+    let data = shot["data"].as_str().ok_or("no image")?;
+    Ok(json!({"type": "image", "mimeType": "image/jpeg", "data": data}))
+}
+
 fn run(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value) -> Result<Vec<Value>, String> {
     let ctx = PolicyCtx::from_value(&call(proxy, who, Op::Policy)?);
     match authorize(who, name, args, &ctx) {
-        Ok(approval) => run_tool(proxy, who, name, args, &approval),
+        Ok(approval) => {
+            let mut res = run_tool(proxy, who, name, args, &approval)?;
+            if args["screenshot"].as_bool().unwrap_or(false)
+                && let Some(tab) = args["tab"].as_u64()
+                && let Ok(img) = screenshot_content(proxy, who, tab)
+            {
+                res.push(img);
+            }
+            Ok(res)
+        }
         Err(d) => {
             // The tool and why. No path, no URL, no page content.
             if d.log {
@@ -739,7 +789,6 @@ fn run(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value) -> Resul
         }
     }
 }
-
 fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, approval: &Approval) -> Result<Vec<Value>, String> {
     let p = proxy;
     match name {
@@ -758,7 +807,12 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
         "browser_test_state" => Ok(text(call(p, who, Op::TestState)?.to_string())),
         #[cfg(debug_assertions)]
         "browser_test_grant" => Ok(text(call(p, who, Op::TestGrant { tab: tab_arg(args)? })?.to_string())),
-        "browser_open" => {
+        #[cfg(debug_assertions)]
+        "browser_test_decline" => { call(p, who, Op::TestDecline)?; Ok(text("declined".into())) }
+        #[cfg(debug_assertions)]
+        "browser_test_consent_approve" => { call(p, who, Op::TestConsentApprove)?; Ok(text("approved".into())) }
+        #[cfg(debug_assertions)]
+        "browser_test_consent_decline" => { call(p, who, Op::TestConsentDecline)?; Ok(text("declined".into())) }        "browser_open" => {
             let url = args["url"].as_str().ok_or("missing url")?.to_string();
             let activate = !args["background"].as_bool().unwrap_or(false);
             let tab = call(p, who, Op::Open { url, activate })?["tab"].as_u64().ok_or("no tab")?;
@@ -843,11 +897,11 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
             let before = href(p, who, tab);
             let (x, y, note) = match ref_arg(&args["ref"]).or_else(|| ref_arg(&args["element"])) {
                 Some(r) => {
-                    let (x, y, covered) = point(p, who, tab, &r)?;
-                    if !covered.is_empty() && button == "left" {
+                    let rr = args["re_resolve"].as_bool().unwrap_or(false);
+let (x, y, covered) = point(p, who, tab, &r, rr)?;                    if !covered.is_empty() && button == "left" {
                         // Something sits on top (a banner, an overlay): click the element itself.
-                        let v = eval(p, who, tab, &with_el(&r, "e.click();return {ok:1};"))?;
-                        if let Some(e) = v["error"].as_str() {
+                        let rr = args["re_resolve"].as_bool().unwrap_or(false);
+let v = eval(p, who, tab, &with_el(&r, "e.click();return {ok:1};", rr))?;                        if let Some(e) = v["error"].as_str() {
                             return Err(e.to_string());
                         }
                         settle(p, who, tab, &before);
@@ -871,8 +925,8 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
         "browser_hover" => {
             let tab = tab_arg(args)?;
             let r = need_ref(args, "ref")?;
-            let (x, y, _) = point(p, who, tab, &r)?;
-            mouse(p, who, tab, "mouseMoved", x, y, "none", 0)?;
+            let rr = args["re_resolve"].as_bool().unwrap_or(false);
+            let (x, y, _) = point(p, who, tab, &r, rr)?;            mouse(p, who, tab, "mouseMoved", x, y, "none", 0)?;
             thread::sleep(Duration::from_millis(300));
             Ok(text(format!("hovering {r}\n\n{}", snapshot(p, who, tab, &json!({"interactive": true}))?)))
         }
@@ -881,8 +935,8 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
             let r = ref_arg(&args["ref"]).or_else(|| ref_arg(&args["element"])).ok_or("missing ref")?;
             let t = args["text"].as_str().ok_or("missing text")?;
             let append = args["append"].as_bool().unwrap_or(false);
-            let v = eval(p, who, tab, &with_el(&r, &FOCUS_JS.replace("__APPEND__", if append { "true" } else { "false" })))?;
-            if let Some(e) = v["error"].as_str() {
+            let rr = args["re_resolve"].as_bool().unwrap_or(false);
+            let v = eval(p, who, tab, &with_el(&r, &FOCUS_JS.replace("__APPEND__", if append { "true" } else { "false" }), rr))?;            if let Some(e) = v["error"].as_str() {
                 return Err(e.to_string());
             }
             if !append && t.is_empty() {
@@ -890,10 +944,10 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
             }
             if !t.is_empty() && cdp(p, who, tab, "Input.insertText", json!({"text": t})).is_err() {
                 // No DevTools: set the value the way frameworks notice.
-                eval(p, who, tab, &with_el(&r, &SET_JS.replace("__TEXT__", &json!(t).to_string())))?;
-            }
-            let shown = eval(p, who, tab, &with_el(&r, "return {v:e.isContentEditable?e.innerText:(e.type==='password'?'(hidden)':e.value)};"))?;
-            let now = shown["v"].as_str().unwrap_or("").chars().take(120).collect::<String>();
+                let rr = args["re_resolve"].as_bool().unwrap_or(false);
+                eval(p, who, tab, &with_el(&r, &SET_JS.replace("__TEXT__", &json!(t).to_string()), rr))?;            }
+            let rr = args["re_resolve"].as_bool().unwrap_or(false);
+            let shown = eval(p, who, tab, &with_el(&r, "return {v:e.isContentEditable?e.innerText:(e.type==='password'?'(hidden)':e.value)};", rr))?;            let now = shown["v"].as_str().unwrap_or("").chars().take(120).collect::<String>();
             if args["submit"].as_bool().unwrap_or(false) {
                 let before = href(p, who, tab);
                 press(p, who, tab, "Enter")?;
@@ -914,8 +968,8 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
             let tab = tab_arg(args)?;
             let r = need_ref(args, "ref")?;
             let opt = args["option"].as_str().ok_or("missing option")?;
-            let v = eval(p, who, tab, &with_el(&r, &SELECT_JS.replace("__OPT__", &json!(opt).to_string())))?;
-            if let Some(e) = v["error"].as_str() {
+            let rr = args["re_resolve"].as_bool().unwrap_or(false);
+            let v = eval(p, who, tab, &with_el(&r, &SELECT_JS.replace("__OPT__", &json!(opt).to_string()), rr))?;            if let Some(e) = v["error"].as_str() {
                 return Err(e.to_string());
             }
             Ok(text(format!("{r} is now \"{}\"", v["chosen"].as_str().unwrap_or(""))))
@@ -931,8 +985,8 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
                 ("bottom", _) => "window.scrollTo(0,document.documentElement.scrollHeight);".into(),
                 (r, _) => {
                     let r = ref_arg(&json!(r)).unwrap_or_default();
-                    let v = eval(p, who, tab, &with_el(&r, "e.scrollIntoView({block:'center'});return {ok:1};"))?;
-                    if let Some(e) = v["error"].as_str() {
+                    let rr = args["re_resolve"].as_bool().unwrap_or(false);
+                    let v = eval(p, who, tab, &with_el(&r, "e.scrollIntoView({block:'center'});return {ok:1};", rr))?;                    if let Some(e) = v["error"].as_str() {
                         return Err(e.to_string());
                     }
                     String::new()
@@ -949,9 +1003,9 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
         "browser_drag" => {
             let tab = tab_arg(args)?;
             let (a, b) = (need_ref(args, "from")?, need_ref(args, "to")?);
-            let (x1, y1, _) = point(p, who, tab, &a)?;
-            let (x2, y2, _) = point(p, who, tab, &b)?;
-            mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
+            let rr = args["re_resolve"].as_bool().unwrap_or(false);
+            let (x1, y1, _) = point(p, who, tab, &a, rr)?;
+            let (x2, y2, _) = point(p, who, tab, &b, rr)?;            mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
             mouse(p, who, tab, "mousePressed", x1, y1, "left", 1)?;
             for s in 1..=8 {
                 let f = s as f64 / 8.0;
@@ -987,15 +1041,15 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
             let js = WAIT_JS.replace("__C__", &cond.to_string());
             let start = Instant::now();
             loop {
+                if cancelled() { return Err("cancelled".into()); }
                 if eval(p, who, tab, &js)?.as_bool() == Some(true) {
-                    return Ok(text(format!("done after {} ms\n\n{}", start.elapsed().as_millis(), snapshot(p, who, tab, &json!({"interactive": true}))?)));
+                    return Ok(text(format!("done after {} ms\\n\\n{}", start.elapsed().as_millis(), snapshot(p, who, tab, &json!({"interactive": true}))?)));
                 }
                 if start.elapsed() > Duration::from_millis(ms) {
-                    return Err(format!("still not there after {ms} ms"));
+                    return Err(format!("timeout: still not there after {ms} ms"));
                 }
                 thread::sleep(Duration::from_millis(250));
-            }
-        }
+            }        }
         "browser_screenshot" => {
             let tab = tab_arg(args)?;
             let png = args["format"].as_str() == Some("png");
@@ -1004,8 +1058,8 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
                 params["quality"] = json!(75);
             }
             if let Some(r) = ref_arg(&args["ref"]) {
-                let v = eval(p, who, tab, &with_el(&r, "e.scrollIntoView({block:'center'});const b=e.getBoundingClientRect();return {x:b.left+scrollX,y:b.top+scrollY,w:b.width,h:b.height};"))?;
-                if let Some(e) = v["error"].as_str() {
+                let rr = args["re_resolve"].as_bool().unwrap_or(false);
+                let v = eval(p, who, tab, &with_el(&r, "e.scrollIntoView({block:'center'});const b=e.getBoundingClientRect();return {x:b.left+scrollX,y:b.top+scrollY,w:b.width,h:b.height};", rr))?;                if let Some(e) = v["error"].as_str() {
                     return Err(e.to_string());
                 }
                 params["clip"] = json!({"x": v["x"], "y": v["y"], "width": v["w"], "height": v["h"], "scale": 1});
@@ -1116,9 +1170,28 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
         "browser_handoff" => {
             let tab = tab_arg(args)?;
             let message = args["message"].as_str().unwrap_or("Please take over, then press Done.").to_string();
-            call_for(p, who, Op::Handoff { tab, message }, Duration::from_secs(15 * 60)).map_err(|e| if e.contains("in time") { "the person did not press Done within 15 minutes".into() } else { e })?;
+            let reason = args["reason"].as_str().unwrap_or("other").to_string();
+            let ms = args["timeout_ms"].as_u64().unwrap_or(15 * 60 * 1000).clamp(1000, 15 * 60 * 1000);
+            match call_for(p, who, Op::Handoff { tab, message, reason, timeout_ms: ms }, Duration::from_millis(ms)) {
+                Ok(_) => {}
+                Err(e) if e.contains("in time") => return Err("timeout: the person did not press Done in time".into()),
+                Err(e) => return Err(e),
+            }
+            // declined comes back as Err("declined")
             wait_load(p, who, tab);
-            Ok(text(format!("the person pressed Done\n\n{}", snapshot(p, who, tab, &json!({}))?)))
+            Ok(text(format!("the person pressed Done\\n\\n{}", snapshot(p, who, tab, &json!({}))?)))
+        }
+        "browser_consent" => {
+            let tab = tab_arg(args)?;
+            let kind = args["kind"].as_str().unwrap_or("action").to_string();
+            let message = args["message"].as_str().unwrap_or("Approve this action?").to_string();
+            let ms = args["timeout_ms"].as_u64().unwrap_or(60_000).clamp(1000, 300_000);
+            match call_for(p, who, Op::Consent { tab, kind, message }, Duration::from_millis(ms)) {
+                Ok(_) => Ok(text("approved".into())),
+                Err(e) if e == "declined" => Err("declined".into()),
+                Err(e) if e.contains("in time") => Err("timeout".into()),
+                Err(e) => Err(e),
+            }
         }
         "browser_download" => {
             let url = args["url"].as_str().ok_or("missing url")?.to_string();
@@ -1126,11 +1199,12 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
             if !args["wait"].as_bool().unwrap_or(false) {
                 return Ok(text("started; see browser_downloads".into()));
             }
+            let ms = args["timeout_ms"].as_u64().unwrap_or(600_000).clamp(1000, 600_000);
             let start = Instant::now();
-            while start.elapsed() < Duration::from_secs(600) {
+            while start.elapsed() < Duration::from_millis(ms) {
+                if cancelled() { return Err("cancelled".into()); }
                 thread::sleep(Duration::from_millis(700));
-                let list = call(p, who, Op::Downloads)?;
-                if let Some(d) = list.as_array().and_then(|a| a.iter().find(|d| d["url"] == url.as_str())) {
+                let list = call(p, who, Op::Downloads)?;                if let Some(d) = list.as_array().and_then(|a| a.iter().find(|d| d["url"] == url.as_str())) {
                     match d["state"].as_str() {
                         Some("done") => return Ok(text(format!("downloaded {} ({} bytes)", d["path"].as_str().unwrap_or(""), d["size"]))),
                         Some("failed") => return Err(format!("download failed: {}", d["note"].as_str().unwrap_or(""))),
@@ -1148,6 +1222,31 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
             call(p, who, Op::Close { tab: tab_arg(args)? })?;
             Ok(text("closed".into()))
         }
+        "browser_help" => {
+            let topic = args["topic"].as_str().unwrap_or("");
+            Ok(text(help_text(topic)))
+        }
+        "browser_status" => {
+            let v = call(p, who, Op::Status)?;
+            Ok(text(serde_json::to_string_pretty(&v).unwrap_or_default()))
+        }
+        "browser_whoami" => {
+            let ctxv = call(p, who, Op::Policy)?;
+            let tabs = call(p, who, Op::List)?;
+            let short = if who.session.len() >= 8 { &who.session[..8] } else { &who.session };
+            let out = json!({
+                "session": who.name,
+                "short_id": short,
+                "session_id": who.session,
+                "profile": if ctxv["shared"].as_bool().unwrap_or(false) { "shared" } else { "agent" },
+                "shared_profile": ctxv["shared"].as_bool().unwrap_or(false),
+                "upload_on": ctxv["upload"].as_bool().unwrap_or(false),
+                "upload_dir": ctxv["upload_dir"].as_str().unwrap_or(""),
+                "tabs": tabs,
+                "granted_tabs": tabs.as_array().map(|a| a.iter().filter(|t| t["yours"]==false).map(|t| t["tab"].clone()).collect::<Vec<_>>()).unwrap_or_default(),
+            });
+            Ok(text(serde_json::to_string_pretty(&out).unwrap_or_default()))
+        }
         _ => Err(format!("unknown tool {name}")),
     }
 }
@@ -1163,27 +1262,33 @@ fn snapshot(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64, args: &Value) -> Re
     if let Some(e) = v["error"].as_str() {
         return Err(e.to_string());
     }
-    let mut out = format!("Title: {}\nURL: {}\n", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or(""));
+    let mut out = format!("Title: {}\\nURL: {}\\n", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or(""));
     let lines: Vec<&str> = v["lines"].as_array().map(|a| a.iter().filter_map(|l| l.as_str()).collect()).unwrap_or_default();
     if lines.is_empty() {
-        out.push_str("\n(no controls or headings visible)");
+        out.push_str("\\n(no controls or headings visible)");
     } else {
         out.push('\n');
-        out.push_str(&lines.join("\n"));
-    }
+        out.push_str(&lines.join("\\n"));    }
     if let Some(m) = v["more"].as_u64().filter(|m| *m > 0) {
-        out.push_str(&format!("\n… {m} more elements; use scope or max_lines"));
+        out.push_str(&format!("\\n… {m} more elements; use scope or max_lines"));
     }
     if v["frames"].as_u64().is_some_and(|f| f > 0) {
-        out.push_str(&format!("\n({} iframe(s) not looked inside)", v["frames"]));
+        out.push_str(&format!("\\n({} iframe(s) not looked inside)", v["frames"]));
+    }
+    // page-changed marker: compare to the last snapshot taken for this tab.
+    let sig = format!("{}|{}|{}", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or(""), lines.len());
+    let mut map = last_sig_map().lock().unwrap_or_else(|e| e.into_inner());    let changed = map.get(&tab).is_some_and(|prev| prev != &sig);
+    map.insert(tab, sig);
+    if changed {
+        out.push_str("\\n[page changed since last snapshot]");
     }
     Ok(out)
 }
 
 const SNAPSHOT_JS: &str = r#"(()=>{const O=__OPT__;
 document.querySelectorAll('[data-lumen-ref]').forEach(e=>e.removeAttribute('data-lumen-ref'));
-const refs=new Map();window.__lumenRefs=refs;let n=0,more=0,frames=0;
-const vis=e=>{const b=e.getBoundingClientRect();if(b.width<1&&b.height<1)return false;const s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0'};
+if(!window.__lumenGen)window.__lumenGen=0;window.__lumenGen++;
+const refs=new Map();window.__lumenRefs=refs;let n=0,more=0,frames=0;const vis=e=>{const b=e.getBoundingClientRect();if(b.width<1&&b.height<1)return false;const s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0'};
 const tx=s=>(s||'').replace(/\s+/g,' ').trim();
 const name=e=>{const a=e.getAttribute('aria-label');if(a)return tx(a);
  const lb=e.getAttribute('aria-labelledby');if(lb){const t=lb.split(/\s+/).map(i=>document.getElementById(i)).filter(Boolean).map(x=>x.innerText).join(' ');if(tx(t))return tx(t)}
@@ -1208,7 +1313,7 @@ const walk=(p,d)=>{for(const e of p.children){
  if(r&&(ACT.has(r)||(!O.interactive&&(r==='heading'||(r==='img'&&d<3))))&&vis(e)){
   const act=ACT.has(r);let s='  '.repeat(Math.min(d,8))+'- '+r;const nm=name(e).slice(0,100).replace(/"/g,"'");if(nm)s+=' "'+nm+'"';
   if(r==='heading')s+=' [h'+e.tagName[1]+']';
-  if(act){n++;const id='e'+n;refs.set(id,e);e.setAttribute('data-lumen-ref',id);s+=' [ref='+id+']'}
+   if(act){n++;const id='e'+n;refs.set(id,e);e.setAttribute('data-lumen-ref',id);e.setAttribute('data-lumen-gen',String(window.__lumenGen||0));if(!window.__lumenRefInfo)window.__lumenRefInfo={};window.__lumenRefInfo[id]={role:r,name:nm};s+=' [ref='+id+']'}
   if(['checkbox','radio','switch','menuitemcheckbox'].includes(r)&&(e.checked||e.getAttribute('aria-checked')==='true'))s+=' checked';
   if(e.getAttribute('aria-expanded'))s+=' expanded='+e.getAttribute('aria-expanded');
   if(e.getAttribute('aria-selected')==='true')s+=' selected';
@@ -1224,9 +1329,8 @@ const walk=(p,d)=>{for(const e of p.children){
  walk(e,deeper);
 }};
 walk(root,0);
-return {title:document.title,url:location.href,lines,more,frames};})()"#;
-
-const FOCUS_JS: &str = r#"e.scrollIntoView({block:'center'});e.focus();
+document.querySelectorAll('[data-lumen-ref]').forEach(e=>e.setAttribute('data-lumen-gen',String(window.__lumenGen)));
+return {title:document.title,url:location.href,lines,more,frames,gen:window.__lumenGen};})()"#;const FOCUS_JS: &str = r#"e.scrollIntoView({block:'center'});e.focus();
 if(document.activeElement!==e&&!e.contains(document.activeElement))return {error:R+' cannot take typing (not a field?)'};
 if(!__APPEND__){if(e.isContentEditable){const s=getSelection(),g=document.createRange();g.selectNodeContents(e);s.removeAllRanges();s.addRange(g)}else if(e.select)e.select()}
 else if(e.setSelectionRange&&typeof e.value==='string'){try{e.setSelectionRange(e.value.length,e.value.length)}catch(x){}}

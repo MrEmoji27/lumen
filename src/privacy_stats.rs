@@ -143,6 +143,7 @@ pub struct Bar {
     /// "YYYY-MM-DD".
     pub day: String,
     pub blocked: u64,
+    #[allow(dead_code)]
     pub bytes: u64,
 }
 
@@ -160,8 +161,11 @@ pub struct SiteRow {
 /// Everything the report page draws, computed in one pass over the days.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
+    #[allow(dead_code)]
     pub today: Counts,
+    #[allow(dead_code)]
     pub week: Counts,
+    #[allow(dead_code)]
     pub month: Counts,
     pub all: Counts,
     /// Agent tabs, kept apart from all of the above.

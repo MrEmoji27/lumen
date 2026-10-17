@@ -95,6 +95,8 @@ pub struct Blocker {
     on: Cell<bool>,
     /// Hide what slipped through, and cookie banners (cosmetic rules).
     cosmetic: Cell<bool>,
+    /// Add the Global Privacy Control and Do Not Track headers to every request.
+    gpc: Cell<bool>,
     blocked: Cell<u64>,
     /// `adblock::Engine` refuses to cross threads, so it is born here, on the
     /// UI thread, from bytes baked by the background thread.
@@ -117,6 +119,7 @@ impl Blocker {
             dir: data_dir,
             on: Cell::new(true),
             cosmetic: Cell::new(true),
+            gpc: Cell::new(false),
             blocked: Cell::new(0),
             engine: RefCell::new(None),
             rx: RefCell::new(rx),
@@ -132,6 +135,12 @@ impl Blocker {
 
     pub fn set_cosmetic(&self, on: bool) {
         self.cosmetic.set(on);
+    }
+
+    /// Send "Sec-GPC: 1" and "DNT: 1" with every request. The handler already runs for
+    /// each one, so this costs two header sets and no extra hook.
+    pub fn set_gpc(&self, on: bool) {
+        self.gpc.set(on);
     }
 
     /// The URL with tracking parameters removed by `$removeparam` rules, if any were.
@@ -498,11 +507,17 @@ fn on_request(
     unsafe {
         let mut ctx = COREWEBVIEW2_WEB_RESOURCE_CONTEXT::default();
         args.ResourceContext(&mut ctx)?;
+        let request = args.Request()?;
+        if b.gpc.get()
+            && let Ok(h) = request.Headers()
+        {
+            let _ = h.SetHeader(&HSTRING::from("Sec-GPC"), &HSTRING::from("1"));
+            let _ = h.SetHeader(&HSTRING::from("DNT"), &HSTRING::from("1"));
+        }
         // The document is the page itself. Never block the page.
         let Some(kind) = map_context(ctx) else {
             return Ok(());
         };
-        let request = args.Request()?;
         let mut uri = PWSTR::null();
         request.Uri(&mut uri)?;
         let url = take(uri);
@@ -885,6 +900,7 @@ mod tests {
             rx: RefCell::new(rx),
             sources: RefCell::new(vec!["easylist.txt".into(), "easyprivacy.txt".into()]),
             cookies: RefCell::new(None),
+            gpc: Cell::new(false),
         };
         assert_eq!(b.check("https://ads.example.com/x.js", "https://site.com", "script"), Some(Cat::Ads));
         assert_eq!(b.check("https://track.example.org/p", "https://site.com", "image"), Some(Cat::Trackers));

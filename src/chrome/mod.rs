@@ -10,6 +10,7 @@ pub mod dialog;
 mod gfx;
 mod pages;
 mod report;
+mod dashboard;
 #[cfg(debug_assertions)]
 mod shot;
 mod style;
@@ -154,10 +155,32 @@ pub struct UiState {
     pub bookmarks: Vec<UiMark>,
     /// Filled only while the report page is open.
     pub report: Option<crate::privacy_stats::Snapshot>,
+    /// Filled only while the dashboard is open: today's privacy counts.
+    pub privacy_today: Option<crate::privacy_stats::Counts>,
     /// A download ended while the page was closed: a small dot on the footer button.
     pub dl_unseen: bool,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
     pub upnp_port_open: bool,
+    /// The active page's zoom, in percent.
+    pub zoom: u32,
+    /// Sites with a zoom of their own: (host, percent).
+    pub zooms: Vec<(String, u32)>,
+    /// Cookies the active page's site has, once the lock has asked.
+    pub site_cookies: Option<usize>,
+    /// Tabs of the other workspaces, for the tab search. Private tabs never appear here:
+    /// they are not kept when a workspace is put away.
+    pub other_tabs: Vec<UiOther>,
+}
+
+/// A tab in a workspace that is not showing: enough to find it and bring it back.
+#[derive(Clone, Debug)]
+pub struct UiOther {
+    pub ws: usize,
+    /// Its place among that workspace's saved tabs.
+    pub idx: usize,
+    pub ws_name: String,
+    pub title: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -236,6 +259,10 @@ pub enum Hit {
     Page(pages::PageHit),
     /// A widget of the report page (report.rs).
     Report(report::Click),
+    /// A tile or button of the dashboard (dashboard.rs).
+    Dash(dashboard::Click),
+    /// The grid button in the footer: the dashboard.
+    DashFooter,
     /// The shield in the footer: the report page.
     ReportFooter,
     /// Clicked a workspace name in the switcher.
@@ -244,6 +271,20 @@ pub enum Hit {
     GlanceOpen,
     /// The "+" button next to workspaces to add a new one.
     WorkspaceAdd,
+    /// The lock (or globe) in the address bar: the site info popover.
+    SiteInfo,
+    /// A permission answer in the site popover: (kind, "allow" | "block" | "ask").
+    SitePerm(String, &'static str),
+    /// "Clear data for this site" in the site popover.
+    SiteClear,
+    /// "Site settings…" in the site popover: open the Sites page.
+    SiteSettings,
+    /// The zoom chip in the address bar: click takes the page back to 100%.
+    ZoomChip,
+    /// A row of the tab search card.
+    TabSearch(usize),
+    /// The tab search card itself: clicks on it are not clicks outside it.
+    SearchCard,
 }
 
 #[derive(Clone, Debug)]
@@ -259,6 +300,8 @@ enum SuggKind {
     Go(String),
     Search(String),
     Tab(u64),
+    /// A tab in a workspace that is put away: (workspace, index among its saved tabs).
+    TabOther(usize, usize),
     /// From history (false) or bookmarks (true).
     Url(String, bool),
 }
@@ -357,6 +400,34 @@ pub(crate) struct Inner {
     glance_dim: Option<HWND>,
     /// Workspace index being renamed via the omnibox edit, if any.
     renaming: Option<usize>,
+    /// The site info popover (the lock) is open.
+    site_open: bool,
+    /// The tab search card is open (Ctrl+Shift+A).
+    search_open: bool,
+    /// The filter box of the tab search; a real edit window.
+    search_edit: HWND,
+    /// The row the tab search has picked.
+    search_sel: usize,
+    /// What the last tab-search frame listed, so a click knows what it lands on.
+    search_rows: Vec<SwitchRow>,
+}
+
+/// One row of the tab search: enough to switch to the tab it names. `other` is (workspace,
+/// index among that workspace's saved tabs); without it, the tab is in this workspace.
+#[derive(Clone, Debug)]
+struct SwitchRow {
+    id: u64,
+    other: Option<(usize, usize)>,
+    ws_name: String,
+    title: String,
+    url: String,
+    private: bool,
+}
+
+impl SwitchRow {
+    fn label(&self) -> String {
+        if self.title.is_empty() { host(&self.url) } else { self.title.clone() }
+    }
 }
 
 /// The native chrome. Cheap to clone the handle; state lives behind the RefCell.
@@ -369,6 +440,7 @@ const CLASS: PCWSTR = w!("LumenChrome");
 const ID_EDIT: usize = 101;
 const ID_NTP: usize = 102;
 const ID_BM: usize = 103;
+const ID_SRCH: usize = 104;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -409,6 +481,78 @@ fn host(url: &str) -> String {
     let h = rest.split(['/', '?', '#']).next().unwrap_or("");
     let h = h.rsplit('@').next().unwrap_or(h);
     h.strip_prefix("www.").unwrap_or(h).to_string()
+}
+
+/// How many tab search rows show before the card says how many are left.
+const SEARCH_ROWS: usize = 9;
+
+/// The tab search's rows: this workspace's tabs as they stand, then the tabs of the workspaces
+/// that are put away, filtered by `q` and ranked best first. Equal scores keep the sidebar's
+/// order, so an empty query lists the tabs as they are.
+fn switch_rows(s: &UiState, q: &str) -> Vec<SwitchRow> {
+    let mut all = switch_candidates(&s.tabs, &s.other_tabs);
+    let ws_name = s.workspaces.get(s.active_workspace).cloned().unwrap_or_default();
+    for row in &mut all {
+        if row.other.is_none() {
+            row.ws_name = ws_name.clone();
+        }
+    }
+    rank_rows(&all, q)
+}
+
+/// The candidates of the tab search, in list order.
+fn switch_candidates(tabs: &[UiTab], other: &[UiOther]) -> Vec<SwitchRow> {
+    let mut all: Vec<SwitchRow> = tabs
+        .iter()
+        .map(|t| SwitchRow { id: t.id, other: None, ws_name: String::new(), title: t.title.clone(), url: t.url.clone(), private: t.private })
+        .collect();
+    for o in other {
+        all.push(SwitchRow {
+            id: 0,
+            other: Some((o.ws, o.idx)),
+            ws_name: o.ws_name.clone(),
+            title: o.title.clone(),
+            url: o.url.clone(),
+            private: false,
+        });
+    }
+    all
+}
+
+/// The candidates that fit `q`, best first.
+fn rank_rows(all: &[SwitchRow], q: &str) -> Vec<SwitchRow> {
+    let order = {
+        let entries: Vec<crate::tabsearch::Entry> = all.iter().map(|r| crate::tabsearch::Entry { title: &r.title, url: &r.url }).collect();
+        crate::tabsearch::rank(q, &entries)
+    };
+    order.into_iter().map(|i| all[i].clone()).collect()
+}
+
+/// The tab search card's rectangle: over the sidebar, starting at its top.
+fn search_card(sb: R, rows: usize) -> R {
+    let h = 46.0 + rows as f32 * 30.0 + if rows == 0 { 34.0 } else { 6.0 };
+    R::new(sb.x + 8.0, 8.0, (sb.w - 16.0).max(180.0), h.min(sb.h - 16.0))
+}
+
+/// Put history and bookmark hits into a suggestion list: under the "Switch to tab" rows (an
+/// open tab is always the better answer) and over what is already there, skipping a URL the
+/// list already shows.
+fn merge_hits(sugg: &mut Vec<Sugg>, hits: Vec<(String, String, bool, String)>) {
+    let at = sugg
+        .iter()
+        .rposition(|s| matches!(s.kind, SuggKind::Tab(_) | SuggKind::TabOther(..)))
+        .map_or(sugg.len(), |n| n + 1);
+    let mut add = Vec::new();
+    for (url, title, bm, detail) in hits {
+        if sugg.iter().any(|s| matches!(&s.kind, SuggKind::Go(u) | SuggKind::Url(u, _) if *u == url)) {
+            continue;
+        }
+        let label = if title.is_empty() { url.clone() } else { title };
+        add.push(Sugg { kind: SuggKind::Url(url, bm), label, detail });
+    }
+    for (n, s) in add.into_iter().enumerate() {
+        sugg.insert(at + n, s);
+    }
 }
 
 fn wide_text(hwnd: HWND) -> String {
@@ -518,7 +662,22 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit] {
+            let search_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_SRCH as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit, search_edit] {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
@@ -560,6 +719,11 @@ impl Chrome {
                 mouse: (-1.0, -1.0),
                 glance_dim: Some(dim),
                 renaming: None,
+                site_open: false,
+                search_open: false,
+                search_edit,
+                search_sel: 0,
+                search_rows: Vec::new(),
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -687,18 +851,7 @@ impl Chrome {
         if !i.editing || wide_text(i.edit).trim() != q {
             return;
         }
-        let at = i.sugg.iter().position(|s| matches!(s.kind, SuggKind::Tab(_))).unwrap_or(i.sugg.len());
-        let mut add = Vec::new();
-        for (url, title, bm, detail) in hits {
-            if i.sugg.iter().any(|s| matches!(&s.kind, SuggKind::Go(u) | SuggKind::Url(u, _) if *u == url)) {
-                continue;
-            }
-            let label = if title.is_empty() { url.clone() } else { title };
-            add.push(Sugg { kind: SuggKind::Url(url, bm), label, detail });
-        }
-        for (n, s) in add.into_iter().enumerate() {
-            i.sugg.insert(at + n, s);
-        }
+        merge_hits(&mut i.sugg, hits);
         i.sugg.truncate(9);
         i.invalidate();
     }
@@ -733,6 +886,30 @@ impl Chrome {
             let _ = SetFocus(Some(edit));
             SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
         }
+    }
+
+    /// Ctrl+Shift+A: the quick switcher over the sidebar. A second press closes it.
+    pub fn open_tab_search(&self) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        if i.search_open {
+            i.close_search();
+            return;
+        }
+        // The card lives in the sidebar; in the icon-only sidebar show the full one.
+        if i.state.as_ref().is_some_and(|s| s.settings.compact) {
+            send(&i.proxy, json!({"t": "peek", "on": true}));
+        }
+        i.search_open = true;
+        i.search_sel = 0;
+        unsafe {
+            SetWindowTextW(i.search_edit, &HSTRING::from("")).ok();
+        }
+        i.layout_edits();
+        unsafe {
+            let _ = SetFocus(Some(i.search_edit));
+        }
+        // The rows are rebuilt by the paint this asks for.
+        i.invalidate();
     }
 }
 
@@ -968,6 +1145,11 @@ impl Inner {
         place(self.ntp_edit, R::new(f.x + 42.0, f.y + (f.h - 22.0) / 2.0, f.w - 58.0, 22.0), self.ntp_visible() && ntp_live);
         let b = pages::bm_search_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3));
         place(self.bm_edit, R::new(b.x + 34.0, b.y + (b.h - 20.0) / 2.0, b.w - 46.0, 20.0), s.full && s.panel == "bookmarks");
+        // The tab search's filter, inside the card over the sidebar.
+        let sb = self.sidebar();
+        let q = wide_text(self.search_edit).trim().to_lowercase();
+        let card = search_card(sb, switch_rows(s, &q).len().min(SEARCH_ROWS));
+        place(self.search_edit, R::new(card.x + 40.0, card.y + 10.0, card.w - 52.0, 22.0), self.search_open);
     }
 
     fn focus_ntp(&mut self) {
@@ -977,6 +1159,36 @@ impl Inner {
         }
         self.layout_edits();
         self.invalidate();
+    }
+
+    /// Close the tab search: filter box hidden, focus back on the page.
+    fn close_search(&mut self) {
+        if !self.search_open {
+            return;
+        }
+        self.search_open = false;
+        self.search_rows.clear();
+        self.search_sel = 0;
+        if self.state.as_ref().is_some_and(|s| s.settings.compact || s.peek) {
+            send(&self.proxy, json!({"t": "peek", "on": false}));
+        }
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        self.layout_edits();
+        send(&self.proxy, json!({"t": "focusPage"}));
+        self.invalidate();
+    }
+
+    /// Enter in the tab search: switch to the picked row, workspace and all.
+    fn switch_to(&mut self, n: usize) {
+        let Some(row) = self.search_rows.get(n).cloned() else { return };
+        let msg = match row.other {
+            Some((ws, idx)) => json!({"t": "switchTab", "ws": ws, "idx": idx, "other": true}),
+            None => json!({"t": "switchTab", "id": row.id}),
+        };
+        send(&self.proxy, msg);
+        self.close_search();
     }
 
     fn begin_edit(&mut self) {
@@ -1044,16 +1256,26 @@ impl Inner {
         }
         self.sugg.push(Sugg { kind: SuggKind::Search(q.clone()), label: q.clone(), detail: String::new() });
         send(&self.proxy, json!({"t": "suggest", "q": q}));
-        let lq = q.to_lowercase();
+        // Open tabs as "Switch to tab" rows, this workspace's first, then the workspaces that
+        // are put away. Ranked as the quick switcher ranks them, best match first.
         if let Some(s) = &self.state {
-            for t in s.tabs.iter().filter(|t| t.id != s.active && !t.url.is_empty()) {
-                if self.sugg.len() >= 6 {
-                    break;
-                }
-                if t.title.to_lowercase().contains(&lq) || t.url.to_lowercase().contains(&lq) {
-                    let label = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
-                    self.sugg.push(Sugg { kind: SuggKind::Tab(t.id), label, detail: String::new() });
-                }
+            let mut all: Vec<(SuggKind, String, String, String)> = s
+                .tabs
+                .iter()
+                .filter(|t| t.id != s.active && !t.url.is_empty())
+                .map(|t| (SuggKind::Tab(t.id), t.title.clone(), t.url.clone(), String::new()))
+                .collect();
+            for o in &s.other_tabs {
+                all.push((SuggKind::TabOther(o.ws, o.idx), o.title.clone(), o.url.clone(), o.ws_name.clone()));
+            }
+            let order = {
+                let entries: Vec<crate::tabsearch::Entry> = all.iter().map(|(_, t, u, _)| crate::tabsearch::Entry { title: t, url: u }).collect();
+                crate::tabsearch::rank(&q, &entries)
+            };
+            for n in order.into_iter().take(6) {
+                let (kind, title, url, tag) = all[n].clone();
+                let label = if title.is_empty() { host(&url) } else { title };
+                self.sugg.push(Sugg { kind, label, detail: tag });
             }
         }
         self.invalidate();
@@ -1063,6 +1285,7 @@ impl Inner {
         let Some(sg) = self.sugg.get(i).cloned() else { return };
         match sg.kind {
             SuggKind::Tab(id) => send(&self.proxy, json!({"t": "activate", "id": id})),
+            SuggKind::TabOther(ws, idx) => send(&self.proxy, json!({"t": "switchTab", "ws": ws, "idx": idx, "other": true})),
             SuggKind::Go(q) | SuggKind::Search(q) | SuggKind::Url(q, _) => send(&self.proxy, json!({"t": "nav", "url": q})),
         }
         self.end_edit();
@@ -1247,10 +1470,18 @@ impl Inner {
             self.gfx.round_stroke(o, 9.0, th.acc_soft, 1.5);
         }
         let secure = act.as_ref().is_some_and(|t| t.url.starts_with("https://"));
+        let site = act.as_ref().is_some_and(|t| t.url.starts_with("http"));
         if compact {
             self.gfx.icon("search", o.x + (o.w - 16.0) / 2.0, o.y + 9.0, 16.0, th.dim);
         } else {
-            self.gfx.icon(if secure && !focused { "lock" } else { "search" }, o.x + 10.0, o.y + 9.0, 16.0, if secure { th.dim } else { th.faint });
+            // The icon is the site's button: a lock for https, a globe for plain http.
+            let icon = if secure && !focused { "lock" } else if site && !focused { "globe" } else { "search" };
+            let plate = R::new(o.x + 4.0, o.y + 5.0, 28.0, 24.0);
+            let hov = self.is_hover(&Hit::SiteInfo) || self.site_open;
+            if site && !focused && hov {
+                self.gfx.round(plate, 7.0, th.hover);
+            }
+            self.gfx.icon(icon, o.x + 10.0, o.y + 9.0, 16.0, if hov && site { th.text } else if secure { th.dim } else { th.faint });
             if !focused {
                 let text = act.as_ref().filter(|t| t.status != "new").map(|t| {
                     let h = host(&t.url);
@@ -1263,6 +1494,21 @@ impl Inner {
             }
         }
         self.hit(o, Hit::Omni);
+        // The lock sits over the omnibox's own hit, so it is registered after it.
+        if site && !compact && !focused {
+            self.hit(R::new(o.x + 4.0, o.y + 5.0, 28.0, 24.0), Hit::SiteInfo);
+        }
+        // The zoom chip, when the page is not at 100%: one click takes it back.
+        if !compact && !focused && s.zoom != 100 && act.as_ref().is_some_and(|t| !t.url.is_empty()) {
+            let label = format!("{}%", s.zoom);
+            let w = self.gfx.measure(&label, Font::ui(11.5, 500)) + 16.0;
+            let r = R::new(o.right() - 36.0 - w, o.y + 5.0, w, 24.0);
+            let h = Hit::ZoomChip;
+            let hov = self.is_hover(&h);
+            self.gfx.round(r, 12.0, if hov { th.press } else { th.hover });
+            self.gfx.text(&label, r, Font::ui(11.5, 500).align(Align::Center), if hov { th.text } else { th.dim });
+            self.hit(r, h);
+        }
         if !compact && !focused && act.as_ref().is_some_and(|t| !t.url.is_empty() && !t.agent) {
             let r = R::new(o.right() - 30.0, o.y + 5.0, 24.0, 24.0);
             if self.is_hover(&Hit::Star) {
@@ -1390,7 +1636,7 @@ impl Inner {
                 let (icon, hint) = match sg.kind {
                     SuggKind::Go(_) => ("globe", "Open"),
                     SuggKind::Search(_) => ("search", "Search"),
-                    SuggKind::Tab(_) => ("tab", "Switch to tab"),
+                    SuggKind::Tab(_) | SuggKind::TabOther(..) => ("tab", "Switch to tab"),
                     SuggKind::Url(_, true) => ("star", "Bookmark"),
                     SuggKind::Url(_, false) if !sg.detail.is_empty() => ("clock", "In page"),
                     SuggKind::Url(_, false) => ("clock", "History"),
@@ -1458,7 +1704,7 @@ impl Inner {
         let live: Vec<&UiDl> = s.downloads.iter().filter(|d| d.state == "progress").collect();
         // Bookmarks and the privacy report, left of downloads. The icon-only sidebar has no
         // room for more buttons: Ctrl+Shift+O and the address bar's star still reach the page.
-        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 60.0 };
+        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 90.0 };
         if !compact {
             let bm = R::new(dl.x - 30.0, dl.y, 28.0, 28.0);
             let on = s.panel == "bookmarks";
@@ -1476,6 +1722,14 @@ impl Inner {
             }
             self.gfx.icon("shield", pv.x + 6.0, pv.y + 6.0, 16.0, if on { th.accent } else if hov { th.text } else { th.dim });
             self.hit(pv, Hit::ReportFooter);
+            let db = R::new(pv.x - 30.0, pv.y, 28.0, 28.0);
+            let on = s.panel == "dashboard";
+            let hov = self.is_hover(&Hit::DashFooter);
+            if hov {
+                self.gfx.round(db, 7.0, th.hover);
+            }
+            self.gfx.icon("dashboard", db.x + 6.0, db.y + 6.0, 16.0, if on { th.accent } else if hov { th.text } else { th.dim });
+            self.hit(db, Hit::DashFooter);
         }
         if self.is_hover(&Hit::DlFooter) {
             self.gfx.round(dl, 7.0, th.hover);
@@ -1532,6 +1786,161 @@ impl Inner {
             }
             self.gfx.text(&t, R::new(r.x + 5.0, r.y, r.w - 5.0, r.h), Font::ui(11.5, 400), if hov { th.text } else { th.faint });
             self.hit(r, Hit::Mem);
+        }
+
+        // The quick switcher sits over everything else in the sidebar; so does the lock's card.
+        if self.search_open {
+            self.draw_search(s);
+        } else if self.site_open {
+            self.draw_site_menu(s);
+        }
+    }
+
+    /// The site popover under the lock: what the site may do, what it stores, and the ways out.
+    fn draw_site_menu(&mut self, s: &UiState) {
+        let th = self.theme;
+        let sb = self.sidebar();
+        let Some(tab) = s.active_tab() else { return };
+        let origin = crate::engine::origin_of(&tab.url);
+        if !origin.starts_with("http") {
+            self.site_open = false;
+            return;
+        }
+        // The common kinds always; any other kind this site was answered about, after them.
+        let answered = |kind: &str| s.rules.iter().find(|(o, k, _)| o == &origin && k == kind).map(|(_, _, a)| *a);
+        let mut kinds: Vec<String> = crate::sites::KINDS.iter().take(crate::sites::COMMON).map(|k| k.key.to_string()).collect();
+        for (o, k, _) in &s.rules {
+            if o == &origin && !kinds.iter().any(|x| x == k) {
+                kinds.push(k.clone());
+            }
+        }
+        let card = R::new(sb.x + 8.0, 86.0 + s.ws_h(), sb.w - 16.0, 134.0 + kinds.len() as f32 * 54.0);
+        self.gfx.round(R::new(card.x, card.y + 4.0, card.w, card.h), 12.0, th.shade.alpha(0.65));
+        self.gfx.round(card, 12.0, th.raise);
+        self.gfx.round_stroke(card, 12.0, th.line, 1.0);
+        let mut y = card.y + 12.0;
+        self.gfx.text(&host(&tab.url), R::new(card.x + 12.0, y, card.w - 24.0, 20.0), Font::ui(13.0, 600), th.text);
+        y += 20.0;
+        let note = match s.site_cookies {
+            Some(1) => "1 cookie stored".to_string(),
+            Some(n) => format!("{n} cookies stored"),
+            None => "Checking what it stores…".to_string(),
+        };
+        self.gfx.text(&note, R::new(card.x + 12.0, y, card.w - 24.0, 18.0), Font::ui(11.5, 400), th.faint);
+        y += 24.0;
+        self.gfx.line(card.x + 8.0, y, card.right() - 8.0, y, th.line, 1.0);
+        y += 10.0;
+        for kind in &kinds {
+            let label = crate::sites::label(kind);
+            self.gfx.text(&label, R::new(card.x + 12.0, y, card.w - 24.0, 18.0), Font::ui(12.0, 500), th.dim);
+            y += 20.0;
+            self.site_chips(card.x + 12.0, card.right() - 12.0, y, kind, answered(kind));
+            y += 34.0;
+        }
+        // The two ways out of the permissions grid, stacked: the card is sidebar-wide.
+        for hit in [Hit::SiteClear, Hit::SiteSettings] {
+            let label = match hit {
+                Hit::SiteClear => "Clear data for this site",
+                _ => "Site settings…",
+            };
+            let r = R::new(card.x + 12.0, y, card.w - 24.0, 28.0);
+            let hov = self.is_hover(&hit);
+            self.gfx.round(r, 7.0, if hov { th.press } else { th.bg });
+            self.gfx.text(label, r, Font::ui(12.0, 500).align(Align::Center), if hov { th.text } else { th.dim });
+            self.hit(r, hit);
+            y += 32.0;
+        }
+    }
+
+    /// The Allow / Block / Ask chips of one kind in the site popover: three equal cells from
+    /// `x` to `right`.
+    fn site_chips(&mut self, x: f32, right: f32, y: f32, kind: &str, cur: Option<bool>) {
+        let th = self.theme;
+        let f = Font::ui(11.5, 500).align(Align::Center);
+        let opts: [(&'static str, Option<bool>); 3] = [("Allow", Some(true)), ("Block", Some(false)), ("Ask", None)];
+        let w = (right - x - 2.0 * 4.0) / 3.0;
+        let mut cx = x;
+        for (label, v) in opts {
+            let r = R::new(cx, y, w, 26.0);
+            let h = Hit::SitePerm(kind.to_string(), label);
+            if v == cur {
+                self.gfx.round(r, 6.0, th.press);
+            } else if self.is_hover(&h) {
+                self.gfx.round(r, 6.0, th.hover);
+            }
+            self.gfx.text(label, r, f, if v == cur { th.text } else { th.dim });
+            self.hit(r, h);
+            cx += w + 4.0;
+        }
+    }
+
+    /// The origin (scheme://host) of the active page, when it is a site at all.
+    fn active_origin(&self) -> Option<String> {
+        let s = self.state.as_ref()?;
+        let t = s.active_tab()?;
+        t.url.starts_with("http").then(|| crate::engine::origin_of(&t.url))
+    }
+
+    /// The tab search card: a filter box on top, then the matching tabs of every workspace.
+    fn draw_search(&mut self, s: &UiState) {
+        let th = self.theme;
+        let sb = self.sidebar();
+        let q = wide_text(self.search_edit).trim().to_lowercase();
+        self.search_rows = switch_rows(s, &q);
+        let shown = self.search_rows.len().min(SEARCH_ROWS);
+        let card = search_card(sb, shown);
+        self.search_sel = self.search_sel.min(self.search_rows.len().saturating_sub(1));
+        self.gfx.round(R::new(card.x, card.y + 4.0, card.w, card.h), 12.0, th.shade.alpha(0.65));
+        self.gfx.round(card, 12.0, th.raise);
+        self.gfx.round_stroke(card, 12.0, th.line, 1.0);
+        // The card is not "outside itself"; rows registered after win over it.
+        self.hit(card, Hit::SearchCard);
+        // The filter field (a real edit window is placed over this).
+        let field = R::new(card.x + 8.0, card.y + 8.0, card.w - 16.0, 26.0);
+        self.gfx.round(field, 8.0, th.bg);
+        self.gfx.icon("search", field.x + 9.0, field.y + 5.0, 16.0, th.faint);
+        if q.is_empty() {
+            self.gfx.text("Search open tabs", R::new(field.x + 33.0, field.y, field.w - 40.0, field.h), Font::ui(12.5, 400), th.faint);
+        }
+        // Hits.
+        let mut y = card.y + 42.0;
+        if self.search_rows.is_empty() {
+            self.gfx.text("No open tab matches", R::new(card.x, y + 12.0, card.w, 26.0), Font::ui(12.5, 400).align(Align::Center), th.faint);
+        }
+        for n in 0..shown {
+            // Right: where the tab lives, or that it is private. Left: what it says.
+            let (label, tag, tc) = {
+                let row = &self.search_rows[n];
+                if row.private {
+                    (row.label(), "Private".to_string(), th.accent)
+                } else if row.other.is_some() {
+                    (row.label(), row.ws_name.clone(), th.faint)
+                } else {
+                    (row.label(), String::new(), th.faint)
+                }
+            };
+            let r = R::new(card.x + 6.0, y, card.w - 12.0, 30.0);
+            let h = Hit::TabSearch(n);
+            if n == self.search_sel {
+                self.gfx.round(r, 7.0, th.hover);
+            } else if self.is_hover(&h) {
+                self.gfx.round(r, 7.0, th.hover.alpha(0.6));
+            }
+            let tw = if tag.is_empty() { 0.0 } else { self.gfx.measure(&tag, Font::ui(11.0, 500)) + 16.0 };
+            self.gfx.text(&label, R::new(r.x + 10.0, r.y, r.w - 20.0 - tw, r.h), Font::ui(12.5, 450), th.text);
+            if !tag.is_empty() {
+                self.gfx.text(&tag, R::new(r.right() - tw - 4.0, r.y, tw, r.h), Font::ui(11.0, 500).align(Align::Right), tc);
+            }
+            self.hit(r, h);
+            y += 30.0;
+        }
+        if self.search_rows.len() > shown {
+            self.gfx.text(
+                &format!("{} more — type to narrow", self.search_rows.len() - shown),
+                R::new(card.x, y + 2.0, card.w, 16.0),
+                Font::ui(11.0, 400).align(Align::Center),
+                th.faint,
+            );
         }
     }
 
@@ -1942,6 +2351,14 @@ impl Inner {
             self.invalidate();
             return;
         }
+        // A click that lands anywhere but the tab search card closes it (the row still acts).
+        if self.search_open && !matches!(h, Some(Hit::TabSearch(_)) | Some(Hit::SearchCard)) {
+            self.close_search();
+        }
+        // The same for the lock's card, which acts through its own hits.
+        if self.site_open && !matches!(h, Some(Hit::SiteInfo | Hit::SitePerm(..) | Hit::SiteClear | Hit::SiteSettings)) {
+            self.site_open = false;
+        }
         let p = &self.proxy;
         match h.unwrap() {
             Hit::Back => send(p, json!({"t": "back"})),
@@ -1986,6 +2403,16 @@ impl Inner {
             Hit::DlFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "downloads");
                 send(p, json!({"t": "panel", "open": open, "which": "downloads"}));
+            }
+            Hit::ReportFooter => {
+                let open = self.state.as_ref().is_some_and(|s| s.panel != "report");
+                send(p, json!({"t": "panel", "open": open, "which": "report"}));
+            }
+            Hit::Report(c) => report::click(self, c),
+            Hit::Dash(c) => dashboard::click(self, c),
+            Hit::DashFooter => {
+                let open = self.state.as_ref().is_some_and(|s| s.panel != "dashboard");
+                send(p, json!({"t": "panel", "open": open, "which": "dashboard"}));
             }
             Hit::BookmarksFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "bookmarks");
@@ -2049,6 +2476,33 @@ impl Inner {
                 }
             }
             Hit::Page(ph) => pages::click(self, ph),
+            Hit::SiteInfo => {
+                // The lock: open what the site may do, or put it away again.
+                let opening = !self.site_open;
+                self.site_open = opening;
+                if opening {
+                    send(p, json!({"t": "siteOpen"}));
+                }
+            }
+            Hit::SitePerm(kind, v) => {
+                // "lock": the answer came from the popover, not the Site settings page, so a
+                // private tab must not leave it in the store on the way out.
+                if let Some(origin) = self.active_origin() {
+                    send(p, json!({"t": "permSet", "origin": origin, "kind": kind, "v": v, "lock": true}));
+                }
+            }
+            Hit::SiteClear => {
+                if let Some(origin) = self.active_origin() {
+                    send(p, json!({"t": "siteClear", "origin": origin, "lock": true}));
+                }
+                self.site_open = false;
+            }
+            Hit::SiteSettings => {
+                self.site_open = false;
+                send(p, json!({"t": "panel", "open": true, "which": "sites"}));
+            }
+            Hit::ZoomChip => send(p, json!({"t": "zoomSet", "pct": 100})),
+            Hit::TabSearch(n) => self.switch_to(n),
             _ => {}
         }
         self.invalidate();
@@ -2360,6 +2814,13 @@ impl Inner {
 
     fn key(&mut self, vk: u32) -> bool {
         let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
+        // The tab search and the lock's card sit over the sidebar: Escape puts them away.
+        if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) && (self.search_open || self.site_open) {
+            self.close_search();
+            self.site_open = false;
+            self.invalidate();
+            return true;
+        }
         // When a glance is open, Escape closes it and Enter opens it as a tab.
         if let Some(s) = &self.state {
             if s.glance {
@@ -2632,6 +3093,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         i.page.scroll = 0.0;
                     }
                     i.invalidate();
+                } else if id == ID_SRCH && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    // Typing filters the tab list; the pick starts over at the best match.
+                    if code == EN_CHANGE {
+                        i.search_sel = 0;
+                    }
+                    i.invalidate();
                 }
                 LRESULT(0)
             }
@@ -2761,6 +3228,27 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         SetWindowTextW(hwnd, &HSTRING::new()).ok();
                     }
                     return LRESULT(0);
+                } else if id == ID_SRCH {
+                    match vk {
+                        v if v == VK_RETURN.0 => {
+                            let sel = i.search_sel;
+                            i.switch_to(sel);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_ESCAPE.0 => {
+                            i.close_search();
+                            return LRESULT(0);
+                        }
+                        v if v == VK_DOWN.0 || v == VK_UP.0 => {
+                            let n = i.search_rows.len();
+                            if n > 0 {
+                                i.search_sel = if v == VK_DOWN.0 { (i.search_sel + 1) % n } else { (i.search_sel + n - 1) % n };
+                                i.invalidate();
+                            }
+                            return LRESULT(0);
+                        }
+                        _ => {}
+                    }
                 } else if id == ID_NTP && vk == VK_RETURN.0 {
                     let q = wide_text(hwnd).trim().to_string();
                     if !q.is_empty() {
@@ -2787,5 +3275,90 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             return LRESULT(0);
         }
         CallWindowProcW(old, hwnd, msg, wp, lp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(kind: SuggKind, label: &str) -> Sugg {
+        Sugg { kind, label: label.to_string(), detail: String::new() }
+    }
+
+    fn hit(url: &str, title: &str, bm: bool) -> (String, String, bool, String) {
+        (url.to_string(), title.to_string(), bm, String::new())
+    }
+
+    fn tab(id: u64, title: &str, url: &str, private: bool) -> UiTab {
+        UiTab {
+            id,
+            title: title.into(),
+            url: url.into(),
+            loading: false,
+            back: false,
+            fwd: false,
+            pinned: false,
+            pin_away: false,
+            audio: false,
+            muted: false,
+            status: "live",
+            agent: false,
+            agent_ok: false,
+            reader: false,
+            private,
+            split: false,
+            translated: false,
+            translating: false,
+            servo: false,
+        }
+    }
+
+    /// The rows the address bar shows: "Switch to tab" sits over history, and no address is
+    /// offered twice.
+    #[test]
+    fn switch_to_tab_rows_stay_above_history() {
+        let mut list = vec![
+            s(SuggKind::Go("doc.rust-lang.org".into()), "doc.rust-lang.org"),
+            s(SuggKind::Search("rust".into()), "rust"),
+            s(SuggKind::Tab(7), "The Rust Book"),
+        ];
+        merge_hits(&mut list, vec![hit("https://news.ycombinator.com/", "Hacker News", false)]);
+        assert!(matches!(list[2].kind, SuggKind::Tab(7)));
+        assert!(matches!(list[3].kind, SuggKind::Url(_, false)));
+        assert_eq!(list[3].label, "Hacker News");
+        // A second answer (the page-text worker) lands under the first.
+        merge_hits(&mut list, vec![hit("https://doc.rust-lang.org/book/", "The Book", false)]);
+        assert!(matches!(list[4].kind, SuggKind::Url(_, false)));
+        // A hit for an address the list already offers as "Open" is not repeated.
+        merge_hits(&mut list, vec![hit("doc.rust-lang.org", "already there", false)]);
+        assert_eq!(list.len(), 5);
+        // A workspace tab counts as a switch row too: history stays under it.
+        let mut list = vec![s(SuggKind::TabOther(1, 2), "Mail (Work)")];
+        merge_hits(&mut list, vec![hit("https://mail.example/", "Mail", true)]);
+        assert!(matches!(list[0].kind, SuggKind::TabOther(1, 2)));
+        assert!(matches!(list[1].kind, SuggKind::Url(_, true)));
+    }
+
+    /// The tab search covers every workspace, the sidebar's order when nothing is typed, and
+    /// marks private tabs.
+    #[test]
+    fn the_tab_search_covers_every_workspace() {
+        let tabs = [tab(1, "Docs", "https://docs.test/", false), tab(2, "Inbox", "https://mail.test/", true)];
+        let other = [UiOther { ws: 2, idx: 0, ws_name: "Work".into(), title: "Standup notes".into(), url: "https://notes.test/".into() }];
+        let all = switch_candidates(&tabs, &other);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].other, Some((2, 0)));
+        assert!(all[1].private);
+        // Nothing typed: every tab, in the order the sidebar has them.
+        let rows = rank_rows(&all, "");
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2, 0]);
+        assert_eq!(rows[2].label(), "Standup notes");
+        // Typing keeps only what fits.
+        let rows = rank_rows(&all, "standup");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ws_name, "Work");
+        assert!(rank_rows(&all, "docs").iter().any(|r| r.id == 1));
+        assert!(rank_rows(&all, "docs zebra").is_empty());
     }
 }
