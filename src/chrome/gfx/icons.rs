@@ -75,6 +75,8 @@ pub static TABLE: &[Entry] = &[
     lucide!("download", "download"),
     lucide!("pin", "pin"),
     lucide!("bookmark", "bookmark"),
+    lucide!("shield", "shield"),
+    lucide!("dashboard", "layout-dashboard"),
     lucide!("play", "play", filled),
     lucide!("pause", "pause", filled),
     lucide!("sidebar", "panel-left"),

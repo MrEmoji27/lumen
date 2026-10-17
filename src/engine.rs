@@ -16,7 +16,7 @@ use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler, BytesReceivedChangedEventHandler,
     ClearBrowsingDataCompletedHandler, ContainsFullScreenElementChangedEventHandler, DownloadStartingEventHandler,
     FocusChangedEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
-    StateChangedEventHandler,
+    StateChangedEventHandler, ZoomFactorChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler,
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, LaunchingExternalUriSchemeEventHandler, Microsoft::Web::WebView2::Win32::*,
     SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
@@ -85,6 +85,18 @@ pub enum Ev {
     ExternalUri { tab: u64, origin: String, uri: String, user: bool },
     /// The person answered the question about opening an app.
     ExternalAnswer { origin: String, uri: String, answer: crate::extlink::Answer },
+    /// The zoom of a page changed (a key, the wheel, or Lumen itself): (tab, factor).
+    Zoom(u64, f64),
+    /// A plain http page was stopped to try https: (tab, the https address, the http one).
+    Upgrade(u64, String, String),
+    /// Whether the site answers on the https port: (tab, https address, http address, answer).
+    Probed(u64, String, String, crate::sites::Probe),
+    /// A click on the "this site does not use https" page: (tab, what was chosen).
+    HttpChoice(u64, crate::sites::HttpChoice),
+    /// How many cookies the page's site has, for the lock's popover: (tab, count).
+    SiteCookies(u64, usize),
+    /// A site's stored data was cleared: (origin, it worked).
+    SiteCleared(String, bool),
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
     /// A magnet link was cancelled out of a page; hand it to aria2.
@@ -214,6 +226,10 @@ pub enum Action {
     Bookmark,
     History,
     Bookmarks,
+    /// Ctrl+Shift+R: what Lumen stopped, by day and by site.
+    Report,
+    /// Ctrl+Shift+D: everything at a glance.
+    Dashboard,
     DevTools,
     Reader,
     Listen,
@@ -224,6 +240,8 @@ pub enum Action {
     Split,
     /// F8: the page's text in the target language, or the original text back.
     TranslatePage,
+    /// Ctrl+Shift+A: find an open tab, of any workspace.
+    TabSearch,
 }
 
 pub struct Ctx {
@@ -234,8 +252,9 @@ pub struct Ctx {
     /// Webviews born from window.open, waiting for the main loop to adopt them.
     pub popups: RefCell<Vec<(u64, WebView)>>,
     pub dark: Cell<bool>,
-    /// Runs on every page right after it is built. Popups included.
-    pub on_built: RefCell<Option<Box<dyn Fn(&WebView)>>>,
+    /// Runs on every page right after it is built. Popups included. The `Who`
+    /// is the tab asking: what happens here is counted against it.
+    pub on_built: RefCell<Option<Box<dyn Fn(&WebView, crate::privacy_stats::Who)>>>,
     /// The first page creates the WebView2 environment with these.
     pub web_context: RefCell<wry::WebContext>,
     pub args: String,
@@ -252,7 +271,7 @@ pub struct Ctx {
     /// Dark Reader script for new documents, when dark pages are on.
     pub dark_js: RefCell<Option<Rc<str>>>,
     /// Tracking parameters a filter list removes (set by the blocker).
-    pub rewrite: RefCell<Option<Rc<dyn Fn(&str) -> Option<String>>>>,
+    pub rewrite: RefCell<Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>>,
     /// Per tab: the id WebView2 gave the injected Dark Reader script.
     pub dark_ids: Rc<RefCell<HashMap<u64, String>>>,
     /// Strict isolation: one environment per agent profile, made on first use.
@@ -267,6 +286,10 @@ pub struct Ctx {
     /// a profile outlives them: its cookies are still there when the session ends and
     /// must be wiped then.
     pub profiles: RefCell<HashMap<String, ICoreWebView2Profile>>,
+    /// Plain http pages: whether to try https first, and the hosts left alone.
+    pub https: Rc<RefCell<crate::sites::HttpsPolicy>>,
+    /// Send the Global Privacy Control signal to pages (the header lives in the blocker).
+    pub gpc: Cell<bool>,
 }
 
 /// A strict-isolation environment on its way. See `start_own_env` / `poll_own_envs`.
@@ -427,6 +450,9 @@ fn build_tab_in(
     private: bool,
 ) -> wry::Result<WebView> {
     let dark = ctx.dark.get();
+    // Who this page is: whose tab, private or not, person's or agent's. The
+    // blocker counts everything that happens here against this.
+    let who = crate::privacy_stats::Who::new(id, private, profile.agent());
     let p_title = ctx.proxy.clone();
     let p_load = ctx.proxy.clone();
     let popup_ctx = ctx.clone();
@@ -466,6 +492,9 @@ fn build_tab_in(
         .with_hotkeys_zoom(true)
         .with_initialization_script(crate::blocker::COSMETIC_JS)
         .with_initialization_script(crate::glance::GLANCE_JS)
+        // Pages can ask whether the person said no to being sold: navigator.globalPrivacyControl.
+        // Decided when the page is built; the header follows the setting at once.
+        .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -503,9 +532,12 @@ fn build_tab_in(
     drop(wc);
     if first {
         ctx.env.replace(Some(wv.environment()));
-        set_tracking(&wv, &ctx.tracking.borrow());
     }
-    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone());
+    // Tracking prevention is a setting of the profile, and InPrivate pages and the agent's
+    // pages each have a profile of their own. Every page says it again; it costs nothing.
+    set_tracking(&wv, &ctx.tracking.borrow());
+    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone(), who);
+    hook_zoom(&wv, id, ctx.proxy.clone());
     crate::glance::hook(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv, id, private);
     hook_crash(&wv, id, ctx.proxy.clone());
@@ -525,7 +557,7 @@ fn build_tab_in(
         set_dark(ctx, &wv, id, false, url.filter(|_| dark_first).map(str::to_string));
     }
     if let Some(f) = ctx.on_built.borrow().as_ref() {
-        f(&wv);
+        f(&wv, who);
     }
     Ok(wv)
 }
@@ -855,7 +887,14 @@ fn title_pacer(id: u64, proxy: EventLoopProxy<Ev>) -> impl Fn(String) + 'static 
     }
 }
 
-fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<Rc<dyn Fn(&str) -> Option<String>>>) {
+fn hook_page(
+    wv: &WebView,
+    id: u64,
+    proxy: EventLoopProxy<Ev>,
+    rewrite: Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>,
+    https: Rc<RefCell<crate::sites::HttpsPolicy>>,
+    who: crate::privacy_stats::Who,
+) {
     let core = wv.webview();
     let mut token = 0i64;
     unsafe {
@@ -880,10 +919,24 @@ fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<R
                     let _ = p.send_event(Ev::Magnet(id, u));
                     return Ok(());
                 }
+                // A click on the warning page for a site without https. Not a navigation.
+                if u.starts_with("lumen-http:") {
+                    args.SetCancel(true)?;
+                    if let Some(choice) = crate::sites::parse_http_choice(&u) {
+                        let _ = p.send_event(Ev::HttpChoice(id, choice));
+                    }
+                    return Ok(());
+                }
+                // Plain http: stop, and see whether the site speaks https. The main loop goes on.
+                if let Some(secure) = crate::sites::https_upgrade(&u, &https.borrow()) {
+                    args.SetCancel(true)?;
+                    let _ = p.send_event(Ev::Upgrade(id, secure, u));
+                    return Ok(());
+                }
                 // The journal times the page from here to NavigationCompleted.
                 let _ = p.send_event(Ev::NavStart(id, u.clone()));
                 let clean = clean_url(&u);
-                let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u)));
+                let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u), who));
                 if let Some(clean) = listed.or(clean) {
                     args.SetCancel(true)?;
                     let _ = p.send_event(Ev::Redirect(id, clean));
@@ -1070,6 +1123,116 @@ fn hook_focus(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     }
 }
 
+// ---------------------------------------------------------------------- zoom
+
+/// WebView2 zooms by itself (Ctrl+plus, Ctrl+minus, Ctrl+0, Ctrl+wheel, pinch). This only
+/// listens: the main loop remembers the factor for the site and shows it in the address bar.
+fn hook_zoom(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
+    let mut token = 0i64;
+    unsafe {
+        let _ = wv.controller().add_ZoomFactorChanged(
+            &ZoomFactorChangedEventHandler::create(Box::new(move |c, _| {
+                if let Some(c) = c {
+                    let mut f = 1.0f64;
+                    if c.ZoomFactor(&mut f).is_ok() {
+                        let _ = proxy.send_event(Ev::Zoom(id, f));
+                    }
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+/// The page's zoom factor now (1.0 is 100%).
+pub fn zoom_factor(wv: &WebView) -> Option<f64> {
+    let mut f = 1.0f64;
+    unsafe { wv.controller().ZoomFactor(&mut f).ok().map(|_| f) }
+}
+
+/// Zoom the page. True when WebView2 took it.
+pub fn set_zoom_factor(wv: &WebView, f: f64) -> bool {
+    unsafe { wv.controller().SetZoomFactor(f).is_ok() }
+}
+
+// ------------------------------------------------------------ site data
+
+/// How many cookies this profile would send to `url`. Never blocks; 0 when it cannot be asked.
+pub fn cookie_count(wv: &WebView, url: &str, done: impl FnOnce(usize) + 'static) {
+    cookie_list(wv, url, move |list| done(list.len()));
+}
+
+/// The cookies for a URL, as WebView2's objects.
+fn cookie_list(wv: &WebView, url: &str, done: impl FnOnce(Vec<ICoreWebView2Cookie>) + 'static) {
+    let done = Rc::new(RefCell::new(Some(done)));
+    let fire = {
+        let done = done.clone();
+        move |v: Vec<ICoreWebView2Cookie>| {
+            if let Some(f) = done.borrow_mut().take() {
+                f(v);
+            }
+        }
+    };
+    let fire2 = fire.clone();
+    let asked = unsafe {
+        wv.webview().cast::<ICoreWebView2_2>().and_then(|c| c.CookieManager()).and_then(|m| {
+            m.GetCookies(
+                &HSTRING::from(url),
+                &GetCookiesCompletedHandler::create(Box::new(move |hr, list| {
+                    let mut out = Vec::new();
+                    if hr.is_ok()
+                        && let Some(list) = list
+                    {
+                        let mut n = 0u32;
+                        let _ = list.Count(&mut n);
+                        for i in 0..n {
+                            if let Ok(c) = list.GetValueAtIndex(i) {
+                                out.push(c);
+                            }
+                        }
+                    }
+                    fire2(out);
+                    Ok(())
+                })),
+            )
+        })
+    };
+    if asked.is_err() {
+        fire(Vec::new());
+    }
+}
+
+/// Forget what one site stored here: its cookies, and its other storage by origin (local
+/// storage, IndexedDB, caches, service workers) through the DevTools Protocol. `wv` must be a
+/// page of the profile that holds the data and never an InPrivate page: that store goes away
+/// with its last page anyway. `done` runs when the storage call has answered.
+pub fn clear_site(wv: &WebView, origin: &str, done: impl FnOnce(bool) + 'static) {
+    let url = format!("{}/", origin.trim_end_matches('/'));
+    let core = wv.webview();
+    let origin = origin.to_string();
+    cookie_list(wv, &url, move |list| unsafe {
+        if let Ok(m) = core.cast::<ICoreWebView2_2>().and_then(|c| c.CookieManager()) {
+            for c in &list {
+                let _ = m.DeleteCookie(c);
+            }
+        }
+        let params = serde_json::json!({"origin": origin, "storageTypes": "all"}).to_string();
+        let _ = core.CallDevToolsProtocolMethod(
+            &HSTRING::from("Storage.clearDataForOrigin"),
+            &HSTRING::from(params),
+            &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |hr, _| {
+                done(hr.is_ok());
+                Ok(())
+            })),
+        );
+    });
+}
+
+/// In every page when the signal is on: the property sites read the Global Privacy Control
+/// answer from, and the older Do Not Track one.
+const GPC_JS: &str = "try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:()=>true,configurable:true});Object.defineProperty(Navigator.prototype,'doNotTrack',{get:()=>'1',configurable:true})}catch(e){}";
+
 // ------------------------------------------------------------- crashed pages
 
 /// A page that dies leaves a white rectangle that looks like a slow page.
@@ -1142,6 +1305,10 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, false, false, v) if v == k('D') => Bookmark,
         (true, false, false, v) if v == k('H') => History,
         (true, true, false, v) if v == k('O') => Bookmarks,
+        (true, true, false, v) if v == k('R') => Report,
+        (true, true, false, v) if v == k('D') => Dashboard,
+        // Not the page's own Ctrl+A: that is a text selection.
+        (true, true, false, v) if v == k('A') => TabSearch,
         (true, true, false, v) if v == k('I') => DevTools,
         (true, false, true, v) if (k('1')..=k('4')).contains(&v) => Workspace((v - k('1')) as usize),
         _ => return None,

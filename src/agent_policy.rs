@@ -173,6 +173,10 @@ pub const RULES: &[Rule] = &[
     rule("browser_download", Scope::TabOpt, Gate::Download),
     rule("browser_downloads", Scope::Free, Gate::Nothing),
     rule("browser_close", Scope::OwnTab, Gate::Nothing),
+    rule("browser_help", Scope::Free, Gate::Nothing),
+    rule("browser_status", Scope::Free, Gate::Nothing),
+    rule("browser_whoami", Scope::Free, Gate::Nothing),
+    rule("browser_consent", Scope::Tab, Gate::Nothing),
 ];
 
 /// Hooks for the integration tests. Debug builds only; a release build has no such tools.
@@ -184,6 +188,9 @@ const TEST_RULES: &[Rule] = &[
     rule("browser_test_grant", Scope::Free, Gate::Nothing),
     rule("browser_test_profile", Scope::Tab, Gate::Nothing),
     rule("browser_test_pause", Scope::Free, Gate::Nothing),
+    rule("browser_test_decline", Scope::Free, Gate::Nothing),
+    rule("browser_test_consent_approve", Scope::Free, Gate::Nothing),
+    rule("browser_test_consent_decline", Scope::Free, Gate::Nothing),
 ];
 #[cfg(not(debug_assertions))]
 const TEST_RULES: &[Rule] = &[];
