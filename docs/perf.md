@@ -300,3 +300,22 @@ layout, with the page drawn over it). Both are visible in the journal's
 `ui_slow` counter over a day of use; the idle numbers above are the claim the
 brief asked to keep.
 
+## Idle memory, 18 October
+
+Lumen at idle had grown from 18.2 MB to 24.6 MB (private working set, headless, start page, 95 s).
+A heap census found it in one allocation: the ad blocker's matcher, 8.3 MB on 15 October and
+14.4 MB on 18 October. The privacy report had switched the matcher to debug mode so every rule
+kept its text and its list, only to say "ad" or "tracker". That cost 6 MB for as long as Lumen
+ran.
+
+Now the matcher is built without debug info, and a sorted table of the tracker lists' host
+hashes (47,559 hosts, about 380 KB, `filters/trackers4.bin`) answers ad or tracker. A blocked
+request whose host, or a domain above it, is in the table is a tracker; the rest are ads.
+
+| Build | Matcher on disk | Idle, warm start |
+|---|---|---|
+| 0.2.0 | 14.0 MB | 23.9 / 24.2 MB |
+| fix | 8.1 MB | 18.5 / 18.5 MB |
+
+The old matcher files (`engine.dat`, `engine2.dat`, `engine3.dat`, about 31 MB) are deleted on start.
+

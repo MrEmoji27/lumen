@@ -67,7 +67,7 @@ const MALICIOUS_MAX_BODY: usize = 4 << 20;
 /// Lumen's honest subset: host-anchored `||host^$popup` only, not the full uBO grammar.
 static POPUP_HOSTS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Hosts on the malware/phishing lists. Loaded once from disk, refreshed weekly.
-static DANGER_HOSTS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+static DANGER_HOSTS: Mutex<Option<Vec<u64>>> = Mutex::new(None);
 /// Hosts the person chose to open once this session (Continue anyway). Session-only.
 static DANGER_PASS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
@@ -96,11 +96,15 @@ struct PageCos {
     exceptions: HashSet<String>,
     generichide: bool,
 }
-/// Bumped when what goes into the matcher changes (3: source indexes for the report).
-const ENGINE_FILE: &str = "engine3.dat";
-/// Which list each rule came from, in the order the lists went in. Without it
-/// the report cannot say ad or tracker, so it says "other".
-const SOURCES_FILE: &str = "engine3.sources";
+/// Bumped when what goes into the matcher changes (4: no debug info; the
+/// report's ad-or-tracker answer moved to TRACKERS_FILE).
+const ENGINE_FILE: &str = "engine4.dat";
+/// The tracker lists' host rules (`||host^`), as sorted FNV-1a hashes, eight
+/// bytes each. How the report tells a tracker from an ad. About 380 KB, where
+/// keeping every rule's text in the matcher for the same answer cost 6 MB.
+const TRACKERS_FILE: &str = "trackers4.bin";
+/// Matchers and sidecars of earlier builds: deleted on sight.
+const OLD_FILES: &[&str] = &["engine.dat", "engine2.dat", "engine3.dat", "engine3.sources"];
 /// The cookie lists' hiding rules, one per line, for counting banner hides
 /// apart from ad hides. The engine knows the rules; this file is only a tally.
 const COOKIE_FILE: &str = "cookie_selectors.txt";
@@ -108,11 +112,10 @@ const COOKIE_FILE: &str = "cookie_selectors.txt";
 const MAX_AGE: Duration = Duration::from_secs(4 * 24 * 60 * 60);
 const NET_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A matcher and the names of the lists it was built from, in the order the
-/// rules were added: rule's `source_index` into `names` says who stopped it.
+/// A matcher, and the tracker hosts that say what a block it makes was.
 struct Built {
     bytes: Vec<u8>,
-    names: Vec<String>,
+    trackers: Vec<u64>,
 }
 
 pub struct Blocker {
@@ -127,8 +130,8 @@ pub struct Blocker {
     /// UI thread, from bytes baked by the background thread.
     engine: RefCell<Option<adblock::Engine>>,
     rx: RefCell<Receiver<Built>>,
-    /// List name per source index, as the matcher remembers it.
-    sources: RefCell<Vec<String>>,
+    /// The tracker table: sorted host hashes (see TRACKERS_FILE).
+    trackers: RefCell<Vec<u64>>,
     /// Cookie banners' selectors, loaded when first needed and dropped when
     /// the matcher is replaced.
     cookies: RefCell<Option<Rc<HashSet<String>>>>,
@@ -148,7 +151,7 @@ impl Blocker {
             blocked: Cell::new(0),
             engine: RefCell::new(None),
             rx: RefCell::new(rx),
-            sources: RefCell::new(Vec::new()),
+            trackers: RefCell::new(Vec::new()),
             cookies: RefCell::new(None),
         })
     }
@@ -469,7 +472,7 @@ impl Blocker {
         if engine.deserialize(&built.bytes).is_ok() {
             engine.use_resources(scriptlet_resources());
             *self.engine.borrow_mut() = Some(engine);
-            *self.sources.borrow_mut() = built.names;
+            *self.trackers.borrow_mut() = built.trackers;
             // The cookie tallies belong to the lists this matcher was built
             // from; drop them so the next page reads the new ones.
             *self.cookies.borrow_mut() = None;
@@ -508,16 +511,7 @@ impl Blocker {
         if !res.should_block() {
             return None;
         }
-        let index = res.filter.as_ref().and_then(|f| f.source_location.as_ref().map(|l| l.source_index));
-        Some(self.cat_of(index))
-    }
-
-    /// Which list a rule came from. No source on the rule (the engine fused
-    /// it into something bigger, or the matcher predates the sidecar) means
-    /// no list to credit, and no list is "other".
-    fn cat_of(&self, index: Option<u32>) -> Cat {
-        let sources = self.sources.borrow();
-        index.and_then(|i| sources.get(i as usize)).map_or(Cat::Other, |name| list_cat(name))
+        Some(classify(url, &self.trackers.borrow()))
     }
 }
 
@@ -658,11 +652,10 @@ fn map_context(ctx: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> Option<&'static str> {
 /// a background thread or never at all.
 /// (list text, trusted). Trusted lists may use scriptlets that need trust.
 ///
-/// Built with debug info on, so every rule remembers which list it came from:
-/// that source index is how the report says "ad" or "tracker" instead of
-/// "something stopped it". It costs engine size and nothing at match time.
+/// Built without debug info: the matcher stays as small as the rules allow.
+/// The engine keeps these bytes in memory for as long as Lumen runs.
 fn serialize_engine(lists: &[(String, bool)]) -> Vec<u8> {
-    let mut set = adblock::FilterSet::new(true);
+    let mut set = adblock::FilterSet::new(false);
     for (text, trusted) in lists {
         let permissions = adblock::resources::PermissionMask::from_bits(if *trusted { TRUST } else { 0 });
         set.add_filter_list(text.clone(), adblock::lists::ParseOptions { permissions, ..Default::default() });
@@ -676,6 +669,72 @@ fn list_cat(name: &str) -> Cat {
         "easylist.txt" | "pgl.txt" | "ublock.txt" | "quick-fixes.txt" => Cat::Ads,
         "easyprivacy.txt" | "privacy-ublock.txt" | "cookies-easylist.txt" | "cookies-ublock.txt" => Cat::Trackers,
         _ => Cat::Other,
+    }
+}
+
+/// FNV-1a of a host name: what TRACKERS_FILE holds, one per host.
+fn host_hash(host: &str) -> u64 {
+    host.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+}
+
+/// The hosts of the tracker lists' plain host rules (`||host^`, options
+/// allowed), hashed, sorted, unique. Path rules and exceptions are left out:
+/// a block they make is counted as an ad, which is the safer mistake.
+fn tracker_hosts(lists: &[(&str, &str)]) -> Vec<u64> {
+    let mut out = Vec::new();
+    for (name, text) in lists {
+        if list_cat(name) != Cat::Trackers {
+            continue;
+        }
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("||") else { continue };
+            let Some(end) = rest.find('^') else { continue };
+            let host = &rest[..end];
+            if !host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+                out.push(host_hash(&host.to_ascii_lowercase()));
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Ad or tracker, for a request the matcher blocked: a tracker when its host,
+/// or a domain above it, is a tracker list's host. No tracker table at all
+/// (the file is missing) means no way to tell, and that is "other".
+fn classify(url: &str, trackers: &[u64]) -> Cat {
+    if trackers.is_empty() {
+        return Cat::Other;
+    }
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    let mut h = host.as_str();
+    loop {
+        if trackers.binary_search(&host_hash(h)).is_ok() {
+            return Cat::Trackers;
+        }
+        match h.split_once('.') {
+            Some((_, up)) if up.contains('.') => h = up,
+            _ => return Cat::Ads,
+        }
+    }
+}
+
+/// The tracker table off disk. A missing or torn file is an empty table.
+fn read_trackers(path: &Path) -> Vec<u64> {
+    let Ok(bytes) = fs::read(path) else { return Vec::new() };
+    bytes.chunks_exact(8).map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])).collect()
+}
+
+/// The tracker table to disk, beside the matcher (tmp + rename).
+fn write_trackers(path: &Path, hashes: &[u64]) {
+    let bytes: Vec<u8> = hashes.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let tmp = path.with_extension("part");
+    if fs::write(&tmp, bytes).is_ok() {
+        let _ = fs::rename(&tmp, path);
     }
 }
 
@@ -730,6 +789,9 @@ fn build_engine(data_dir: &Path, tx: Sender<Built>, force: bool) {
         eprintln!("lumen: blocker: no filter dir at {}", dir.display());
     }
     ensure_cookie_file(&dir);
+    for old in OLD_FILES {
+        let _ = fs::remove_file(dir.join(old));
+    }
     // Malware/phishing lists and the `$popup` hosts are not gated on the ad
     // toggle: dangerous is dangerous whether or not ads are blocked.
     ensure_malicious(&dir);
@@ -737,13 +799,10 @@ fn build_engine(data_dir: &Path, tx: Sender<Built>, force: bool) {
     let fresh = !force && is_fresh(&dir);
     // Fast start: young lists and a matcher already built. Milliseconds.
     if let Ok(bytes) = fs::read(dir.join(ENGINE_FILE)) && !bytes.is_empty() && !force {
-        // Whoever built it first wrote the names beside it; without them the
-        // matcher still blocks, it just cannot say who stopped what.
-        let names = fs::read_to_string(dir.join(SOURCES_FILE))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
-            .unwrap_or_default();
-        let _ = tx.send(Built { bytes, names });
+        // Whoever built it wrote the tracker table beside it; without it the
+        // matcher still blocks, the report just cannot say ad or tracker.
+        let trackers = read_trackers(&dir.join(TRACKERS_FILE));
+        let _ = tx.send(Built { bytes, trackers });
         if fresh {
             return;
         }
@@ -760,24 +819,24 @@ fn build_engine(data_dir: &Path, tx: Sender<Built>, force: bool) {
             eprintln!("lumen: blocker: {name} did not download");
         }
     }
-    // One entry per list that went in, in that order: a rule's source index
-    // points straight at it.
-    let mut names: Vec<String> = Vec::new();
+    let mut names: Vec<&str> = Vec::new();
     let mut lists: Vec<(String, bool)> = Vec::new();
     for (name, _) in LISTS {
         let Ok(text) = fs::read_to_string(dir.join(name)) else { continue };
         lists.push((text, TRUSTED.contains(name)));
-        names.push((*name).to_string());
+        names.push(name);
     }
     if lists.is_empty() {
         eprintln!("lumen: blocker: no lists at all, nothing gets blocked");
     }
     let bytes = serialize_engine(&lists);
+    let named: Vec<(&str, &str)> = names.iter().copied().zip(lists.iter().map(|(t, _)| t.as_str())).collect();
+    let trackers = tracker_hosts(&named);
     let _ = fs::write(dir.join(ENGINE_FILE), &bytes);
-    let _ = fs::write(dir.join(SOURCES_FILE), serde_json::to_string(&names).unwrap_or_default());
+    write_trackers(&dir.join(TRACKERS_FILE), &trackers);
     // The lists just changed, so the tallies change with them: overwrite.
     let _ = fs::write(dir.join(COOKIE_FILE), cookie_selectors(&dir));
-    let _ = tx.send(Built { bytes, names });
+    let _ = tx.send(Built { bytes, trackers });
 }
 
 fn fetch_to(url: &str, path: &Path) -> bool {
@@ -937,7 +996,7 @@ pub fn danger_host(url: &str) -> bool {
         return false;
     }
     let guard = DANGER_HOSTS.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref().is_some_and(|set| host_matches(&host, set))
+    guard.as_ref().is_some_and(|hashes| host_matches_hashed(&host, hashes))
 }
 
 /// The person chose Continue anyway for this host: it stays open until Lumen
@@ -970,11 +1029,30 @@ fn host_matches(host: &str, set: &HashSet<String>) -> bool {
     false
 }
 
+/// The same walk as `host_matches`, over sorted host hashes: the malicious
+/// lists hold about 81,000 hosts, 650 KB as hashes where strings in a set
+/// cost 6 to 8 MB for as long as Lumen runs.
+fn host_matches_hashed(host: &str, hashes: &[u64]) -> bool {
+    let mut rest = host.trim_end_matches('.');
+    loop {
+        if rest.is_empty() {
+            return false;
+        }
+        if hashes.binary_search(&host_hash(rest)).is_ok() {
+            return true;
+        }
+        match rest.split_once('.') {
+            Some((_, tail)) => rest = tail,
+            None => return false,
+        }
+    }
+}
+
 /// Download the malicious lists if they are older than a week (or missing),
 /// verify what is on disk, and load every host into the matcher set. Runs on
 /// the build thread, once per start, whatever the ad matcher's own state.
 fn ensure_malicious(dir: &Path) {
-    let mut all = HashSet::new();
+    let mut all: Vec<u64> = Vec::new();
     let mut ok = false;
     for (name, url) in MALICIOUS {
         let path = dir.join(name);
@@ -986,15 +1064,17 @@ fn ensure_malicious(dir: &Path) {
             && let Some(body) = fetch_malicious(url, &path)
             && let Some(hosts) = parse_malicious_checked(&body)
         {
-            all.extend(hosts);
+            all.extend(hosts.iter().map(|h| host_hash(h)));
             ok = true;
             continue;
         }
         if let Some(hosts) = load_malicious_checked(&path) {
-            all.extend(hosts);
+            all.extend(hosts.iter().map(|h| host_hash(h)));
             ok = true;
         }
     }
+    all.sort_unstable();
+    all.dedup();
     if ok {
         *DANGER_HOSTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(all);
     }
@@ -1099,23 +1179,15 @@ mod tests {
         assert!(!blocks(&e, "https://site.com/app.js", "https://site.com", "script"));
     }
 
-    /// The whole point of the sidecar: a rule that fires must name its list
-    /// through the serialize -> deserialize round trip the real matcher takes.
+    /// A blocked request says ad or tracker from the tracker table, through the
+    /// serialize -> deserialize round trip the real matcher takes.
     #[test]
-    fn a_blocked_rule_says_which_list_stopped_it() {
+    fn a_blocked_request_says_ad_or_tracker() {
         let bytes = serialize_engine(&[("||ads.example.com^".into(), false), ("||track.example.org^".into(), false)]);
         let mut e = adblock::Engine::new_with_filter_set(adblock::FilterSet::new(false));
         e.deserialize(&bytes).expect("matcher loads");
-        let req = adblock::request::Request::new("https://ads.example.com/x.js", "https://site.com", "script", "GET").unwrap();
-        let res = e.check_network_request(&req);
-        assert!(res.should_block());
-        let index = res.filter.as_ref().and_then(|f| f.source_location.as_ref().map(|l| l.source_index));
-        assert_eq!(index, Some(0), "the first list added is index 0");
-        let req = adblock::request::Request::new("https://track.example.org/p", "https://site.com", "image", "GET").unwrap();
-        let res = e.check_network_request(&req);
-        assert_eq!(res.filter.as_ref().and_then(|f| f.source_location.as_ref().map(|l| l.source_index)), Some(1));
-
-        // And through Blocker's own answer.
+        let trackers = tracker_hosts(&[("easylist.txt", "||ads.example.com^"), ("easyprivacy.txt", "||track.example.org^$third-party\n/pixel.gif?\n@@||ok.example.org^")]);
+        assert_eq!(trackers.len(), 1, "only the tracker list's host rule goes in");
         let (tx, rx) = channel();
         let b = Blocker {
             dir: PathBuf::from("."),
@@ -1124,7 +1196,7 @@ mod tests {
             blocked: Cell::new(0),
             engine: RefCell::new(Some(e)),
             rx: RefCell::new(rx),
-            sources: RefCell::new(vec!["easylist.txt".into(), "easyprivacy.txt".into()]),
+            trackers: RefCell::new(trackers),
             cookies: RefCell::new(None),
             gpc: Cell::new(false),
         };
@@ -1132,10 +1204,30 @@ mod tests {
         assert_eq!(b.check("https://track.example.org/p", "https://site.com", "image"), Some(Cat::Trackers));
         assert_eq!(b.check("https://site.com/app.js", "https://site.com", "script"), None, "the page is let through");
         drop(tx);
-        // No sidecar at all is not a crash: the count just says "other".
-        assert_eq!(b.cat_of(None), Cat::Other);
-        *b.sources.borrow_mut() = Vec::new();
-        assert_eq!(b.cat_of(Some(0)), Cat::Other, "an unknown list is other");
+        // No table at all is not a crash: the count just says "other".
+        *b.trackers.borrow_mut() = Vec::new();
+        assert_eq!(b.check("https://track.example.org/p", "https://site.com", "image"), Some(Cat::Other));
+    }
+
+    #[test]
+    fn a_subdomain_of_a_tracker_is_a_tracker() {
+        let t = tracker_hosts(&[("easyprivacy.txt", "||doubleclick.net^")]);
+        assert_eq!(classify("https://stats.g.doubleclick.net:443/x?y", &t), Cat::Trackers);
+        assert_eq!(classify("https://doubleclick.net/", &t), Cat::Trackers);
+        assert_eq!(classify("https://notdoubleclick.net/", &t), Cat::Ads);
+        assert_eq!(classify("https://example.com/", &t), Cat::Ads);
+    }
+
+    #[test]
+    fn the_tracker_table_survives_disk() {
+        let dir = std::env::temp_dir().join(format!("lumen-trackers-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join(TRACKERS_FILE);
+        let t = tracker_hosts(&[("easyprivacy.txt", "||a.example^\n||b.example^")]);
+        write_trackers(&path, &t);
+        assert_eq!(read_trackers(&path), t);
+        assert!(read_trackers(&dir.join("missing.bin")).is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1295,7 +1387,7 @@ mod tests {
     fn the_public_doors_answer_for_hosts_and_passes() {
         // Seed the sets the way the build thread would.
         *POPUP_HOSTS.lock().unwrap() = Some(["popup.example.com".to_string()].into_iter().collect());
-        *DANGER_HOSTS.lock().unwrap() = Some(["evil.example.com".to_string()].into_iter().collect());
+        *DANGER_HOSTS.lock().unwrap() = Some(vec![host_hash("evil.example.com")]);
         assert!(popup_rule("https://popup.example.com/"));
         assert!(popup_rule("https://sub.popup.example.com/"));
         assert!(!popup_rule("https://safe.example.com/"));
