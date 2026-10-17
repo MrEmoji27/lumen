@@ -281,13 +281,23 @@ impl Aria {
     /// `pause` puts it in paused, for a torrent a PAGE started: it must wait
     /// for the person to press Resume. Returns the gid aria2 gave it.
     pub fn add(&self, url: &str, headers: &[String], filename: Option<&str>, pause: bool) -> Result<String, String> {
+        self.add_in(url, headers, filename, pause, None)
+    }
+
+    /// Like `add`, into a folder of its own instead of the download folder. A torrent that a
+    /// .torrent file fetched this way spawns inherits the folder.
+    pub fn add_in(&self, url: &str, headers: &[String], filename: Option<&str>, pause: bool, dir: Option<&Path>) -> Result<String, String> {
         let (port, secret) = self.line()?;
+        let mut options = uri_options(headers, filename, pause);
+        if let (Some(dir), Some(map)) = (dir, options.as_object_mut()) {
+            map.insert("dir".to_string(), Value::String(dir.display().to_string()));
+        }
         let gid = call(
             port,
             &secret,
             self.id(),
             "aria2.addUri",
-            &[json!([url]), uri_options(headers, filename, pause)],
+            &[json!([url]), options],
         )?
         .as_str()
         .map(str::to_string)

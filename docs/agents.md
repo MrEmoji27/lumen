@@ -35,8 +35,10 @@ lumen-agent screenshot tab=3 full_page=true        # prints the path of the imag
 lumen-agent tools                                  # everything there is
 ```
 
-`--session NAME` keeps a worker's calls in its own set of tabs. Exit code 1 means the tool said no
-(the message says why), 2 means Lumen could not be reached.
+`--session NAME` keeps a worker's calls in its own set of tabs. Lumen hands out the session id; the
+CLI keeps it in a file named after NAME (`agent_sessions\NAME.id` in the Lumen data folder, user
+only). The name is a label for you. It is never a key. Exit code 1 means the tool said no (the
+message says why), 2 means Lumen could not be reached.
 
 ## How an agent sees a page
 
@@ -79,8 +81,19 @@ waits until the person presses it.
 ## Many agents at once
 
 Every MCP session owns the tabs it opens. Agent A cannot list, read, click or close agent B's tabs.
-When a client disconnects, its tabs close. Workers can browse side by side without stepping on each
-other.
+Lumen makes the session id at `initialize`: 24 random bytes. A client cannot pick one, and a name
+it sends is only a label. An id Lumen does not know gets HTTP 404 and an MCP error. When a client
+says goodbye, its tabs close. When it does not (the bridge was killed), Lumen closes them after 15
+minutes of silence, unless a handoff is waiting. Workers can browse side by side without stepping
+on each other.
+
+## Your own tabs
+
+Your tabs are off limits. Not even "Agents use my profile" opens them. To lend one tab, right-click
+it and choose **Let agents use this tab**. It gets a small outlined AI mark. The lend ends when
+the tab goes to another site, when it closes, or when you choose **Stop letting agents use this
+tab**. A lent tab can be read and steered. It can never be scripted (no eval), never get uploads,
+never be closed or resized by an agent.
 
 ## Out of the way
 
@@ -96,7 +109,21 @@ centred, in the taskbar, with sound. One Lumen per profile, always.
 
 - Localhost only. A token on every request. Host and Origin checked, so a web page cannot talk to
   the door by pretending to be local. Bodies capped at 1 MB.
-- Agent tabs live in their own profile (own cookies) unless Settings shares yours.
+- One function, `authorize`, checks every tool call before it runs. Every tool has a row in a
+  table. A call that breaks a rule gets a tool error that names the setting that would allow it,
+  and a line in the journal (tool name and reason code, no content).
+- Agent tabs live in their own profile (own cookies) unless Settings shares yours. Sharing only
+  puts your logins in the agent's own tabs. It does not open your tabs.
+- `browser_eval` runs only in the agent's own tabs of the separate profile. Turn on "Agents use my
+  profile" and eval is refused.
+- `browser_upload` is off. Turn on "Let agents upload files" and it reads one folder only
+  (`Lumen agent uploads` in your home folder, or `agent_upload_dir` in settings.json). No `..`, no
+  network or device paths, no symlink or junction out. Files only.
+- Agents open http(s) pages, data: pages and search words. Not `file:`, `edge:`, `about:` (except
+  blank) or `magnet:`. Otherwise an agent could read any file by opening it as a page.
+- Downloads and PDFs go to `Agent downloads` inside your download folder. Only http(s) URLs.
+  A torrent that an agent's download or page starts arrives paused until you press Resume.
+  `browser_downloads` lists only the agents' own.
 - Agent tabs never go into history, never save passwords, get no site permissions.
 - The "Agent working · Stop" chip in the sidebar shuts the door and closes every agent tab.
 
