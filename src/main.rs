@@ -1156,6 +1156,13 @@ impl App {
         self.page_fs || self.user_fs
     }
 
+    /// Fullscreen as the layout sees it: the page fills the window. A panel (Downloads,
+    /// Control...) is drawn by the chrome, which fullscreen hides, so with one open the
+    /// window shows the chrome and its inset stage instead of a blank screen.
+    fn fullscreen_view(&self) -> bool {
+        self.fullscreen() && self.panel == Panel::None
+    }
+
     fn pinned_count(&self) -> usize {
         self.tabs.iter().filter(|t| t.pinned).count()
     }
@@ -1173,7 +1180,7 @@ impl App {
     /// The page rectangle, in window coordinates.
     fn stage(&self) -> (f64, f64, f64, f64) {
         let (w, h) = logical_size(&self.ctx);
-        if self.fullscreen() {
+        if self.fullscreen_view() {
             return (0.0, 0.0, w, h);
         }
         let side = self.sidebar_w();
@@ -1247,7 +1254,7 @@ impl App {
 
     fn layout(&mut self) {
         let (w, h) = logical_size(&self.ctx);
-        let fs = self.fullscreen();
+        let fs = self.fullscreen_view();
         self.chrome.set_visible(!fs);
         if !fs {
             let side = self.sidebar_w();

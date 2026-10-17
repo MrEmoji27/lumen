@@ -217,6 +217,11 @@ pub fn fake(s: &mut UiState) {
         ];
         s.tabs.append(&mut v);
     }
+    if fake_has("mem") {
+        s.mem = Some((412 * 1024 * 1024, 9));
+        s.blocked = 1280;
+        s.settings.show_memory = true;
+    }
     if fake_has("dl") {
         let d = |id: u64, name: &str, state: &'static str, kind: &'static str, got: i64, total: i64| UiDl {
             id,

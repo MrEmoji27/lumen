@@ -10,6 +10,7 @@ mod gfx;
 mod pages;
 #[cfg(debug_assertions)]
 mod shot;
+mod style;
 #[cfg(debug_assertions)]
 pub use shot::script as test_script;
 pub mod theme;
@@ -182,6 +183,8 @@ pub enum Hit {
     TabSnd(u64),
     NewTab,
     Gear,
+    /// The sidebar button: compact on or off, same as Ctrl+B.
+    Sidebar,
     Mem,
     DlFooter,
     AgentStop,
@@ -697,6 +700,10 @@ impl Inner {
             dark_menus(s.dark);
         }
         let was_ntp = self.ntp_visible();
+        // A page opens at its top, also when it is the one that was open before.
+        if self.state.as_ref().map_or("none", |o| o.panel) != s.panel {
+            self.page.scroll = 0.0;
+        }
         self.state = Some(s);
         if !self.editing {
             self.sugg.clear();
@@ -776,7 +783,7 @@ impl Inner {
         let s = self.state.as_ref().unwrap();
         let ws_h = s.ws_h();
         if s.compact() {
-            R::new(sb.x + (sb.w - 36.0) / 2.0, 104.0 + ws_h, 36.0, 34.0)
+            R::new(sb.x + (sb.w - 36.0) / 2.0, 140.0 + ws_h, 36.0, 34.0)
         } else {
             R::new(sb.x + 8.0, 46.0 + ws_h, sb.w - 16.0, 34.0)
         }
@@ -1005,6 +1012,7 @@ impl Inner {
             self.button(R::new(x, 8.0, 28.0, 28.0), "close", Hit::Close, true);
             self.button(R::new(x, 38.0, 28.0, 28.0), if s.maximized { "restore" } else { "max" }, Hit::Max, true);
             self.button(R::new(x, 68.0, 28.0, 28.0), "min", Hit::Min, true);
+            self.button(R::new(x, 104.0, 28.0, 28.0), "sidebar", Hit::Sidebar, true);
         } else {
             // Navigation on the left, window buttons on the right edge, on either side.
             let (nav_x, win_x) = (sb.x + 8.0, sb.right() - 8.0 - 86.0);
@@ -1016,6 +1024,11 @@ impl Inner {
             ];
             for (i, (icon, h, en)) in navs.into_iter().enumerate() {
                 self.button(R::new(nav_x + i as f32 * 29.0, 9.0, 28.0, 28.0), icon, h, en);
+            }
+            // After the three arrows, set apart: it changes the sidebar, not the page.
+            let tog = R::new(nav_x + 3.0 * 29.0 + 6.0, 9.0, 28.0, 28.0);
+            if tog.right() + 6.0 <= win_x {
+                self.button(tog, "sidebar", Hit::Sidebar, true);
             }
             let wins = [("min", Hit::Min), (if s.maximized { "restore" } else { "max" }, Hit::Max), ("close", Hit::Close)];
             for (i, (icon, h)) in wins.into_iter().enumerate() {
@@ -1130,7 +1143,7 @@ impl Inner {
         }
 
         // Tabs.
-        let list_top = (if compact { 148.0 } else if offer { 122.0 } else { 90.0 }) + ws_h;
+        let list_top = (if compact { 184.0 } else if offer { 122.0 } else { 90.0 }) + ws_h;
         let list = R::new(sb.x, list_top, sb.w, sb.h - list_top - 40.0);
         self.gfx.clip(list);
         let mut y = list.y - self.scroll;
@@ -1308,9 +1321,10 @@ impl Inner {
         let busy_n = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused" | "seeding")).count();
         if busy_n > 0 {
             let t = if busy_n > 9 { "9+".to_string() } else { busy_n.to_string() };
+            // A small disc on the ring's upper right, clear of the arrow.
             let d = 13.0;
-            let bx = dl.right() - 5.0 - d;
-            let by = dl.y - 3.0;
+            let bx = dl.x + 14.0 + 9.0 - d / 2.0;
+            let by = dl.y + 14.0 - 9.0 - d / 2.0;
             self.gfx.circle(bx + d / 2.0, by + d / 2.0, d / 2.0, th.accent);
             self.gfx.text(&t, R::new(bx, by + 0.5, d, d), Font::ui(9.0, 700).align(Align::Center), th.bg);
         } else if s.dl_unseen {
@@ -1361,7 +1375,9 @@ impl Inner {
             let base = if active { th.press } else { th.raise };
             self.gfx.round(r, 8.0, if active { base } else { base.mix(th.hover, h) });
         } else if !active && h > 0.01 {
-            self.gfx.round(r, 8.0, th.hover.alpha(h));
+            // Held down: one step further than hovering, so a click feels received.
+            let pressed = hov && self.press.as_ref() == Some(&Hit::Tab(t.id));
+            self.gfx.round(r, 8.0, if pressed { th.press } else { th.hover.alpha(h) });
         }
         self.hit(r, Hit::Tab(t.id));
         self.draw_tab_body(t, r, s, pinned, hov || active);
@@ -1650,6 +1666,14 @@ impl Inner {
             Hit::TabX(id) => send(p, json!({"t": "close", "id": id})),
             Hit::TabSnd(id) => send(p, json!({"t": "mute", "id": id})),
             Hit::NewTab => send(p, json!({"t": "newtab"})),
+            Hit::Sidebar => {
+                // The same change Ctrl+B makes: through the settings, so it is saved.
+                if let Some(s) = &self.state {
+                    let mut st = s.settings.clone();
+                    st.compact = !st.compact;
+                    send(p, json!({"t": "settings", "v": st}));
+                }
+            }
             Hit::Gear => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "settings");
                 send(p, json!({"t": "panel", "open": open, "which": "settings"}));
