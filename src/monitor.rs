@@ -160,6 +160,14 @@ unsafe fn top_frame(f: ICoreWebView2FrameInfo) -> Option<u32> {
     Some(id)
 }
 
+/// Before the first page exists there is no WebView2 to ask. Lumen's own numbers are
+/// still real, so the Control page has something to show instead of dashes.
+pub fn sample_host(proxy: EventLoopProxy<Ev>) {
+    let me = unsafe { GetCurrentProcess() };
+    let host = Proc { pid: std::process::id(), kind: "host", frames: vec![], mem: private_ws(me), cpu: cpu_time(me) };
+    let _ = proxy.send_event(Ev::Usage(vec![host]));
+}
+
 /// Ask WebView2 which process serves which page. The answer arrives as Ev::Usage.
 pub fn sample(env: &ICoreWebView2Environment, proxy: EventLoopProxy<Ev>) {
     let Ok(env13) = env.cast::<ICoreWebView2Environment13>() else { return };

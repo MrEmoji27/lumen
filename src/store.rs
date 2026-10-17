@@ -212,7 +212,7 @@ impl Settings {
 
     /// Keep values inside sane bounds. A bad file must not break the browser.
     pub fn clamp(&mut self) {
-        self.sidebar_width = self.sidebar_width.clamp(180, 400);
+        self.sidebar_width = self.sidebar_width.clamp(232, 400);
         self.gap = self.gap.clamp(0, 32);
         self.radius = self.radius.clamp(0, 20);
         self.sleep_after_min = self.sleep_after_min.clamp(1, 240);
