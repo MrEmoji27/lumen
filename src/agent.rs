@@ -55,6 +55,35 @@ pub struct Who {
     pub paused: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct PageMark {
+    pub url: String,
+    pub mutations: u64,
+    pub target: String,
+    pub tabs: usize,
+}
+
+pub fn click_outcome(before: &PageMark, after: &PageMark) -> String {
+    if after.url != before.url {
+        return format!("the page went to {}", after.url);
+    }
+    if after.tabs > before.tabs {
+        return "a new tab opened".to_string();
+    }
+    if !after.target.is_empty() && after.target != before.target {
+        return format!("it is now {}", after.target.trim());
+    }
+    // target state maybe includes checked/value; if changed even if before empty?
+    if !after.target.is_empty() && before.target.is_empty() {
+        return format!("it is now {}", after.target.trim());
+    }
+    let changes = after.mutations.saturating_sub(before.mutations);
+    if changes > 0 {
+        return format!("{} changes on the page", changes);
+    }
+    "nothing on the page changed; try another way or take a new browser_snapshot".to_string()
+}
+
 pub enum Op {
     List,
     Open { url: String, activate: bool },
@@ -1360,6 +1389,17 @@ fn href(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) -> String {
     eval(proxy, who, tab, "location.href").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
 }
 
+fn page_mark(sh: &Arc<Shared>, who: &Who, tab: u64, r: Option<&Ref>, tabs: usize, rr: bool) -> PageMark {
+    let _ = eval(&sh.proxy, who, tab, "if(!window.__lumenMut){window.__lumenMutN=0;window.__lumenMut=new MutationObserver(function(m){window.__lumenMutN+=(m&&m.length)||0;});window.__lumenMut.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});} return window.__lumenMutN||0;");
+    let mutations = eval(&sh.proxy, who, tab, "return window.__lumenMutN||0;").ok().and_then(|v| v.as_u64()).unwrap_or(0);
+    let url = href(&sh.proxy, who, tab);
+    let target = match r {
+        Some(r) => eval_at(sh, who, tab, r, "return (e.checked?' checked':'')+(e.value&&e.value!==''?' value=\"'+String(e.value)+'\"':'')+(e.getAttribute&&e.getAttribute('aria-expanded')==='true'?' expanded':'')+(e.disabled?' disabled':'');", rr).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+        None => String::new(),
+    };
+    PageMark { url, mutations, target, tabs }
+}
+
 /// Where an agent's files go: its own folder under "Agent downloads", apart from the
 /// person's downloads and from every other agent's.
 fn agent_files_dir(who: &Who) -> PathBuf {
@@ -1703,9 +1743,11 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             let clicks = if args["double"].as_bool().unwrap_or(false) { 2 } else { 1 };
             let before = href(p, who, tab);
             let tabs_before = tab_list(p, who);
+            let mut clicked_ref: Option<Ref> = None;
             let (x, y, note) = match ref_arg(&args["ref"]).or_else(|| ref_arg(&args["element"])) {
                 Some(r) => {
                     let r = parse_ref(&r);
+                    clicked_ref = Some(r.clone());
                     let rr = args["re_resolve"].as_bool().unwrap_or(false);
                     // Actionability: wait for the element to be there, visible, enabled
                     // and standing still, as a person would before clicking it.
@@ -1716,6 +1758,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
                     let (x, y) = frame_point(sh, who, tab, &r, x, y)?;
                     if !covered.is_empty() && button == "left" {
                         // Something sits on top (a banner, an overlay): click the element itself.
+                        let mark_before = page_mark(sh, who, tab, Some(&r), tabs_before.len(), rr);
                         let v = eval_at(sh, who, tab, &r, "e.click();return {ok:1};", rr)?;
                         if let Some(e) = v["error"].as_str() {
                             return Err(e.to_string());
@@ -1723,7 +1766,9 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
                         settle(p, who, tab, &before);
                         wait_network_idle(p, who, tab, IDLE_WAIT_MS);
                         let opened = opened_tabs(&tabs_before, p, who);
-                        return Ok(text(format!("clicked {} directly: it was under {covered}{opened}\n\n{}", ref_text(&r), snapshot(sh, who, tab, &json!({}))?)));
+                        let mark_after = page_mark(sh, who, tab, Some(&r), tab_list(p, who).len(), rr);
+                        let outcome = click_outcome(&mark_before, &mark_after);
+                        return Ok(text(format!("clicked {} directly: it was under {covered}{opened}; {outcome}\n\n{}", ref_text(&r), snapshot(sh, who, tab, &json!({}))?)));
                     }
                     (x, y, ref_text(&r))
                 }
@@ -1732,6 +1777,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
                     (x, y, format!("({x}, {y})"))
                 }
             };
+            let mark_before = page_mark(sh, who, tab, clicked_ref.as_ref(), tabs_before.len(), true);
             // A mouse event needs a page that renders: the tab comes to the front.
             show_for_mouse(p, who, tab);
             mouse(p, who, tab, "mouseMoved", x, y, button, 0)?;
@@ -1742,7 +1788,9 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             settle(p, who, tab, &before);
             wait_network_idle(p, who, tab, IDLE_WAIT_MS);
             let opened = opened_tabs(&tabs_before, p, who);
-            Ok(text(format!("clicked {note}{opened}\n\n{}", snapshot(sh, who, tab, &json!({}))?)))
+            let mark_after = page_mark(sh, who, tab, clicked_ref.as_ref(), tab_list(p, who).len(), true);
+            let outcome = click_outcome(&mark_before, &mark_after);
+            Ok(text(format!("clicked {note}: {outcome}{opened}\n\n{}", snapshot(sh, who, tab, &json!({}))?)))
         }
         "browser_hover" => {
             let tab = tab_arg(args)?;
@@ -2470,6 +2518,16 @@ pub fn nav_status_line(v: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn click_outcome_priority() {
+        let base = PageMark { url: "http://a/x".into(), mutations: 10, target: String::new(), tabs: 1 };
+        assert_eq!(click_outcome(&base, &PageMark { url: "http://a/done".into(), ..base.clone() }), "the page went to http://a/done");
+        assert_eq!(click_outcome(&base, &PageMark { target: " checked".into(), ..base.clone() }), "it is now checked");
+        assert_eq!(click_outcome(&base, &PageMark { tabs: 2, ..base.clone() }), "a new tab opened");
+        assert_eq!(click_outcome(&base, &PageMark { mutations: 24, ..base.clone() }), "14 changes on the page");
+        assert_eq!(click_outcome(&base, &base), "nothing on the page changed; try another way or take a new browser_snapshot");
+    }
 
     #[test]
     fn nav_status_names_bad_pages() {
