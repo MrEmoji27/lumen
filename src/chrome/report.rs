@@ -11,6 +11,7 @@ use super::{
     pages::{close_button, column, empty_state, fmt_bytes, group_label, title_block},
     send,
     style::*,
+    theme::Theme,
 };
 use crate::privacy_stats::{Counts, SiteRow, Snapshot};
 
@@ -39,7 +40,7 @@ pub fn fmt_time(ms: u64) -> String {
     }
 }
 
-/// The quiet line under the tiles: the other things Lumen did, only those that happened.
+/// The quiet line under the Blocked tiles: the other things Lumen did, only those that happened.
 pub fn extras(c: &Counts) -> String {
     let parts: Vec<String> = [
         (c.cookies, "cookie banners hidden"),
@@ -53,6 +54,47 @@ pub fn extras(c: &Counts) -> String {
     .map(|(n, what)| format!("{n} {what}"))
     .collect();
     parts.join(" · ")
+}
+
+/// A small trend for one number against the period before it. None for "all",
+/// or when there is nothing to compare.
+fn trend(now: u64, prev: u64, range: &str) -> Option<String> {
+    if range == "all" || (now == 0 && prev == 0) {
+        return None;
+    }
+    if prev == 0 {
+        return Some("new".into());
+    }
+    let pct = ((now as f64 - prev as f64) / prev as f64 * 100.0).round() as i64;
+    if pct > 0 {
+        Some(format!("↑{pct}%"))
+    } else if pct < 0 {
+        Some(format!("↓{}%", -pct))
+    } else {
+        Some("–".into())
+    }
+}
+
+/// One tile of a section: caption, big number, and a note under it.
+fn tile(i: &mut Inner, th: Theme, r: R, label: &str, value: &str, note: &str) {
+    i.gfx.round(r, R_LG, th.bg);
+    i.gfx.text(label, R::new(r.x + S4, r.y + S3, r.w - 2.0 * S4, 16.0), CAPTION, th.faint);
+    i.gfx.text(value, R::new(r.x + S4, r.y + 28.0, r.w - 2.0 * S4, 40.0), BIG_NUM, th.text);
+    if !note.is_empty() {
+        i.gfx.text_wrap(note, R::new(r.x + S4, r.y + 68.0, r.w - 2.0 * S4, 30.0), SMALL, th.faint);
+    }
+}
+
+/// A row of tiles for one section. `n` tiles, gap between them, height ~100.
+fn tile_row(i: &mut Inner, th: Theme, col: R, y: f32, tiles: &[(&str, &str, &str)]) -> f32 {
+    let gap = S3;
+    let n = tiles.len() as f32;
+    let tw = (col.w - (n - 1.0) * gap) / n;
+    for (k, (label, value, note)) in tiles.iter().enumerate() {
+        let r = R::new(col.x + k as f32 * (tw + gap), y, tw, 100.0);
+        tile(i, th, r, label, value, note);
+    }
+    y + 100.0 + S4
 }
 
 pub fn draw(i: &mut Inner, st: R, s: &UiState) {
@@ -82,13 +124,23 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     }
     y += 28.0 + S4;
 
-    if snap.all.blocked() == 0 && snap.all.cosmetic == 0 && snap.all.cookies == 0 {
+    let empty = snap.all.blocked() == 0
+        && snap.all.cosmetic == 0
+        && snap.all.cookies == 0
+        && snap.all.popups == 0
+        && snap.all.webrtc == 0
+        && snap.all.signals == 0
+        && snap.all.wrong_password == 0
+        && snap.all.malicious == 0
+        && snap.all.danger == 0
+        && snap.all.https_up == 0;
+    if empty {
         y = empty_state(
             i,
             R::new(col.x, y + S5, col.w, 160.0),
             "shield",
             "Nothing blocked yet",
-            "Browse a little. Every ad, tracker and cookie banner Lumen stops is counted here, with the data and time it saved you.",
+            "Browse a little. Every ad, popup and tracker Lumen stops is counted here, with the data and time it saved you.",
         );
         i.gfx.unclip();
         i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
@@ -96,30 +148,74 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         return;
     }
 
-    // Four totals for the range (or the one site picked).
+    // The counts for the range, or the one site picked. Trends only for the range.
     let c = snap.site.as_ref().map(|r| r.counts).unwrap_or(snap.totals);
-    let tiles = [
-        ("BLOCKED", c.blocked().to_string(), "requests stopped"),
-        ("TRACKERS", c.trackers.to_string(), "of them trackers"),
-        ("DATA SAVED", fmt_bytes(c.bytes as i64), "estimated"),
-        ("TIME SAVED", fmt_time(c.ms), "estimated"),
-    ];
-    let gap = S3;
-    let tw = (col.w - 3.0 * gap) / 4.0;
-    for (n, (label, value, note)) in tiles.iter().enumerate() {
-        let r = R::new(col.x + n as f32 * (tw + gap), y, tw, 92.0);
-        i.gfx.round(r, R_LG, th.bg);
-        i.gfx.text(label, R::new(r.x + S4, r.y + S3, r.w - 2.0 * S4, 16.0), CAPTION, th.faint);
-        i.gfx.text(value, R::new(r.x + S4, r.y + 28.0, r.w - 2.0 * S4, 40.0), BIG_NUM, th.text);
-        i.gfx.text(note, R::new(r.x + S4, r.y + 68.0, r.w - 2.0 * S4, 18.0), SMALL, th.faint);
-    }
-    y += 92.0 + S3;
+    let range = if snap.site.is_some() { "all" } else { &snap.range };
+    let prev = snap.prev;
+    let note = |now: u64, was: u64, quiet: &str| -> String {
+        match trend(now, was, range) {
+            Some(t) => t,
+            None => quiet.to_string(),
+        }
+    };
+
+    // 1. Blocked
+    y = group_label(i, col, y, "Blocked", 0);
+    let (ads_n, ads_t) = ((c.ads + c.scriptlets).to_string(), note(c.ads + c.scriptlets, prev.ads + prev.scriptlets, "ad rules"));
+    let (pop_n, pop_t) = (c.popups.to_string(), note(c.popups, prev.popups, "blocked popups"));
+    let (trk_n, trk_t) = (c.trackers.to_string(), note(c.trackers, prev.trackers, "tracker rules"));
+    y = tile_row(
+        i,
+        th,
+        col,
+        y,
+        &[
+            ("ADS", &ads_n, &ads_t),
+            ("POP-UPS", &pop_n, &pop_t),
+            ("TRACKERS", &trk_n, &trk_t),
+        ],
+    );
     let more = extras(&c);
     if !more.is_empty() {
-        i.gfx.text_wrap(&more, R::new(col.x, y, col.w, 36.0), SMALL, th.dim);
+        i.gfx.text_wrap(&more, R::new(col.x, y - S2, col.w, 36.0), SMALL, th.dim);
         y += 24.0;
     }
-    y += S4;
+
+    // 2. Saved
+    y = group_label(i, col, y, "Saved", 0);
+    let (data_n, time_n) = (fmt_bytes(c.bytes as i64), fmt_time(c.ms));
+    y = tile_row(
+        i,
+        th,
+        col,
+        y,
+        &[
+            ("DATA SAVED", &data_n, "estimated"),
+            ("TIME SAVED", &time_n, "estimated"),
+        ],
+    );
+
+    // 3. Privacy stats
+    y = group_label(i, col, y, "Privacy stats", 0);
+    let ip = c.webrtc + c.signals;
+    let bad = c.danger + c.malicious;
+    y = tile_row(
+        i,
+        th,
+        col,
+        y,
+        &[
+            (
+                "IP LEAKS PREVENTED",
+                &ip.to_string(),
+                "Lumen has no VPN. WebRTC and tracking headers cannot see your local address.",
+            ),
+            ("WRONG PASSWORD", &c.wrong_password.to_string(), "Failed KeePass unlocks of the vault."),
+            ("DANGEROUS SITES", &bad.to_string(), "Warnings shown, and subresources from the malware lists."),
+            ("HTTPS UPGRADES", &c.https_up.to_string(), "Plain http pages moved to https."),
+        ],
+    );
+    y += S2;
 
     if let Some(site) = &snap.site {
         y = draw_site(i, col, y, site);
@@ -239,11 +335,16 @@ fn draw_site(i: &mut Inner, col: R, y: f32, site: &SiteRow) -> f32 {
         ("Ads", c.ads),
         ("Trackers", c.trackers),
         ("Other requests", c.other),
+        ("Pop-ups blocked", c.popups),
         ("Page clutter hidden", c.cosmetic),
         ("Cookie banners hidden", c.cookies),
         ("Tracking parameters removed", c.removeparam),
         ("YouTube ad blocks", c.scriptlets),
         ("Sponsor segments skipped", c.sponsor),
+        ("IP leaks prevented", c.webrtc + c.signals),
+        ("Dangerous sites warned", c.danger),
+        ("Dangerous subresources blocked", c.malicious),
+        ("HTTPS upgrades", c.https_up),
     ] {
         if v == 0 {
             continue;
@@ -297,5 +398,15 @@ mod tests {
         let c = Counts { cookies: 3, sponsor: 1, ..Default::default() };
         assert_eq!(extras(&c), "3 cookie banners hidden · 1 sponsor segments skipped");
         assert_eq!(extras(&Counts::default()), "");
+    }
+
+    #[test]
+    fn trend_reads_a_change_against_the_period_before() {
+        assert_eq!(trend(10, 5, "7").as_deref(), Some("↑100%"));
+        assert_eq!(trend(5, 10, "7").as_deref(), Some("↓50%"));
+        assert_eq!(trend(7, 7, "7").as_deref(), Some("–"));
+        assert_eq!(trend(3, 0, "7").as_deref(), Some("new"));
+        assert_eq!(trend(0, 0, "7"), None);
+        assert_eq!(trend(9, 3, "all"), None, "all time has no previous period");
     }
 }
