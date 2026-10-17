@@ -6,6 +6,7 @@
 //! everything else is drawn.
 
 mod anim;
+mod dialog;
 mod gfx;
 mod pages;
 #[cfg(debug_assertions)]
@@ -128,6 +129,10 @@ pub struct UiState {
     pub glance: bool,
     /// The active page is bookmarked.
     pub bookmarked: bool,
+    /// The active page's bookmark, for the star's menu.
+    pub mark: Option<UiMark>,
+    /// Bookmark folder names, in order. "Unsorted" is not one: it is the empty name.
+    pub bm_folders: Vec<String>,
     /// Read aloud in reader view: "" | "ready" | "playing" | "paused".
     pub listen: &'static str,
     /// KeePass entries matching the active site: labels only, empty when locked.
@@ -136,12 +141,21 @@ pub struct UiState {
     pub vault: usize,
     /// Filled only while the History page is open.
     pub history: Vec<UiVisit>,
-    /// Filled only while the Bookmarks page is open: (url, title).
-    pub bookmarks: Vec<(String, String)>,
+    /// Filled only while the Bookmarks page is open.
+    pub bookmarks: Vec<UiMark>,
     /// A download ended while the page was closed: a small dot on the footer button.
     pub dl_unseen: bool,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
     pub upnp_port_open: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct UiMark {
+    pub id: u64,
+    pub url: String,
+    pub title: String,
+    /// Empty is Unsorted.
+    pub folder: String,
 }
 
 #[derive(Clone, Debug)]
@@ -189,6 +203,8 @@ pub enum Hit {
     Sidebar,
     Mem,
     DlFooter,
+    /// The star in the footer: the Bookmarks page.
+    BookmarksFooter,
     AgentStop,
     PermAllow(u64),
     HandoffDone,
@@ -252,6 +268,8 @@ pub(crate) struct Inner {
     favs: HashMap<u64, Vec<u8>>,
     edit: HWND,
     ntp_edit: HWND,
+    /// The Bookmarks page's search box.
+    bm_edit: HWND,
     edit_font: HFONT,
     /// The family the edit boxes were made with, to remake them when it changes.
     edit_face: String,
@@ -285,6 +303,7 @@ pub struct Chrome {
 const CLASS: PCWSTR = w!("LumenChrome");
 const ID_EDIT: usize = 101;
 const ID_NTP: usize = 102;
+const ID_BM: usize = 103;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -407,7 +426,22 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit] {
+            let bm_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_BM as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit] {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
@@ -428,6 +462,7 @@ impl Chrome {
                 favs: HashMap::new(),
                 edit,
                 ntp_edit,
+                bm_edit,
                 edit_font: HFONT::default(),
                 edit_face: String::new(),
                 ntp_font: HFONT::default(),
@@ -669,7 +704,8 @@ impl Inner {
             self.ntp_font = mk(15.0, &face);
             SendMessageW(self.edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.ntp_edit, WM_SETFONT, Some(WPARAM(self.ntp_font.0 as usize)), Some(LPARAM(1)));
-            for e in [self.edit, self.ntp_edit] {
+            SendMessageW(self.bm_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
+            for e in [self.edit, self.ntp_edit, self.bm_edit] {
                 SendMessageW(e, EM_SETMARGINS, Some(WPARAM((EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize)), Some(LPARAM(0)));
             }
         }
@@ -705,6 +741,11 @@ impl Inner {
         // A page opens at its top, also when it is the one that was open before.
         if self.state.as_ref().map_or("none", |o| o.panel) != s.panel {
             self.page.scroll = 0.0;
+            // The search box starts empty each time the Bookmarks page opens.
+            unsafe {
+                SetWindowTextW(self.bm_edit, &HSTRING::new()).ok();
+            }
+            self.page.bm_collapsed.clear();
         }
         self.state = Some(s);
         if !self.editing {
@@ -817,6 +858,8 @@ impl Inner {
         // The box hides when idle and empty, so the drawn placeholder shows through.
         let ntp_live = unsafe { GetFocus() } == self.ntp_edit || !wide_text(self.ntp_edit).is_empty();
         place(self.ntp_edit, R::new(f.x + 42.0, f.y + (f.h - 22.0) / 2.0, f.w - 58.0, 22.0), self.ntp_visible() && ntp_live);
+        let b = pages::bm_search_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3));
+        place(self.bm_edit, R::new(b.x + 34.0, b.y + (b.h - 20.0) / 2.0, b.w - 46.0, 20.0), s.full && s.panel == "bookmarks");
     }
 
     fn focus_ntp(&mut self) {
@@ -1305,7 +1348,19 @@ impl Inner {
         let dl = if compact { R::new(sb.x + 2.0, fy + 3.0, 26.0, 26.0) } else { R::new(gear.x - 30.0, gear.y, 28.0, 28.0) };
         // Downloads in flight: an arrow with a progress ring. Nothing running: the plain arrow.
         let live: Vec<&UiDl> = s.downloads.iter().filter(|d| d.state == "progress").collect();
-        let mem_room = sb.w - 56.0 - 30.0;
+        // Bookmarks, left of downloads. The icon-only sidebar has no room for a third button:
+        // Ctrl+Shift+O and the address bar's star still reach the page there.
+        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 30.0 };
+        if !compact {
+            let bm = R::new(dl.x - 30.0, dl.y, 28.0, 28.0);
+            let on = s.panel == "bookmarks";
+            let hov = self.is_hover(&Hit::BookmarksFooter);
+            if hov {
+                self.gfx.round(bm, 7.0, th.hover);
+            }
+            self.gfx.icon("star", bm.x + 6.0, bm.y + 6.0, 16.0, if on { th.accent } else if hov { th.text } else { th.dim });
+            self.hit(bm, Hit::BookmarksFooter);
+        }
         if self.is_hover(&Hit::DlFooter) {
             self.gfx.round(dl, 7.0, th.hover);
         }
@@ -1640,7 +1695,7 @@ impl Inner {
                 return;
             }
         }
-        if pages::drag_end(self) {
+        if pages::drag_end(self, y) {
             return;
         }
         let h = self.hit_at(x, y);
@@ -1694,10 +1749,21 @@ impl Inner {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "downloads");
                 send(p, json!({"t": "panel", "open": open, "which": "downloads"}));
             }
+            Hit::BookmarksFooter => {
+                let open = self.state.as_ref().is_some_and(|s| s.panel != "bookmarks");
+                send(p, json!({"t": "panel", "open": open, "which": "bookmarks"}));
+            }
             Hit::AgentStop => send(p, json!({"t": "agentStop"})),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
-            Hit::Star => send(p, json!({"t": "bookmark"})),
+            Hit::Star => {
+                // Not bookmarked yet: one click keeps it, in Unsorted. Already kept: a menu.
+                let Some(mark) = self.state.as_ref().and_then(|s| s.mark.clone()) else {
+                    send(p, json!({"t": "bookmark"}));
+                    return;
+                };
+                self.star_menu(mark, x, y);
+            }
             Hit::Listen => send(p, json!({"t": "listen"})),
             Hit::ListenStop => send(p, json!({"t": "listenStop"})),
             Hit::KdbxFill => {
@@ -1863,6 +1929,22 @@ impl Inner {
                 }
             }
             Hit::WorkspaceAdd => send(&self.proxy, json!({"t": "workspaceAdd"})),
+            Hit::Page(pages::PageHit::Bm(id) | pages::PageHit::BmDel(id)) => {
+                if let Some(m) = s.bookmarks.iter().find(|m| m.id == id) {
+                    self.mark_menu(m, true, x, y);
+                }
+            }
+            Hit::Page(pages::PageHit::BmFolder(name)) if !name.is_empty() => {
+                match self.popup(&[(1, "Rename…".into()), (2, "Delete folder".into())], x, y) {
+                    1 => {
+                        if let Some(a) = dialog::ask_fields(self.hwnd, "Rename folder", &[("Name", &name)]) {
+                            send(&self.proxy, json!({"t": "bmFolderRename", "old": name, "new": a[0]}));
+                        }
+                    }
+                    2 => send(&self.proxy, json!({"t": "bmFolderDelete", "name": name})),
+                    _ => {}
+                }
+            }
             Hit::Shortcut(i) => {
                 if self.popup(&[(1, "Remove from new tab page".into())], x, y) == 1 {
                     let mut st = s.settings.clone();
@@ -1900,6 +1982,56 @@ impl Inner {
         );
         self.hit(r, hit);
         r.right() + 6.0
+    }
+
+    /// The menu for one bookmark: edit it, move it to a folder, order it, remove it. The star
+    /// and the rows of the Bookmarks page share it. `page` adds the entries that only make
+    /// sense in the list (open in a new tab, move up and down).
+    fn mark_menu(&self, mark: &UiMark, page: bool, x: f32, y: f32) {
+        let Some(s) = &self.state else { return };
+        let mut items: Vec<(u32, String)> = vec![(1, "Edit…".into())];
+        if page {
+            items.push((2, "Open in new tab".into()));
+        }
+        items.push((0, String::new()));
+        if !mark.folder.is_empty() {
+            items.push((30, "Move to Unsorted".into()));
+        }
+        // The first forty folders; more than that is not a menu any more.
+        for (n, f) in s.bm_folders.iter().enumerate().take(40) {
+            if *f != mark.folder {
+                items.push((31 + n as u32, format!("Move to {f}")));
+            }
+        }
+        if page {
+            items.push((0, String::new()));
+            items.push((3, "Move up".into()));
+            items.push((4, "Move down".into()));
+        }
+        items.push((0, String::new()));
+        items.push((5, "Remove bookmark".into()));
+        let id = mark.id;
+        let msg = match self.popup(&items, x, y) {
+            1 => {
+                let Some(a) = dialog::ask_fields(self.hwnd, "Edit bookmark", &[("Title", &mark.title), ("Address", &mark.url)]) else { return };
+                json!({"t": "bmEdit", "id": id, "title": a[0], "url": a[1], "folder": mark.folder})
+            }
+            2 => json!({"t": "bmOpen", "url": mark.url, "bg": true}),
+            3 => json!({"t": "bmShift", "id": id, "d": -1}),
+            4 => json!({"t": "bmShift", "id": id, "d": 1}),
+            5 => json!({"t": "bmDelete", "id": id}),
+            30 => json!({"t": "bmMove", "id": id, "folder": ""}),
+            n @ 31..=70 => match s.bm_folders.get(n as usize - 31) {
+                Some(f) => json!({"t": "bmMove", "id": id, "folder": f}),
+                None => return,
+            },
+            _ => return,
+        };
+        send(&self.proxy, msg);
+    }
+
+    fn star_menu(&self, mark: UiMark, x: f32, y: f32) {
+        self.mark_menu(&mark, false, x, y);
     }
 
     /// A native popup menu. Returns the chosen id, 0 for none.
@@ -2121,8 +2253,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_MBUTTONUP => {
-                if let Some(Hit::Tab(id)) = i.hit_at(x, y) {
-                    send(&i.proxy, json!({"t": "close", "id": id}));
+                match i.hit_at(x, y) {
+                    Some(Hit::Tab(id)) => send(&i.proxy, json!({"t": "close", "id": id})),
+                    // A bookmark: middle click opens it in a tab behind this one.
+                    Some(Hit::Page(pages::PageHit::Bm(id))) => {
+                        if let Some(m) = i.state.as_ref().and_then(|s| s.bookmarks.iter().find(|m| m.id == id)) {
+                            send(&i.proxy, json!({"t": "bmOpen", "url": m.url, "bg": true}));
+                        }
+                    }
+                    _ => {}
                 }
                 LRESULT(0)
             }
@@ -2193,12 +2332,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 } else if id == ID_NTP && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
                     i.layout_edits();
                     i.invalidate();
+                } else if id == ID_BM && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    // A new search starts at the top of the results.
+                    if code == EN_CHANGE {
+                        i.page.scroll = 0.0;
+                    }
+                    i.invalidate();
                 }
                 LRESULT(0)
             }
             WM_CTLCOLOREDIT => {
                 let hdc = HDC(wp.0 as _);
-                let is_ntp = HWND(lp.0 as _) == i.ntp_edit;
+                // The Bookmarks search sits in a field drawn in the sidebar's color, like the new tab one.
+                let is_ntp = HWND(lp.0 as _) == i.ntp_edit || HWND(lp.0 as _) == i.bm_edit;
                 let _ = SetTextColor(hdc, COLORREF(i.theme.text.colorref()));
                 let bg = if is_ntp { i.theme.bg } else { i.theme.raise };
                 let _ = SetBkColor(hdc, COLORREF(bg.colorref()));
@@ -2313,6 +2459,14 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         }
                         _ => {}
                     }
+                } else if id == ID_BM && vk == VK_ESCAPE.0 {
+                    // Escape clears the search first; with nothing typed it leaves the page.
+                    if wide_text(hwnd).is_empty() {
+                        send(&i.proxy, json!({"t": "panel", "open": false}));
+                    } else {
+                        SetWindowTextW(hwnd, &HSTRING::new()).ok();
+                    }
+                    return LRESULT(0);
                 } else if id == ID_NTP && vk == VK_RETURN.0 {
                     let q = wide_text(hwnd).trim().to_string();
                     if !q.is_empty() {

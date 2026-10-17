@@ -10,6 +10,7 @@ mod agent;
 mod agentkit;
 mod aloud;
 mod blocker;
+mod bookmarks;
 mod chrome;
 mod engine;
 mod glance;
@@ -1133,6 +1134,10 @@ fn debug_log(ev: &Ev) {
 
 /// The tabs that go into session.json. Private tabs and agent tabs leave no
 /// trace; an empty new tab page is only worth keeping while it is the active one.
+fn ui_mark(b: library::Bookmark) -> chrome::UiMark {
+    chrome::UiMark { id: b.id, url: b.url, title: b.title, folder: b.folder }
+}
+
 fn keepable(tabs: &[Tab], active: u64) -> Vec<&Tab> {
     tabs.iter().filter(|t| !t.agent && !t.private && (!t.url.is_empty() || t.id == active)).collect()
 }
@@ -1574,10 +1579,12 @@ impl App {
                     Vec::new()
                 },
                 bookmarks: if self.panel == Panel::Bookmarks {
-                    self.library.bookmarks().into_iter().map(|b| (b.url, b.title)).collect()
+                    self.library.bookmarks().into_iter().map(ui_mark).collect()
                 } else {
                     Vec::new()
                 },
+                mark: self.active_tab().filter(|t| !t.url.is_empty()).and_then(|t| self.library.mark_for_url(&t.url)).map(ui_mark),
+                bm_folders: self.library.folders(),
                 handoff: self.handoff.as_ref().map(|h| (h.1.clone(), h.2.clone())),
                 prompt: self
                     .prompts
@@ -4259,6 +4266,85 @@ impl App {
             "kdbxFill" => self.kdbx_fill(m["n"].as_u64().unwrap_or(0) as usize),
             "kdbxLock" => {
                 self.vault = None;
+                self.push();
+            }
+            "bmOpen" => {
+                let url = m["url"].as_str().unwrap_or("").to_string();
+                if url.is_empty() {
+                    return;
+                }
+                if m["bg"].as_bool().unwrap_or(false) {
+                    // A tab behind this one. It loads when it is first clicked, like any
+                    // tab restored from a session: ten middle clicks must not start ten pages.
+                    let mut t = Tab::new(self.ctx.alloc_id(), url.clone());
+                    t.title = self.library.mark_for_url(&url).map(|b| b.title).unwrap_or_default();
+                    t.workspace = self.active_workspace;
+                    self.tabs.push(t);
+                    self.dirty = true;
+                    self.push();
+                } else {
+                    self.navigate(&url);
+                }
+            }
+            "bmEdit" => {
+                let s = |k: &str| m[k].as_str().unwrap_or("").to_string();
+                if self.library.edit_bookmark(id, &s("title"), &s("url"), &s("folder")) {
+                    self.library.flush();
+                    self.push();
+                }
+            }
+            "bmMove" => {
+                self.library.move_bookmark(id, m["folder"].as_str().unwrap_or(""));
+                self.library.flush();
+                self.push();
+            }
+            "bmPlace" => {
+                self.library.place(id, m["folder"].as_str().unwrap_or(""), m["before"].as_u64());
+                self.library.flush();
+                self.push();
+            }
+            "bmShift" => {
+                self.library.shift_bookmark(id, m["d"].as_i64().unwrap_or(0).signum() as i32);
+                self.library.flush();
+                self.push();
+            }
+            "bmDelete" => {
+                self.library.delete_bookmark(id);
+                self.library.flush();
+                self.push();
+            }
+            "bmFolderAdd" => {
+                self.library.add_folder(m["name"].as_str().unwrap_or(""));
+                self.library.flush();
+                self.push();
+            }
+            "bmFolderRename" => {
+                self.library.rename_folder(m["old"].as_str().unwrap_or(""), m["new"].as_str().unwrap_or(""));
+                self.library.flush();
+                self.push();
+            }
+            "bmFolderDelete" => {
+                self.library.delete_folder(m["name"].as_str().unwrap_or(""));
+                self.library.flush();
+                self.push();
+            }
+            "bmImport" => {
+                // Read-only: the other browsers' files are opened for reading and never touched.
+                let want = m["browser"].as_str().unwrap_or("");
+                let found: Vec<bookmarks::Found> = bookmarks::scan().into_iter().filter(|f| want == "all" || f.browser == want).collect();
+                let (mut added, mut skipped) = (0, 0);
+                for f in &found {
+                    let (a, s) = self.library.import(&f.items);
+                    added += a;
+                    skipped += s;
+                }
+                self.library.flush();
+                let msg = match found.as_slice() {
+                    [one] => bookmarks::summary(one.browser, added, skipped),
+                    [] => "That browser's bookmarks are gone".to_string(),
+                    many => format!("Imported {added} from {} browsers, skipped {skipped} already here", many.len()),
+                };
+                self.chrome.flash(msg);
                 self.push();
             }
             "unbookmark" => {
