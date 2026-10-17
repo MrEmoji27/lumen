@@ -10,6 +10,8 @@ mod gfx;
 pub mod layout;
 mod motion;
 mod pages;
+mod report;
+mod dashboard;
 #[cfg(debug_assertions)]
 mod shot;
 mod style;
@@ -161,6 +163,10 @@ pub struct UiState {
     pub history: Vec<UiVisit>,
     /// Filled only while the Bookmarks page is open.
     pub bookmarks: Vec<UiMark>,
+    /// Filled only while the report page is open.
+    pub report: Option<crate::privacy_stats::Snapshot>,
+    /// Filled only while the dashboard is open: today's privacy counts.
+    pub privacy_today: Option<crate::privacy_stats::Counts>,
     /// A download ended while the page was closed: a small dot on the footer button.
     pub dl_unseen: bool,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
@@ -261,6 +267,14 @@ pub enum Hit {
     NtpSearch,
     /// Page widgets (settings and Control live in pages.rs).
     Page(pages::PageHit),
+    /// A widget of the report page (report.rs).
+    Report(report::Click),
+    /// A tile or button of the dashboard (dashboard.rs).
+    Dash(dashboard::Click),
+    /// The grid button in the footer: the dashboard.
+    DashFooter,
+    /// The shield in the footer: the report page.
+    ReportFooter,
     /// Clicked a workspace name in the switcher.
     Workspace(usize),
     /// "Open as tab" button on the glance card.
@@ -1669,6 +1683,12 @@ impl Inner {
             Hit::Mem => "mem",
             Hit::DlFooter => "dl",
             Hit::BookmarksFooter => "bm",
+            Hit::ReportFooter => "report",
+            Hit::DashFooter => "dash",
+            Hit::SiteInfo => "siteinfo",
+            Hit::ZoomChip => "zoom",
+            Hit::SiteClear => "siteclear",
+            Hit::SiteSettings => "sitesettings",
             Hit::Star => "star",
             Hit::NewTab => "newtab",
             Hit::Menu => "menu",
@@ -2105,16 +2125,17 @@ impl Inner {
         self.gfx.unclip();
     }
 
-    /// The footer: the memory readout and the agent chip (left), the downloads,
-    /// bookmarks and settings buttons (right). The compact sidebar keeps the two
-    /// that fit; the agent chip is a status, and shows wherever it fits.
+    /// The footer: the memory readout and the agent chip (left), then the
+    /// downloads, bookmarks, privacy report, dashboard and settings buttons
+    /// (right). The compact sidebar keeps the two that fit; the agent chip is a
+    /// status, and shows wherever it fits.
     fn draw_footer(&mut self, s: &UiState, sb: R, compact: bool) {
         let lo = self.look.clone();
         let th = lo.theme;
         let fy = sb.bottom() - 38.0;
         let size = 28.0;
         let agent = s.agent_busy && !compact;
-        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 30.0 };
+        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 90.0 };
         if lo.footer_btns {
             let gear = if compact {
                 R::new(sb.x + 28.0, fy + 3.0, 26.0, 26.0)
@@ -2124,16 +2145,14 @@ impl Inner {
             self.button(gear, "sliders", Hit::Gear, true);
             let dl = if compact { R::new(sb.x + 2.0, fy + 3.0, 26.0, 26.0) } else { R::new(gear.x - size - 2.0, gear.y, size, size) };
             if !compact {
+                // Right to left from the downloads button: the pages people keep
+                // an eye on, then the settings.
                 let bm = R::new(dl.x - size - 2.0, dl.y, size, size);
-                let on = s.panel == "bookmarks";
-                let h = Hit::BookmarksFooter;
-                let hov = self.is_hover(&h);
-                let a = self.motion.hover(Self::button_id(&h), if hov { 1.0 } else { 0.0 });
-                if a > 0.01 {
-                    self.gfx.round(bm, lo.r_sm + 1.0, th.hover.alpha(a.min(1.0)));
-                }
-                self.gfx.icon("star", bm.x + 6.0, bm.y + 6.0, 16.0, if on { th.accent } else if hov { th.text } else { th.dim });
-                self.hit(bm, h);
+                self.footer_page_button(bm, s, "star", "bookmarks", Hit::BookmarksFooter);
+                let pv = R::new(bm.x - size - 2.0, bm.y, size, size);
+                self.footer_page_button(pv, s, "shield", "report", Hit::ReportFooter);
+                let db = R::new(pv.x - size - 2.0, pv.y, size, size);
+                self.footer_page_button(db, s, "dashboard", "dashboard", Hit::DashFooter);
             }
             self.draw_dl_button(dl, s);
         }
@@ -2329,6 +2348,22 @@ impl Inner {
                 th.faint,
             );
         }
+    }
+
+    /// One of the footer's page buttons: a square that opens a panel, lit while
+    /// that panel is the open one. Bookmarks, the privacy report and the
+    /// dashboard share it.
+    fn footer_page_button(&mut self, r: R, s: &UiState, icon: &str, panel: &str, hit: Hit) {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let on = s.panel == panel;
+        let hov = self.is_hover(&hit);
+        let a = self.motion.hover(Self::button_id(&hit), if hov { 1.0 } else { 0.0 });
+        if a > 0.01 {
+            self.gfx.round(r, lo.r_sm + 1.0, th.hover.alpha(a.min(1.0)));
+        }
+        self.gfx.icon(icon, r.x + 6.0, r.y + 6.0, 16.0, if on { th.accent } else if hov { th.text } else { th.dim });
+        self.hit(r, hit);
     }
 
     /// The downloads button: an arrow with a progress ring while something runs,
@@ -3293,6 +3328,16 @@ impl Inner {
             Hit::DlFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "downloads");
                 send(p, json!({"t": "panel", "open": open, "which": "downloads"}));
+            }
+            Hit::ReportFooter => {
+                let open = self.state.as_ref().is_some_and(|s| s.panel != "report");
+                send(p, json!({"t": "panel", "open": open, "which": "report"}));
+            }
+            Hit::Report(c) => report::click(self, c),
+            Hit::Dash(c) => dashboard::click(self, c),
+            Hit::DashFooter => {
+                let open = self.state.as_ref().is_some_and(|s| s.panel != "dashboard");
+                send(p, json!({"t": "panel", "open": open, "which": "dashboard"}));
             }
             Hit::BookmarksFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "bookmarks");

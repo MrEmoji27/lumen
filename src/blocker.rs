@@ -11,12 +11,13 @@ use std::{
     rc::Rc,
     sync::mpsc::{Receiver, Sender, channel},
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
+use crate::privacy_stats::{self, Cat, Who};
 use webview2_com::{
-    AddScriptToExecuteOnDocumentCreatedCompletedHandler, ExecuteScriptCompletedHandler, NavigationStartingEventHandler, Microsoft::Web::WebView2::Win32::*, WebMessageReceivedEventHandler,
-    WebResourceRequestedEventHandler,
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler, ExecuteScriptCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler, Microsoft::Web::WebView2::Win32::*, WebMessageReceivedEventHandler,
+    WebResourceRequestedEventHandler, WebResourceResponseReceivedEventHandler,
 };
 use windows::{
     Win32::System::Com::CoTaskMemFree,
@@ -70,11 +71,24 @@ struct PageCos {
     exceptions: HashSet<String>,
     generichide: bool,
 }
-/// Bumped when what goes into the matcher changes (2: list trust for scriptlets).
-const ENGINE_FILE: &str = "engine2.dat";
+/// Bumped when what goes into the matcher changes (3: source indexes for the report).
+const ENGINE_FILE: &str = "engine3.dat";
+/// Which list each rule came from, in the order the lists went in. Without it
+/// the report cannot say ad or tracker, so it says "other".
+const SOURCES_FILE: &str = "engine3.sources";
+/// The cookie lists' hiding rules, one per line, for counting banner hides
+/// apart from ad hides. The engine knows the rules; this file is only a tally.
+const COOKIE_FILE: &str = "cookie_selectors.txt";
 /// Four days. Older than that and the list is a rumour.
 const MAX_AGE: Duration = Duration::from_secs(4 * 24 * 60 * 60);
 const NET_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A matcher and the names of the lists it was built from, in the order the
+/// rules were added: rule's `source_index` into `names` says who stopped it.
+struct Built {
+    bytes: Vec<u8>,
+    names: Vec<String>,
+}
 
 pub struct Blocker {
     dir: PathBuf,
@@ -87,7 +101,12 @@ pub struct Blocker {
     /// `adblock::Engine` refuses to cross threads, so it is born here, on the
     /// UI thread, from bytes baked by the background thread.
     engine: RefCell<Option<adblock::Engine>>,
-    rx: RefCell<Receiver<Vec<u8>>>,
+    rx: RefCell<Receiver<Built>>,
+    /// List name per source index, as the matcher remembers it.
+    sources: RefCell<Vec<String>>,
+    /// Cookie banners' selectors, loaded when first needed and dropped when
+    /// the matcher is replaced.
+    cookies: RefCell<Option<Rc<HashSet<String>>>>,
 }
 
 #[allow(dead_code)]
@@ -104,6 +123,8 @@ impl Blocker {
             blocked: Cell::new(0),
             engine: RefCell::new(None),
             rx: RefCell::new(rx),
+            sources: RefCell::new(Vec::new()),
+            cookies: RefCell::new(None),
         })
     }
 
@@ -123,7 +144,7 @@ impl Blocker {
     }
 
     /// The URL with tracking parameters removed by `$removeparam` rules, if any were.
-    pub fn rewrite(&self, url: &str) -> Option<String> {
+    pub fn rewrite(&self, url: &str, who: Who) -> Option<String> {
         if !self.on.get() || !url.starts_with("http") || !url.contains('?') {
             return None;
         }
@@ -131,7 +152,10 @@ impl Blocker {
         let slot = self.engine.borrow();
         let engine = slot.as_ref()?;
         let req = adblock::request::Request::new(url, url, "document", "GET").ok()?;
-        engine.check_network_request(&req).rewritten_url.filter(|u| u != url)
+        let clean = engine.check_network_request(&req).rewritten_url.filter(|u| u != url)?;
+        // The page counted as itself: the link was on it, not on an ad.
+        privacy_stats::removeparam(&privacy_stats::host(url), who);
+        Some(clean)
     }
 
     /// The scriptlets this page gets (`+js(...)` rules), ready to run, or empty.
@@ -145,16 +169,17 @@ impl Blocker {
         engine.url_cosmetic_resources(url).injected_script
     }
 
-    /// CSS for one page. First call: the site's own rules. Every call: generic rules that
-    /// match the class names and ids the page reported. One rule per selector, so a selector
-    /// the browser cannot parse only loses itself.
-    fn cosmetic_css(&self, url: &str, st: &mut PageCos, first: bool, classes: &[String], ids: &[String]) -> String {
+    /// CSS for one page, and how many elements were hidden, and how many of
+    /// those were cookie banners. First call: the site's own rules. Every call:
+    /// generic rules that match the class names and ids the page reported. One
+    /// rule per selector, so a selector the browser cannot parse only loses itself.
+    fn cosmetic_css(&self, url: &str, st: &mut PageCos, first: bool, classes: &[String], ids: &[String]) -> (String, u64, u64) {
         if !self.on.get() || !self.cosmetic.get() || !url.starts_with("http") {
-            return String::new();
+            return (String::new(), 0, 0);
         }
         self.pump();
         let slot = self.engine.borrow();
-        let Some(engine) = slot.as_ref() else { return String::new() };
+        let Some(engine) = slot.as_ref() else { return (String::new(), 0, 0) };
         let mut css = String::new();
         let hide = |sel: &str, css: &mut String| {
             css.push_str(sel);
@@ -179,7 +204,35 @@ impl Blocker {
                 hide(&sel, &mut css);
             }
         }
-        css
+        // Every hidden element was one rule firing. Lines that style rather
+        // than hide are not counted.
+        let cookies = self.cookie_set();
+        let (mut hides, mut cookie_n) = (0u64, 0u64);
+        for line in css.lines() {
+            if !line.ends_with("{display:none!important}") {
+                continue;
+            }
+            hides += 1;
+            if cookies.contains(line.split('{').next().unwrap_or("")) {
+                cookie_n += 1;
+            }
+        }
+        (css, hides, cookie_n)
+    }
+
+    /// The cookie lists' selectors, read once and kept until the matcher is
+    /// replaced. A missing file is an empty set, remembered so the read is
+    /// not tried again on every page.
+    fn cookie_set(&self) -> Rc<HashSet<String>> {
+        if let Some(set) = self.cookies.borrow().clone() {
+            return set;
+        }
+        let set: HashSet<String> = fs::read_to_string(self.dir.join("filters").join(COOKIE_FILE))
+            .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default();
+        let set = Rc::new(set);
+        *self.cookies.borrow_mut() = Some(set.clone());
+        set
     }
 
     /// Total requests blocked since start.
@@ -187,11 +240,16 @@ impl Blocker {
         self.blocked.get()
     }
 
-    /// Hook one page. Call once per WebView after it is built.
-    pub fn attach(self: &Rc<Self>, wv: &WebView) {
+    /// Hook one page. Call once per WebView after it is built. `who` is the tab
+    /// asking: everything counted here is counted against it.
+    pub fn attach(self: &Rc<Self>, wv: &WebView, who: Who) {
         let core = wv.webview();
         let environment = wv.environment();
         let weak = Rc::downgrade(self);
+        // Bytes this page moved since its window began: a load's size, taken
+        // as a speed sample when the load finishes or the next one starts.
+        let nav_bytes = Rc::new(Cell::new(0u64));
+        let nav_at = Rc::new(Cell::new(None::<Instant>));
         unsafe {
             let star = HSTRING::from("*");
             // ICoreWebView2_22 also sees service workers. Older builds only
@@ -218,6 +276,7 @@ impl Blocker {
             let w3 = Rc::downgrade(self);
             let current: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
             let generation = Rc::new(Cell::new(0u64));
+            let (nav_load, nav_time) = (nav_bytes.clone(), nav_at.clone());
             let mut token = 0i64;
             let _ = core.add_NavigationStarting(
                 &NavigationStartingEventHandler::create(Box::new(move |sender, args| {
@@ -230,10 +289,20 @@ impl Blocker {
                     let mut u = PWSTR::null();
                     args.Uri(&mut u)?;
                     let url = take(u);
+                    // A new page in this tab: the sidebar's chip starts over,
+                    // and the page before it is now one speed sample.
+                    privacy_stats::nav_start(who.tab);
+                    if let Some(t0) = nav_time.get() {
+                        privacy_stats::nav_sample(nav_load.get(), t0.elapsed().as_secs_f64());
+                    }
+                    nav_time.set(Some(Instant::now()));
+                    nav_load.set(0);
                     let js = b.scriptlets(&url);
                     if js.is_empty() {
                         return Ok(());
                     }
+                    // One injection, one count: the script comes whole.
+                    privacy_stats::scriptlet(&privacy_stats::host(&url), who);
                     let host = url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#', ':']).next()).unwrap_or("");
                     let wrapped = format!(
                         "(()=>{{if(window!==window.top||location.hostname!=={})return;\nconst scriptletGlobals={{}};\n{js}\n}})();",
@@ -257,6 +326,22 @@ impl Blocker {
                 })),
                 &mut token,
             );
+            // A finished page is a speed sample too: its own bytes over its own
+            // seconds. Without this, one page visit never teaches the estimate
+            // because the next navigation may never come. The window restarts
+            // here, so late, lazy bytes form their own sample later.
+            let (c_bytes, c_time) = (nav_bytes.clone(), nav_at.clone());
+            let _ = core.add_NavigationCompleted(
+                &NavigationCompletedEventHandler::create(Box::new(move |_, _| {
+                    if let Some(t0) = c_time.get() {
+                        privacy_stats::nav_sample(c_bytes.get(), t0.elapsed().as_secs_f64());
+                    }
+                    c_time.set(Some(Instant::now()));
+                    c_bytes.set(0);
+                    Ok(())
+                })),
+                &mut token,
+            );
             // Cosmetic rules: the page script asks, this answers with CSS.
             let w2 = Rc::downgrade(self);
             let state = Rc::new(RefCell::new(PageCos::default()));
@@ -273,10 +358,16 @@ impl Blocker {
                     }
                     let mut src = PWSTR::null();
                     args.Source(&mut src)?;
+                    let src = take(src);
                     let list = |k: &str| -> Vec<String> {
                         msg[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).take(3000).collect()).unwrap_or_default()
                     };
-                    let css = b.cosmetic_css(&take(src), &mut state.borrow_mut(), msg["first"] == 1, &list("c"), &list("i"));
+                    let (css, hides, cookie_n) = b.cosmetic_css(&src, &mut state.borrow_mut(), msg["first"] == 1, &list("c"), &list("i"));
+                    if hides > 0 {
+                        let site = privacy_stats::host(&src);
+                        privacy_stats::hides(&site, hides, who);
+                        privacy_stats::cookie_hides(&site, cookie_n, who);
+                    }
                     if !css.is_empty() {
                         let js = format!("window.__lumenCos&&window.__lumenCos({})", serde_json::to_string(&css).unwrap_or_default());
                         let _ = sender.ExecuteScript(&HSTRING::from(js), &ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(()))));
@@ -290,16 +381,48 @@ impl Blocker {
                 &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                     let Some(b) = weak.upgrade() else { return Ok(()) };
                     let Some(args) = args else { return Ok(()) };
-                    on_request(&b, &environment, &page, &args)
+                    on_request(&b, &environment, &page, &args, who)
                 })),
                 &mut token,
             );
+            // What a response carried: sizes measure this machine's real speed
+            // and teach the averages what a script or an image weighs. The
+            // blocker's own 403 has no Content-Length, so a blocked request
+            // never measures itself.
+            let carried = nav_bytes.clone();
+            if let Ok(c2) = core.cast::<ICoreWebView2_2>() {
+                let _ = c2.add_WebResourceResponseReceived(
+                    &WebResourceResponseReceivedEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let Ok(resp) = args.Response() else { return Ok(()) };
+                        let Ok(headers) = resp.Headers() else { return Ok(()) };
+                        let mut p = PWSTR::null();
+                        if headers.GetHeader(&HSTRING::from("Content-Length"), &mut p).is_err() {
+                            return Ok(());
+                        }
+                        let len = take(p).trim().parse::<u64>().unwrap_or(0);
+                        if len == 0 {
+                            return Ok(());
+                        }
+                        carried.set(carried.get().saturating_add(len));
+                        // The "other" bucket keeps its seed: whole documents
+                        // and stylesheets would drown the small requests
+                        // that land there.
+                        let kind = kind_of_content_type(&response_header(&headers, "Content-Type"));
+                        if kind != "other" {
+                            privacy_stats::note_response(kind, len);
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+            }
         }
     }
 
     /// Background thread in, serialized matcher out. A thread that will not
     /// spawn leaves the receiver empty, which means nothing blocks.
-    fn spawn_build(data_dir: &Path) -> Receiver<Vec<u8>> {
+    fn spawn_build(data_dir: &Path) -> Receiver<Built> {
         let (tx, rx) = channel();
         let dir = data_dir.to_path_buf();
         let _ = thread::Builder::new()
@@ -313,14 +436,18 @@ impl Blocker {
     /// when nothing is waiting.
     fn pump(&self) {
         let mut latest = None;
-        while let Ok(bytes) = self.rx.borrow().try_recv() {
-            latest = Some(bytes);
+        while let Ok(built) = self.rx.borrow().try_recv() {
+            latest = Some(built);
         }
-        let Some(bytes) = latest else { return };
+        let Some(built) = latest else { return };
         let mut engine = adblock::Engine::new_with_filter_set(adblock::FilterSet::new(false));
-        if engine.deserialize(&bytes).is_ok() {
+        if engine.deserialize(&built.bytes).is_ok() {
             engine.use_resources(scriptlet_resources());
             *self.engine.borrow_mut() = Some(engine);
+            *self.sources.borrow_mut() = built.names;
+            // The cookie tallies belong to the lists this matcher was built
+            // from; drop them so the next page reads the new ones.
+            *self.cookies.borrow_mut() = None;
             return;
         }
         if self.engine.borrow().is_some() {
@@ -339,21 +466,33 @@ impl Blocker {
         *self.rx.borrow_mut() = rx;
     }
 
-    /// The whole hot path. Runs for every request of every page.
-    fn should_block(&self, url: &str, source: &str, kind: &str) -> bool {
+    /// The whole hot path. Runs for every request of every page. The door's
+    /// answer: the list that stopped it, or None to let it through.
+    fn check(&self, url: &str, source: &str, kind: &str) -> Option<Cat> {
         if !self.on.get() || url.is_empty() || source.is_empty() {
-            return false;
+            return None;
         }
         self.pump();
-        let mut slot = self.engine.borrow_mut();
-        let Some(engine) = slot.as_mut() else {
-            return false;
-        };
+        let slot = self.engine.borrow();
+        let engine = slot.as_ref()?;
         // A URL the matcher cannot read is a URL we leave alone.
-        match adblock::request::Request::new(url, source, kind, "GET") {
-            Ok(req) => engine.check_network_request(&req).should_block(),
-            Err(_) => false,
+        let res = match adblock::request::Request::new(url, source, kind, "GET") {
+            Ok(req) => engine.check_network_request(&req),
+            Err(_) => return None,
+        };
+        if !res.should_block() {
+            return None;
         }
+        let index = res.filter.as_ref().and_then(|f| f.source_location.as_ref().map(|l| l.source_index));
+        Some(self.cat_of(index))
+    }
+
+    /// Which list a rule came from. No source on the rule (the engine fused
+    /// it into something bigger, or the matcher predates the sidecar) means
+    /// no list to credit, and no list is "other".
+    fn cat_of(&self, index: Option<u32>) -> Cat {
+        let sources = self.sources.borrow();
+        index.and_then(|i| sources.get(i as usize)).map_or(Cat::Other, |name| list_cat(name))
     }
 }
 
@@ -363,6 +502,7 @@ fn on_request(
     environment: &ICoreWebView2Environment,
     page: &ICoreWebView2,
     args: &ICoreWebView2WebResourceRequestedEventArgs,
+    who: Who,
 ) -> windows::core::Result<()> {
     unsafe {
         let mut ctx = COREWEBVIEW2_WEB_RESOURCE_CONTEXT::default();
@@ -386,9 +526,9 @@ fn on_request(
             return Ok(());
         }
         let source = take(top);
-        if !b.should_block(&url, &source, kind) {
+        let Some(cat) = b.check(&url, &source, kind) else {
             return Ok(());
-        }
+        };
         let reason = HSTRING::from("Blocked");
         let headers = HSTRING::new();
         let Ok(reply) = environment.CreateWebResourceResponse(None, 403, &reason, &headers) else {
@@ -396,6 +536,10 @@ fn on_request(
         };
         let _ = args.SetResponse(&reply);
         b.blocked.set(b.blocked.get() + 1);
+        // The page it happened on, and the name behind the request that died.
+        let site = privacy_stats::host(&source);
+        let domain = privacy_stats::registrable(&privacy_stats::host(&url));
+        privacy_stats::blocked(&site, &domain, cat, kind, who);
         Ok(())
     }
 }
@@ -407,6 +551,34 @@ fn take(p: PWSTR) -> String {
     let s = unsafe { p.to_string() }.unwrap_or_default();
     unsafe { CoTaskMemFree(Some(p.0 as *const _)) };
     s
+}
+
+/// One response header, or nothing. Only used off the request path.
+fn response_header(headers: &ICoreWebView2HttpResponseHeaders, name: &str) -> String {
+    let mut p = PWSTR::null();
+    if unsafe { headers.GetHeader(&HSTRING::from(name), &mut p) }.is_err() {
+        return String::new();
+    }
+    take(p)
+}
+
+/// What a response says it is, in terms an average can sit in. Anything the
+/// content type does not name is "other".
+fn kind_of_content_type(content_type: &str) -> &'static str {
+    let ct = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    if ct.contains("javascript") || ct.contains("ecmascript") {
+        "script"
+    } else if ct.starts_with("image/") {
+        "image"
+    } else if ct.starts_with("font/") || ct.contains("font") {
+        "font"
+    } else if ct.starts_with("video/") || ct.starts_with("audio/") {
+        "media"
+    } else if ct == "application/json" || ct.ends_with("+json") {
+        "xmlhttprequest"
+    } else {
+        "other"
+    }
 }
 
 /// WebView2's resource context to what a filter list calls a request.
@@ -443,8 +615,12 @@ fn map_context(ctx: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> Option<&'static str> {
 /// Rules in, serialized matcher out. This is the slow part, so it happens on
 /// a background thread or never at all.
 /// (list text, trusted). Trusted lists may use scriptlets that need trust.
+///
+/// Built with debug info on, so every rule remembers which list it came from:
+/// that source index is how the report says "ad" or "tracker" instead of
+/// "something stopped it". It costs engine size and nothing at match time.
 fn serialize_engine(lists: &[(String, bool)]) -> Vec<u8> {
-    let mut set = adblock::FilterSet::new(false);
+    let mut set = adblock::FilterSet::new(true);
     for (text, trusted) in lists {
         let permissions = adblock::resources::PermissionMask::from_bits(if *trusted { TRUST } else { 0 });
         set.add_filter_list(text.clone(), adblock::lists::ParseOptions { permissions, ..Default::default() });
@@ -452,19 +628,76 @@ fn serialize_engine(lists: &[(String, bool)]) -> Vec<u8> {
     adblock::Engine::new_with_filter_set(set).serialize()
 }
 
+/// Which list a file is: the two boxes the report counts for.
+fn list_cat(name: &str) -> Cat {
+    match name {
+        "easylist.txt" | "pgl.txt" | "ublock.txt" | "quick-fixes.txt" => Cat::Ads,
+        "easyprivacy.txt" | "privacy-ublock.txt" | "cookies-easylist.txt" | "cookies-ublock.txt" => Cat::Trackers,
+        _ => Cat::Other,
+    }
+}
+
+/// The cookie lists' hiding rules, one selector per line. Exceptions (`#@#`)
+/// and procedural operators (`#?#`) have no plain `##`, so they never match
+/// and never land here; the engine decides whether a rule fires anyway.
+/// `###id` does land here, as `#id`, which is what the page will be asked to
+/// hide too.
+fn cookie_selectors(dir: &Path) -> String {
+    let mut out = String::new();
+    for (name, _) in LISTS {
+        if !name.starts_with("cookies-") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(dir.join(name)) else { continue };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('!') {
+                continue;
+            }
+            let Some(pos) = line.find("##") else { continue };
+            let sel = line[pos + 2..].trim();
+            // `####id` removes an element instead of hiding it: not a hide.
+            // Exceptions (`#@#`) and procedural rules (`#?#`) have no plain
+            // `##` anywhere, so they never get this far.
+            if sel.is_empty() || sel.starts_with("##") {
+                continue;
+            }
+            out.push_str(sel);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The tally file beside the matcher, written whenever the lists were read.
+/// Cheap: two files, one pass each.
+fn ensure_cookie_file(dir: &Path) {
+    if dir.join(COOKIE_FILE).exists() {
+        return;
+    }
+    let _ = fs::write(dir.join(COOKIE_FILE), cookie_selectors(dir));
+}
+
 fn scriptlet_resources() -> Vec<adblock::resources::Resource> {
     serde_json::from_str(SCRIPTLETS).unwrap_or_default()
 }
 
-fn build_engine(data_dir: &Path, tx: Sender<Vec<u8>>, force: bool) {
+fn build_engine(data_dir: &Path, tx: Sender<Built>, force: bool) {
     let dir = data_dir.join("filters");
     if fs::create_dir_all(&dir).is_err() {
         eprintln!("lumen: blocker: no filter dir at {}", dir.display());
     }
+    ensure_cookie_file(&dir);
     let fresh = !force && is_fresh(&dir);
     // Fast start: young lists and a matcher already built. Milliseconds.
     if let Ok(bytes) = fs::read(dir.join(ENGINE_FILE)) && !bytes.is_empty() && !force {
-        let _ = tx.send(bytes);
+        // Whoever built it first wrote the names beside it; without them the
+        // matcher still blocks, it just cannot say who stopped what.
+        let names = fs::read_to_string(dir.join(SOURCES_FILE))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+            .unwrap_or_default();
+        let _ = tx.send(Built { bytes, names });
         if fresh {
             return;
         }
@@ -481,16 +714,24 @@ fn build_engine(data_dir: &Path, tx: Sender<Vec<u8>>, force: bool) {
             eprintln!("lumen: blocker: {name} did not download");
         }
     }
-    let lists: Vec<(String, bool)> = LISTS
-        .iter()
-        .filter_map(|(name, _)| fs::read_to_string(dir.join(name)).ok().map(|t| (t, TRUSTED.contains(name))))
-        .collect();
+    // One entry per list that went in, in that order: a rule's source index
+    // points straight at it.
+    let mut names: Vec<String> = Vec::new();
+    let mut lists: Vec<(String, bool)> = Vec::new();
+    for (name, _) in LISTS {
+        let Ok(text) = fs::read_to_string(dir.join(name)) else { continue };
+        lists.push((text, TRUSTED.contains(name)));
+        names.push((*name).to_string());
+    }
     if lists.is_empty() {
         eprintln!("lumen: blocker: no lists at all, nothing gets blocked");
     }
     let bytes = serialize_engine(&lists);
     let _ = fs::write(dir.join(ENGINE_FILE), &bytes);
-    let _ = tx.send(bytes);
+    let _ = fs::write(dir.join(SOURCES_FILE), serde_json::to_string(&names).unwrap_or_default());
+    // The lists just changed, so the tallies change with them: overwrite.
+    let _ = fs::write(dir.join(COOKIE_FILE), cookie_selectors(&dir));
+    let _ = tx.send(Built { bytes, names });
 }
 
 fn fetch_to(url: &str, path: &Path) -> bool {
@@ -630,6 +871,95 @@ mod tests {
         e.deserialize(&bytes).expect("serialized matcher loads");
         assert!(blocks(&e, "https://ads.example.com/x.js", "https://site.com", "script"));
         assert!(!blocks(&e, "https://site.com/app.js", "https://site.com", "script"));
+    }
+
+    /// The whole point of the sidecar: a rule that fires must name its list
+    /// through the serialize -> deserialize round trip the real matcher takes.
+    #[test]
+    fn a_blocked_rule_says_which_list_stopped_it() {
+        let bytes = serialize_engine(&[("||ads.example.com^".into(), false), ("||track.example.org^".into(), false)]);
+        let mut e = adblock::Engine::new_with_filter_set(adblock::FilterSet::new(false));
+        e.deserialize(&bytes).expect("matcher loads");
+        let req = adblock::request::Request::new("https://ads.example.com/x.js", "https://site.com", "script", "GET").unwrap();
+        let res = e.check_network_request(&req);
+        assert!(res.should_block());
+        let index = res.filter.as_ref().and_then(|f| f.source_location.as_ref().map(|l| l.source_index));
+        assert_eq!(index, Some(0), "the first list added is index 0");
+        let req = adblock::request::Request::new("https://track.example.org/p", "https://site.com", "image", "GET").unwrap();
+        let res = e.check_network_request(&req);
+        assert_eq!(res.filter.as_ref().and_then(|f| f.source_location.as_ref().map(|l| l.source_index)), Some(1));
+
+        // And through Blocker's own answer.
+        let (tx, rx) = channel();
+        let b = Blocker {
+            dir: PathBuf::from("."),
+            on: Cell::new(true),
+            cosmetic: Cell::new(true),
+            blocked: Cell::new(0),
+            engine: RefCell::new(Some(e)),
+            rx: RefCell::new(rx),
+            sources: RefCell::new(vec!["easylist.txt".into(), "easyprivacy.txt".into()]),
+            cookies: RefCell::new(None),
+            gpc: Cell::new(false),
+        };
+        assert_eq!(b.check("https://ads.example.com/x.js", "https://site.com", "script"), Some(Cat::Ads));
+        assert_eq!(b.check("https://track.example.org/p", "https://site.com", "image"), Some(Cat::Trackers));
+        assert_eq!(b.check("https://site.com/app.js", "https://site.com", "script"), None, "the page is let through");
+        drop(tx);
+        // No sidecar at all is not a crash: the count just says "other".
+        assert_eq!(b.cat_of(None), Cat::Other);
+        *b.sources.borrow_mut() = Vec::new();
+        assert_eq!(b.cat_of(Some(0)), Cat::Other, "an unknown list is other");
+    }
+
+    #[test]
+    fn lists_split_into_ads_and_trackers() {
+        assert_eq!(list_cat("easylist.txt"), Cat::Ads);
+        assert_eq!(list_cat("ublock.txt"), Cat::Ads);
+        assert_eq!(list_cat("quick-fixes.txt"), Cat::Ads);
+        assert_eq!(list_cat("easyprivacy.txt"), Cat::Trackers);
+        assert_eq!(list_cat("privacy-ublock.txt"), Cat::Trackers);
+        assert_eq!(list_cat("cookies-ublock.txt"), Cat::Trackers);
+        assert_eq!(list_cat("unbreak.txt"), Cat::Other);
+        assert_eq!(list_cat("something-new.txt"), Cat::Other);
+    }
+
+    #[test]
+    fn a_response_says_what_it_is() {
+        assert_eq!(kind_of_content_type("application/javascript; charset=utf-8"), "script");
+        assert_eq!(kind_of_content_type("text/javascript"), "script");
+        assert_eq!(kind_of_content_type("image/webp"), "image");
+        assert_eq!(kind_of_content_type("font/woff2"), "font");
+        assert_eq!(kind_of_content_type("application/font-woff"), "font");
+        assert_eq!(kind_of_content_type("video/mp4"), "media");
+        assert_eq!(kind_of_content_type("audio/mpeg"), "media");
+        assert_eq!(kind_of_content_type("application/json"), "xmlhttprequest");
+        assert_eq!(kind_of_content_type("application/vnd.api+json"), "xmlhttprequest");
+        assert_eq!(kind_of_content_type("text/html"), "other");
+        assert_eq!(kind_of_content_type("text/css"), "other");
+        assert_eq!(kind_of_content_type(""), "other");
+    }
+
+    /// Cookie banners are counted apart from ads, by name, and the exceptions
+    /// and procedural operators never land in the tally.
+    #[test]
+    fn cookie_lists_leave_a_tally_of_their_selectors() {
+        let dir = std::env::temp_dir().join(format!("lumen-cookies-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("cookies-ublock.txt"), "! comment\nnews.com##.cookie-wall\nnews.com###onetrust-banner\n##.gdpr-modal\nnews.com#@#.cookie-wall\nnews.com#?#.banner:has(> .x)\nnews.com####ad-id\n").unwrap();
+        fs::write(dir.join("cookies-easylist.txt"), "shop.com##.consent-bar\n").unwrap();
+        let out = cookie_selectors(&dir);
+        let set: HashSet<&str> = out.lines().collect();
+        assert!(set.contains(".cookie-wall"));
+        assert!(set.contains("#onetrust-banner"));
+        assert!(set.contains(".gdpr-modal"));
+        assert!(set.contains(".consent-bar"));
+        assert_eq!(set.len(), 4, "no comments, exceptions, procedural rules or removes: {set:?}");
+        // Written once, kept, refreshed only by a rebuild.
+        ensure_cookie_file(&dir);
+        assert!(dir.join(COOKIE_FILE).exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

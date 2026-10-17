@@ -344,14 +344,6 @@ impl Motion {
 mod tests {
     use super::*;
 
-    /// A motion with a fixed frame time, so tests do not depend on a real clock.
-    fn motion(dt: f32) -> Motion {
-        let mut m = Motion::default();
-        m.begin();
-        m.dt = dt;
-        m
-    }
-
     /// One frame at `dt`, touching what the closure touches.
     fn frame(m: &mut Motion, dt: f32, work: impl FnOnce(&mut Motion)) {
         m.begin();

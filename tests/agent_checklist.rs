@@ -6,8 +6,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    sync::Arc,
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -22,32 +21,7 @@ fn tmp(name: &str) -> PathBuf {
     dir
 }
 
-struct Door { port: u16, token: String }
-
-impl Door {
-    fn post(&self, sid: Option<&str>, body: &Value) -> Value {
-        let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(60))).ok();
-        let mut head = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nAuthorization: Bearer {}\r\n", self.port, self.token);
-        if let Some(x) = sid { head += &format!("Mcp-Session-Id: {x}\r\n"); }
-        let req = format!("{head}Content-Length: {}\r\nConnection: close\r\n\r\n{}", body.to_string().len(), body);
-        s.write_all(req.as_bytes()).unwrap();
-        let mut raw = Vec::new();
-        let _ = s.read_to_end(&mut raw);
-        let text = String::from_utf8_lossy(&raw);
-        let body = text.split_once("\r\n\r\n").map(|x| x.1).unwrap_or("");
-        serde_json::from_str(body).unwrap_or(Value::Null)
-    }
-    fn init(&self) -> String {
-        let r = self.post(None, &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"1"}}}));
-        // token header? read from response headers not parsed; instead use file? We need sid header. Re-parse raw.
-        r.to_string();
-        // We'll parse header separately below by direct call.
-        String::new()
-    }
-}
-
-// Simpler: operate via lumen-agent CLI? Use raw HTTP with header capture.
+// Operate via raw HTTP with header capture.
 fn raw_post(port: u16, token: &str, sid: Option<&str>, body: &Value) -> (u16, String, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(60))).ok();
