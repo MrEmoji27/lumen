@@ -34,6 +34,8 @@ mod upnp;
 mod video;
 mod workspaces;
 mod store;
+mod sites;
+mod tabsearch;
 mod sitefavs;
 mod speeddial;
 mod sponsorblock;
@@ -82,6 +84,8 @@ enum Panel {
     Downloads,
     History,
     Bookmarks,
+    /// What each site may do, and the zoom and http choices kept per site.
+    Sites,
 }
 
 impl Panel {
@@ -93,6 +97,7 @@ impl Panel {
             Panel::Downloads => "downloads",
             Panel::History => "history",
             Panel::Bookmarks => "bookmarks",
+            Panel::Sites => "sites",
         }
     }
 }
@@ -145,6 +150,12 @@ struct Tab {
     visible: bool,
     /// Typed in the address bar as a bare host and not yet answered. See `Typed`.
     typed: Option<Typed>,
+    /// The zoom the page is at, in percent.
+    zoom: u32,
+    /// A zoom Lumen just set itself: the change event that follows is not the person's.
+    zoom_set: Option<u32>,
+    /// Showing the "this site does not use https" page for this http address.
+    no_https: Option<String>,
 }
 
 /// What the sleep policy needs to know about a hidden tab.
@@ -246,6 +257,9 @@ impl Tab {
             hidden_at: None,
             visible: false,
             typed: None,
+            zoom: 100,
+            zoom_set: None,
+            no_https: None,
         }
     }
 
@@ -367,6 +381,12 @@ struct App {
     mods: ModifiersState,
     /// Remembered permission answers, and requests waiting for the user.
     rules: store::Rules,
+    /// The zoom each site is read at, in percent. Only sites that differ from the default.
+    zooms: sites::Zooms,
+    /// Hosts that answered on the https port this run, so the probe is made once.
+    probed: HashSet<String>,
+    /// How many cookies the active tab's site has: (tab, count), asked for when the lock opens.
+    site_cookies: Option<(u64, usize)>,
     prompts: Vec<(u64, u64, String, &'static str)>,
     /// Which "open this app?" questions are on screen or were just refused.
     ext_gate: extlink::Gate,
@@ -600,6 +620,8 @@ fn main() {
         dark_js: RefCell::new(None),
         rewrite: RefCell::new(None),
         dark_ids: Rc::new(RefCell::new(HashMap::new())),
+        https: Rc::new(RefCell::new(https_policy(&settings))),
+        gpc: Cell::new(settings.gpc),
     });
 
     {
@@ -620,6 +642,7 @@ fn main() {
     let blocker = blocker::Blocker::start(store::data_dir());
     blocker.set_enabled(settings.adblock);
     blocker.set_cosmetic(settings.cosmetic);
+    blocker.set_gpc(settings.gpc);
     {
         let b = blocker.clone();
         ctx.rewrite.replace(Some(Rc::new(move |u: &str| b.rewrite(u))));
@@ -690,6 +713,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         agent_last: Instant::now(),
         mods: ModifiersState::empty(),
         rules: store::load_rules(),
+        zooms: store::load_zooms(),
+        probed: HashSet::new(),
+        site_cookies: None,
         prompts: Vec::new(),
         ext_gate: Default::default(),
         library: library::Library::load(&store::data_dir()),
@@ -779,6 +805,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             Ok("history") => Panel::History,
             Ok("bookmarks") => Panel::Bookmarks,
             Ok("settings") => Panel::Settings,
+            Ok("sites") => Panel::Sites,
             _ => Panel::None,
         };
         if panel != Panel::None || app.settings.compact {
@@ -1002,6 +1029,11 @@ fn part_kind(file: &str) -> Option<&'static str> {
 /// "https://a.b.c/x" -> "a.b.c"
 fn host_of(url: &str) -> String {
     url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).map(|h| h.rsplit('@').next().unwrap_or(h)).unwrap_or("").to_string()
+}
+
+/// The http-to-https rules the navigation hook reads, from the settings.
+fn https_policy(s: &Settings) -> sites::HttpsPolicy {
+    sites::HttpsPolicy { on: s.https_first, exceptions: s.http_ok.iter().cloned().collect(), passes: HashSet::new() }
 }
 
 fn resolve_dark(s: &Settings, os: WinTheme) -> bool {
@@ -1684,6 +1716,24 @@ impl App {
                     .flat_map(|(o, r)| r.iter().map(move |(k, a)| (o.clone(), k.clone(), *a)))
                     .collect(),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
+                zoom: self.active_tab().map_or(100, |t| t.zoom),
+                zooms: self.zooms.iter().map(|(h, p)| (h.clone(), *p)).collect(),
+                site_cookies: self.site_cookies.filter(|(id, _)| *id == self.active).map(|(_, n)| n),
+                other_tabs: self
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(w, _)| *w != self.active_workspace)
+                    .flat_map(|(w, ws)| {
+                        ws.saved.iter().enumerate().filter(|(_, t)| !t.url.is_empty()).map(move |(n, t)| chrome::UiOther {
+                            ws: w,
+                            idx: n,
+                            ws_name: ws.name.clone(),
+                            title: t.title.clone(),
+                            url: t.url.clone(),
+                        })
+                    })
+                    .collect(),
                 workspaces: self.workspaces.iter().map(|w| w.name.clone()).collect(),
                 active_workspace: self.active_workspace,
                 glance: self.glance.is_some(),
@@ -1778,6 +1828,8 @@ impl App {
             t.suspended = false;
             t.trimmed = false;
         }
+        let want = self.wanted_zoom(i);
+        self.put_zoom(i, want);
         self.limit_tab(i);
     }
 
@@ -2992,9 +3044,27 @@ impl App {
         }
         if old.tracking != self.settings.tracking {
             self.ctx.tracking.replace(self.settings.tracking.clone());
-            // Tracking prevention is per profile; any page reaches it.
-            if let Some(v) = self.tabs.iter().find_map(|t| t.view.as_ref()) {
+            // Tracking prevention is per profile, and private and agent pages have their own.
+            for v in self.tabs.iter().filter_map(|t| t.view.as_ref()) {
                 engine::set_tracking(v, &self.settings.tracking);
+            }
+        }
+        if old.https_first != self.settings.https_first || old.http_ok != self.settings.http_ok {
+            let mut p = self.ctx.https.borrow_mut();
+            p.on = self.settings.https_first;
+            p.exceptions = self.settings.http_ok.iter().cloned().collect();
+        }
+        if old.gpc != self.settings.gpc {
+            self.blocker.set_gpc(self.settings.gpc);
+            self.ctx.gpc.set(self.settings.gpc);
+        }
+        if old.perm_defaults != self.settings.perm_defaults {
+        }
+        if old.default_zoom != self.settings.default_zoom {
+            // Sites with no zoom of their own follow the default.
+            for i in 0..self.tabs.len() {
+                let want = self.wanted_zoom(i);
+                self.put_zoom(i, want);
             }
         }
         if old.radius != self.settings.radius {
@@ -3055,6 +3125,14 @@ impl App {
             }
             Ev::Url(id, u) => {
                 if let Some(i) = self.idx(id) {
+                    // The warning for a site without https is a page made from a string: the tab
+                    // keeps the address it was asked for, until a real page replaces it.
+                    if self.tabs[i].no_https.is_some() {
+                        if !u.starts_with("http") {
+                            return;
+                        }
+                        self.tabs[i].no_https = None;
+                    }
                     // Reader view is a page made from a string; the tab keeps the real URL.
                     if self.tabs[i].reader.is_some() {
                         if !u.starts_with("http") {
@@ -3105,6 +3183,9 @@ impl App {
                         }
                     }
                     self.tabs[i].url = u;
+                    // A site the person zoomed keeps its zoom; any other gets the default.
+                    let want = self.wanted_zoom(i);
+                    self.put_zoom(i, want);
                     self.dirty = true;
                     self.push();
                 }
@@ -3386,13 +3467,39 @@ impl App {
             }
             Ev::Agent(call) => self.on_agent(call),
             Ev::Permission { pid, tab, origin, kind } => {
-                match self.rules.get(&origin).and_then(|r| r.get(kind)).copied() {
-                    Some(allow) => engine::answer_permission(&self.ctx, pid, Some(allow)),
-                    None => {
+                match sites::verdict(&self.rules, &self.settings.perm_defaults, &origin, kind) {
+                    sites::Verdict::Allow => engine::answer_permission(&self.ctx, pid, Some(true)),
+                    sites::Verdict::Block => engine::answer_permission(&self.ctx, pid, Some(false)),
+                    sites::Verdict::Ask => {
                         self.prompts.push((pid, tab, origin, kind));
                         self.push();
                     }
                 }
+            }
+            Ev::Zoom(id, f) => {
+                let Some(i) = self.idx(id) else { return };
+                let pct = sites::pct_of(f);
+                // The change Lumen made itself is not the person's choice.
+                let ours = self.tabs[i].zoom_set.take() == Some(pct);
+                self.tabs[i].zoom = pct;
+                if !ours {
+                    self.remember_zoom(i, pct);
+                }
+                self.push();
+            }
+            Ev::Upgrade(id, secure, plain) => self.upgrade(id, secure, plain),
+            Ev::Probed(id, secure, plain, answer) => self.probed(id, secure, plain, answer),
+            Ev::HttpChoice(id, choice) => self.http_choice(id, choice),
+            Ev::SiteCookies(id, n) => {
+                self.site_cookies = Some((id, n));
+                self.push();
+            }
+            Ev::SiteCleared(origin, ok) => {
+                self.site_cookies = None;
+                let what = if ok { format!("Cleared the data of {}", host_of(&origin)) } else { "Could not clear that site".to_string() };
+                self.chrome.flash(what);
+                self.ask_site_cookies();
+                self.push();
             }
             Ev::Handoff(tab, url, page, name) => {
                 let mut headers = Vec::new();
@@ -4014,6 +4121,8 @@ impl App {
             }
             Action::Split => self.toggle_split(),
             Action::TranslatePage => self.toggle_translate(i),
+            // The switcher lives in the chrome: it owns the list box and the typing.
+            Action::TabSearch => self.chrome.open_tab_search(),
         }
     }
 
@@ -4204,6 +4313,7 @@ impl App {
                     (true, Some("downloads")) => Panel::Downloads,
                     (true, Some("history")) => Panel::History,
                     (true, Some("bookmarks")) => Panel::Bookmarks,
+                    (true, Some("sites")) => Panel::Sites,
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);
@@ -4614,23 +4724,119 @@ impl App {
                 let pid = m["pid"].as_u64().unwrap_or(0);
                 let allow = m["allow"].as_bool().unwrap_or(false);
                 if let Some(k) = self.prompts.iter().position(|p| p.0 == pid) {
-                    let (_, _, origin, kind) = self.prompts.remove(k);
-                    self.rules.entry(origin).or_default().insert(kind.to_string(), allow);
-                    store::save_rules(&self.rules);
+                    let (_, tab, origin, kind) = self.prompts.remove(k);
+                    // A private tab's answer is for this once: it must not be written down.
+                    let private = self.idx(tab).is_some_and(|i| self.off_record(&self.tabs[i]));
+                    if !private {
+                        let v = if allow { sites::Verdict::Allow } else { sites::Verdict::Block };
+                        sites::set_rule(&mut self.rules, &origin, kind, v);
+                        store::save_rules(&self.rules);
+                    }
                 }
                 engine::answer_permission(&self.ctx, pid, Some(allow));
                 self.push();
             }
             "permReset" => {
                 let (origin, kind) = (m["origin"].as_str().unwrap_or(""), m["kind"].as_str().unwrap_or(""));
-                if let Some(r) = self.rules.get_mut(origin) {
-                    r.remove(kind);
-                    if r.is_empty() {
-                        self.rules.remove(origin);
-                    }
-                }
+                sites::set_rule(&mut self.rules, origin, kind, sites::Verdict::Ask);
                 store::save_rules(&self.rules);
                 self.push();
+            }
+            // The Site settings page and the lock's popover: Allow, Block or Ask for one kind.
+            "permSet" => {
+                let (origin, kind) = (m["origin"].as_str().unwrap_or(""), m["kind"].as_str().unwrap_or(""));
+                let v = match m["v"].as_str() {
+                    Some("allow") => sites::Verdict::Allow,
+                    Some("block") => sites::Verdict::Block,
+                    _ => sites::Verdict::Ask,
+                };
+                // An answer given on a private or agent page, from the lock, is for this visit:
+                // writing it down would record a site the person kept off the record.
+                let keep = !(m["lock"].as_bool().unwrap_or(false) && self.active_tab().is_some_and(|t| self.off_record(t)));
+                // Only kinds Lumen knows, on origins that are sites. The app launcher's own
+                // per-scheme rules ("open mailto") are the Site settings page's to edit too.
+                let known = sites::KINDS.iter().any(|k| k.key == kind) || kind.starts_with("open ");
+                if keep && known && origin.starts_with("http") {
+                    sites::set_rule(&mut self.rules, origin, kind, v);
+                    store::save_rules(&self.rules);
+                    self.push();
+                }
+            }
+            // Every answer a site has: back to asking.
+            "permResetSite" => {
+                self.rules.remove(m["origin"].as_str().unwrap_or(""));
+                store::save_rules(&self.rules);
+                self.push();
+            }
+            // The chip in the address bar: back to 100%. The site keeps that choice.
+            "zoomSet" => {
+                let pct = sites::clamp_pct(m["pct"].as_u64().unwrap_or(100) as u32);
+                let i = self.active_idx();
+                self.put_zoom(i, pct);
+                self.remember_zoom(i, pct);
+                self.push();
+            }
+            // The Site settings page: this site goes back to the default zoom.
+            "zoomForget" => {
+                let host = m["host"].as_str().unwrap_or("").to_string();
+                if self.zooms.remove(&host).is_some() {
+                    store::save_zooms(&self.zooms);
+                }
+                self.follow_zoom(&host);
+                self.push();
+            }
+            // The lock was pressed: ask what the site holds.
+            "siteOpen" => self.ask_site_cookies(),
+            "siteClear" => {
+                let origin = m["origin"].as_str().unwrap_or("").to_string();
+                // From the lock over a private or agent page, clearing would reach into the
+                // person's own store for a site they never opened there. Those stores go away
+                // with their last page anyway.
+                if m["lock"].as_bool().unwrap_or(false) && self.active_tab().is_some_and(|t| self.off_record(t)) {
+                    self.chrome.flash("Private tabs forget everything when they close".into());
+                } else {
+                    self.clear_site(&origin);
+                }
+            }
+            // The tab search picked a row: a tab here, or one in a workspace that is put away.
+            "switchTab" => {
+                if m["other"].as_bool().unwrap_or(false) {
+                    let ws = m["ws"].as_u64().unwrap_or(0) as usize;
+                    let idx = m["idx"].as_u64().unwrap_or(0) as usize;
+                    if ws < self.workspaces.len() && ws != self.active_workspace {
+                        self.switch_workspace(ws);
+                    }
+                    // Pinned tabs sort to the front on load, so the index holds.
+                    if let Some(t) = self.tabs.get(idx) {
+                        let id = t.id;
+                        self.activate(id);
+                    }
+                } else {
+                    let id = m["id"].as_u64().unwrap_or(0);
+                    if self.idx(id).is_some() {
+                        self.activate(id);
+                    }
+                }
+            }
+            // Privacy: this host may stay on plain http no more.
+            "httpForget" => {
+                let host = m["host"].as_str().unwrap_or("").to_string();
+                if self.settings.http_ok.iter().any(|h| *h == host) {
+                    let mut st = self.settings.clone();
+                    st.http_ok.retain(|h| *h != host);
+                    self.apply_settings(st);
+                }
+                self.push();
+            }
+            // Per-kind default: ask, or block without asking.
+            "permDefault" => {
+                let kind = m["kind"].as_str().unwrap_or("");
+                if sites::KINDS.iter().any(|k| k.key == kind) {
+                    let v = if m["v"].as_str() == Some("block") { sites::Verdict::Block } else { sites::Verdict::Ask };
+                    let mut st = self.settings.clone();
+                    sites::set_default(&mut st.perm_defaults, kind, v);
+                    self.apply_settings(st);
+                }
             }
             "clearPasswords" => {
                 if let Some(v) = self.tabs.iter().filter(|t| !t.agent).find_map(|t| t.view.as_ref()) {
@@ -5444,6 +5650,177 @@ impl App {
 
     /// Clearing everything also clears the site icons: they are a list of the sites that were
     /// visited. A partial clear leaves them (they carry no times to cut by).
+    // ----------------------------------------------------------------- sites
+
+    /// The zoom a tab's page should be at, in percent. Pages that are not websites stay at 100.
+    fn wanted_zoom(&self, i: usize) -> u32 {
+        sites::zoom_host(&self.tabs[i].url).map_or(100, |h| sites::zoom_for(&self.zooms, self.settings.default_zoom, &h))
+    }
+
+    /// Put a tab's page at `pct`. The change event this causes is Lumen's own, not the person's.
+    fn put_zoom(&mut self, i: usize, pct: u32) {
+        let t = &mut self.tabs[i];
+        t.zoom = pct;
+        let Some(v) = &t.view else { return };
+        if engine::zoom_factor(v).map(sites::pct_of) != Some(pct) {
+            t.zoom_set = Some(pct);
+            engine::set_zoom_factor(v, sites::factor_of(pct));
+        }
+    }
+
+    /// Every tab of the host `host` goes to the zoom the site has now (or the default).
+    fn follow_zoom(&mut self, host: &str) {
+        for i in 0..self.tabs.len() {
+            if sites::zoom_host(&self.tabs[i].url).as_deref() == Some(host) {
+                let want = self.wanted_zoom(i);
+                self.put_zoom(i, want);
+            }
+        }
+    }
+
+    /// The person zoomed tab `i` to `pct`: the site keeps it. Private and agent tabs keep nothing.
+    fn remember_zoom(&mut self, i: usize, pct: u32) {
+        let t = &self.tabs[i];
+        if self.off_record(t) {
+            return;
+        }
+        let Some(host) = sites::zoom_host(&t.url) else { return };
+        if sites::remember_zoom(&mut self.zooms, self.settings.default_zoom, &host, pct) {
+            store::save_zooms(&self.zooms);
+        }
+        self.follow_zoom(&host);
+    }
+
+    /// A plain http address was stopped. If the site answers on the https port, go there; if
+    /// it does not, say so and let the person choose. Asked once per site and run.
+    fn upgrade(&mut self, id: u64, secure: String, plain: String) {
+        let Some(i) = self.idx(id) else { return };
+        let host = sites::exception_host(&plain).unwrap_or_default();
+        self.tabs[i].no_https = None;
+        self.tabs[i].url = secure.clone();
+        if self.probed.contains(&host) {
+            if let Some(v) = &self.tabs[i].view {
+                let _ = v.load_url(&secure);
+            }
+        } else {
+            // The spinner runs while the port is tried; the answer comes back as an event.
+            self.tabs[i].loading = true;
+            let proxy = self.ctx.proxy.clone();
+            let target = format!("{}:443", host.trim_start_matches('['));
+            std::thread::Builder::new()
+                .name("lumen-https-probe".into())
+                .spawn(move || {
+                    let answer = sites::probe(&target, Duration::from_secs(4));
+                    let _ = proxy.send_event(Ev::Probed(id, secure, plain, answer));
+                })
+                .ok();
+        }
+        self.dirty = true;
+        self.push();
+    }
+
+    fn probed(&mut self, id: u64, secure: String, plain: String, answer: sites::Probe) {
+        let Some(i) = self.idx(id) else { return };
+        // The person typed something else while the port was tried: that wins.
+        if self.tabs[i].url != secure || self.tabs[i].no_https.is_some() {
+            return;
+        }
+        let host = sites::exception_host(&plain).unwrap_or_default();
+        let t = &mut self.tabs[i];
+        t.loading = false;
+        match answer {
+            sites::Probe::Shut => {
+                // No page was loaded: the warning is the first thing this tab shows, so Back
+                // goes to the page before it.
+                t.no_https = Some(plain.clone());
+                t.url = plain.clone();
+                t.title = format!("{} does not use https", host);
+                if let Some(v) = &t.view {
+                    let _ = v.load_html(&sites::interstitial_html(&plain, self.ctx.dark.get()));
+                }
+                journal::feature("https_first_warning", t.private);
+            }
+            other => {
+                if other == sites::Probe::Open {
+                    self.probed.insert(host);
+                }
+                if let Some(v) = &t.view {
+                    let _ = v.load_url(&secure);
+                }
+            }
+        }
+        self.dirty = true;
+        self.push();
+    }
+
+    /// A click on the warning page. It only counts while this tab shows that page for that address.
+    fn http_choice(&mut self, id: u64, choice: sites::HttpChoice) {
+        use sites::HttpChoice::*;
+        let Some(i) = self.idx(id) else { return };
+        let Some(shown) = self.tabs[i].no_https.clone() else { return };
+        let (url, always) = match choice {
+            Back => {
+                self.tabs[i].no_https = None;
+                if self.tabs[i].back {
+                    if let Some(v) = &self.tabs[i].view {
+                        let _ = v.go_back();
+                    }
+                } else if self.tabs.len() > 1 {
+                    self.close(id);
+                }
+                return;
+            }
+            Once(u) => (u, false),
+            Always(u) => (u, true),
+        };
+        if url != shown {
+            return;
+        }
+        let Some(host) = sites::exception_host(&url) else { return };
+        // Agents and private tabs change nothing that outlives them.
+        if always && !self.tabs[i].agent && !self.tabs[i].private {
+            let mut st = self.settings.clone();
+            st.http_ok.push(host);
+            self.apply_settings(st);
+        } else {
+            self.ctx.https.borrow_mut().passes.insert(host);
+        }
+        self.tabs[i].no_https = None;
+        self.tabs[i].url = url.clone();
+        if let Some(v) = &self.tabs[i].view {
+            let _ = v.load_url(&url);
+        }
+        self.dirty = true;
+        self.push();
+    }
+
+    /// Open the address bar's lock: ask how many cookies the site has.
+    fn ask_site_cookies(&mut self) {
+        let Some(t) = self.active_tab() else { return };
+        let (id, url) = (t.id, t.url.clone());
+        let Some(v) = t.view.as_ref() else { return };
+        let proxy = self.ctx.proxy.clone();
+        engine::cookie_count(v, &url, move |n| {
+            let _ = proxy.send_event(Ev::SiteCookies(id, n));
+        });
+    }
+
+    /// Forget one site's cookies and stored data. Never the InPrivate store: it ends with
+    /// the last private tab anyway. Needs a page of the person's own profile to ask.
+    fn clear_site(&mut self, origin: &str) {
+        if !origin.starts_with("http") {
+            return;
+        }
+        let Some(v) = self.plain_view() else {
+            self.chrome.flash("Open a page first: clearing needs one".into());
+            return;
+        };
+        let (proxy, o) = (self.ctx.proxy.clone(), origin.to_string());
+        engine::clear_site(v, origin, move |ok| {
+            let _ = proxy.send_event(Ev::SiteCleared(o, ok));
+        });
+    }
+
     fn forget_site_favs(&mut self, since: Option<u64>) {
         if since.is_none() && !self.site_favs.is_empty() {
             self.site_favs.clear();

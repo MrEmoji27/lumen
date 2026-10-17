@@ -135,6 +135,17 @@ pub struct Settings {
     /// Bandwidth cap per tab, KB/s.
     pub net_limit: bool,
     pub net_limit_kbps: u32,
+    /// What a kind of permission question does when the site has no answer of its own:
+    /// "block", or absent for ask. Keys are the kinds of `sites::KINDS`.
+    pub perm_defaults: std::collections::BTreeMap<String, String>,
+    /// The zoom pages open at, in percent, unless the site has a zoom of its own.
+    pub default_zoom: u32,
+    /// Try https first for plain http pages, and warn when a site has none.
+    pub https_first: bool,
+    /// Hosts the person said may stay on plain http.
+    pub http_ok: Vec<String>,
+    /// Send "Sec-GPC: 1" and tell pages not to sell or share what they know of you.
+    pub gpc: bool,
 }
 
 impl Default for Settings {
@@ -190,6 +201,11 @@ impl Default for Settings {
             cpu_limit_pct: 50,
             net_limit: false,
             net_limit_kbps: 2048,
+            perm_defaults: Default::default(),
+            default_zoom: 100,
+            https_first: true,
+            http_ok: Vec::new(),
+            gpc: true,
             speed_dial: true,
             shortcuts: vec![
                 s("YouTube", "https://www.youtube.com"),
@@ -232,6 +248,14 @@ impl Settings {
         self.cpu_limit_pct = self.cpu_limit_pct.clamp(5, 100);
         self.net_limit_kbps = self.net_limit_kbps.clamp(32, 1_000_000);
         self.download_limit_kbps = self.download_limit_kbps.min(1_000_000);
+        self.default_zoom = crate::sites::clamp_pct(self.default_zoom);
+        // Only "block" means anything in the defaults; ask is the absence of a line.
+        self.perm_defaults.retain(|k, v| v == "block" && !k.is_empty());
+        self.http_ok.iter_mut().for_each(|h| *h = h.trim().to_ascii_lowercase());
+        self.http_ok.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
+        self.http_ok.sort();
+        self.http_ok.dedup();
+        self.http_ok.truncate(500);
         // 0 means "never chosen"; a real port stays inside the range.
         if self.bt_port != 0 {
             self.bt_port = self.bt_port.clamp(BT_PORT_MIN, BT_PORT_MAX);
@@ -337,6 +361,15 @@ pub fn load_rules() -> Rules {
 
 pub fn save_rules(r: &Rules) {
     save("permissions.json", r);
+}
+
+/// The zoom of each site, in percent: zoom.json. Only sites that differ from the default zoom.
+pub fn load_zooms() -> crate::sites::Zooms {
+    load("zoom.json")
+}
+
+pub fn save_zooms(z: &crate::sites::Zooms) {
+    save("zoom.json", z);
 }
 
 /// A finished download, kept so the Downloads page survives a restart.
