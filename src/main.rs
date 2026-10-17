@@ -26,6 +26,7 @@ mod library;
 mod monitor;
 mod pacing;
 mod pagekit;
+mod privacy_stats;
 mod pins;
 mod recall;
 #[cfg(feature = "servo")]
@@ -86,11 +87,18 @@ enum Panel {
     Downloads,
     History,
     Bookmarks,
+    Report,
+    Dashboard,
     /// What each site may do, and the zoom and http choices kept per site.
     Sites,
 }
 
 impl Panel {
+    /// Pages that show live numbers: the process sampling runs only while one is open.
+    fn live(self) -> bool {
+        matches!(self, Panel::Control | Panel::Dashboard)
+    }
+
     fn name(self) -> &'static str {
         match self {
             Panel::None => "none",
@@ -99,6 +107,8 @@ impl Panel {
             Panel::Downloads => "downloads",
             Panel::History => "history",
             Panel::Bookmarks => "bookmarks",
+            Panel::Report => "report",
+            Panel::Dashboard => "dashboard",
             Panel::Sites => "sites",
         }
     }
@@ -320,6 +330,10 @@ struct App {
     closed: Vec<SavedTab>,
     settings: Settings,
     panel: Panel,
+    /// The report page's range tile: "today" | "7" | "30" | "all".
+    report_range: String,
+    /// The site whose row was clicked on the report page.
+    report_site: Option<String>,
     peek: bool,
     page_fs: bool,
     user_fs: bool,
@@ -644,12 +658,13 @@ fn main() {
     let blocker = blocker::Blocker::start(store::data_dir());
     blocker.set_enabled(settings.adblock);
     blocker.set_cosmetic(settings.cosmetic);
+    privacy_stats::set_enabled(settings.privacy_stats);
     blocker.set_gpc(settings.gpc);
     {
         let b = blocker.clone();
-        ctx.rewrite.replace(Some(Rc::new(move |u: &str| b.rewrite(u))));
+        ctx.rewrite.replace(Some(Rc::new(move |u: &str, who| b.rewrite(u, who))));
         let b = blocker.clone();
-        ctx.on_built.replace(Some(Box::new(move |wv: &WebView| b.attach(wv))));
+        ctx.on_built.replace(Some(Box::new(move |wv: &WebView, who| b.attach(wv, who))));
     }
 
     // The browser chrome: a native child window. No webview until a page needs one.
@@ -677,6 +692,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         closed: Vec::new(),
         settings,
         panel: Panel::None,
+        report_range: "today".into(),
+        report_site: None,
         peek: false,
         page_fs: false,
         user_fs: false,
@@ -796,7 +813,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     }
     // Test hooks for the chrome screenshots (LUMEN_TEST_SHOT, see chrome/shot.rs):
     // LUMEN_TEST_COMPACT=1 starts with the icon-only sidebar, LUMEN_TEST_PANEL=
-    // downloads|control|history|bookmarks|settings opens that page.
+    // downloads|control|history|bookmarks|settings|report opens that page.
     if cfg!(debug_assertions) {
         if std::env::var_os("LUMEN_TEST_COMPACT").is_some() {
             app.settings.compact = true;
@@ -807,6 +824,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             Ok("history") => Panel::History,
             Ok("bookmarks") => Panel::Bookmarks,
             Ok("settings") => Panel::Settings,
+            Ok("report") => Panel::Report,
+            Ok("dashboard") => Panel::Dashboard,
             Ok("sites") => Panel::Sites,
             _ => Panel::None,
         };
@@ -945,7 +964,12 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 _ => {}
             },
             Event::UserEvent(ev) => app.on_event(ev),
-            Event::MainEventsCleared => app.flush(),
+            Event::MainEventsCleared => {
+                app.flush();
+                // Whatever the blocker counted reaches the disk at most a minute
+                // apart, and only when the loop had nothing left to do.
+                privacy_stats::flush_if_due();
+            }
             _ => {}
         }
         if app.exit {
@@ -955,6 +979,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             app.upnp.release();
             // The journal's goodbye: a run with this line is a run that ended.
             journal::stop(true, app.born.elapsed());
+            privacy_stats::flush();
             *cf = ControlFlow::Exit;
         } else {
             let now = Instant::now();
@@ -1642,7 +1667,7 @@ impl App {
                 full: self.ui_full(),
                 stage: ((sx - off) as f32, sy as f32, sw as f32, sh as f32),
                 mem: self.mem,
-                blocked: self.blocker.blocked(),
+                blocked: privacy_stats::tab_blocked(self.active),
                 cpu_cap: self.job.is_some(),
                 downloads: self
                     .downloads
@@ -1701,6 +1726,13 @@ impl App {
                     self.library.bookmarks().into_iter().map(ui_mark).collect()
                 } else {
                     Vec::new()
+                },
+                // Filled only while the report page is open.
+                privacy_today: (self.panel == Panel::Dashboard).then(privacy_stats::today),
+                report: if self.panel == Panel::Report {
+                    Some(privacy_stats::snapshot(&self.report_range, self.report_site.as_deref()))
+                } else {
+                    None
                 },
                 suggestions: self.speed_dial_suggestions(),
                 mark: self.active_tab().filter(|t| !t.url.is_empty()).and_then(|t| self.library.mark_for_url(&t.url)).map(ui_mark),
@@ -1818,7 +1850,7 @@ impl App {
         let isolated = t.agent && !self.settings.agent_shared_profile;
         // An agent's page starts blank, so the recording is on before the first request.
         let first = if t.agent { None } else { Some(t.url.as_str()) };
-        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), isolated, t.private) {
+        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), isolated, t.private, t.agent) {
             if t.muted {
                 engine::set_muted(&v, true);
             }
@@ -1842,7 +1874,7 @@ impl App {
         if self.settings.net_limit {
             monitor::throttle(v, Some(self.settings.net_limit_kbps));
         }
-        if self.panel == Panel::Control
+        if self.panel.live()
             && !self.watches.contains_key(&t.id)
             && let Some(w) = monitor::watch(v, t.id, self.net.clone())
         {
@@ -2243,7 +2275,7 @@ impl App {
         let (x, y, w, h) = self.stage();
         // The card is 80% of the stage, centred; layout sizes the dim to match.
         let rect = logical_rect(x + w * 0.1, y + h * 0.1, w * 0.8, h * 0.8);
-        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, false, false) else { return };
+        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, false, false, false) else { return };
         // The card takes Escape and Enter itself while it has focus.
         glance::hook_keys(&v, self.ctx.proxy.clone());
         if !headless() {
@@ -2874,10 +2906,10 @@ impl App {
         if p == Panel::Downloads {
             self.dl_unseen = false;
         }
-        if was == Panel::Control && p != Panel::Control {
+        if was.live() && !p.live() {
             self.stop_monitor();
         }
-        if p == Panel::Control && was != Panel::Control {
+        if p.live() && !was.live() {
             self.start_monitor();
         }
         self.layout();
@@ -2887,7 +2919,7 @@ impl App {
 
     /// Switching tabs or navigating closes any panel, quietly.
     fn leave_panel(&mut self) {
-        if self.panel == Panel::Control {
+        if self.panel.live() {
             self.stop_monitor();
         }
         self.panel = Panel::None;
@@ -2921,7 +2953,7 @@ impl App {
 
     /// Raw process numbers in; per-tab memory, CPU and network out, straight to the UI.
     fn on_usage(&mut self, procs: Vec<monitor::Proc>) {
-        if self.panel != Panel::Control {
+        if !self.panel.live() {
             return;
         }
         let now = Instant::now();
@@ -3074,6 +3106,7 @@ impl App {
         }
         self.blocker.set_enabled(self.settings.adblock);
         self.blocker.set_cosmetic(self.settings.cosmetic);
+        privacy_stats::set_enabled(self.settings.privacy_stats);
         self.apply_limits(Some(&old));
         if old.save_passwords != self.settings.save_passwords {
             self.ctx.passwords.set(self.settings.save_passwords);
@@ -3157,9 +3190,14 @@ impl App {
                         if let Some(vid) = sponsorblock::video_id(&u) {
                             if self.tabs[i].view.is_some() {
                                 let tab_id = self.tabs[i].id;
+                                let who = privacy_stats::Who::new(tab_id, self.tabs[i].private, self.tabs[i].agent);
+                                let site = privacy_stats::host(&u);
                                 let proxy = self.ctx.proxy.clone();
                                 std::thread::spawn(move || {
                                     let segs = sponsorblock::fetch_segments(&vid);
+                                    // Counted where the segments are known: one
+                                    // page load, however many segments it skipped.
+                                    privacy_stats::sponsor(&site, segs.len() as u64, who);
                                     let json = serde_json::json!(segs.iter().map(|s| [s.start, s.end]).collect::<Vec<_>>());
                                     let script = sponsorblock::init_script(&json.to_string());
                                     let _ = proxy.send_event(Ev::SponsorBlock(tab_id, script));
@@ -4109,6 +4147,14 @@ impl App {
                 let p = if self.panel == Panel::Control { Panel::None } else { Panel::Control };
                 self.set_panel(p);
             }
+            Action::Report => {
+                let p = if self.panel == Panel::Report { Panel::None } else { Panel::Report };
+                self.set_panel(p);
+            }
+            Action::Dashboard => {
+                let p = if self.panel == Panel::Dashboard { Panel::None } else { Panel::Dashboard };
+                self.set_panel(p);
+            }
             Action::DevTools => match &self.tabs[i].view {
                 Some(v) => v.open_devtools(),
                 None => {}
@@ -4315,10 +4361,39 @@ impl App {
                     (true, Some("downloads")) => Panel::Downloads,
                     (true, Some("history")) => Panel::History,
                     (true, Some("bookmarks")) => Panel::Bookmarks,
+                    (true, Some("report")) => Panel::Report,
+                    (true, Some("dashboard")) => Panel::Dashboard,
                     (true, Some("sites")) => Panel::Sites,
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);
+            }
+            "report" => {
+                // The report page picked a range tile or a site row.
+                if let Some(r) = m["range"].as_str()
+                    && matches!(r, "today" | "7" | "30" | "all")
+                {
+                    self.report_range = r.to_string();
+                }
+                if let Some(host) = m["site"].as_str() {
+                    self.report_site = (!host.is_empty()).then(|| host.to_string());
+                }
+                self.push();
+            }
+            "freeMemory" => {
+                // The dashboard's button: every hidden page to its lowest memory level now,
+                // the same trim the sleep policy gives a page hidden for 30 seconds.
+                for t in self.tabs.iter().filter(|t| !self.on_stage(t.id)) {
+                    if let Some(v) = &t.view {
+                        let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
+                    }
+                }
+                self.push();
+            }
+            "reportReset" => {
+                privacy_stats::reset();
+                self.report_site = None;
+                self.push();
             }
             "workspaceSwitch" => {
                 if let Some(n) = m["to"].as_u64() {
@@ -5217,6 +5292,7 @@ impl App {
             self.upnp.release();
             // Leaving on purpose, so the journal ends with a clean goodbye.
             journal::stop(true, self.born.elapsed());
+            privacy_stats::flush();
             std::process::exit(0);
         }
         self.next_tick = now + TICK;

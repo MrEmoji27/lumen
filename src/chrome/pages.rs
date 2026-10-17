@@ -91,7 +91,7 @@ pub struct Page {
     pub scroll: f32,
     /// The panel the scroll offset belongs to.
     pub(super) which: &'static str,
-    max: f32,
+    pub(super) max: f32,
     pub usage: Option<Value>,
     slide: Option<Slide>,
     sliders: Vec<(&'static str, R, Scale)>,
@@ -418,6 +418,8 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
         "history" => draw_library(i, st, s),
         "bookmarks" => draw_bookmarks(i, st, s),
         "sites" => draw_sites(i, st, s),
+        "report" => super::report::draw(i, st, s),
+        "dashboard" => super::dashboard::draw(i, st, s),
         _ => draw_control(i, st, s),
     }
 }
@@ -723,7 +725,7 @@ fn draw_button(i: &mut Inner, right: f32, cy: f32, label: &str, hit: PageHit) {
     i.hit(r, h);
 }
 
-fn fmt_bytes(b: i64) -> String {
+pub(super) fn fmt_bytes(b: i64) -> String {
     let b = b.max(0) as f64;
     if b >= 1073741824.0 {
         format!("{:.2} GB", b / 1073741824.0)
@@ -1114,14 +1116,14 @@ fn chip_label(kbps: u32) -> &'static str {
 
 /// The content column of a list page: centred, capped, and never closer to the edge than
 /// the margin.
-fn column(st: R, max_w: f32) -> R {
+pub(super) fn column(st: R, max_w: f32) -> R {
     let w = (st.w - 2.0 * COL_MARGIN).clamp(120.0, max_w);
     R::new(st.x + (st.w - w) / 2.0, st.y, w, st.h)
 }
 
 /// The close button, top right of the page, drawn last so it sits over whatever scrolls
 /// beneath it. Esc does the same.
-fn close_button(i: &mut Inner, st: R) {
+pub(super) fn close_button(i: &mut Inner, st: R) {
     let th = i.theme;
     let r = R::new(st.right() - S4 - 32.0, st.y + S4, 32.0, 32.0);
     let h = Hit::Page(PageHit::Done);
@@ -1133,7 +1135,7 @@ fn close_button(i: &mut Inner, st: R) {
 
 /// Page title, and one quiet line under it when there is something to say. Returns the y
 /// the content starts at.
-fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> f32 {
+pub(super) fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> f32 {
     let th = i.theme;
     i.gfx.text(title, R::new(col.x, y, col.w - 48.0, 40.0), TITLE, th.text);
     if sub.is_empty() {
@@ -1145,7 +1147,7 @@ fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> f32 {
 
 /// A button at (x, y), 30 high. Outlined and quiet, or (primary) filled with the accent.
 /// Returns its rectangle so the caller can step along.
-fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageHit, primary: bool) -> R {
+pub(super) fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageHit, primary: bool) -> R {
     let th = i.theme;
     let f = if primary { BODY_STRONG } else { BODY }.align(Align::Center);
     let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * S4, 30.0);
@@ -1166,7 +1168,7 @@ fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageHit, prim
 }
 
 /// A text action on a row, 28 high, its right edge at `right`. Returns its left edge.
-fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: PageHit) -> f32 {
+pub(super) fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: PageHit) -> f32 {
     let th = i.theme;
     let f = SMALL_STRONG.align(Align::Center);
     let w = i.gfx.measure(label, f) + 2.0 * S3;
@@ -1182,7 +1184,7 @@ fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: PageHit) -> f
 }
 
 /// A small caps label that opens a group of rows. Returns the y after it.
-fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -> f32 {
+pub(super) fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -> f32 {
     let th = i.theme;
     let label = if count > 0 { format!("{}  {count}", text.to_uppercase()) } else { text.to_uppercase() };
     i.gfx.text(&label, R::new(col.x, y, col.w, 20.0), CAPTION, th.faint);
@@ -1191,7 +1193,7 @@ fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -> f32 {
 
 /// What a page shows when it has nothing to list: a mark, a plain sentence, and what to do
 /// about it. Centred in `area`; returns its bottom.
-fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint: &str) -> f32 {
+pub(super) fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint: &str) -> f32 {
     let th = i.theme;
     let cx = area.x + area.w / 2.0;
     i.gfx.circle(cx, area.y + 28.0, 28.0, th.bg);
@@ -1203,7 +1205,7 @@ fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint: &str) -> f
 
 /// A row's hover plate. The row also registers itself, so anything drawn on it afterwards
 /// (buttons) takes the mouse first.
-fn row_plate(i: &mut Inner, r: R, id: u64) -> bool {
+pub(super) fn row_plate(i: &mut Inner, r: R, id: u64) -> bool {
     let th = i.theme;
     let h = Hit::Page(PageHit::Row(id));
     let hov = i.is_hover(&h) || i.hover.as_ref().is_some_and(|x| matches!(x, Hit::Page(PageHit::Dl(_, d)) if *d == id));

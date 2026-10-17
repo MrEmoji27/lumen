@@ -225,6 +225,10 @@ pub enum Action {
     Bookmark,
     History,
     Bookmarks,
+    /// Ctrl+Shift+R: what Lumen stopped, by day and by site.
+    Report,
+    /// Ctrl+Shift+D: everything at a glance.
+    Dashboard,
     DevTools,
     Reader,
     Listen,
@@ -247,8 +251,9 @@ pub struct Ctx {
     /// Webviews born from window.open, waiting for the main loop to adopt them.
     pub popups: RefCell<Vec<(u64, WebView)>>,
     pub dark: Cell<bool>,
-    /// Runs on every page right after it is built. Popups included.
-    pub on_built: RefCell<Option<Box<dyn Fn(&WebView)>>>,
+    /// Runs on every page right after it is built. Popups included. The `Who`
+    /// is the tab asking: what happens here is counted against it.
+    pub on_built: RefCell<Option<Box<dyn Fn(&WebView, crate::privacy_stats::Who)>>>,
     /// The first page creates the WebView2 environment with these.
     pub web_context: RefCell<wry::WebContext>,
     pub args: String,
@@ -265,7 +270,7 @@ pub struct Ctx {
     /// Dark Reader script for new documents, when dark pages are on.
     pub dark_js: RefCell<Option<Rc<str>>>,
     /// Tracking parameters a filter list removes (set by the blocker).
-    pub rewrite: RefCell<Option<Rc<dyn Fn(&str) -> Option<String>>>>,
+    pub rewrite: RefCell<Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>>,
     /// Per tab: the id WebView2 gave the injected Dark Reader script.
     pub dark_ids: Rc<RefCell<HashMap<u64, String>>>,
     /// Plain http pages: whether to try https first, and the hosts left alone.
@@ -380,9 +385,9 @@ pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
 /// `isolated`: the page lives in the separate "agent" profile (own cookies and storage).
 /// `private`: WebView2 InPrivate. No cookies outlive the last private page, and
 /// nothing the page does reaches this profile's history.
-pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, isolated: bool, private: bool) -> wry::Result<WebView> {
+pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, isolated: bool, private: bool, agent: bool) -> wry::Result<WebView> {
     let env = ctx.env.borrow().clone();
-    build_tab_in(ctx, id, url, bounds, env, isolated, private)
+    build_tab_in(ctx, id, url, bounds, env, isolated, private, agent)
 }
 
 fn build_tab_in(
@@ -393,8 +398,12 @@ fn build_tab_in(
     env: Option<ICoreWebView2Environment>,
     isolated: bool,
     private: bool,
+    agent: bool,
 ) -> wry::Result<WebView> {
     let dark = ctx.dark.get();
+    // Who this page is: whose tab, private or not, person's or agent's. The
+    // blocker counts everything that happens here against this.
+    let who = crate::privacy_stats::Who::new(id, private, agent);
     let p_title = ctx.proxy.clone();
     let p_load = ctx.proxy.clone();
     let popup_ctx = ctx.clone();
@@ -432,7 +441,7 @@ fn build_tab_in(
             let ctx = &popup_ctx;
             let new_id = ctx.alloc_id();
             let bounds = content_bounds_now(ctx);
-            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), isolated, private) {
+            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), isolated, private, agent) {
                 Ok(wv) => {
                     let core = wv.webview();
                     ctx.popups.borrow_mut().push((new_id, wv));
@@ -458,7 +467,7 @@ fn build_tab_in(
     // Tracking prevention is a setting of the profile, and InPrivate pages and the agent's
     // pages each have a profile of their own. Every page says it again; it costs nothing.
     set_tracking(&wv, &ctx.tracking.borrow());
-    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone());
+    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone(), who);
     hook_zoom(&wv, id, ctx.proxy.clone());
     crate::glance::hook(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv, id, private);
@@ -479,7 +488,7 @@ fn build_tab_in(
         set_dark(ctx, &wv, id, false, url.filter(|_| dark_first).map(str::to_string));
     }
     if let Some(f) = ctx.on_built.borrow().as_ref() {
-        f(&wv);
+        f(&wv, who);
     }
     Ok(wv)
 }
@@ -563,8 +572,9 @@ fn hook_page(
     wv: &WebView,
     id: u64,
     proxy: EventLoopProxy<Ev>,
-    rewrite: Option<Rc<dyn Fn(&str) -> Option<String>>>,
+    rewrite: Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>,
     https: Rc<RefCell<crate::sites::HttpsPolicy>>,
+    who: crate::privacy_stats::Who,
 ) {
     let core = wv.webview();
     let mut token = 0i64;
@@ -607,7 +617,7 @@ fn hook_page(
                 // The journal times the page from here to NavigationCompleted.
                 let _ = p.send_event(Ev::NavStart(id, u.clone()));
                 let clean = clean_url(&u);
-                let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u)));
+                let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u), who));
                 if let Some(clean) = listed.or(clean) {
                     args.SetCancel(true)?;
                     let _ = p.send_event(Ev::Redirect(id, clean));
@@ -976,6 +986,8 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, false, false, v) if v == k('D') => Bookmark,
         (true, false, false, v) if v == k('H') => History,
         (true, true, false, v) if v == k('O') => Bookmarks,
+        (true, true, false, v) if v == k('R') => Report,
+        (true, true, false, v) if v == k('D') => Dashboard,
         // Not the page's own Ctrl+A: that is a text selection.
         (true, true, false, v) if v == k('A') => TabSearch,
         (true, true, false, v) if v == k('I') => DevTools,
