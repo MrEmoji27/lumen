@@ -16,7 +16,7 @@ use std::{
 
 use crate::privacy_stats::{self, Cat, Who};
 use webview2_com::{
-    AddScriptToExecuteOnDocumentCreatedCompletedHandler, ExecuteScriptCompletedHandler, NavigationStartingEventHandler, Microsoft::Web::WebView2::Win32::*, WebMessageReceivedEventHandler,
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler, ExecuteScriptCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler, Microsoft::Web::WebView2::Win32::*, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler, WebResourceResponseReceivedEventHandler,
 };
 use windows::{
@@ -237,8 +237,8 @@ impl Blocker {
         let core = wv.webview();
         let environment = wv.environment();
         let weak = Rc::downgrade(self);
-        // Bytes this page moved since its navigation began: one load's size,
-        // the next navigation turns into a speed sample.
+        // Bytes this page moved since its window began: a load's size, taken
+        // as a speed sample when the load finishes or the next one starts.
         let nav_bytes = Rc::new(Cell::new(0u64));
         let nav_at = Rc::new(Cell::new(None::<Instant>));
         unsafe {
@@ -313,6 +313,22 @@ impl Blocker {
                             Ok(())
                         })),
                     );
+                    Ok(())
+                })),
+                &mut token,
+            );
+            // A finished page is a speed sample too: its own bytes over its own
+            // seconds. Without this, one page visit never teaches the estimate
+            // because the next navigation may never come. The window restarts
+            // here, so late, lazy bytes form their own sample later.
+            let (c_bytes, c_time) = (nav_bytes.clone(), nav_at.clone());
+            let _ = core.add_NavigationCompleted(
+                &NavigationCompletedEventHandler::create(Box::new(move |_, _| {
+                    if let Some(t0) = c_time.get() {
+                        privacy_stats::nav_sample(c_bytes.get(), t0.elapsed().as_secs_f64());
+                    }
+                    c_time.set(Some(Instant::now()));
+                    c_bytes.set(0);
                     Ok(())
                 })),
                 &mut token,
