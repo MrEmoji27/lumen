@@ -621,11 +621,12 @@ fn main() {
     let blocker = blocker::Blocker::start(store::data_dir());
     blocker.set_enabled(settings.adblock);
     blocker.set_cosmetic(settings.cosmetic);
+    privacy_stats::set_enabled(settings.privacy_stats);
     {
         let b = blocker.clone();
-        ctx.rewrite.replace(Some(Rc::new(move |u: &str| b.rewrite(u))));
+        ctx.rewrite.replace(Some(Rc::new(move |u: &str, who| b.rewrite(u, who))));
         let b = blocker.clone();
-        ctx.on_built.replace(Some(Box::new(move |wv: &WebView| b.attach(wv))));
+        ctx.on_built.replace(Some(Box::new(move |wv: &WebView, who| b.attach(wv, who))));
     }
 
     // The browser chrome: a native child window. No webview until a page needs one.
@@ -917,7 +918,12 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 _ => {}
             },
             Event::UserEvent(ev) => app.on_event(ev),
-            Event::MainEventsCleared => app.flush(),
+            Event::MainEventsCleared => {
+                app.flush();
+                // Whatever the blocker counted reaches the disk at most a minute
+                // apart, and only when the loop had nothing left to do.
+                privacy_stats::flush_if_due();
+            }
             _ => {}
         }
         if app.exit {
@@ -927,6 +933,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             app.upnp.release();
             // The journal's goodbye: a run with this line is a run that ended.
             journal::stop(true, app.born.elapsed());
+            privacy_stats::flush();
             *cf = ControlFlow::Exit;
         } else {
             let now = Instant::now();
@@ -1767,7 +1774,7 @@ impl App {
         let isolated = t.agent && !self.settings.agent_shared_profile;
         // An agent's page starts blank, so the recording is on before the first request.
         let first = if t.agent { None } else { Some(t.url.as_str()) };
-        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), isolated, t.private) {
+        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), isolated, t.private, t.agent) {
             if t.muted {
                 engine::set_muted(&v, true);
             }
@@ -2190,7 +2197,7 @@ impl App {
         let (x, y, w, h) = self.stage();
         // The card is 80% of the stage, centred; layout sizes the dim to match.
         let rect = logical_rect(x + w * 0.1, y + h * 0.1, w * 0.8, h * 0.8);
-        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, false, false) else { return };
+        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, false, false, false) else { return };
         // The card takes Escape and Enter itself while it has focus.
         glance::hook_keys(&v, self.ctx.proxy.clone());
         if !headless() {
@@ -3003,6 +3010,7 @@ impl App {
         }
         self.blocker.set_enabled(self.settings.adblock);
         self.blocker.set_cosmetic(self.settings.cosmetic);
+        privacy_stats::set_enabled(self.settings.privacy_stats);
         self.apply_limits(Some(&old));
         if old.save_passwords != self.settings.save_passwords {
             self.ctx.passwords.set(self.settings.save_passwords);
@@ -3078,9 +3086,14 @@ impl App {
                         if let Some(vid) = sponsorblock::video_id(&u) {
                             if self.tabs[i].view.is_some() {
                                 let tab_id = self.tabs[i].id;
+                                let who = privacy_stats::Who::new(tab_id, self.tabs[i].private, self.tabs[i].agent);
+                                let site = privacy_stats::host(&u);
                                 let proxy = self.ctx.proxy.clone();
                                 std::thread::spawn(move || {
                                     let segs = sponsorblock::fetch_segments(&vid);
+                                    // Counted where the segments are known: one
+                                    // page load, however many segments it skipped.
+                                    privacy_stats::sponsor(&site, segs.len() as u64, who);
                                     let json = serde_json::json!(segs.iter().map(|s| [s.start, s.end]).collect::<Vec<_>>());
                                     let script = sponsorblock::init_script(&json.to_string());
                                     let _ = proxy.send_event(Ev::SponsorBlock(tab_id, script));
@@ -4993,6 +5006,7 @@ impl App {
             self.upnp.release();
             // Leaving on purpose, so the journal ends with a clean goodbye.
             journal::stop(true, self.born.elapsed());
+            privacy_stats::flush();
             std::process::exit(0);
         }
         self.next_tick = now + TICK;

@@ -70,6 +70,8 @@ pub struct Settings {
     pub sponsorblock: bool,
     /// Hide ad leftovers and cookie banners (cosmetic rules).
     pub cosmetic: bool,
+    /// Count what the blocker stops, per day and per site, for the report.
+    pub privacy_stats: bool,
     pub show_memory: bool,
     /// The speed dial: tiles under the new tab page's search box.
     pub shortcuts: Vec<Shortcut>,
@@ -170,6 +172,7 @@ impl Default for Settings {
             upnp: true,
             torrent_note: true,
             cosmetic: true,
+            privacy_stats: true,
             dark_pages: false,
             remember_text: true,
             clear_on_exit: false,
