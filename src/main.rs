@@ -11,6 +11,7 @@ mod agent_policy;
 mod agentkit;
 mod aloud;
 mod blocker;
+mod bookmarks;
 mod chrome;
 mod engine;
 mod glance;
@@ -20,6 +21,7 @@ mod library;
 mod monitor;
 mod pacing;
 mod pagekit;
+mod pins;
 mod recall;
 #[cfg(feature = "servo")]
 mod servo_engine;
@@ -29,6 +31,8 @@ mod upnp;
 mod video;
 mod workspaces;
 mod store;
+mod sitefavs;
+mod speeddial;
 mod sponsorblock;
 mod trackers;
 
@@ -99,6 +103,9 @@ struct Tab {
     back: bool,
     fwd: bool,
     pinned: bool,
+    /// The page a pin was pinned on. Closing the tab unloads it back to this; the current
+    /// `url` may have wandered. Empty when not pinned.
+    pin_url: String,
     audio: bool,
     muted: bool,
     suspended: bool,
@@ -214,6 +221,7 @@ impl Tab {
             back: false,
             fwd: false,
             pinned: false,
+            pin_url: String::new(),
             audio: false,
             muted: false,
             suspended: false,
@@ -236,6 +244,11 @@ impl Tab {
             visible: false,
             typed: None,
         }
+    }
+
+    /// The session's record of this tab.
+    fn saved(&self) -> SavedTab {
+        SavedTab { url: self.url.clone(), title: self.title.clone(), favicon: self.favicon.clone(), pinned: self.pinned, pin_url: self.pin_url.clone() }
     }
 
     /// What the sleep policy looks at.
@@ -296,6 +309,9 @@ struct App {
     ui_dirty: bool,
     /// Favicons are big. They travel alone, only when they change.
     fav_queue: Vec<u64>,
+    /// One favicon per site, for the speed dial's tiles. Kept in favicons.json.
+    site_favs: sitefavs::Favs,
+    site_favs_dirty: bool,
     /// Sidebar color reported by the UI. Paints the gaps around the page.
     bg: (u8, u8, u8),
     /// Two pages side by side: the tab in the other half of the stage.
@@ -599,6 +615,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         ui_ready: true,
         ui_dirty: false,
         fav_queue: Vec::new(),
+        site_favs: sitefavs::load(),
+        site_favs_dirty: false,
         bg,
         split: None,
         pane_right: false,
@@ -1136,6 +1154,10 @@ fn debug_log(ev: &Ev) {
 
 /// The tabs that go into session.json. Private tabs and agent tabs leave no
 /// trace; an empty new tab page is only worth keeping while it is the active one.
+fn ui_mark(b: library::Bookmark) -> chrome::UiMark {
+    chrome::UiMark { id: b.id, url: b.url, title: b.title, folder: b.folder }
+}
+
 fn keepable(tabs: &[Tab], active: u64) -> Vec<&Tab> {
     tabs.iter().filter(|t| !t.agent && !t.private && (!t.url.is_empty() || t.id == active)).collect()
 }
@@ -1499,6 +1521,7 @@ impl App {
                         back: t.back,
                         fwd: t.fwd,
                         pinned: t.pinned,
+                        pin_away: pins::offers_back(t.pinned, &t.pin_url, &t.url),
                         audio: t.audio,
                         muted: t.muted,
                         status: t.status(),
@@ -1577,10 +1600,13 @@ impl App {
                     Vec::new()
                 },
                 bookmarks: if self.panel == Panel::Bookmarks {
-                    self.library.bookmarks().into_iter().map(|b| (b.url, b.title)).collect()
+                    self.library.bookmarks().into_iter().map(ui_mark).collect()
                 } else {
                     Vec::new()
                 },
+                suggestions: self.speed_dial_suggestions(),
+                mark: self.active_tab().filter(|t| !t.url.is_empty()).and_then(|t| self.library.mark_for_url(&t.url)).map(ui_mark),
+                bm_folders: self.library.folders(),
                 handoff: self.handoff.as_ref().map(|h| (h.1.clone(), h.2.clone())),
                 prompt: self
                     .prompts
@@ -1628,6 +1654,7 @@ impl App {
             t.title = saved.title;
             t.favicon = saved.favicon;
             t.pinned = saved.pinned;
+            t.pin_url = pins::restored_pin_url(saved.pinned, &saved.pin_url, &t.url);
             t.workspace = self.active_workspace;
             if i == ws_active {
                 active = Some(t.id);
@@ -1872,7 +1899,53 @@ impl App {
         self.tabs.iter().filter(|t| !self.off_record(t)).find_map(|t| t.view.as_ref())
     }
 
+    /// Closing a pinned tab unloads it instead: the page and its memory go, the pin stays
+    /// in the row and loads its pinned URL when clicked. False: not a pin to keep.
+    fn unload_pin(&mut self, id: u64) -> bool {
+        let Some(i) = self.idx(id) else { return false };
+        let t = &self.tabs[i];
+        if pins::closing(t.pinned, self.off_record(t), &t.pin_url, &t.url) != pins::Closing::Unload {
+            return false;
+        }
+        if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
+            self.listen_stop();
+        }
+        if id == self.active || self.split == Some(id) {
+            self.unsplit();
+        }
+        if id == self.active {
+            let slots: Vec<pins::Slot> = self.tabs.iter().map(|t| pins::Slot { pinned: t.pinned, loaded: t.has_page() }).collect();
+            match pins::next_after_close(&slots, i) {
+                Some(n) => {
+                    let next = self.tabs[n].id;
+                    self.activate(next);
+                }
+                None => {
+                    self.new_tab(None, None);
+                }
+            }
+        }
+        let Some(i) = self.idx(id) else { return true };
+        self.discard(i);
+        // A pin comes back where it was pinned, with a clean slate: no history to walk, no reader.
+        let t = &mut self.tabs[i];
+        t.url = pins::target(&t.pin_url, &t.url);
+        t.pin_url = t.url.clone();
+        t.back = false;
+        t.fwd = false;
+        t.crashed = false;
+        t.typed = None;
+        t.translated = None;
+        t.translating = false;
+        self.dirty = true;
+        self.push();
+        true
+    }
+
     fn close(&mut self, id: u64) {
+        if self.unload_pin(id) {
+            return;
+        }
         let Some(i) = self.idx(id) else { return };
         if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
             self.listen_stop();
@@ -1903,7 +1976,7 @@ impl App {
             monitor::unwatch(None, w, true);
         }
         if !t.url.is_empty() && !t.private {
-            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned });
+            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned, pin_url: t.pin_url });
             if self.closed.len() > MAX_CLOSED {
                 self.closed.remove(0);
             }
@@ -1955,7 +2028,7 @@ impl App {
         let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
         let saved: Vec<SavedTab> = keep
             .iter()
-            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+            .map(|t| t.saved())
             .collect();
         let active_idx = keep.iter().position(|t| t.id == self.active).unwrap_or(0);
         let ids: Vec<u64> = keep.iter().map(|t| t.id).collect();
@@ -2003,6 +2076,7 @@ impl App {
             t.title = saved.title.clone();
             t.favicon = saved.favicon.clone();
             t.pinned = saved.pinned;
+            t.pin_url = pins::restored_pin_url(saved.pinned, &saved.pin_url, &t.url);
             t.workspace = to;
             if i == ws.active {
                 active = Some(t.id);
@@ -2945,6 +3019,15 @@ impl App {
                     && self.tabs[i].reader.is_none()
                     && self.tabs[i].favicon != f
                 {
+                    // The site's icon for the speed dial, kept past this tab. Not for private tabs:
+                    // that would write down that the site was visited.
+                    if !self.tabs[i].private
+                        && !self.tabs[i].agent
+                        && sitefavs::remember(&mut self.site_favs, &self.tabs[i].url, &f)
+                    {
+                        self.site_favs_dirty = true;
+                        self.chrome.set_site_fav(&speeddial::host_of(&self.tabs[i].url), &f);
+                    }
                     self.tabs[i].favicon = f;
                     self.fav_queue.push(id);
                     self.dirty = true;
@@ -3769,6 +3852,9 @@ impl App {
             "ready" => {
                 self.ui_ready = true;
                 self.fav_queue = self.tabs.iter().filter(|t| !t.favicon.is_empty()).map(|t| t.id).collect();
+                for (host, uri) in &self.site_favs {
+                    self.chrome.set_site_fav(host, uri);
+                }
                 self.push();
                 if !self.shown {
                     self.shown = true;
@@ -3797,11 +3883,28 @@ impl App {
                 if let Some(i) = self.idx(id) {
                     let mut t = self.tabs.remove(i);
                     t.pinned = !t.pinned;
+                    // The pin remembers the page it was made on; unpinning forgets it.
+                    t.pin_url = if t.pinned { t.url.clone() } else { String::new() };
                     // Pinned: end of the pinned block. Unpinned: first after it.
                     let at = self.pinned_count();
                     self.tabs.insert(at, t);
                     self.dirty = true;
                     self.push();
+                }
+            }
+            "pinBack" => {
+                // A pin that wandered goes back to the page it was pinned on.
+                if let Some(i) = self.idx(id) {
+                    let t = &mut self.tabs[i];
+                    let url = t.pin_url.clone();
+                    if t.pinned && !url.is_empty() {
+                        t.url = url.clone();
+                        if let Some(v) = &t.view {
+                            let _ = v.load_url(&url);
+                        }
+                        self.dirty = true;
+                        self.push();
+                    }
                 }
             }
             "reader" => {
@@ -3965,7 +4068,7 @@ impl App {
                     let saved = if i == self.active_workspace {
                         keepable(&self.tabs, self.active)
                             .iter()
-                            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+                            .map(|t| t.saved())
                             .collect()
                     } else {
                         ws.saved.clone()
@@ -4022,7 +4125,7 @@ impl App {
                         self.pane_right = false;
                     }
                     let t = self.tabs.remove(i);
-                    let saved = SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned };
+                    let saved = t.saved();
                     self.agent_logs.borrow_mut().remove(&t.id);
                     self.prompts.retain(|p| p.1 != t.id);
                     if let Some(w) = self.watches.remove(&t.id) {
@@ -4219,6 +4322,85 @@ impl App {
                 self.vault = None;
                 self.push();
             }
+            "bmOpen" => {
+                let url = m["url"].as_str().unwrap_or("").to_string();
+                if url.is_empty() {
+                    return;
+                }
+                if m["bg"].as_bool().unwrap_or(false) {
+                    // A tab behind this one. It loads when it is first clicked, like any
+                    // tab restored from a session: ten middle clicks must not start ten pages.
+                    let mut t = Tab::new(self.ctx.alloc_id(), url.clone());
+                    t.title = self.library.mark_for_url(&url).map(|b| b.title).unwrap_or_default();
+                    t.workspace = self.active_workspace;
+                    self.tabs.push(t);
+                    self.dirty = true;
+                    self.push();
+                } else {
+                    self.navigate(&url);
+                }
+            }
+            "bmEdit" => {
+                let s = |k: &str| m[k].as_str().unwrap_or("").to_string();
+                if self.library.edit_bookmark(id, &s("title"), &s("url"), &s("folder")) {
+                    self.library.flush();
+                    self.push();
+                }
+            }
+            "bmMove" => {
+                self.library.move_bookmark(id, m["folder"].as_str().unwrap_or(""));
+                self.library.flush();
+                self.push();
+            }
+            "bmPlace" => {
+                self.library.place(id, m["folder"].as_str().unwrap_or(""), m["before"].as_u64());
+                self.library.flush();
+                self.push();
+            }
+            "bmShift" => {
+                self.library.shift_bookmark(id, m["d"].as_i64().unwrap_or(0).signum() as i32);
+                self.library.flush();
+                self.push();
+            }
+            "bmDelete" => {
+                self.library.delete_bookmark(id);
+                self.library.flush();
+                self.push();
+            }
+            "bmFolderAdd" => {
+                self.library.add_folder(m["name"].as_str().unwrap_or(""));
+                self.library.flush();
+                self.push();
+            }
+            "bmFolderRename" => {
+                self.library.rename_folder(m["old"].as_str().unwrap_or(""), m["new"].as_str().unwrap_or(""));
+                self.library.flush();
+                self.push();
+            }
+            "bmFolderDelete" => {
+                self.library.delete_folder(m["name"].as_str().unwrap_or(""));
+                self.library.flush();
+                self.push();
+            }
+            "bmImport" => {
+                // Read-only: the other browsers' files are opened for reading and never touched.
+                let want = m["browser"].as_str().unwrap_or("");
+                let found: Vec<bookmarks::Found> = bookmarks::scan().into_iter().filter(|f| want == "all" || f.browser == want).collect();
+                let (mut added, mut skipped) = (0, 0);
+                for f in &found {
+                    let (a, s) = self.library.import(&f.items);
+                    added += a;
+                    skipped += s;
+                }
+                self.library.flush();
+                let msg = match found.as_slice() {
+                    [one] => bookmarks::summary(one.browser, added, skipped),
+                    [] => "That browser's bookmarks are gone".to_string(),
+                    many => format!("Imported {added} from {} browsers, skipped {skipped} already here", many.len()),
+                };
+                self.chrome.flash(msg);
+                self.push();
+            }
             "unbookmark" => {
                 self.library.unbookmark(m["url"].as_str().unwrap_or(""));
                 // Written now, not on a later tick: a bookmark is worth a write.
@@ -4235,6 +4417,7 @@ impl App {
                 // Seconds since the epoch; missing or null means everything.
                 let since = m["since"].as_u64();
                 self.library.clear_history(since);
+                self.forget_site_favs(since);
                 self.recall.clear(since);
                 self.library.flush();
                 // WebView2 keeps a history of its own in the profile; it goes too.
@@ -4247,6 +4430,7 @@ impl App {
                 let since = m["since"].as_u64();
                 let more = m["more"].as_bool().unwrap_or(false);
                 self.library.clear_history(since);
+                self.forget_site_favs(since);
                 self.recall.clear(since);
                 self.library.flush();
                 if let Some(v) = self.plain_view() {
@@ -5086,6 +5270,27 @@ impl App {
         }
     }
 
+    /// Clearing everything also clears the site icons: they are a list of the sites that were
+    /// visited. A partial clear leaves them (they carry no times to cut by).
+    fn forget_site_favs(&mut self, since: Option<u64>) {
+        if since.is_none() && !self.site_favs.is_empty() {
+            self.site_favs.clear();
+            sitefavs::save(&self.site_favs);
+        }
+    }
+
+    /// Sites to offer on the new tab page while it has no tiles: the ones seen most. Only worked
+    /// out when the page is showing and has nothing else to show.
+    fn speed_dial_suggestions(&self) -> Vec<store::Shortcut> {
+        let showing = self.panel == Panel::None && self.active_tab().is_some_and(|t| t.status() == "new");
+        if !showing || !self.settings.speed_dial || !self.settings.shortcuts.is_empty() {
+            return Vec::new();
+        }
+        let seen: Vec<speeddial::Seen> =
+            self.library.top_visits(60).into_iter().filter(|v| !v.url.is_empty()).map(|v| speeddial::Seen { url: v.url }).collect();
+        speeddial::suggest(&seen, &self.settings.shortcuts, 8)
+    }
+
     fn toggle_bookmark(&mut self) {
         let Some(t) = self.active_tab() else { return };
         if t.url.is_empty() || t.agent {
@@ -5136,7 +5341,8 @@ impl App {
             return;
         }
         self.library.clear_history(None);
-        self.recall.clear(None);
+        self.library.clear_history(None);
+        self.forget_site_favs(None);
         self.library.flush();
         // WebView2 finishes the wipe on its own time and Lumen is closing, so ask now
         // and again at the next start: clearing twice costs nothing, missing it would.
@@ -5163,12 +5369,15 @@ impl App {
 
     fn save_session(&mut self) {
         self.dirty = false;
+        if std::mem::take(&mut self.site_favs_dirty) {
+            sitefavs::save(&self.site_favs);
+        }
         let (width, height) = logical_size(&self.ctx);
         let maximized = self.ctx.window.is_maximized();
         let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
         let saved: Vec<SavedTab> = keep
             .iter()
-            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+            .map(|t| t.saved())
             .collect();
         let active_tab_idx = keep.iter().position(|t| t.id == self.active).unwrap_or(0);
         // to_session stamps the live tabs into the active workspace's slot.

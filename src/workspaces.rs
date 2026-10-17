@@ -180,6 +180,7 @@ mod tests {
             title: title.to_string(),
             favicon: String::new(),
             pinned,
+            pin_url: if pinned { url.to_string() } else { String::new() },
         }
     }
 
@@ -271,6 +272,32 @@ mod tests {
         // The active workspace's tabs also appear in the compat fields.
         assert_eq!(s.tabs.len(), 2);
         assert_eq!(s.active, 1);
+    }
+
+    /// Pins belong to the workspace they were made in, and keep the page they were pinned on
+    /// whether that workspace is the live one or a stored one.
+    #[test]
+    fn pins_stay_in_their_workspace() {
+        let mut work_pin = tab("https://mail.work/inbox", "Mail", true);
+        work_pin.pin_url = "https://mail.work/".into();
+        let session = Session {
+            workspaces: vec![
+                Workspace { name: "Main".into(), tabs: vec![tab("https://music.example/", "Music", true)], active: 0 },
+                Workspace { name: "Work".into(), tabs: vec![work_pin], active: 0 },
+            ],
+            active_workspace: 0,
+            ..Default::default()
+        };
+        let (ws, active) = build_from_session(&session);
+        let live = ws[0].saved.clone();
+        let s = to_session(&ws, active, &live, 0, 800.0, 600.0, false);
+        assert!(s.workspaces[0].tabs[0].pinned);
+        assert_eq!(s.workspaces[0].tabs[0].pin_url, "https://music.example/");
+        assert!(s.workspaces[1].tabs[0].pinned);
+        assert_eq!(s.workspaces[1].tabs[0].pin_url, "https://mail.work/");
+        // And it all survives the file.
+        let back: Session = serde_json::from_str(&serde_json::to_string(&s).expect("to json")).expect("from json");
+        assert_eq!(back.workspaces[1].tabs[0].pin_url, "https://mail.work/");
     }
 
     // ---------------------------------------------------------------- switching

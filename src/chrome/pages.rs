@@ -45,7 +45,13 @@ pub enum PageHit {
     PermReset(usize),
     Open(String),
     Forget(String),
-    Unbookmark(String),
+    /// A row of the Bookmarks page: click opens, drag moves, right click has the menu.
+    Bm(u64),
+    BmDel(u64),
+    /// A folder's header (the empty name is Unsorted): click folds it.
+    BmFolder(String),
+    BmNewFolder,
+    BmImport,
     ClearHistory,
     ClearData,
 }
@@ -75,6 +81,26 @@ pub struct Page {
     view: R,
     /// A short-lived note ("Copy a link or magnet first", a failed unlock).
     pub(super) flash: Option<(String, std::time::Instant)>,
+    /// Bookmark folders folded shut. Forgotten when the page closes.
+    pub(super) bm_collapsed: std::collections::HashSet<String>,
+    /// A bookmark row picked up: it moves when let go over another row or folder.
+    bm_drag: Option<BmDrag>,
+    /// What the last Bookmarks frame drew, for working out where a drag lands.
+    bm_rows: Vec<DropRow>,
+}
+
+struct BmDrag {
+    id: u64,
+    y0: f32,
+    moved: bool,
+}
+
+/// A row or a folder header on the Bookmarks page, as the drag sees it. `id` 0 is a header.
+#[derive(Clone, Debug, PartialEq)]
+struct DropRow {
+    r: R,
+    folder: String,
+    id: u64,
 }
 
 // ------------------------------------------------------------------ schema
@@ -140,6 +166,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("dark_pages", "Darken light sites", "When Lumen is dark, Dark Reader repaints sites that have no dark mode. Shift+F9 skips a site."),
             Seg("ui_font", "Interface font", "Atkinson Hyperlegible is designed for easy reading.", &[("segoe", "Segoe"), ("instrument", "Instrument"), ("figtree", "Figtree"), ("atkinson", "Atkinson")]),
             Seg("display_font", "Display font", "The clock and page titles.", &[("instrument", "Instrument Serif"), ("fraunces", "Fraunces"), ("newsreader", "Newsreader")]),
+            Toggle("speed_dial", "Speed dial on the new tab page", "Sites you keep as tiles under the search box. Off: just the clock and the search box."),
             Seg("sidebar_side", "Sidebar", "", &[("left", "Left"), ("right", "Right")]),
             Range("sidebar_width", "Sidebar width", "", Scale::Linear(232.0, 400.0, 4.0), "px"),
             Toggle("compact", "Compact sidebar", "Icons only. Ctrl+B toggles it."),
@@ -351,7 +378,8 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
     match s.panel {
         "settings" => draw_settings(i, st, s),
         "downloads" => draw_downloads(i, st, s),
-        "history" | "bookmarks" => draw_library(i, st, s),
+        "history" => draw_library(i, st, s),
+        "bookmarks" => draw_bookmarks(i, st, s),
         _ => draw_control(i, st, s),
     }
 }
@@ -1260,36 +1288,23 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-/// History (grouped by day) or bookmarks: one quiet list, click to open, x to remove.
+/// History, grouped by day: one quiet list, click to open, x to remove.
 fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
-    let history = s.panel == "history";
+    let history = true;
     let col = column(st, COL_W);
     i.gfx.clip(st);
     let mut y = st.y + S5 + 2.0 - i.page.scroll;
-    let (title, sub) = if history {
-        ("History", "Newest first. Private tabs are never recorded.")
-    } else {
-        ("Bookmarks", "Ctrl+D, or the star in the address bar, adds one.")
-    };
     let title_y = y;
-    y = title_block(i, col, y, title, sub);
-    if history && !s.history.is_empty() {
+    y = title_block(i, col, y, "History", "Newest first. Private tabs are never recorded.");
+    if !s.history.is_empty() {
         let w = i.gfx.measure("Clear history…", BODY.align(Align::Center)) + 2.0 * S4;
         outline_button(i, col.right() - w - 48.0, title_y + 4.0, "Clear history…", PageHit::ClearHistory, false);
     }
-    let rows: Vec<(String, String, String, String)> = if history {
-        s.history.iter().map(|v| (v.url.clone(), v.title.clone(), v.day.clone(), v.time.clone())).collect()
-    } else {
-        s.bookmarks.iter().map(|(u, t)| (u.clone(), t.clone(), String::new(), String::new())).collect()
-    };
+    let rows: Vec<(String, String, String, String)> =
+        s.history.iter().map(|v| (v.url.clone(), v.title.clone(), v.day.clone(), v.time.clone())).collect();
     if rows.is_empty() {
-        let (icon, head, hint) = if history {
-            ("clock", "No history yet", "Pages you visit show up here, newest first.")
-        } else {
-            ("star", "No bookmarks yet", "Press Ctrl+D, or the star in the address bar, to keep a page here.")
-        };
-        empty_state(i, R::new(col.x, y + 56.0, col.w, 200.0), icon, head, hint);
+        empty_state(i, R::new(col.x, y + 56.0, col.w, 200.0), "clock", "No history yet", "Pages you visit show up here, newest first.");
         i.gfx.unclip();
         i.page.max = 0.0;
         close_button(i, st);
@@ -1308,7 +1323,7 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
             continue;
         }
         let open = Hit::Page(PageHit::Open(url.clone()));
-        let rm = Hit::Page(if history { PageHit::Forget(url.clone()) } else { PageHit::Unbookmark(url.clone()) });
+        let rm = Hit::Page(PageHit::Forget(url.clone()));
         let hov = i.is_hover(&open) || i.is_hover(&rm);
         if hov {
             i.gfx.round(r, R_MD, th.hover);
@@ -1339,6 +1354,210 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     }
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+    close_button(i, st);
+}
+
+// -------------------------------------------------------------- bookmarks
+
+/// What the search box and the two buttons beside it take. The search gets the rest.
+const BM_BUTTONS_W: f32 = 270.0;
+const BM_ROW_H: f32 = 38.0;
+
+/// The search box of the Bookmarks page. Fixed under the title; the list scrolls below it.
+/// The edit control (mod.rs) sits on top of this rectangle.
+pub fn bm_search_rect(st: R) -> R {
+    let col = column(st, COL_W);
+    R::new(col.x, st.y + S5 + 2.0 + 68.0, (col.w - BM_BUTTONS_W).max(140.0), 34.0)
+}
+
+/// Every word typed is somewhere in the title or the address.
+fn bm_matches(q: &str, m: &super::UiMark) -> bool {
+    let hay = format!("{} {}", m.title, m.url).to_lowercase();
+    q.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+}
+
+/// The page's groups, in order: Unsorted (when it holds something), then each folder. While
+/// searching, only the groups that have a match; otherwise every folder, empty ones too.
+fn bm_groups<'a>(marks: &'a [super::UiMark], folders: &'a [String], q: &str) -> Vec<(&'a str, Vec<&'a super::UiMark>)> {
+    let searching = !q.trim().is_empty();
+    let pick = |folder: &str| -> Vec<&'a super::UiMark> { marks.iter().filter(|m| m.folder == folder && (!searching || bm_matches(q, m))).collect() };
+    let mut out = Vec::new();
+    let loose = pick("");
+    if !loose.is_empty() {
+        out.push(("", loose));
+    }
+    for f in folders {
+        let rows = pick(f);
+        if !searching || !rows.is_empty() {
+            out.push((f.as_str(), rows));
+        }
+    }
+    out
+}
+
+/// Where a dragged bookmark lands when let go with the pointer at `y`: the folder, and the
+/// bookmark it goes before (None: the end of the folder). Over a header it goes to the end of
+/// that folder; over the upper half of a row, before it; over the lower half, before the next
+/// row of the same folder.
+fn bm_drop(rows: &[DropRow], y: f32) -> Option<(String, Option<u64>)> {
+    let n = rows.iter().position(|d| y >= d.r.y && y < d.r.bottom())?;
+    let d = &rows[n];
+    if d.id == 0 {
+        return Some((d.folder.clone(), None));
+    }
+    if y < d.r.y + d.r.h / 2.0 {
+        return Some((d.folder.clone(), Some(d.id)));
+    }
+    let next = rows[n + 1..].iter().find(|x| x.id != 0 && x.folder == d.folder).map(|x| x.id);
+    Some((d.folder.clone(), next))
+}
+
+fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
+    let th = i.theme;
+    let col = column(st, COL_W);
+    let q = super::wide_text(i.bm_edit);
+    let q = q.trim().to_string();
+    let sr = bm_search_rect(st);
+    let top = sr.bottom() + S3;
+    let list = R::new(st.x, top, st.w, st.bottom() - top);
+    let groups = bm_groups(&s.bookmarks, &s.bm_folders, &q);
+    let total: usize = groups.iter().map(|g| g.1.len()).sum();
+    let named = !s.bm_folders.is_empty();
+    i.page.bm_rows.clear();
+
+    // The list first, clipped under the search row; the header is drawn after it so its
+    // buttons win the mouse wherever a half-scrolled row reaches up under them.
+    i.gfx.clip(list);
+    let mut y = top - i.page.scroll;
+    if total == 0 && (!q.is_empty() || s.bm_folders.is_empty()) {
+        let (head, hint) = if q.is_empty() {
+            ("No bookmarks yet", "Press Ctrl+D, or the star in the address bar, to keep a page here. Import brings over what Chrome, Edge, Brave or Opera GX had.")
+        } else {
+            ("Nothing matches", "Try fewer words. The title and the address are searched.")
+        };
+        empty_state(i, R::new(col.x, top + 40.0, col.w, 200.0), if q.is_empty() { "star" } else { "search" }, head, hint);
+        y = top;
+    }
+    let searching = !q.is_empty();
+    let dragging = i.page.bm_drag.as_ref().filter(|d| d.moved).map(|d| d.id);
+    for (folder, rows) in &groups {
+        // A header when there is a folder to name, or Unsorted needs telling apart from them.
+        if !folder.is_empty() || named {
+            let label = if folder.is_empty() { "UNSORTED" } else { &folder.to_uppercase() };
+            let h = R::new(col.x - S2, y, col.w + 2.0 * S2, 30.0);
+            if h.bottom() >= top && h.y <= st.bottom() {
+                let hit = Hit::Page(PageHit::BmFolder(folder.to_string()));
+                let folded = i.page.bm_collapsed.contains(*folder) && !searching;
+                let hov = i.is_hover(&hit);
+                if hov {
+                    i.gfx.round(h, R_MD, th.hover);
+                }
+                // A chevron: down when open, right when folded.
+                let (cx, cy) = (col.x + 6.0, y + 15.0);
+                let c = if hov { th.dim } else { th.faint };
+                if folded {
+                    i.gfx.line(cx - 2.0, cy - 4.0, cx + 2.0, cy, c, 1.5);
+                    i.gfx.line(cx + 2.0, cy, cx - 2.0, cy + 4.0, c, 1.5);
+                } else {
+                    i.gfx.line(cx - 4.0, cy - 2.0, cx, cy + 2.0, c, 1.5);
+                    i.gfx.line(cx, cy + 2.0, cx + 4.0, cy - 2.0, c, 1.5);
+                }
+                i.gfx.text(&format!("{label}  {}", rows.len()), R::new(col.x + 20.0, y, col.w - 20.0, 30.0), CAPTION, th.faint);
+                i.hit(h, hit);
+                i.page.bm_rows.push(DropRow { r: h, folder: folder.to_string(), id: 0 });
+            }
+            y += 30.0;
+        }
+        if i.page.bm_collapsed.contains(*folder) && !searching {
+            y += S2;
+            continue;
+        }
+        if rows.is_empty() {
+            i.gfx.text("Empty. Drag a bookmark here, or use Move to folder.", R::new(col.x + 20.0, y, col.w - 20.0, 28.0), SMALL, th.faint);
+            y += 30.0;
+        }
+        for m in rows {
+            let r = R::new(col.x - S2, y, col.w + 2.0 * S2, BM_ROW_H);
+            y += BM_ROW_H + 2.0;
+            if r.bottom() < top || r.y > st.bottom() {
+                continue;
+            }
+            i.page.bm_rows.push(DropRow { r, folder: m.folder.clone(), id: m.id });
+            let open = Hit::Page(PageHit::Bm(m.id));
+            let rm = Hit::Page(PageHit::BmDel(m.id));
+            let hov = i.is_hover(&open) || i.is_hover(&rm);
+            let lifted = dragging == Some(m.id);
+            if hov && !lifted {
+                i.gfx.round(r, R_MD, th.hover);
+            }
+            let tile = R::new(col.x, y - BM_ROW_H - 2.0 + 8.0, 22.0, 22.0);
+            let name = if m.title.is_empty() { m.url.clone() } else { m.title.clone() };
+            let host = super::host(&m.url);
+            let letter = host.chars().next().or_else(|| name.chars().next()).unwrap_or('·').to_uppercase().to_string();
+            let fade = if lifted { 0.4 } else { 1.0 };
+            i.gfx.round(tile, 6.0, th.press.mix(th.accent, 0.3).alpha(fade));
+            i.gfx.text(&letter, tile, Font::ui(11.0, 650).align(Align::Center), th.text.alpha(fade));
+            let hw = (i.gfx.measure(&host, SMALL) + 4.0).min(220.0);
+            let hx = col.right() - 32.0 - hw;
+            let tx = col.x + 34.0;
+            let ry = y - BM_ROW_H - 2.0;
+            i.gfx.text(&name, R::new(tx, ry, (hx - S4 - tx).max(60.0), BM_ROW_H), BODY, th.text.alpha(fade));
+            i.gfx.text(&host, R::new(hx, ry, hw, BM_ROW_H), SMALL.align(Align::Right), th.faint.alpha(fade));
+            i.hit(r, open);
+            if hov && dragging.is_none() {
+                let xr = R::new(col.right() - 28.0, ry + 5.0, 28.0, 28.0);
+                let xh = i.is_hover(&rm);
+                if xh {
+                    i.gfx.round(xr, R_SM, th.press);
+                }
+                i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if xh { th.text } else { th.dim });
+                i.hit(xr, rm);
+            }
+        }
+        y += S2;
+    }
+    // Where a dragged row would land: a line between rows, or the folder lit.
+    if dragging.is_some()
+        && let Some((folder, before)) = bm_drop(&i.page.bm_rows, i.mouse.1)
+    {
+        let rows = i.page.bm_rows.clone();
+        let target = match before {
+            Some(b) => rows.iter().find(|d| d.id == b).map(|d| d.r.y - 1.0),
+            None => rows.iter().filter(|d| d.folder == folder && d.id != 0).map(|d| d.r.bottom() + 1.0).last(),
+        };
+        match target {
+            Some(ly) => i.gfx.line(col.x, ly, col.right(), ly, th.accent, 2.0),
+            None => {
+                if let Some(h) = rows.iter().find(|d| d.folder == folder && d.id == 0) {
+                    i.gfx.round_stroke(h.r, R_MD, th.accent, 1.5);
+                }
+            }
+        }
+    }
+    i.gfx.unclip();
+    i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+
+    // The header: title, one line under it, the search box and its two buttons.
+    let flash = i.page.flash.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < 8.0).map(|(m, _)| m.clone());
+    let sub = flash.unwrap_or_else(|| match s.bookmarks.len() {
+        0 => "Ctrl+D, or the star in the address bar, adds one.".to_string(),
+        1 => "1 bookmark. Ctrl+Shift+O opens this page.".to_string(),
+        n => format!("{n} bookmarks. Ctrl+Shift+O opens this page."),
+    });
+    title_block(i, col, st.y + S5 + 2.0, "Bookmarks", &sub);
+    let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.bm_edit;
+    i.gfx.round(sr, R_MD, th.bg);
+    i.gfx.round_stroke(sr, R_MD, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
+    i.gfx.icon("search", sr.x + 10.0, sr.y + 9.0, 16.0, th.faint);
+    if q.is_empty() && !focused {
+        i.gfx.text("Search bookmarks", R::new(sr.x + 34.0, sr.y, sr.w - 44.0, sr.h), BODY, th.faint);
+    }
+    let bf = BODY.align(Align::Center);
+    let w_import = i.gfx.measure("Import…", bf) + 2.0 * S4;
+    let w_folder = i.gfx.measure("New folder", bf) + 2.0 * S4;
+    let by = sr.y + 2.0;
+    let bx = outline_button(i, col.right() - w_import, by, "Import…", PageHit::BmImport, false).x;
+    outline_button(i, bx - S2 - w_folder, by, "New folder", PageHit::BmNewFolder, false);
     close_button(i, st);
 }
 
@@ -1577,7 +1796,15 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
 
 // ------------------------------------------------------------------- input
 
-pub fn press(i: &mut Inner, p: PageHit, x: f32, _y: f32) {
+pub fn press(i: &mut Inner, p: PageHit, x: f32, y: f32) {
+    if let PageHit::Bm(id) = p {
+        i.page.bm_drag = Some(BmDrag { id, y0: y, moved: false });
+        // Keep the mouse while it is down, so a drag that leaves the window still ends.
+        unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(i.hwnd);
+        }
+        return;
+    }
     if let PageHit::Slider(key) = p
         && let Some((_, track, scale)) = i.page.sliders.iter().find(|(k, _, _)| *k == key).map(|t| (t.0, t.1, t.2))
     {
@@ -1593,7 +1820,18 @@ fn drag_to(i: &mut Inner, x: f32) {
     set(i, key, json!(v.round() as u32));
 }
 
-pub fn drag_move(i: &mut Inner, x: f32, _y: f32) -> bool {
+pub fn drag_move(i: &mut Inner, x: f32, y: f32) -> bool {
+    if let Some(d) = &mut i.page.bm_drag {
+        // A few pixels of wobble is still a click.
+        if !d.moved && (y - d.y0).abs() > 6.0 {
+            d.moved = true;
+        }
+        if d.moved {
+            i.invalidate();
+            return true;
+        }
+        return false;
+    }
     if i.page.slide.is_none() {
         return false;
     }
@@ -1601,7 +1839,20 @@ pub fn drag_move(i: &mut Inner, x: f32, _y: f32) -> bool {
     true
 }
 
-pub fn drag_end(i: &mut Inner) -> bool {
+pub fn drag_end(i: &mut Inner, y: f32) -> bool {
+    if let Some(d) = i.page.bm_drag.take() {
+        unsafe {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+        }
+        if !d.moved {
+            return false;
+        }
+        if let Some((folder, before)) = bm_drop(&i.page.bm_rows, y) {
+            send(&i.proxy, json!({"t": "bmPlace", "id": d.id, "folder": folder, "before": before}));
+        }
+        i.invalidate();
+        return true;
+    }
     i.page.slide.take().is_some()
 }
 
@@ -1686,7 +1937,48 @@ pub fn click(i: &mut Inner, p: PageHit) {
         }
         PageHit::Open(url) => send(&i.proxy, json!({"t": "nav", "url": url})),
         PageHit::Forget(url) => send(&i.proxy, json!({"t": "forget", "url": url})),
-        PageHit::Unbookmark(url) => send(&i.proxy, json!({"t": "unbookmark", "url": url})),
+        PageHit::Bm(id) => {
+            if let Some(m) = s.bookmarks.iter().find(|m| m.id == id) {
+                send(&i.proxy, json!({"t": "nav", "url": m.url}));
+            }
+        }
+        PageHit::BmDel(id) => send(&i.proxy, json!({"t": "bmDelete", "id": id})),
+        PageHit::BmFolder(name) => {
+            if !i.page.bm_collapsed.remove(&name) {
+                i.page.bm_collapsed.insert(name);
+            }
+            i.invalidate();
+        }
+        PageHit::BmNewFolder => {
+            if let Some(a) = super::dialog::ask_fields(i.hwnd_raw(), "New folder", &[("Name", "")]) {
+                send(&i.proxy, json!({"t": "bmFolderAdd", "name": a[0]}));
+            }
+        }
+        PageHit::BmImport => {
+            // Read-only look at the other browsers' files: which are here, and how many each.
+            let found = crate::bookmarks::scan();
+            if found.is_empty() {
+                i.page.flash = Some(("No Chrome, Edge, Brave or Opera GX bookmarks found on this PC".into(), std::time::Instant::now()));
+                i.invalidate();
+                return;
+            }
+            let mut items: Vec<(u32, String)> = found.iter().enumerate().map(|(n, f)| (n as u32 + 1, format!("{}  ({} bookmarks)", f.browser, f.items.len()))).collect();
+            if found.len() > 1 {
+                items.push((0, String::new()));
+                items.push((50, "All of them".into()));
+            }
+            let (x, y) = i.mouse;
+            let pick = i.popup(&items, x, y);
+            let browser = match pick {
+                0 => return,
+                50 => "all".to_string(),
+                n => match found.get(n as usize - 1) {
+                    Some(f) => f.browser.to_string(),
+                    None => return,
+                },
+            };
+            send(&i.proxy, json!({"t": "bmImport", "browser": browser}));
+        }
         PageHit::ClearHistory => {
             // One native menu of time ranges first, then the wipe.
             if let Some(since) = ask_range(i) {
@@ -1878,6 +2170,57 @@ mod tests {
         assert_eq!(tile_label(&named("some file.not an ext", "file")), "FILE");
         assert_eq!(tile_label(&named("movie", "video")), "VID");
         assert_eq!(tile_label(&named("ubuntu", "torrent")), "TOR");
+    }
+
+    fn mark(id: u64, title: &str, url: &str, folder: &str) -> crate::chrome::UiMark {
+        crate::chrome::UiMark { id, title: title.into(), url: url.into(), folder: folder.into() }
+    }
+
+    #[test]
+    fn search_wants_every_word_in_the_title_or_the_address() {
+        let m = mark(1, "The Rust Programming Language", "https://doc.rust-lang.org/book/", "");
+        assert!(super::bm_matches("rust book", &m));
+        assert!(super::bm_matches("  LANGUAGE ", &m));
+        assert!(super::bm_matches("rust-lang.org", &m));
+        assert!(!super::bm_matches("rust python", &m));
+    }
+
+    #[test]
+    fn groups_run_unsorted_then_folders_and_hide_what_does_not_match() {
+        let marks = vec![
+            mark(1, "A", "https://a.test/", ""),
+            mark(2, "B", "https://b.test/", "Work"),
+            mark(3, "C", "https://c.test/", "Work"),
+        ];
+        let folders = vec!["Work".to_string(), "Empty".to_string()];
+        let g = super::bm_groups(&marks, &folders, "");
+        let names: Vec<(&str, usize)> = g.iter().map(|(f, r)| (*f, r.len())).collect();
+        // Every folder shows when not searching, an empty one too.
+        assert_eq!(names, [("", 1), ("Work", 2), ("Empty", 0)]);
+        // Searching keeps only the groups with a match.
+        let g = super::bm_groups(&marks, &folders, "c.test");
+        assert_eq!(g.iter().map(|(f, r)| (*f, r.len())).collect::<Vec<_>>(), [("Work", 1)]);
+        // Nothing in Unsorted: no Unsorted group.
+        let g = super::bm_groups(&marks[1..], &folders, "");
+        assert_eq!(g[0].0, "Work");
+    }
+
+    #[test]
+    fn a_dragged_bookmark_lands_before_the_row_under_it_or_at_the_end_of_the_folder() {
+        use super::DropRow;
+        let row = |y: f32, folder: &str, id: u64| DropRow { r: R::new(0.0, y, 100.0, 40.0), folder: folder.into(), id };
+        let rows = vec![row(0.0, "", 0), row(40.0, "", 1), row(80.0, "", 2), row(120.0, "Work", 0), row(160.0, "Work", 3)];
+        // Upper half of a row: before it.
+        assert_eq!(super::bm_drop(&rows, 45.0), Some(("".into(), Some(1))));
+        // Lower half: before the next row of the same folder.
+        assert_eq!(super::bm_drop(&rows, 70.0), Some(("".into(), Some(2))));
+        // Lower half of the last one: the end of its folder.
+        assert_eq!(super::bm_drop(&rows, 110.0), Some(("".into(), None)));
+        assert_eq!(super::bm_drop(&rows, 195.0), Some(("Work".into(), None)));
+        // A header: the end of that folder.
+        assert_eq!(super::bm_drop(&rows, 130.0), Some(("Work".into(), None)));
+        // Off the list: nowhere.
+        assert_eq!(super::bm_drop(&rows, 500.0), None);
     }
 
     #[test]

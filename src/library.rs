@@ -47,6 +47,39 @@ pub struct Bookmark {
     pub url: String,
     pub title: String,
     pub added: u64,
+    /// The folder it sits in. Empty is "Unsorted".
+    #[serde(default)]
+    pub folder: String,
+}
+
+/// What bookmarks.json holds now. A file from before folders is a bare list of bookmarks.
+#[derive(Deserialize)]
+struct BookFile {
+    #[serde(default)]
+    folders: Vec<String>,
+    #[serde(default)]
+    bookmarks: Vec<Bookmark>,
+}
+
+#[derive(Serialize)]
+struct BookFileRef<'a> {
+    folders: &'a [String],
+    bookmarks: Vec<&'a Bookmark>,
+}
+
+/// One bookmark coming in from another browser.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Incoming {
+    pub folder: String,
+    pub title: String,
+    pub url: String,
+}
+
+/// The same address, give or take case, a trailing slash and a fragment. Import uses it to
+/// skip what is already here.
+pub fn same_url_key(url: &str) -> String {
+    let u = url.trim().split('#').next().unwrap_or("");
+    u.trim_end_matches('/').to_lowercase()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +129,8 @@ pub struct Library {
     oldest: BinaryHeap<Reverse<Oldest>>,
     /// Newest first.
     marks: Vec<Mark>,
+    /// Folder names, in the order they show. A folder can be empty.
+    folders: Vec<String>,
     books_dirty: bool,
     /// Visits to append to the file on the next flush.
     pending: Vec<Visit>,
@@ -143,6 +178,7 @@ impl Library {
             hist: HashMap::new(),
             oldest: BinaryHeap::new(),
             marks: Vec::new(),
+            folders: Vec::new(),
             books_dirty: false,
             pending: Vec::new(),
             rewrite: false,
@@ -285,7 +321,7 @@ impl Library {
         }
         let id = self.next_id;
         self.next_id += 1;
-        let b = Bookmark { id, url: url.to_string(), title: title.to_string(), added: unix_now() };
+        let b = Bookmark { id, url: url.to_string(), title: title.to_string(), added: unix_now(), folder: String::new() };
         self.marks.insert(0, Mark::new(b));
         self.books_dirty = true;
         id
@@ -307,9 +343,178 @@ impl Library {
         }
     }
 
-    /// Newest first.
+    /// In the person's order: newest first until they move something.
     pub fn bookmarks(&self) -> Vec<Bookmark> {
         self.marks.iter().map(|m| m.b.clone()).collect()
+    }
+
+    pub fn mark_for_url(&self, url: &str) -> Option<Bookmark> {
+        self.marks.iter().find(|m| m.b.url == url).map(|m| m.b.clone())
+    }
+
+    // --------------------------------------------------------------- folders
+    //
+    // One level of folders, plus "Unsorted" (the empty name). A folder is a name; a bookmark
+    // is in the folder it names. Deleting a folder never deletes what is in it.
+
+    /// Folder names in display order: the listed ones, then any a bookmark names that the
+    /// list lost. Never contains "".
+    pub fn folders(&self) -> Vec<String> {
+        let mut out = self.folders.clone();
+        for m in &self.marks {
+            if !m.b.folder.is_empty() && !out.contains(&m.b.folder) {
+                out.push(m.b.folder.clone());
+            }
+        }
+        out
+    }
+
+    fn ensure_folder(&mut self, name: &str) {
+        if !name.is_empty() && !self.folders.iter().any(|f| f == name) {
+            self.folders.push(name.to_string());
+        }
+    }
+
+    /// False for a blank name or one that is already a folder.
+    pub fn add_folder(&mut self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || self.folders().iter().any(|f| f.eq_ignore_ascii_case(name)) {
+            return false;
+        }
+        self.folders.push(name.to_string());
+        self.books_dirty = true;
+        true
+    }
+
+    /// False when `old` is not a folder, or `new` is blank or taken by another one.
+    pub fn rename_folder(&mut self, old: &str, new: &str) -> bool {
+        let new = new.trim();
+        if new.is_empty() || old == new || !self.folders().iter().any(|f| f == old) {
+            return false;
+        }
+        if self.folders().iter().any(|f| f != old && f.eq_ignore_ascii_case(new)) {
+            return false;
+        }
+        self.ensure_folder(old);
+        for f in &mut self.folders {
+            if f == old {
+                *f = new.to_string();
+            }
+        }
+        for m in &mut self.marks {
+            if m.b.folder == old {
+                m.b.folder = new.to_string();
+            }
+        }
+        self.books_dirty = true;
+        true
+    }
+
+    /// The folder goes; what was in it lands in Unsorted.
+    pub fn delete_folder(&mut self, name: &str) {
+        self.folders.retain(|f| f != name);
+        for m in &mut self.marks {
+            if m.b.folder == name {
+                m.b.folder.clear();
+            }
+        }
+        self.books_dirty = true;
+    }
+
+    pub fn move_bookmark(&mut self, id: u64, folder: &str) {
+        self.place(id, folder, None);
+    }
+
+    /// Put a bookmark in `folder`, just before the bookmark `before` (which must be in that
+    /// folder), or at the end of the folder. The drag in the Bookmarks page ends here.
+    pub fn place(&mut self, id: u64, folder: &str, before: Option<u64>) {
+        let Some(from) = self.marks.iter().position(|m| m.b.id == id) else { return };
+        if before == Some(id) {
+            return;
+        }
+        let mut m = self.marks.remove(from);
+        m.b.folder = folder.to_string();
+        self.ensure_folder(folder);
+        let at = match before.and_then(|b| self.marks.iter().position(|x| x.b.id == b)) {
+            Some(p) => p,
+            // The end of the folder: after its last bookmark, or at the end of the list.
+            None => self.marks.iter().rposition(|x| x.b.folder == folder).map_or(self.marks.len(), |p| p + 1),
+        };
+        self.marks.insert(at, m);
+        self.books_dirty = true;
+    }
+
+    /// Move up (-1) or down (1) among the bookmarks of its own folder.
+    pub fn shift_bookmark(&mut self, id: u64, delta: i32) {
+        let Some(from) = self.marks.iter().position(|m| m.b.id == id) else { return };
+        let folder = self.marks[from].b.folder.clone();
+        let same: Vec<usize> = (0..self.marks.len()).filter(|&i| self.marks[i].b.folder == folder).collect();
+        let Some(at) = same.iter().position(|&i| i == from) else { return };
+        let to = at as i32 + delta;
+        if to < 0 || to as usize >= same.len() {
+            return;
+        }
+        self.marks.swap(from, same[to as usize]);
+        self.books_dirty = true;
+    }
+
+    /// Title, address and folder in one go. An address that is blank, or already another
+    /// bookmark's, is refused (false) and nothing changes.
+    pub fn edit_bookmark(&mut self, id: u64, title: &str, url: &str, folder: &str) -> bool {
+        let url = url.trim();
+        if url.is_empty() || self.marks.iter().any(|m| m.b.id != id && m.b.url == url) {
+            return false;
+        }
+        self.ensure_folder(folder);
+        let Some(m) = self.marks.iter_mut().find(|m| m.b.id == id) else { return false };
+        m.b.title = title.trim().to_string();
+        m.b.url = url.to_string();
+        m.b.folder = folder.to_string();
+        m.rebuild();
+        self.books_dirty = true;
+        true
+    }
+
+    pub fn delete_bookmark(&mut self, id: u64) {
+        let before = self.marks.len();
+        self.marks.retain(|m| m.b.id != id);
+        if self.marks.len() != before {
+            self.books_dirty = true;
+        }
+    }
+
+    /// Bring in what another browser had. An address already here (in any folder) is
+    /// skipped. Returns (added, skipped). They land at the end of their folder, in the order
+    /// they came, so an import reads like the browser it came from.
+    pub fn import(&mut self, items: &[Incoming]) -> (usize, usize) {
+        let mut have: HashSet<String> = self.marks.iter().map(|m| same_url_key(&m.b.url)).collect();
+        let (mut added, mut skipped) = (0, 0);
+        for it in items {
+            if it.url.trim().is_empty() || !have.insert(same_url_key(&it.url)) {
+                skipped += 1;
+                continue;
+            }
+            self.ensure_folder(&it.folder);
+            let id = self.next_id;
+            self.next_id += 1;
+            let b = Bookmark { id, url: it.url.trim().to_string(), title: it.title.trim().to_string(), added: unix_now(), folder: it.folder.clone() };
+            let at = self.marks.iter().rposition(|x| x.b.folder == it.folder).map_or(self.marks.len(), |p| p + 1);
+            self.marks.insert(at, Mark::new(b));
+            added += 1;
+        }
+        if added > 0 {
+            self.books_dirty = true;
+        }
+        (added, skipped)
+    }
+
+    /// The pages seen most, best first, for the new tab page when it has no tiles. A pool
+    /// the caller thins (one per site, nothing already a tile).
+    pub fn top_visits(&self, limit: usize) -> Vec<Visit> {
+        let now = unix_now();
+        let mut rows: Vec<(f64, &Entry)> = self.hist.values().map(|e| (frecency(e.v.count, now.saturating_sub(e.v.last)), e)).collect();
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.v.url.cmp(&b.1.v.url)));
+        rows.into_iter().take(limit).map(|(_, e)| e.v.clone()).collect()
     }
 
     /// Write what changed. Two checks when nothing did.
@@ -359,7 +564,14 @@ impl Library {
     fn read_bookmarks(&mut self) {
         let path = self.dir.join(BOOKMARKS_FILE);
         let Ok(text) = fs::read_to_string(&path) else { return };
-        let Ok(list) = serde_json::from_str::<Vec<Bookmark>>(&text) else { return };
+        // The old file is a bare list; the new one carries the folders too.
+        let (list, folders) = match serde_json::from_str::<BookFile>(&text) {
+            Ok(f) => (f.bookmarks, f.folders),
+            Err(_) => match serde_json::from_str::<Vec<Bookmark>>(&text) {
+                Ok(l) => (l, Vec::new()),
+                Err(_) => return,
+            },
+        };
         let mut seen: HashSet<String> = HashSet::new();
         for b in list {
             if b.url.is_empty() || !seen.insert(b.url.clone()) {
@@ -368,7 +580,10 @@ impl Library {
             self.next_id = self.next_id.max(b.id + 1);
             self.marks.push(Mark::new(b));
         }
-        self.marks.sort_by(|a, b| b.b.added.cmp(&a.b.added).then(b.b.id.cmp(&a.b.id)));
+        // The file's order is the person's order (drag, move up, down). Nothing re-sorts it.
+        for f in folders {
+            self.ensure_folder(&f);
+        }
     }
 
     fn append_history(&mut self) {
@@ -400,8 +615,8 @@ impl Library {
     }
 
     fn write_bookmarks(&mut self) {
-        let list: Vec<&Bookmark> = self.marks.iter().map(|m| &m.b).collect();
-        if let Ok(json) = serde_json::to_string_pretty(&list) {
+        let file = BookFileRef { folders: &self.folders, bookmarks: self.marks.iter().map(|m| &m.b).collect() };
+        if let Ok(json) = serde_json::to_string_pretty(&file) {
             atomic_write(&self.dir.join(BOOKMARKS_FILE), &json);
         }
     }
@@ -751,5 +966,168 @@ mod tests {
         assert!(!hits.is_empty());
         assert_eq!(hits[0].url, "https://site500.example.com/page500");
         assert!(ms < 50.0, "search took {ms:.1} ms");
+    }
+
+    fn marks_in(lib: &Library, folder: &str) -> Vec<String> {
+        lib.bookmarks().into_iter().filter(|b| b.folder == folder).map(|b| b.title).collect()
+    }
+
+    fn inc(folder: &str, title: &str, url: &str) -> Incoming {
+        Incoming { folder: folder.into(), title: title.into(), url: url.into() }
+    }
+
+    #[test]
+    fn a_bare_list_from_before_folders_still_loads() {
+        let dir = tmp_dir("oldbooks");
+        fs::write(dir.join(BOOKMARKS_FILE), r#"[{"id":3,"url":"https://a.com/","title":"A","added":10},{"id":4,"url":"https://b.com/","title":"B","added":20}]"#).unwrap();
+        let lib = Library::load(&dir);
+        let all = lib.bookmarks();
+        // File order stands and everything is Unsorted.
+        assert_eq!(all.iter().map(|b| b.title.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        assert!(all.iter().all(|b| b.folder.is_empty()));
+        assert!(lib.folders().is_empty());
+    }
+
+    #[test]
+    fn folders_and_order_survive_a_restart() {
+        let dir = tmp_dir("folders-disk");
+        let mut lib = Library::load(&dir);
+        let a = lib.bookmark("https://a.com/", "A");
+        lib.bookmark("https://b.com/", "B");
+        assert!(lib.add_folder("Work"));
+        assert!(lib.add_folder("Empty"));
+        lib.move_bookmark(a, "Work");
+        lib.flush();
+        let again = Library::load(&dir);
+        assert_eq!(again.folders(), ["Work", "Empty"]);
+        assert_eq!(marks_in(&again, "Work"), ["A"]);
+        assert_eq!(marks_in(&again, ""), ["B"]);
+    }
+
+    #[test]
+    fn folder_names_are_unique_and_not_blank() {
+        let mut lib = Library::load(&tmp_dir("folder-names"));
+        assert!(lib.add_folder("Work"));
+        assert!(!lib.add_folder("work"));
+        assert!(!lib.add_folder("   "));
+        assert!(lib.add_folder("Home"));
+        assert!(!lib.rename_folder("Home", "WORK"));
+        assert!(!lib.rename_folder("Nope", "X"));
+        assert!(lib.rename_folder("Home", "House"));
+        assert_eq!(lib.folders(), ["Work", "House"]);
+    }
+
+    #[test]
+    fn renaming_a_folder_takes_its_bookmarks_along() {
+        let mut lib = Library::load(&tmp_dir("folder-rename"));
+        let a = lib.bookmark("https://a.com/", "A");
+        lib.move_bookmark(a, "Work");
+        assert!(lib.rename_folder("Work", "Job"));
+        assert_eq!(marks_in(&lib, "Job"), ["A"]);
+        assert_eq!(lib.folders(), ["Job"]);
+    }
+
+    #[test]
+    fn deleting_a_folder_keeps_its_bookmarks() {
+        let mut lib = Library::load(&tmp_dir("folder-delete"));
+        let a = lib.bookmark("https://a.com/", "A");
+        lib.move_bookmark(a, "Work");
+        lib.delete_folder("Work");
+        assert!(lib.folders().is_empty());
+        assert_eq!(marks_in(&lib, ""), ["A"]);
+    }
+
+    #[test]
+    fn moving_up_and_down_stays_inside_the_folder() {
+        let mut lib = Library::load(&tmp_dir("shift"));
+        let a = lib.bookmark("https://a.com/", "A");
+        let x = lib.bookmark("https://x.com/", "X");
+        let b = lib.bookmark("https://b.com/", "B");
+        // Newest first: B, X, A. X goes to Work; A and B stay, with X's old place between them.
+        lib.move_bookmark(x, "Work");
+        assert_eq!(marks_in(&lib, ""), ["B", "A"]);
+        lib.shift_bookmark(a, 1);
+        assert_eq!(marks_in(&lib, ""), ["B", "A"], "at the end already");
+        lib.shift_bookmark(b, -1);
+        assert_eq!(marks_in(&lib, ""), ["B", "A"], "at the top already");
+        lib.shift_bookmark(b, 1);
+        assert_eq!(marks_in(&lib, ""), ["A", "B"]);
+        assert_eq!(marks_in(&lib, "Work"), ["X"]);
+    }
+
+    #[test]
+    fn dropping_places_before_a_bookmark_or_at_the_end_of_a_folder() {
+        let mut lib = Library::load(&tmp_dir("place"));
+        let a = lib.bookmark("https://a.com/", "A");
+        let b = lib.bookmark("https://b.com/", "B");
+        let c = lib.bookmark("https://c.com/", "C");
+        // C, B, A. Drag A before C.
+        lib.place(a, "", Some(c));
+        assert_eq!(marks_in(&lib, ""), ["A", "C", "B"]);
+        // Drag A to the end of a folder that is empty, then C after it.
+        lib.place(a, "Work", None);
+        lib.place(c, "Work", None);
+        assert_eq!(marks_in(&lib, "Work"), ["A", "C"]);
+        assert_eq!(marks_in(&lib, ""), ["B"]);
+        // Dropped on itself: nothing happens.
+        lib.place(b, "", Some(b));
+        assert_eq!(marks_in(&lib, ""), ["B"]);
+    }
+
+    #[test]
+    fn editing_changes_title_address_and_folder_but_not_into_a_duplicate() {
+        let mut lib = Library::load(&tmp_dir("edit"));
+        let a = lib.bookmark("https://a.com/", "A");
+        lib.bookmark("https://b.com/", "B");
+        assert!(lib.edit_bookmark(a, "A2", "https://a2.com/", "Work"));
+        let got = lib.mark_for_url("https://a2.com/").expect("moved to the new address");
+        assert_eq!((got.title.as_str(), got.folder.as_str()), ("A2", "Work"));
+        assert!(lib.folders().contains(&"Work".to_string()));
+        // Another bookmark's address, or none: refused, nothing changed.
+        assert!(!lib.edit_bookmark(a, "A3", "https://b.com/", ""));
+        assert!(!lib.edit_bookmark(a, "A3", "  ", ""));
+        assert_eq!(lib.mark_for_url("https://a2.com/").unwrap().title, "A2");
+        // The address bar finds it under its new address.
+        assert!(lib.is_bookmarked("https://a2.com/") && !lib.is_bookmarked("https://a.com/"));
+    }
+
+    #[test]
+    fn import_skips_what_is_already_here_in_any_folder() {
+        let mut lib = Library::load(&tmp_dir("import"));
+        let g = lib.bookmark("https://github.com/", "GitHub");
+        lib.move_bookmark(g, "Work");
+        let items = [
+            inc("Chrome", "GitHub again", "https://GitHub.com"),
+            inc("Chrome", "Rust", "https://www.rust-lang.org/"),
+            inc("Chrome / Dev", "Docs", "https://doc.rust-lang.org/#top"),
+            inc("Chrome / Dev", "Docs twice", "https://doc.rust-lang.org/"),
+            inc("Chrome", "", ""),
+        ];
+        let (added, skipped) = lib.import(&items);
+        assert_eq!((added, skipped), (2, 3));
+        assert_eq!(marks_in(&lib, "Chrome"), ["Rust"]);
+        assert_eq!(marks_in(&lib, "Chrome / Dev"), ["Docs"]);
+        assert_eq!(lib.folders(), ["Work", "Chrome", "Chrome / Dev"]);
+        // Running it again adds nothing.
+        assert_eq!(lib.import(&items), (0, 5));
+    }
+
+    #[test]
+    fn import_keeps_the_other_browsers_order() {
+        let mut lib = Library::load(&tmp_dir("import-order"));
+        lib.import(&[inc("Edge", "One", "https://1.test/"), inc("Edge", "Two", "https://2.test/"), inc("Edge", "Three", "https://3.test/")]);
+        assert_eq!(marks_in(&lib, "Edge"), ["One", "Two", "Three"]);
+    }
+
+    #[test]
+    fn top_visits_come_most_visited_first() {
+        let mut lib = Library::load(&tmp_dir("top"));
+        lib.visit("https://once.com/", "Once");
+        for _ in 0..5 {
+            lib.visit("https://often.com/", "Often");
+        }
+        let top = lib.top_visits(10);
+        assert_eq!(top[0].url, "https://often.com/");
+        assert_eq!(lib.top_visits(1).len(), 1);
     }
 }

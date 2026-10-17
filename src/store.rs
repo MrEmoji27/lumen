@@ -25,7 +25,7 @@ pub fn download_dir() -> PathBuf {
     dir
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Shortcut {
     pub title: String,
     pub url: String,
@@ -71,7 +71,10 @@ pub struct Settings {
     /// Hide ad leftovers and cookie banners (cosmetic rules).
     pub cosmetic: bool,
     pub show_memory: bool,
+    /// The speed dial: tiles under the new tab page's search box.
     pub shortcuts: Vec<Shortcut>,
+    /// Show the speed dial. Off: the new tab page is the clock and the search box.
+    pub speed_dial: bool,
     /// Run GPU work inside the browser process. About 100 MB less. Applies on restart.
     pub gpu_in_process: bool,
     /// Tabs of the same site share one renderer process. Fewer processes, less memory.
@@ -187,6 +190,7 @@ impl Default for Settings {
             cpu_limit_pct: 50,
             net_limit: false,
             net_limit_kbps: 2048,
+            speed_dial: true,
             shortcuts: vec![
                 s("YouTube", "https://www.youtube.com"),
                 s("GitHub", "https://github.com"),
@@ -266,6 +270,8 @@ pub struct SavedTab {
     pub title: String,
     pub favicon: String,
     pub pinned: bool,
+    /// The page a pin was pinned on. Empty in files from before pins remembered it.
+    pub pin_url: String,
 }
 
 /// A named set of tabs. Saved in session.json so workspaces survive a restart.
@@ -384,6 +390,45 @@ mod tests {
     #[test]
     fn clear_on_exit_is_off_by_default() {
         assert!(!Settings::default().clear_on_exit);
+    }
+
+    /// A settings.json from before the speed dial switch still loads, with the speed dial on
+    /// and the person's own tiles untouched.
+    #[test]
+    fn an_old_settings_file_shows_the_speed_dial() {
+        let mut v = serde_json::to_value(Settings::default()).expect("settings to json");
+        v.as_object_mut().expect("an object").remove("speed_dial");
+        v["shortcuts"] = serde_json::json!([{"title": "Mine", "url": "https://mine.test/"}]);
+        let s: Settings = serde_json::from_value(v).expect("old file loads");
+        assert!(s.speed_dial);
+        assert_eq!(s.shortcuts.len(), 1);
+    }
+
+    /// A session.json from before pins remembered their page still loads: the pin
+    /// is there, with no pinned URL yet (the restore fills it in).
+    #[test]
+    fn an_old_session_with_pins_loads() {
+        let old = r#"{"tabs":[{"url":"https://music.youtube.com/","title":"Music","favicon":"","pinned":true},
+            {"url":"https://a.test/","title":"A","favicon":"","pinned":false}],"active":1,"width":900.0,"height":700.0,"maximized":false}"#;
+        let s: Session = serde_json::from_str(old).expect("old session loads");
+        assert_eq!(s.tabs.len(), 2);
+        assert!(s.tabs[0].pinned);
+        assert_eq!(s.tabs[0].pin_url, "");
+        assert_eq!(crate::pins::restored_pin_url(s.tabs[0].pinned, &s.tabs[0].pin_url, &s.tabs[0].url), "https://music.youtube.com/");
+    }
+
+    /// The pinned page rides through a save and a load, apart from the page the tab is on.
+    #[test]
+    fn the_pinned_page_survives_the_session_file() {
+        let tab = SavedTab {
+            url: "https://www.youtube.com/watch?v=1".into(),
+            pinned: true,
+            pin_url: "https://music.youtube.com/".into(),
+            ..Default::default()
+        };
+        let back: SavedTab = serde_json::from_str(&serde_json::to_string(&tab).expect("to json")).expect("from json");
+        assert_eq!(back.pin_url, "https://music.youtube.com/");
+        assert_eq!(back.url, "https://www.youtube.com/watch?v=1");
     }
 
     /// A settings.json written before the field existed still loads, and reads as off.
