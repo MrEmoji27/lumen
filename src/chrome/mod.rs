@@ -67,6 +67,8 @@ pub struct UiTab {
     pub muted: bool,
     pub status: &'static str,
     pub agent: bool,
+    /// The person's tab, which they let agents use (right-click). Marked in the sidebar.
+    pub agent_ok: bool,
     pub reader: bool,
     /// InPrivate tab. Marked in the sidebar, never saved anywhere.
     pub private: bool,
@@ -1568,6 +1570,10 @@ impl Inner {
         if t.agent && (pinned || compact) {
             self.gfx.circle(r.right() - 5.0, r.y + 5.0, 3.0, th.accent);
         }
+        if t.agent_ok && (pinned || compact) {
+            // The person's own tab, lent to agents: the AI dot, fainter.
+            self.gfx.circle(r.right() - 5.0, r.y + 5.0, 3.0, th.accent.alpha(0.5));
+        }
         if t.private && (pinned || compact) {
             // A dot, like the AI one, in a colour of its own.
             self.gfx.circle(r.right() - 5.0, r.y + 5.0, 3.0, private_mark(self.theme.dark));
@@ -1604,6 +1610,13 @@ impl Inner {
         if t.agent {
             let b = R::new(right - 24.0, r.y + 9.0, 22.0, 14.0);
             self.gfx.round(b, 4.0, th.accent.alpha(0.22));
+            self.gfx.text("AI", b, Font::ui(9.0, 650).align(Align::Center), th.accent);
+            right = b.x - 4.0;
+        }
+        if t.agent_ok {
+            // Lent to agents: the AI badge as an outline, so it reads as "yours, but open to them".
+            let b = R::new(right - 24.0, r.y + 9.0, 22.0, 14.0);
+            self.gfx.round_stroke(b, 4.0, th.accent.alpha(0.6), 1.0);
             self.gfx.text("AI", b, Font::ui(9.0, 650).align(Align::Center), th.accent);
             right = b.x - 4.0;
         }
@@ -2056,7 +2069,7 @@ impl Inner {
                 let Some(t) = s.tabs.iter().find(|t| t.id == id) else { return };
                 let mut items: Vec<(u32, String)> = vec![(1, if t.pinned { "Unpin".into() } else { "Pin".into() })];
                 if t.pin_away {
-                    items.push((16, "Back to pinned page".into()));
+                    items.push((17, "Back to pinned page".into()));
                 }
                 // Never offer to copy a private URL anywhere it would be written down.
                 if !t.url.is_empty() && !t.private {
@@ -2097,6 +2110,10 @@ impl Inner {
                 if t.audio || t.muted {
                     items.push((3, if t.muted { "Unmute".into() } else { "Mute".into() }));
                 }
+                // Agents stay out of this tab unless the person says so, one tab at a time.
+                if s.settings.agent && !t.agent && !t.private && t.url.starts_with("http") {
+                    items.push((16, if t.agent_ok { "Stop letting agents use this tab".into() } else { "Let agents use this tab".into() }));
+                }
                 // A pin's Close is already an unload, so it gets no second item for it.
                 if !t.pinned && t.id != s.active && (t.status == "live" || t.status == "asleep") {
                     items.push((4, "Unload now".into()));
@@ -2120,7 +2137,8 @@ impl Inner {
                     12 => "split",
                     13 => "translate",
                     14 => "webview2",
-                    16 => "pinBack",
+                    16 => "agentGrant",
+                    17 => "pinBack",
                     15 => {
                         send(&self.proxy, json!({"t": "workspaceAdd"}));
                         return;

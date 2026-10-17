@@ -227,6 +227,7 @@ pub fn fake(s: &mut UiState) {
             muted: false,
             status: "live",
             agent: false,
+            agent_ok: false,
             reader: false,
             private: false,
             split: false,

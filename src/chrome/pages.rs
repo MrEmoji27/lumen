@@ -200,7 +200,8 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("Site permissions", vec![SitePerms]),
         ("AI agent", vec![
             Toggle("agent", "Let AI agents browse", "A local MCP server. Agents open their own tabs, marked AI, and you can stop them any time."),
-            Toggle("agent_shared_profile", "Agents use my profile", "Off: agent tabs have their own cookies and logins. On: they act as you."),
+            Toggle("agent_shared_profile", "Agents use my profile", "Off: agent tabs have their own cookies and logins. On: their own tabs carry your logins. Your tabs stay yours until you right-click one: Let agents use this tab."),
+            Toggle("agent_upload", "Let agents upload files", "Off: agents cannot put files into pages. On: only files in the Lumen agent uploads folder in your home folder (agent_upload_dir in settings.json changes it)."),
             AgentSetup,
         ]),
         ("Privacy", vec![
