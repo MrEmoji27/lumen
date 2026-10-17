@@ -99,6 +99,8 @@ pub struct Agent {
     pub token: String,
     on: Arc<AtomicBool>,
     port: Option<u32>,
+    /// Who is connected. Cleared when the door shuts.
+    sessions: Arc<Sessions>,
 }
 
 impl Agent {
@@ -110,12 +112,16 @@ impl Agent {
             let _ = std::fs::write(&path, &t);
             t
         });
-        Agent { token, on: Arc::new(AtomicBool::new(false)), port: None }
+        Agent { token, on: Arc::new(AtomicBool::new(false)), port: None, sessions: Arc::new(Sessions::new(session_ttl())) }
     }
 
     /// Turn the door on or off. The listener starts once and stays; off means it refuses.
     pub fn set(&mut self, on: bool, port: u32, proxy: &EventLoopProxy<Ev>) {
         self.on.store(on, Ordering::SeqCst);
+        if !on {
+            // A shut door forgets its sessions: ids from before do not work when it opens again.
+            self.sessions.clear();
+        }
         if on {
             // lumen-agent answers the MCP handshake from this file while Lumen is not running,
             // so an agent's session can start without starting a browser.
@@ -129,8 +135,10 @@ impl Agent {
                 token: self.token.clone(),
                 port,
                 proxy: proxy.clone(),
-                names: Mutex::new(HashMap::new()),
+                sessions: self.sessions.clone(),
             });
+            let sweeper = shared.clone();
+            thread::Builder::new().name("lumen-agent-sweep".into()).spawn(move || sweep(sweeper)).ok();
             thread::Builder::new()
                 .name("lumen-agent".into())
                 .spawn(move || serve(shared))
@@ -154,13 +162,141 @@ impl Agent {
     }
 }
 
+/// `n` bytes from the OS random generator, as hex. Never zeros after a failed call: if the
+/// system generator says no, fall back to the standard library's per-process random keys.
 fn random_hex(n: usize) -> String {
     let mut b = vec![0u8; n];
-    unsafe {
+    let ok = unsafe {
         use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
-        let _ = BCryptGenRandom(None, &mut b, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        BCryptGenRandom(None, &mut b, BCRYPT_USE_SYSTEM_PREFERRED_RNG).is_ok()
+    };
+    if !ok {
+        use std::hash::{BuildHasher, Hasher};
+        for chunk in b.chunks_mut(8) {
+            let r = std::collections::hash_map::RandomState::new().build_hasher().finish().to_le_bytes();
+            chunk.copy_from_slice(&r[..chunk.len()]);
+        }
     }
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+// ---------------------------------------------------------------- sessions
+
+/// A session id is 24 random bytes (192 bits). Only Lumen makes them, at `initialize`.
+const SESSION_BYTES: usize = 24;
+/// Most sessions at once. An agent that opens more than this is looping.
+const MAX_SESSIONS: usize = 64;
+
+/// How long a session may sit silent before Lumen closes its tabs. A bridge that was killed
+/// never says goodbye; this is how its tabs go. Debug builds read LUMEN_AGENT_SESSION_SECS,
+/// so a test need not wait 15 minutes.
+fn session_ttl() -> Duration {
+    if cfg!(debug_assertions)
+        && let Some(secs) = std::env::var("LUMEN_AGENT_SESSION_SECS").ok().and_then(|v| v.parse::<u64>().ok())
+    {
+        return Duration::from_secs(secs.max(1));
+    }
+    Duration::from_secs(15 * 60)
+}
+
+struct Session {
+    /// What the client called itself. A label for people to read, never a key.
+    name: String,
+    last: Instant,
+    /// Requests being answered right now (a handoff waiting is one). A busy session never expires.
+    busy: u32,
+}
+
+/// The sessions Lumen issued. A request names a session by its id and by nothing else.
+pub struct Sessions {
+    map: Mutex<HashMap<String, Session>>,
+    ttl: Duration,
+}
+
+impl Sessions {
+    pub fn new(ttl: Duration) -> Sessions {
+        Sessions { map: Mutex::new(HashMap::new()), ttl }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
+        self.map.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A new session. The label is cleaned: no control characters, 40 characters at most.
+    pub fn issue(&self, label: &str, now: Instant) -> Result<String, String> {
+        let name: String = label.chars().filter(|c| !c.is_control()).take(40).collect();
+        let mut map = self.lock();
+        if map.len() >= MAX_SESSIONS {
+            return Err(format!("{MAX_SESSIONS} sessions are open already; close some first"));
+        }
+        let id = random_hex(SESSION_BYTES);
+        map.insert(id.clone(), Session { name: if name.trim().is_empty() { "agent".into() } else { name }, last: now, busy: 0 });
+        Ok(id)
+    }
+
+    /// A request starts. The label if the id is one Lumen issued and still holds; None if not.
+    fn begin(&self, id: &str, now: Instant) -> Option<String> {
+        let mut map = self.lock();
+        let s = map.get_mut(id)?;
+        s.busy += 1;
+        s.last = now;
+        Some(s.name.clone())
+    }
+
+    fn finish(&self, id: &str, now: Instant) {
+        if let Some(s) = self.lock().get_mut(id) {
+            s.busy = s.busy.saturating_sub(1);
+            s.last = now;
+        }
+    }
+
+    /// The client said goodbye. Its label, if the session existed.
+    fn remove(&self, id: &str) -> Option<String> {
+        self.lock().remove(id).map(|s| s.name)
+    }
+
+    /// Sessions silent for longer than the limit with nothing in flight: taken out and returned
+    /// as (id, label), for the caller to close their tabs.
+    pub fn expire(&self, now: Instant) -> Vec<(String, String)> {
+        let mut map = self.lock();
+        let dead: Vec<String> = map.iter().filter(|(_, s)| s.busy == 0 && now.saturating_duration_since(s.last) > self.ttl).map(|(id, _)| id.clone()).collect();
+        dead.into_iter().filter_map(|id| map.remove(&id).map(|s| (id, s.name))).collect()
+    }
+
+    pub fn clear(&self) {
+        self.lock().clear();
+    }
+}
+
+/// Keeps a request counted as busy until it is answered, whichever way it ends.
+struct Busy<'a> {
+    sessions: &'a Sessions,
+    id: String,
+}
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.sessions.finish(&self.id, Instant::now());
+    }
+}
+
+/// Closes the tabs of sessions that went quiet.
+fn sweep(sh: Arc<Shared>) {
+    let tick = (sh.sessions.ttl / 4).clamp(Duration::from_millis(250), Duration::from_secs(10));
+    loop {
+        thread::sleep(tick);
+        for (session, name) in sh.sessions.expire(Instant::now()) {
+            let _ = call(&sh.proxy, &Who { session, name }, Op::End);
+        }
+    }
+}
+
+/// Host and Origin must be this very door. Anything else is a web page pretending to be local,
+/// or a DNS name pointed at 127.0.0.1. Exact match: no suffix tricks, and "null" (a sandboxed
+/// frame) is not welcome.
+fn origin_ok(host: &str, origin: &str, port: u32) -> bool {
+    let local = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    local.iter().any(|l| l == host) && (origin.is_empty() || local.iter().any(|l| origin == format!("http://{l}")))
 }
 
 struct Shared {
@@ -168,8 +304,7 @@ struct Shared {
     token: String,
     port: u32,
     proxy: EventLoopProxy<Ev>,
-    /// Session id -> the client's name ("claude-code", "opencode"...).
-    names: Mutex<HashMap<String, String>>,
+    sessions: Arc<Sessions>,
 }
 
 fn serve(sh: Arc<Shared>) {
@@ -212,14 +347,13 @@ fn handle(stream: TcpStream, sh: &Shared) {
                 "authorization" => auth = v,
                 "host" => host = v,
                 "origin" => origin = v,
-                "mcp-session-id" | "lumen-session" => session = v.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(64).collect(),
+                "mcp-session-id" => session = v.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(64).collect(),
                 _ => {}
             }
         }
     }
     // A web page cannot reach us by pretending to be localhost.
-    let local = [format!("127.0.0.1:{}", sh.port), format!("localhost:{}", sh.port)];
-    if !local.contains(&host) || !(origin.is_empty() || origin == "null" || local.iter().any(|l| origin.ends_with(l))) {
+    if !origin_ok(&host, &origin, sh.port) {
         return respond(stream, "403 Forbidden", "", "");
     }
     if !sh.on.load(Ordering::SeqCst) {
@@ -232,14 +366,18 @@ fn handle(stream: TcpStream, sh: &Shared) {
     if path != "/mcp" {
         return respond(stream, "404 Not Found", "", "");
     }
-    let name_of = |s: &str| sh.names.lock().ok().and_then(|m| m.get(s).cloned()).unwrap_or_else(|| "agent".into());
     if method == "DELETE" {
-        // The client is done: its tabs go with it.
-        if !session.is_empty() {
-            let who = Who { name: name_of(&session), session };
-            let _ = call(&sh.proxy, &who, Op::End);
+        // The client is done: its tabs go with it. An id Lumen never issued ends nothing.
+        if session.is_empty() {
+            return respond(stream, "400 Bad Request", "", "");
         }
-        return respond(stream, "200 OK", "", "");
+        return match sh.sessions.remove(&session) {
+            Some(name) => {
+                let _ = call(&sh.proxy, &Who { session, name }, Op::End);
+                respond(stream, "200 OK", "", "")
+            }
+            None => respond(stream, "404 Not Found", "", ""),
+        };
     }
     if method != "POST" {
         // No server-to-client stream; plain request and response is enough.
@@ -255,24 +393,40 @@ fn handle(stream: TcpStream, sh: &Shared) {
     let Ok(msg) = serde_json::from_slice::<Value>(&body) else {
         return respond(stream, "400 Bad Request", "", &rpc_err(Value::Null, -32700, "parse error").to_string());
     };
-    // A new session at initialize, unless the client brought its own name for one.
+    let id = msg.get("id").cloned();
+    // Only Lumen makes session ids, and only here. Whatever id the client sent with an
+    // initialize is ignored; the client's name is a label for people, never a key.
     let mut extra = String::new();
+    let name;
+    let _busy;
     if msg["method"] == "initialize" {
-        if session.is_empty() {
-            session = random_hex(12);
-        }
-        let name = msg["params"]["clientInfo"]["name"].as_str().unwrap_or("agent").chars().take(40).collect::<String>();
-        if let Ok(mut m) = sh.names.lock() {
-            m.insert(session.clone(), name);
+        let label = msg["params"]["clientInfo"]["name"].as_str().unwrap_or("agent");
+        match sh.sessions.issue(label, Instant::now()) {
+            Ok(s) => session = s,
+            Err(e) => return respond(stream, "429 Too Many Requests", "", &rpc_err(id.unwrap_or(Value::Null), -32000, &e).to_string()),
         }
         extra = format!("Mcp-Session-Id: {session}\r\n");
+        name = sh.sessions.begin(&session, Instant::now()).unwrap_or_default();
+        _busy = Busy { sessions: &sh.sessions, id: session.clone() };
+    } else if session.is_empty() && msg["method"] == "ping" {
+        // Is anyone home? The bridge asks this before it has a session. No tab is reachable from here.
+        let Some(id) = id else { return respond(stream, "202 Accepted", "", "") };
+        return respond(stream, "200 OK", "", &json!({"jsonrpc": "2.0", "id": id, "result": {}}).to_string());
+    } else {
+        let id = id.clone().unwrap_or(Value::Null);
+        if session.is_empty() {
+            return respond(stream, "400 Bad Request", "", &rpc_err(id, -32600, "no Mcp-Session-Id: send initialize first and use the id it returns").to_string());
+        }
+        match sh.sessions.begin(&session, Instant::now()) {
+            Some(n) => name = n,
+            // The MCP spec: 404 for an id the server does not know, and the client starts over.
+            None => return respond(stream, "404 Not Found", "", &rpc_err(id, -32001, "unknown or expired session: send initialize again").to_string()),
+        }
+        _busy = Busy { sessions: &sh.sessions, id: session.clone() };
     }
-    if session.is_empty() {
-        session = "default".into();
-    }
-    let who = Who { name: name_of(&session), session };
+    let who = Who { name, session };
     // Notifications get no answer.
-    let Some(id) = msg.get("id").cloned() else { return respond(stream, "202 Accepted", &extra, "") };
+    let Some(id) = id else { return respond(stream, "202 Accepted", &extra, "") };
     let out = match msg["method"].as_str().unwrap_or("") {
         "initialize" => json!({"jsonrpc": "2.0", "id": id, "result": {
             "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
@@ -1084,6 +1238,102 @@ mod tests {
         assert_eq!(key_spec("Shift+Tab").unwrap().4, 8);
         assert!(key_spec("Hyper+x").is_err());
         assert!(key_spec("banana").is_err());
+    }
+
+    #[test]
+    fn session_ids_are_long_random_and_only_issued_here() {
+        let s = Sessions::new(Duration::from_secs(60));
+        let now = Instant::now();
+        let ids: Vec<String> = (0..20).map(|_| s.issue("claude-code", now).unwrap()).collect();
+        for id in &ids {
+            // 24 bytes = 192 bits, hex.
+            assert_eq!(id.len(), SESSION_BYTES * 2);
+            assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(id.chars().any(|c| c != '0'), "never all zero");
+        }
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "no repeats");
+        // A name, a guess, an empty id and another agent's label are not sessions.
+        for bad in ["claude-code", "default", "cli", "", "0000", &ids[0][..40]] {
+            assert!(s.begin(bad, now).is_none(), "{bad:?} must not open a session");
+        }
+        assert_eq!(s.begin(&ids[0], now).as_deref(), Some("claude-code"));
+    }
+
+    #[test]
+    fn a_label_is_only_a_label() {
+        let s = Sessions::new(Duration::from_secs(60));
+        let now = Instant::now();
+        let a = s.issue("same-name", now).unwrap();
+        let b = s.issue("same-name", now).unwrap();
+        assert_ne!(a, b, "two clients with one name are two sessions");
+        let c = s.issue("evil\n\tname with a very long tail that goes on and on and on", now).unwrap();
+        let label = s.begin(&c, now).unwrap();
+        assert!(label.chars().count() <= 40 && !label.chars().any(char::is_control), "{label:?}");
+        assert_eq!(s.begin(&s.issue("", now).unwrap(), now).as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn a_quiet_session_expires_a_busy_one_does_not() {
+        let s = Sessions::new(Duration::from_secs(900));
+        let t0 = Instant::now();
+        let quiet = s.issue("quiet", t0).unwrap();
+        let busy = s.issue("waiting", t0).unwrap();
+        let chatty = s.issue("chatty", t0).unwrap();
+        s.begin(&busy, t0).unwrap(); // a handoff, still waiting for the person
+        // Fourteen minutes: nobody has gone yet.
+        assert!(s.expire(t0 + Duration::from_secs(14 * 60)).is_empty());
+        // The chatty one speaks again at minute 14 and finishes.
+        s.begin(&chatty, t0 + Duration::from_secs(14 * 60)).unwrap();
+        s.finish(&chatty, t0 + Duration::from_secs(14 * 60));
+        // Minute 16: the quiet one is gone; the busy and the chatty are not.
+        let gone = s.expire(t0 + Duration::from_secs(16 * 60));
+        assert_eq!(gone, vec![(quiet.clone(), "quiet".to_string())]);
+        assert!(s.begin(&quiet, t0).is_none(), "an expired id is unknown from then on");
+        // The handoff ends at minute 16. The chatty one, last heard at 14, goes after 29;
+        // the other counts its quiet from 16, so it is still here at 30.
+        s.finish(&busy, t0 + Duration::from_secs(16 * 60));
+        let gone: Vec<String> = s.expire(t0 + Duration::from_secs(30 * 60)).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(gone, vec![chatty]);
+        let gone: Vec<String> = s.expire(t0 + Duration::from_secs(32 * 60)).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(gone, vec![busy]);
+    }
+
+    #[test]
+    fn goodbye_and_a_shut_door_forget_sessions() {
+        let s = Sessions::new(Duration::from_secs(60));
+        let now = Instant::now();
+        let a = s.issue("a", now).unwrap();
+        let b = s.issue("b", now).unwrap();
+        assert_eq!(s.remove(&a).as_deref(), Some("a"));
+        assert!(s.remove(&a).is_none(), "second goodbye finds nothing");
+        s.clear();
+        assert!(s.begin(&b, now).is_none());
+    }
+
+    #[test]
+    fn there_is_a_limit_to_sessions() {
+        let s = Sessions::new(Duration::from_secs(60));
+        let now = Instant::now();
+        for _ in 0..MAX_SESSIONS {
+            s.issue("x", now).unwrap();
+        }
+        assert!(s.issue("one more", now).is_err());
+    }
+
+    #[test]
+    fn host_and_origin_must_be_exactly_this_door() {
+        assert!(origin_ok("127.0.0.1:47615", "", 47615));
+        assert!(origin_ok("localhost:47615", "http://localhost:47615", 47615));
+        assert!(origin_ok("127.0.0.1:47615", "http://127.0.0.1:47615", 47615));
+        for host in ["evil.com", "evil.com:47615", "127.0.0.1", "127.0.0.1:1", "127.0.0.1:47615.evil.com", ""] {
+            assert!(!origin_ok(host, "", 47615), "host {host:?}");
+        }
+        for origin in ["http://evil.com", "null", "https://127.0.0.1:47615", "http://evil-127.0.0.1:47615", "http://127.0.0.1:47615.evil.com", "http://127.0.0.1:47615/x"] {
+            assert!(!origin_ok("127.0.0.1:47615", origin, 47615), "origin {origin:?}");
+        }
     }
 
     #[test]
