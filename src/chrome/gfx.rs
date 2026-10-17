@@ -9,7 +9,7 @@ use windows::{
         Graphics::{
             Direct2D::{Common::*, *},
             DirectWrite::*,
-            Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+            Dxgi::Common::{DXGI_FORMAT_A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM},
             Imaging::*,
         },
         System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
@@ -19,6 +19,8 @@ use windows::{
 use windows_numerics::Vector2;
 
 use super::theme::Color;
+
+mod icons;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct R {
@@ -110,6 +112,13 @@ pub struct Gfx {
     ellipsis: RefCell<HashMap<Font, IDWriteInlineObject>>,
     /// Decoded favicons, per tab id. Dropped when the target is lost.
     pub bitmaps: HashMap<u64, ID2D1Bitmap>,
+    /// Lucide icons as alpha masks for the current target, tinted when drawn.
+    /// Key: (icon index, pixel size, stroke x100). Bounded; dropped with the target.
+    icon_masks: RefCell<HashMap<(usize, u32, u32), ID2D1Bitmap>>,
+    /// The SVG rasterizer: made when a mask is missing, dropped at the end of that frame.
+    raster: RefCell<Option<icons::Rasterizer>>,
+    /// Rasterizing failed once: draw the hand-made icons from now on instead of retrying every frame.
+    raster_failed: std::cell::Cell<bool>,
     pub dpi: f32,
     /// Debug shots: the window's target and brush, set aside while a WIC target draws.
     #[cfg(debug_assertions)]
@@ -121,6 +130,7 @@ struct Parked {
     target: Option<ID2D1RenderTarget>,
     brush: Option<ID2D1SolidColorBrush>,
     bitmaps: HashMap<u64, ID2D1Bitmap>,
+    icon_masks: HashMap<(usize, u32, u32), ID2D1Bitmap>,
     shot: IWICBitmap,
 }
 
@@ -178,6 +188,9 @@ impl Gfx {
                 formats: RefCell::new(HashMap::new()),
                 ellipsis: RefCell::new(HashMap::new()),
                 bitmaps: HashMap::new(),
+                icon_masks: RefCell::new(HashMap::new()),
+                raster: RefCell::new(None),
+                raster_failed: std::cell::Cell::new(false),
                 dpi,
                 #[cfg(debug_assertions)]
                 parked: None,
@@ -208,6 +221,7 @@ impl Gfx {
                 self.target = t.cast::<ID2D1RenderTarget>().ok();
                 self.hwnd_rt = Some(t);
                 self.bitmaps.clear();
+                self.icon_masks.borrow_mut().clear();
             }
         }
         true
@@ -237,6 +251,8 @@ impl Gfx {
     }
 
     pub fn end(&mut self) {
+        // The SVG rasterizer only lives for the frame that needed it.
+        self.raster.take();
         if let Some(t) = &self.target {
             let r = unsafe { t.EndDraw(None, None) };
             // Device lost (driver reset, sleep). Rebuild on the next frame.
@@ -245,6 +261,7 @@ impl Gfx {
                 self.hwnd_rt = None;
                 self.brush = None;
                 self.bitmaps.clear();
+                self.icon_masks.borrow_mut().clear();
             }
         }
     }
@@ -509,8 +526,76 @@ impl Gfx {
 
     // ------------------------------------------------------------ icons
 
-    /// Line icons on a 16-unit grid, drawn at (x, y) with size `s` DIPs.
+    /// An icon by Lumen's name, drawn at (x, y) with size `s` DIPs. Lucide where the set has
+    /// it (see `icons.rs`), hand-made geometry for the rest.
     pub fn icon(&self, name: &str, x: f32, y: f32, s: f32, c: Color) {
+        if self.lucide(name, x, y, s, c) {
+            return;
+        }
+        self.geometry_icon(name, x, y, s, c);
+    }
+
+    /// The Lucide mask for (icon, pixel size, stroke): from the cache, or rasterized now.
+    fn icon_mask(&self, idx: usize, px: u32, stroke100: u32) -> Option<ID2D1Bitmap> {
+        let key = (idx, px, stroke100);
+        if let Some(b) = self.icon_masks.borrow().get(&key) {
+            return Some(b.clone());
+        }
+        if self.raster_failed.get() {
+            return None;
+        }
+        let entry = &icons::TABLE[idx];
+        let mut raster = self.raster.borrow_mut();
+        if raster.is_none() {
+            *raster = icons::Rasterizer::new(&self.d2d);
+        }
+        let alpha = raster.as_ref().and_then(|r| r.alpha(&entry.source(stroke100 as f32 / 100.0), px));
+        let Some(alpha) = alpha else {
+            self.raster_failed.set(true);
+            return None;
+        };
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_A8_UNORM, alphaMode: D2D1_ALPHA_MODE_STRAIGHT },
+            dpiX: self.dpi,
+            dpiY: self.dpi,
+        };
+        let bmp = unsafe {
+            self.target.as_ref()?.CreateBitmap(D2D_SIZE_U { width: px, height: px }, Some(alpha.as_ptr() as _), px, &props).ok()?
+        };
+        let mut masks = self.icon_masks.borrow_mut();
+        if masks.len() >= ICON_CACHE_MAX {
+            masks.clear();
+        }
+        masks.insert(key, bmp.clone());
+        Some(bmp)
+    }
+
+    /// Draw a Lucide icon snapped to whole device pixels, so its strokes stay crisp.
+    fn lucide(&self, name: &str, x: f32, y: f32, s: f32, c: Color) -> bool {
+        let Some((idx, entry)) = icons::find(name) else { return false };
+        let size = s * entry.scale;
+        let k = self.dpi / 96.0;
+        let px = (size * k).round().clamp(8.0, 128.0) as u32;
+        let stroke100 = (icons::stroke24(size) * 100.0).round() as u32;
+        let Some(mask) = self.icon_mask(idx, px, stroke100) else { return false };
+        let d = px as f32 / k;
+        // Centred in the s-by-s box, then onto whole device pixels.
+        let (left, top) = (((x + (s - d) / 2.0) * k).round() / k, ((y + (s - d) / 2.0) * k).round() / k);
+        let dest = D2D_RECT_F { left, top, right: left + d, bottom: top + d };
+        let src = D2D_RECT_F { left: 0.0, top: 0.0, right: d, bottom: d };
+        let t = self.t();
+        unsafe {
+            // Opacity masks only work unantialiased; the mask is already pixel-exact.
+            t.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            t.FillOpacityMask(&mask, self.b(c), D2D1_OPACITY_MASK_CONTENT_GRAPHICS, Some(&dest), Some(&src));
+            t.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        }
+        true
+    }
+
+    /// Line icons on a 16-unit grid, drawn at (x, y) with size `s` DIPs. Only for names the
+    /// Lucide set lacks; see `icons::GEOMETRY`.
+    fn geometry_icon(&self, name: &str, x: f32, y: f32, s: f32, c: Color) {
         let k = s / 16.0;
         let p = |px: f32, py: f32| (x + px * k, y + py * k);
         let w = 1.5 * k.max(0.9);
@@ -644,6 +729,9 @@ impl Gfx {
     }
 }
 
+/// Most icon masks kept at once (a few dozen are ever in use; this only bounds a bug).
+const ICON_CACHE_MAX: usize = 128;
+
 const SYSTEM_UI: &str = "Segoe UI Variable Text";
 
 /// Every family name in a collection, in its first listed language.
@@ -726,6 +814,7 @@ impl Gfx {
                 target: self.target.replace(t),
                 brush: std::mem::replace(&mut self.brush, brush),
                 bitmaps: std::mem::take(&mut self.bitmaps),
+                icon_masks: self.icon_masks.take(),
                 shot: bmp,
             });
         }
@@ -739,6 +828,8 @@ impl Gfx {
         self.target = p.target;
         self.brush = p.brush;
         self.bitmaps = p.bitmaps;
+        self.raster.take();
+        *self.icon_masks.borrow_mut() = p.icon_masks;
         ok && self.write_png(&p.shot, path, crop).is_some()
     }
 
