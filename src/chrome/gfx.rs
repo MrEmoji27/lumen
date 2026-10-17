@@ -55,6 +55,7 @@ impl R {
 pub enum Face {
     Ui,
     Serif,
+    Mono,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -78,8 +79,9 @@ impl Font {
     pub const fn ui(size: f32, weight: u32) -> Font {
         Font { face: Face::Ui, size10: (size * 10.0) as u32, weight, italic: false, align: Align::Left }
     }
-    pub const fn serif(size: f32) -> Font {
-        Font { face: Face::Serif, size10: (size * 10.0) as u32, weight: 400, italic: false, align: Align::Left }
+    /// The display face at a chosen weight (the "title weight" setting).
+    pub const fn serif_w(size: f32, weight: u32) -> Font {
+        Font { face: Face::Serif, size10: (size * 10.0) as u32, weight, italic: false, align: Align::Left }
     }
     pub const fn italic(mut self) -> Font {
         self.italic = true;
@@ -98,8 +100,11 @@ pub struct Gfx {
     wic: Option<IWICImagingFactory>,
     /// Every bundled font, unpacked from WOFF2 into one in-memory collection.
     bundled: Option<IDWriteFontCollection1>,
+    /// Every family Windows has installed, as DirectWrite names them. Read once.
+    installed: Vec<String>,
     ui_family: String,
     serif_family: String,
+    mono_family: String,
     /// Family names as DirectWrite sees them in the bundle (font files name themselves oddly).
     families: Vec<String>,
     /// What every draw call goes to: the window's target, or (debug shots) a WIC bitmap's.
@@ -175,12 +180,14 @@ impl Gfx {
             Ok(Gfx {
                 hwnd,
                 d2d,
-                dw,
+                dw: dw.clone(),
                 wic,
                 families: family_names(bundled.as_ref()),
+                installed: system_families(&dw),
                 bundled,
                 ui_family: SYSTEM_UI.into(),
                 serif_family: "Instrument Serif".into(),
+                mono_family: MONO_FALLBACK.into(),
                 target: None,
                 hwnd_rt: None,
                 brush: None,
@@ -374,30 +381,76 @@ impl Gfx {
 
     // ------------------------------------------------------------- text
 
-    /// Choose the interface and display families by setting key. Clears cached formats on change.
-    pub fn set_families(&mut self, ui: &str, display: &str) {
-        // Match by keyword against the names the bundle really has.
-        let find = |word: &str, fallback: &str| -> String {
-            self.families.iter().find(|f| f.contains(word)).cloned().unwrap_or_else(|| fallback.to_string())
-        };
-        let ui = match ui {
-            "instrument" => find("Instrument Sans", SYSTEM_UI),
-            "figtree" => find("Figtree", SYSTEM_UI),
-            "atkinson" => find("Atkinson", SYSTEM_UI),
-            _ => SYSTEM_UI.to_string(),
-        };
-        let serif = match display {
-            "fraunces" => find("Fraunces", "Instrument Serif"),
-            "newsreader" => find("Newsreader", "Instrument Serif"),
-            _ => find("Instrument Serif", "Georgia"),
-        };
-        let (ui, serif) = (ui.as_str(), serif.as_str());
-        if ui != self.ui_family || serif != self.serif_family {
+    /// Choose the interface, display and monospace families by setting. A key
+    /// ("segoe", "instrument", "cascadia"...) picks a bundled font or the system
+    /// default; any other name is looked up among the fonts Windows has
+    /// installed. Clears cached formats on change.
+    pub fn set_families(&mut self, ui: &str, display: &str, mono: &str) {
+        let ui = self.resolve(ui, Face::Ui);
+        let serif = self.resolve(display, Face::Serif);
+        let mono = self.resolve(mono, Face::Mono);
+        let (ui, serif, mono) = (ui.as_str(), serif.as_str(), mono.as_str());
+        if ui != self.ui_family || serif != self.serif_family || mono != self.mono_family {
             self.ui_family = ui.into();
             self.serif_family = serif.into();
+            self.mono_family = mono.into();
             self.formats.borrow_mut().clear();
             self.ellipsis.borrow_mut().clear();
         }
+    }
+
+    /// A setting value to a family DirectWrite knows: a bundled key, an installed
+    /// family (by its own spelling), or the face's fallback.
+    fn resolve(&self, key: &str, face: Face) -> String {
+        let key = key.trim();
+        if let Some(bundled_key) = keyword(key) {
+            return self.bundled_named(bundled_key).unwrap_or_else(|| {
+                // A bundled family that will not load: Windows' own, or the monospace fallback.
+                match face {
+                    Face::Ui => SYSTEM_UI.into(),
+                    Face::Serif => SERIF_FALLBACK.into(),
+                    Face::Mono => self.installed_named(MONO_FALLBACK).unwrap_or_else(|| SYSTEM_UI.into()),
+                }
+            });
+        }
+        if key.is_empty() {
+            return self.fallback(face);
+        }
+        // The monospace keys name fonts that ship with Windows, not with Lumen.
+        if face == Face::Mono {
+            return self.installed_named(key).unwrap_or_else(|| self.installed_named(MONO_FALLBACK).unwrap_or_else(|| SYSTEM_UI.into()));
+        }
+        // A bundled name said directly ("Instrument Sans").
+        if let Some(f) = self.bundled_named(key) {
+            return f;
+        }
+        // An installed family, spelled the way Windows spells it.
+        self.installed_named(key).unwrap_or_else(|| self.fallback(face))
+    }
+
+    fn fallback(&self, face: Face) -> String {
+        match face {
+            Face::Ui => SYSTEM_UI.into(),
+            Face::Serif => self.bundled_named("Instrument Serif").unwrap_or_else(|| SERIF_FALLBACK.into()),
+            Face::Mono => self.installed_named(MONO_FALLBACK).unwrap_or_else(|| SYSTEM_UI.into()),
+        }
+    }
+
+    /// A family name in the bundle, matched by keyword (the files name themselves
+    /// in their own language).
+    fn bundled_named(&self, word: &str) -> Option<String> {
+        self.families.iter().find(|f| f.contains(word)).cloned()
+    }
+
+    /// A family name Windows has installed, matched without case.
+    fn installed_named(&self, name: &str) -> Option<String> {
+        self.installed.iter().find(|f| f.eq_ignore_ascii_case(name)).cloned()
+    }
+
+    /// Every installed family name, in the order DirectWrite lists them. For the
+    /// settings' searchable font picker.
+    pub fn installed_families(&self) -> &[String] {
+        &self.installed
     }
 
     /// The interface family in use ("Segoe UI Variable Text" when the system one).
@@ -412,17 +465,15 @@ impl Gfx {
         unsafe {
             // System font from the system collection; anything else from the bundle.
             let bundled = || self.bundled.as_ref().and_then(|c| c.cast::<IDWriteFontCollection>().ok());
-            let (family, coll): (HSTRING, Option<IDWriteFontCollection>) = match f.face {
-                Face::Ui if self.ui_family == SYSTEM_UI => (HSTRING::from(SYSTEM_UI), None),
-                Face::Ui => match bundled() {
-                    Some(c) => (HSTRING::from(self.ui_family.as_str()), Some(c)),
-                    None => (HSTRING::from(SYSTEM_UI), None),
-                },
-                Face::Serif => match bundled() {
-                    Some(c) => (HSTRING::from(self.serif_family.as_str()), Some(c)),
-                    None => (HSTRING::from("Georgia"), None),
-                },
+            let name = match f.face {
+                Face::Ui => self.ui_family.as_str(),
+                Face::Serif => self.serif_family.as_str(),
+                Face::Mono => self.mono_family.as_str(),
             };
+            // A family the bundle carries is looked up in it; every other name
+            // (Windows' own fonts) comes from the system collection.
+            let coll = if self.families.iter().any(|f| f == name) { bundled() } else { None };
+            let (family, coll): (HSTRING, Option<IDWriteFontCollection>) = (HSTRING::from(name), coll);
             let fmt = self
                 .dw
                 .CreateTextFormat(
@@ -522,6 +573,41 @@ impl Gfx {
         unsafe {
             self.t().DrawBitmap(b, Some(&r.d2d()), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None)
         };
+    }
+
+    /// Image file bytes (PNG, JPEG, BMP, GIF) to a bitmap cached under `key`, at
+    /// no more than `max_px` on the long side. Drawing a small bitmap enlarged is
+    /// the cheap, dependable blur: WIC does the work once, not every frame.
+    pub fn bitmap_scaled(&mut self, key: u64, bytes: &[u8], max_px: u32) -> Option<ID2D1Bitmap> {
+        if let Some(b) = self.bitmaps.get(&key) {
+            return Some(b.clone());
+        }
+        let wic = self.wic.as_ref()?;
+        let t = self.target.as_ref()?;
+        unsafe {
+            let stream = wic.CreateStream().ok()?;
+            stream.InitializeFromMemory(bytes).ok()?;
+            let dec = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+            let frame = dec.GetFrame(0).ok()?;
+            let conv = wic.CreateFormatConverter().ok()?;
+            conv.Initialize(&frame, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeMedianCut)
+                .ok()?;
+            let (mut w, mut h) = (0u32, 0u32);
+            conv.GetSize(&mut w, &mut h).ok()?;
+            let bmp = if w > max_px || h > max_px {
+                let k = max_px as f32 / w.max(h).max(1) as f32;
+                let scaler = wic.CreateBitmapScaler().ok()?;
+                // Fant: a soft downsample, which is what the blur wants.
+                scaler
+                    .Initialize(&conv, ((w as f32 * k) as u32).max(1), ((h as f32 * k) as u32).max(1), WICBitmapInterpolationModeFant)
+                    .ok()?;
+                t.CreateBitmapFromWicBitmap(&scaler, None).ok()?
+            } else {
+                t.CreateBitmapFromWicBitmap(&conv, None).ok()?
+            };
+            self.bitmaps.insert(key, bmp.clone());
+            Some(bmp)
+        }
     }
 
     // ------------------------------------------------------------ icons
@@ -733,6 +819,38 @@ impl Gfx {
 const ICON_CACHE_MAX: usize = 128;
 
 const SYSTEM_UI: &str = "Segoe UI Variable Text";
+/// When the bundle will not give a serif, Windows does.
+const SERIF_FALLBACK: &str = "Georgia";
+/// The monospace the figures are set in when the setting says "cascadia" or
+/// names a font this PC does not have.
+const MONO_FALLBACK: &str = "Cascadia Mono";
+
+/// The bundled fonts' keywords, in the settings' words.
+fn keyword(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "instrument" => "Instrument",
+        "figtree" => "Figtree",
+        "atkinson" => "Atkinson",
+        "fraunces" => "Fraunces",
+        "newsreader" => "Newsreader",
+        "segoe" => return None,
+        "cascadia" => MONO_FALLBACK,
+        _ => return None,
+    })
+}
+
+/// Every family name Windows has installed.
+fn system_families(dw: &IDWriteFactory5) -> Vec<String> {
+    unsafe {
+        let mut c: Option<IDWriteFontCollection1> = None;
+        let _ = dw.GetSystemFontCollection(true, &mut c, false);
+        let names = family_names(c.as_ref());
+        if cfg!(debug_assertions) {
+            let _ = std::fs::write(crate::store::data_dir().join("fonts.log"), names.join("\n"));
+        }
+        names
+    }
+}
 
 /// Every family name in a collection, in its first listed language.
 fn family_names(c: Option<&IDWriteFontCollection1>) -> Vec<String> {
@@ -750,7 +868,7 @@ fn family_names(c: Option<&IDWriteFontCollection1>) -> Vec<String> {
         }
     }
     if cfg!(debug_assertions) {
-        let _ = std::fs::write(crate::store::data_dir().join("fonts.log"), out.join("\n"));
+        let _ = std::fs::write(crate::store::data_dir().join("bundle-fonts.log"), out.join("\n"));
     }
     out
 }

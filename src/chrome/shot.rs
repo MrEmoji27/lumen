@@ -266,7 +266,7 @@ pub fn fake(s: &mut UiState) {
         s.listen = "playing";
         s.kdbx = vec!["doc.rust-lang.org".into()];
     }
-    if fake_has("marks") && s.panel == "bookmarks" {
+    if fake_has("marks") && (s.panel == "bookmarks" || s.settings.bm_bar) {
         let m = |id: u64, title: &str, url: &str, folder: &str| UiMark { id, title: title.into(), url: url.into(), folder: folder.into() };
         s.bm_folders = vec!["Work".into(), "Chrome".into(), "Reading".into()];
         s.bookmarks = vec![

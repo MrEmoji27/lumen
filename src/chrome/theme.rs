@@ -72,9 +72,35 @@ fn palette(name: &str) -> (f32, f32, f32, f32, f32) {
     }
 }
 
+/// The person's own colours, from settings. None means the palette's own.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Custom {
+    /// The window background: the space around the page.
+    pub bg: Option<Color>,
+    /// The sidebar and toolbar surface.
+    pub side: Option<Color>,
+    /// Cards, fields and other raised surfaces.
+    pub surface: Option<Color>,
+    pub text: Option<Color>,
+    pub dim: Option<Color>,
+}
+
+impl Custom {
+    pub fn is_empty(&self) -> bool {
+        self.bg.is_none() && self.side.is_none() && self.surface.is_none() && self.text.is_none() && self.dim.is_none()
+    }
+    /// Hex strings in (empty = none). Anything unreadable is ignored.
+    pub fn from_hex(bg: &str, side: &str, surface: &str, text: &str, dim: &str) -> Custom {
+        let c = |s: &str| Color::from_hex(s);
+        Custom { bg: c(bg), side: c(side), surface: c(surface), text: c(text), dim: c(dim) }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub dark: bool,
+    /// The sidebar and toolbar surface. The same as `bg` until the person parts them.
+    pub side: Color,
     pub bg: Color,
     pub raise: Color,
     pub hover: Color,
@@ -91,16 +117,61 @@ pub struct Theme {
 
 impl Theme {
     pub fn new(palette_name: &str, dark: bool, accent_hex: &str) -> Theme {
-        let (h, c, al, ac, ah) = palette(palette_name);
-        let k = |l: f32, cm: f32| oklch(l, c * cm, h);
+        Theme::custom(palette_name, dark, accent_hex, &Custom::default())
+    }
+
+    /// The same palette, with the person's own colours laid over it. Overriding
+    /// one surface pulls the steps around it along: a custom sidebar colour gets
+    /// its own hover, press and line, a custom background its own dim text.
+    pub fn custom(palette_name: &str, dark: bool, accent_hex: &str, c: &Custom) -> Theme {
+        let (h, chroma, al, ac, ah) = palette(palette_name);
+        let k = |l: f32, cm: f32| oklch(l, chroma * cm, h);
         let accent = Color::from_hex(accent_hex).unwrap_or_else(|| oklch(al, ac, ah));
         let (bg, raise, hover, press, line, text, dim, faint) = if dark {
             (k(0.185, 1.0), k(0.225, 1.2), k(0.245, 1.2), k(0.28, 1.3), k(0.27, 1.2), k(0.94, 0.5), k(0.72, 0.8), k(0.52, 1.0))
         } else {
             (k(0.955, 1.0), k(0.988, 0.5), k(0.918, 1.0), k(0.89, 1.0), k(0.9, 1.0), k(0.22, 1.0), k(0.46, 1.0), k(0.62, 1.0))
         };
+        if c.is_empty() {
+            return Theme {
+                dark,
+                side: bg,
+                bg,
+                raise,
+                hover,
+                press,
+                line,
+                text,
+                dim,
+                faint,
+                accent,
+                acc_soft: bg.mix(accent, 0.35),
+                shade: Color(0.0, 0.0, 0.0, if dark { 0.45 } else { 0.14 }),
+                danger: oklch(0.58, 0.2, 27.0),
+            };
+        }
+        let bg = c.bg.unwrap_or(bg);
+        let side = c.side.or(c.bg).unwrap_or(bg);
+        let raise = c.surface.unwrap_or(raise);
+        let text = c.text.unwrap_or(text);
+        // The steps around a custom surface: a little lighter in the dark, a
+        // little darker in the light. A custom text and background decide the
+        // two greys between them.
+        let toward = if dark { Color(1.0, 1.0, 1.0, 1.0) } else { Color(0.0, 0.0, 0.0, 1.0) };
+        let (hover, press, line) = if c.surface.is_some() {
+            (raise.mix(toward, 0.05), raise.mix(toward, 0.11), raise.mix(text, 0.18))
+        } else {
+            (hover, press, line)
+        };
+        let (dim, faint) = if c.bg.is_some() || c.text.is_some() {
+            (text.mix(bg, 0.31), text.mix(bg, 0.55))
+        } else {
+            (dim, faint)
+        };
+        let dim = c.dim.unwrap_or(dim);
         Theme {
             dark,
+            side,
             bg,
             raise,
             hover,
@@ -120,5 +191,48 @@ impl Theme {
     pub fn swatch(name: &str) -> (Color, Color) {
         let (h, c, al, ac, ah) = palette(name);
         (oklch(0.3, c * 3.0, h), oklch(al, ac, ah))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_overrides_is_exactly_the_palette() {
+        for dark in [true, false] {
+            let a = Theme::new("slate", dark, "#3366ff");
+            let b = Theme::custom("slate", dark, "#3366ff", &Custom::default());
+            assert_eq!(a.side, b.side);
+            assert_eq!(a.bg, b.bg);
+            assert_eq!(a.hover, b.hover);
+            assert_eq!(a.dim, b.dim);
+        }
+    }
+
+    #[test]
+    fn overrides_reach_the_theme_and_its_steps() {
+        let c = Custom::from_hex("#102030", "#203040", "#304050", "#f0f0f0", "");
+        let t = Theme::custom("graphite", true, "", &c);
+        assert_eq!(t.bg, Color::from_hex("#102030").unwrap());
+        assert_eq!(t.side, Color::from_hex("#203040").unwrap());
+        assert_eq!(t.raise, Color::from_hex("#304050").unwrap());
+        assert_eq!(t.text, Color::from_hex("#f0f0f0").unwrap());
+        // The steps follow the custom surface instead of the palette's.
+        assert_ne!(t.hover, Theme::new("graphite", true, "").hover);
+        // And a custom sidebar alone does not drag the background with it.
+        let c = Custom::from_hex("", "#203040", "", "", "");
+        let t = Theme::custom("graphite", true, "", &c);
+        assert_eq!(t.side, Color::from_hex("#203040").unwrap());
+        assert_eq!(t.bg, Theme::new("graphite", true, "").bg);
+        // A custom background alone carries the side and the dim greys with it.
+        let c = Custom::from_hex("#101418", "", "", "", "");
+        let t = Theme::custom("graphite", true, "", &c);
+        assert_eq!(t.side, t.bg);
+        assert_ne!(t.faint, Theme::new("graphite", true, "").faint);
+        // A dim colour of its own wins over the derived one.
+        let c = Custom::from_hex("#101418", "", "", "", "#888888");
+        let t = Theme::custom("graphite", true, "", &c);
+        assert_eq!(t.dim, Color::from_hex("#888888").unwrap());
     }
 }

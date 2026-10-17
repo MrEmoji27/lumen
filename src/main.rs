@@ -427,6 +427,10 @@ struct App {
     clear_pending: bool,
     /// Read aloud: the reader-view tab being spoken, if any.
     aloud: Option<Aloud>,
+    /// The sidebar's width right now, and where it is gliding to (compact, peek,
+    /// or the person's own width). `from, to, when it started`.
+    side_w: f64,
+    side_anim: Option<(f64, f64, Instant)>,
     /// SponsorBlock: a fetched skip script waiting for its tab to finish
     /// loading, so it lands in the new document and not the one going away.
     spb: HashMap<u64, String>,
@@ -593,6 +597,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     // Read before the struct literal moves `settings` into the app.
     let keep_seeding = settings.keep_seeding;
     let dl_limit = settings.download_limit_kbps;
+    // The sidebar starts at its width; folding and peeking glide from here.
+    let side_w = if settings.compact { COMPACT_W } else { settings.sidebar_width as f64 };
     // Ensure the torrent port is chosen (picks once, saves, returns it).
     let bt_port = settings.ensure_bt_port();
     // Start UPnP mapping for the torrent port if enabled.
@@ -678,6 +684,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         test_translate: false,
         clear_pending: false,
         aloud: None,
+        side_w,
+        side_anim: None,
         spb: HashMap::new(),
         vault: None,
         vault_seen: Instant::now(),
@@ -787,6 +795,10 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 let now = Instant::now();
+                // The sidebar's width glides: a step is what wakes for it.
+                if app.side_anim.is_some() {
+                    app.layout();
+                }
                 if app.next_sample.is_some_and(|t| t <= now) {
                     app.sample();
                 }
@@ -1314,8 +1326,57 @@ impl App {
         self.tabs.iter().filter(|t| t.pinned).count()
     }
 
+    /// The sidebar's width right now: folded, peeked open, or the person's own.
+    /// The value glides (Compact, Ctrl+B, a peek) instead of jumping.
     fn sidebar_w(&self) -> f64 {
+        self.side_w
+    }
+
+    /// Where the sidebar is headed.
+    fn side_target(&self) -> f64 {
         if self.settings.compact && !self.peek { COMPACT_W } else { self.settings.sidebar_width as f64 }
+    }
+
+    /// Step the sidebar's width toward its target. Returns whether it is still
+    /// moving, so the loop can keep waking for it and stop when it lands. Motion
+    /// off (or reduced) means it lands at once.
+    fn step_side(&mut self, now: Instant) -> bool {
+        const SIDE_MS: f64 = 0.16;
+        let target = self.side_target();
+        if (target - self.side_w).abs() < 0.5 {
+            self.side_w = target;
+            self.side_anim = None;
+            return false;
+        }
+        if !self.chrome.look().motion.enabled {
+            // Motion off (or the system asking for less): it lands at once.
+            self.side_w = target;
+            self.side_anim = None;
+            return false;
+        }
+        if self.side_anim.as_ref().is_none_or(|(_, to, _)| (*to - target).abs() > 0.01) {
+            self.side_anim = Some((self.side_w, target, now));
+        }
+        let (from, to, at) = self.side_anim.unwrap_or((self.side_w, target, now));
+        let t = ((now - at).as_secs_f64() / SIDE_MS).clamp(0.0, 1.0);
+        self.side_w = from + (to - from) * chrome::ease_out(t as f32) as f64;
+        if t >= 1.0 {
+            self.side_w = to;
+            self.side_anim = None;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// The chrome's top rows: the tab strip, toolbar and bookmarks bar, for the
+    /// layouts that have them. Zero for the vertical sidebar.
+    fn top_h(&self) -> f64 {
+        chrome::Metrics::new(self.layout_kind(), self.settings.compact, self.settings.bm_bar).top() as f64
+    }
+
+    fn layout_kind(&self) -> chrome::Kind {
+        chrome::Kind::of(&self.settings.layout)
     }
 
     /// The UI needs the whole window only for the new tab page and settings.
@@ -1331,9 +1392,17 @@ impl App {
             return (0.0, 0.0, w, h);
         }
         let side = self.sidebar_w();
-        let g = self.settings.gap as f64;
-        let x = if self.settings.sidebar_side == "right" { g } else { side };
-        (x, g, (w - side - g).max(1.0), (h - 2.0 * g).max(1.0))
+        let right = self.settings.sidebar_side == "right";
+        let (x, y, sw, sh) = chrome::layout::stage(
+            self.layout_kind(),
+            w as f32,
+            h as f32,
+            side as f32,
+            right,
+            self.top_h() as f32,
+            self.settings.gap as f32,
+        );
+        (x as f64, y as f64, sw as f64, sh as f64)
     }
 
     /// The stage cut in two: the active tab's rectangle, the split tab's, and the
@@ -1400,19 +1469,17 @@ impl App {
     }
 
     fn layout(&mut self) {
+        // The sidebar's width glides; a step here is what moves it.
+        let moving = self.step_side(Instant::now());
         let (w, h) = logical_size(&self.ctx);
         let fs = self.fullscreen_view();
         self.chrome.set_visible(!fs);
         if !fs {
-            let side = self.sidebar_w();
-            let (x, cw) = if self.ui_full() {
-                (0.0, w)
-            } else if self.settings.sidebar_side == "right" {
-                (w - side, side)
-            } else {
-                (0.0, side)
-            };
-            self.chrome.set_bounds(x, 0.0, cw, h);
+            // The chrome's own rectangle for this layout. The horizontal layout
+            // is a strip across the top; the hybrid one is an underlay the page
+            // is drawn over; the vertical one is the sidebar itself.
+            let (x, y, cw, ch) = chrome::Chrome::bounds_for(self.layout_kind(), w, h);
+            self.chrome.set_bounds(x, y, cw, ch);
         }
         self.sync_panes();
         let (act, other, div) = self.panes();
@@ -1470,6 +1537,10 @@ impl App {
             self.chrome.set_glance_dim(x, y, sw, sh);
             engine::raise(v);
         }
+        // A moving sidebar is a moving layout: keep the chrome drawing with it.
+        if moving {
+            self.push();
+        }
     }
 
     fn focus_page(&self) {
@@ -1507,8 +1578,11 @@ impl App {
         if self.ui_dirty {
             self.ui_dirty = false;
             let (sx, sy, sw, sh) = self.stage();
-            // Chrome coordinates: full mode starts at the window origin; strip mode is the sidebar only.
-            let off = if !self.ui_full() && self.settings.sidebar_side == "right" { logical_size(&self.ctx).0 - self.sidebar_w() } else { 0.0 };
+            // Chrome coordinates: full mode starts at the window origin; a sidebar
+            // on the right is the one place the stage sits left of the chrome.
+            let (cx, _, _, _) = chrome::Chrome::bounds_for(self.layout_kind(), logical_size(&self.ctx).0, logical_size(&self.ctx).1);
+            let off = cx;
+            let bar_bookmarks = self.settings.bm_bar && self.layout_kind().top_toolbar();
             let state = chrome::UiState {
                 tabs: self
                     .tabs
@@ -1599,7 +1673,7 @@ impl App {
                 } else {
                     Vec::new()
                 },
-                bookmarks: if self.panel == Panel::Bookmarks {
+                bookmarks: if self.panel == Panel::Bookmarks || bar_bookmarks {
                     self.library.bookmarks().into_iter().map(ui_mark).collect()
                 } else {
                     Vec::new()
@@ -4025,6 +4099,27 @@ impl App {
                     self.apply_settings(s);
                 }
             }
+            "dashboard" => {
+                // The dashboard is Lumen's own home: the clock, the search box and
+                // the speed dial. Opening it means an empty page on this tab.
+                let i = self.active_idx();
+                self.leave_panel();
+                self.tabs[i].url.clear();
+                self.tabs[i].title.clear();
+                self.tabs[i].typed = None;
+                // The page goes; the tab stays.
+                self.tabs[i].view = None;
+                self.tabs[i].visible = false;
+                self.tabs[i].suspended = false;
+                self.tabs[i].trimmed = false;
+                self.tabs[i].crashed = false;
+                self.tabs[i].reader = None;
+                self.tabs[i].translated = None;
+                self.layout();
+                self.focus_page();
+                self.dirty = true;
+                self.push();
+            }
             "panel" => {
                 let p = match (m["open"].as_bool().unwrap_or(false), m["which"].as_str()) {
                     (false, _) => Panel::None,
@@ -4740,6 +4835,10 @@ impl App {
     /// turn when something waits for it, IDLE_TICK when nothing does.
     fn next_wake(&self, now: Instant) -> Instant {
         let mut at = now + IDLE_TICK;
+        // A gliding sidebar wants the next frame, and only while it glides.
+        if self.side_anim.is_some() {
+            at = at.min(now + Duration::from_millis(16));
+        }
         // The memory read, which the journal's minute rides on. Idle means idle:
         // neither clock is armed when nothing is on screen and nothing is loading,
         // so the journal never wakes an idle Lumen.
