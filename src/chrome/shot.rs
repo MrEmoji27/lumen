@@ -222,8 +222,24 @@ pub fn fake(s: &mut UiState) {
             UiTab { status: "off", ..t(9008, "Unloaded tab", "https://off.example.com/") },
             UiTab { agent: true, ..t(9009, "Agent research", "https://agent.example.com/") },
             UiTab { private: true, ..t(9010, "Private page", "https://private.example.com/") },
+            UiTab { split: true, muted: true, ..t(9011, "Split left page", "https://split.example.com/left") },
+            UiTab { split: true, translated: true, ..t(9012, "Split right page", "https://split.example.com/right") },
         ];
         s.tabs.append(&mut v);
+    }
+    if fake_has("page") {
+        // The active tab is a secure, bookmarked page: lock, star and the offer chips show.
+        let id = s.active;
+        if let Some(t) = s.tabs.iter_mut().find(|t| t.id == id) {
+            t.title = "The Rust Programming Language".into();
+            t.url = "https://doc.rust-lang.org/book/".into();
+            t.status = "live";
+            t.back = true;
+            t.fwd = true;
+        }
+        s.bookmarked = true;
+        s.listen = "playing";
+        s.kdbx = vec!["doc.rust-lang.org".into()];
     }
     if fake_has("mem") {
         s.mem = Some((412 * 1024 * 1024, 9));

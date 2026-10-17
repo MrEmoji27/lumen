@@ -253,3 +253,7 @@ decoded in software. Hardware acceleration was not touched.
 
 The headless window is off-screen, so these numbers say nothing about
 presentation. Tearing on a real window is not measured here.
+
+## Lucide icons
+
+Lucide icons (SVG rasterized once per size into alpha masks, tinted when drawn): idle private bytes of lumen.exe, debug build, headless, 25 s, 3 runs each: 31.5 MB before (31.4 to 31.8), 31.9 MB after (31.9 to 32.0). About +0.4 MB, mostly the masks and the SVG code; the Direct3D device used to rasterize is dropped after each frame that needed it.
