@@ -126,9 +126,14 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     }
     y += 2.0 * 104.0 + gap + i.look.s5;
 
-    // Two actions under the tiles.
+    // Actions under the tiles, and the pages that left the footer for here.
     let mut x = col.x;
-    for (label, c) in [("Free memory", Click::FreeMemory), ("Open Control", Click::Open("control"))] {
+    for (label, c) in [
+        ("Free memory", Click::FreeMemory),
+        ("Open Control", Click::Open("control")),
+        ("Bookmarks", Click::Open("bookmarks")),
+        ("Privacy report", Click::Open("report")),
+    ] {
         let f = i.look.small_strong.align(Align::Center);
         let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * i.look.s3, 30.0);
         let h = Hit::Dash(c);

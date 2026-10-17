@@ -311,8 +311,6 @@ pub enum Hit {
     Sidebar,
     Mem,
     DlFooter,
-    /// The star in the footer: the Bookmarks page.
-    BookmarksFooter,
     /// The arrow in the footer: the Drive panel.
     DriveFooter,
     AgentStop,
@@ -341,8 +339,6 @@ pub enum Hit {
     Dash(dashboard::Click),
     /// The grid button in the footer: the dashboard.
     DashFooter,
-    /// The shield in the footer: the report page.
-    ReportFooter,
     /// Clicked a workspace name in the switcher.
     Workspace(usize),
     /// "Open as tab" button on the glance card.
@@ -1797,8 +1793,6 @@ impl Inner {
             Hit::Gear => "gear",
             Hit::Mem => "mem",
             Hit::DlFooter => "dl",
-            Hit::BookmarksFooter => "bm",
-            Hit::ReportFooter => "report",
             Hit::DashFooter => "dash",
             Hit::SiteInfo => "siteinfo",
             Hit::ZoomChip => "zoom",
@@ -2267,8 +2261,7 @@ impl Inner {
     }
 
     /// The footer: the memory readout and the agent chip (left), then the
-    /// downloads, bookmarks, privacy report, dashboard and settings buttons
-    /// (right), Drive among them. The compact sidebar keeps the two that fit; the agent chip is a
+    /// dashboard, Drive, downloads and settings buttons (right). The compact sidebar keeps the two that fit; the agent chip is a
     /// status, and shows wherever it fits.
     fn draw_footer(&mut self, s: &UiState, sb: R, compact: bool) {
         let lo = self.look.clone();
@@ -2288,16 +2281,12 @@ impl Inner {
             self.button(gear, "sliders", Hit::Gear, true);
             let dl = if compact { R::new(sb.x + 2.0, fy + 3.0, 26.0, 26.0) } else { R::new(gear.x - size - 2.0, gear.y, size, size) };
             if !compact {
-                // Right to left from the downloads button: the pages people keep
-                // an eye on, then the settings.
-                let bm = R::new(dl.x - size - 2.0, dl.y, size, size);
-                self.footer_page_button(bm, s, "star", "bookmarks", Hit::BookmarksFooter);
+                // Right to left from the downloads button: Drive, then the dashboard,
+                // which is the door to bookmarks, the privacy report and the rest.
                 // Drive: an arrow taking off, lit while a run is going.
-                let dr = R::new(bm.x - size - 2.0, bm.y, size, size);
+                let dr = R::new(dl.x - size - 2.0, dl.y, size, size);
                 self.footer_page_button(dr, s, "send", "drive", Hit::DriveFooter);
-                let pv = R::new(dr.x - size - 2.0, dr.y, size, size);
-                self.footer_page_button(pv, s, "shield", "report", Hit::ReportFooter);
-                let db = R::new(pv.x - size - 2.0, pv.y, size, size);
+                let db = R::new(dr.x - size - 2.0, dr.y, size, size);
                 self.footer_page_button(db, s, "dashboard", "dashboard", Hit::DashFooter);
                 left_edge = db.x;
             } else {
@@ -3516,19 +3505,11 @@ impl Inner {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "downloads");
                 send(p, json!({"t": "panel", "open": open, "which": "downloads"}));
             }
-            Hit::ReportFooter => {
-                let open = self.state.as_ref().is_some_and(|s| s.panel != "report");
-                send(p, json!({"t": "panel", "open": open, "which": "report"}));
-            }
             Hit::Report(c) => report::click(self, c),
             Hit::Dash(c) => dashboard::click(self, c),
             Hit::DashFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "dashboard");
                 send(p, json!({"t": "panel", "open": open, "which": "dashboard"}));
-            }
-            Hit::BookmarksFooter => {
-                let open = self.state.as_ref().is_some_and(|s| s.panel != "bookmarks");
-                send(p, json!({"t": "panel", "open": open, "which": "bookmarks"}));
             }
             Hit::DriveFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "drive");
