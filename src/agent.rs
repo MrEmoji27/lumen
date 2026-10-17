@@ -246,7 +246,7 @@ impl Agent {
         if on {
             // lumen-agent answers the MCP handshake from this file while Lumen is not running,
             // so an agent's session can start without starting a browser.
-            let card = json!({"tools": tools(), "instructions": INSTRUCTIONS, "version": env!("CARGO_PKG_VERSION")});
+            let card = json!({"tools": tools(), "instructions": INSTRUCTIONS, "version": crate::VERSION});
             let _ = std::fs::write(crate::store::data_dir().join("agent_tools.json"), card.to_string());
         }
         if on && self.port.is_none() {
@@ -702,7 +702,7 @@ fn handle(stream: TcpStream, sh: &Arc<Shared>) {
         "initialize" => json!({"jsonrpc": "2.0", "id": id, "result": {
             "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "lumen", "version": env!("CARGO_PKG_VERSION")},
+            "serverInfo": {"name": "lumen", "version": crate::VERSION},
             "instructions": INSTRUCTIONS
         }}),
         "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),

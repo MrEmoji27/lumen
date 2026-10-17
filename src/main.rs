@@ -664,7 +664,15 @@ fn show_window(w: &tao::window::Window) {
     }
 }
 
+/// Which Lumen this is: the version, then the commit it was built from and its date.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LUMEN_BUILD"), ")");
+
 fn main() {
+    // `lumen.exe --version`: say which build this is, then done. No window.
+    if std::env::args().any(|a| a == "--version") {
+        say_on_console(&format!("Lumen {VERSION}"));
+        return;
+    }
     HEADLESS.store(
         std::env::var_os("LUMEN_HEADLESS").is_some_and(|v| v != "0") || std::env::args().any(|a| a == "--headless"),
         std::sync::atomic::Ordering::Relaxed,

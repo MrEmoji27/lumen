@@ -665,6 +665,22 @@ pub fn set_clear_history_pending(pending: bool) {
 mod tests {
     use super::*;
 
+    /// The chrome sends the whole Settings back as JSON when one thing changes (a new
+    /// speed-dial tile, a toggle). A value that does not read back is dropped silently.
+    #[test]
+    fn settings_survive_the_chrome_round_trip() {
+        let mut s = Settings::default();
+        s.clamp();
+        let back: Result<Settings, _> = serde_json::from_value(serde_json::to_value(&s).unwrap());
+        assert!(back.is_ok(), "{:?}", back.err());
+        if let Ok(text) = std::env::var("LUMEN_TEST_SETTINGS_FILE").and_then(|p| std::fs::read_to_string(p).map_err(|_| std::env::VarError::NotPresent)) {
+            let mut real: Settings = serde_json::from_str(&text).unwrap();
+            real.clamp();
+            let back: Result<Settings, _> = serde_json::from_value(serde_json::to_value(&real).unwrap());
+            assert!(back.is_ok(), "real file: {:?}", back.err());
+        }
+    }
+
     #[test]
     fn clear_on_exit_is_off_by_default() {
         assert!(!Settings::default().clear_on_exit);

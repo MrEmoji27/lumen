@@ -136,6 +136,9 @@ fn start_detached(exe: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("could not start Lumen: {e}"))
 }
 
+/// Which build this is: the version, then the commit it was built from and its date.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LUMEN_BUILD"), ")");
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut session = std::env::var("LUMEN_SESSION").unwrap_or_default();
@@ -148,6 +151,10 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
             println!("{}", HELP);
+            ExitCode::SUCCESS
+        }
+        Some("--version" | "version") => {
+            println!("lumen-agent {}", VERSION);
             ExitCode::SUCCESS
         }
         Some("mcp") => stdio(&session),

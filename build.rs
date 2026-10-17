@@ -8,6 +8,26 @@ fn main() {
         .manifest_optional()
         .unwrap();
     angle_dlls();
+    stamp();
+}
+
+/// The build stamp every exe carries: the commit it was built from and that commit's
+/// date, and +dev when the tree had changes nobody committed. `lumen --version`, the
+/// Settings page and the agent door all show it, so "which build is this" has an answer.
+fn stamp() {
+    println!("cargo:rerun-if-changed=.git/logs/HEAD");
+    println!("cargo:rerun-if-changed=src");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let commit = git(&["log", "-1", "--format=%h %cd", "--date=format:%Y-%m-%d"]).unwrap_or_else(|| "unknown".into());
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+    println!("cargo:rustc-env=LUMEN_BUILD={commit}{}", if dirty { " +dev" } else { "" });
 }
 
 /// Servo draws through ANGLE, which lives in two DLLs the Windows loader has to find
