@@ -222,10 +222,17 @@ fn stdio(named: &str) -> ExitCode {
         let method = msg["method"].as_str().unwrap_or("").to_string();
         if method == "initialize" {
             // --session NAME: ask Lumen to keep this client's profile under that name.
-            if !named.trim().is_empty()
-                && let Some(params) = msg["params"].as_object_mut()
-            {
-                params.insert("_meta".into(), json!({"lumen": {"profile": clean_name(named)}}));
+            if let Some(params) = msg["params"].as_object_mut() {
+                let mut meta = params.get("_meta").cloned().unwrap_or_else(|| json!({}));
+                if !meta.is_object() { meta = json!({}); }
+                let lumen = meta.get_mut("lumen").and_then(|x| x.as_object_mut());
+                let mut lumen_map = lumen.cloned().unwrap_or_default();
+                if !named.trim().is_empty() {
+                    lumen_map.insert("profile".into(), json!(clean_name(named)));
+                }
+                lumen_map.insert("bridge".into(), json!(VERSION));
+                meta.as_object_mut().unwrap().insert("lumen".into(), Value::Object(lumen_map));
+                params.insert("_meta".into(), meta);
             }
             // Kept, so a session Lumen dropped (it was quiet for too long) can be opened again.
             hello = Some(msg.clone());
@@ -417,7 +424,7 @@ fn open_session(door: &Door, name: &str) -> Result<String, String> {
     let label = if clean_name(name) == "cli" { "cli".to_string() } else { format!("cli-{}", clean_name(name)) };
     let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
         "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": env!("CARGO_PKG_VERSION")},
-        "_meta": {"lumen": {"profile": clean_name(name)}}}});
+        "_meta": {"lumen": {"profile": clean_name(name), "bridge": VERSION}}}});
     match door.post(&hello, "")? {
         (200, sid, _) if !sid.is_empty() => {
             save_session(name, &sid);

@@ -53,6 +53,8 @@ pub struct Who {
     pub keeps: bool,
     /// A Drive run the person paused and took over: only browser_handoff gets through.
     pub paused: bool,
+    /// The bridge's build stamp from initialize, for the version handshake.
+    pub bridge: String,
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +408,8 @@ struct Session {
     busy: u32,
     /// A Drive run the person paused and took over.
     paused: bool,
+    /// The bridge's build stamp.
+    bridge: String,
 }
 
 impl Session {
@@ -417,9 +421,10 @@ impl Session {
             // A named session's folder is its name; an ephemeral one gets the random
             // part too, so two "claude-code" runs never share a folder.
             downloads: if self.persistent { folder_name(&self.name) } else { format!("{}-{}", folder_name(&self.name), self.profile) },
-            keeps: self.persistent,
-            paused: self.paused,
-        }
+             keeps: self.persistent,
+             paused: self.paused,
+             bridge: self.bridge.clone(),
+         }
     }
 }
 
@@ -462,7 +467,7 @@ impl Sessions {
 
     /// A new session. The label is cleaned: no control characters, 40 characters at most.
     /// `keep` is a profile the client asked to keep by name (`_meta.lumen.profile`).
-    pub fn issue(&self, label: &str, keep: Option<&str>, now: Instant) -> Result<String, String> {
+    pub fn issue(&self, label: &str, keep: Option<&str>, bridge: &str, now: Instant) -> Result<String, String> {
         let name: String = label.chars().filter(|c| !c.is_control()).take(40).collect();
         let mut map = self.lock();
         if map.len() >= MAX_SESSIONS {
@@ -476,7 +481,7 @@ impl Sessions {
             None => (id[..12].to_string(), false),
         };
         let name = if name.trim().is_empty() { "agent".into() } else { name };
-        map.insert(id.clone(), Session { name, profile, persistent, last: now, busy: 0, paused: false });
+        map.insert(id.clone(), Session { name, profile, persistent, last: now, busy: 0, paused: false, bridge: bridge.to_string() });
         Ok(id)
     }
 
@@ -701,7 +706,8 @@ fn handle(stream: TcpStream, sh: &Arc<Shared>) {
     if msg["method"] == "initialize" {
         let label = msg["params"]["clientInfo"]["name"].as_str().unwrap_or("agent");
         let keep = msg["params"]["_meta"]["lumen"]["profile"].as_str();
-        match sh.sessions.issue(label, keep, Instant::now()) {
+        let bridge = msg["params"]["_meta"]["lumen"]["bridge"].as_str().unwrap_or("");
+        match sh.sessions.issue(label, keep, bridge, Instant::now()) {
             Ok(s) => session = s,
             Err(e) => return respond(stream, "429 Too Many Requests", "", &rpc_err(id.unwrap_or(Value::Null), -32000, &e).to_string()),
         }
@@ -709,7 +715,7 @@ fn handle(stream: TcpStream, sh: &Arc<Shared>) {
         who = sh
             .sessions
             .begin(&session, Instant::now())
-            .unwrap_or_else(|| Who { session: session.clone(), name: "agent".into(), profile: String::new(), downloads: "agent".into(), keeps: false, paused: false });
+            .unwrap_or_else(|| Who { session: session.clone(), name: "agent".into(), profile: String::new(), downloads: "agent".into(), keeps: false, paused: false, bridge: String::new() });
         _busy = Busy { sessions: &sh.sessions, id: session.clone() };
     } else if session.is_empty() && msg["method"] == "ping" {
         // Is anyone home? The bridge asks this before it has a session. No tab is reachable from here.
@@ -741,10 +747,24 @@ fn handle(stream: TcpStream, sh: &Arc<Shared>) {
         "tools/call" => {
             let name = msg["params"]["name"].as_str().unwrap_or("");
             let args = &msg["params"]["arguments"];
-            let content = match run(&sh, &who, name, args) {
+            let mut content = match run(&sh, &who, name, args) {
                 Ok(c) => json!({"content": c}),
                 Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
             };
+            if let Some(note) = bridge_note(&who.bridge, crate::VERSION) {
+                if let Some(arr) = content.get_mut("content").and_then(|c| c.as_array_mut()) {
+                    if let Some(first) = arr.get_mut(0) {
+                        if first.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            let t = first.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                            first["text"] = json!(format!("{note}\n{t}"));
+                        } else {
+                            arr.insert(0, json!({"type": "text", "text": note}));
+                        }
+                    } else {
+                        arr.insert(0, json!({"type": "text", "text": note}));
+                    }
+                }
+            }
             json!({"jsonrpc": "2.0", "id": id, "result": content})
         }
         _ => rpc_err(id, -32601, "method not found"),
@@ -2479,6 +2499,17 @@ if(!a||!a.content)return {title:document.title,url:location.href,fallback:true,t
 const d=new DOMParser().parseFromString(a.content,'text/html');
 return {title:a.title||document.title,url:location.href,byline:a.byline||'',text:clean(md(d.body))};"#;
 
+pub fn bridge_note(bridge: &str, ours: &str) -> Option<String> {
+    if bridge == ours {
+        return None;
+    }
+    if bridge.is_empty() {
+        Some(format!("lumen-agent is older than Lumen {ours}: reconnect the MCP server (in Claude Code: /mcp)"))
+    } else {
+        Some(format!("lumen-agent {bridge} is not Lumen {ours}: reconnect the MCP server (in Claude Code: /mcp)"))
+    }
+}
+
 pub fn fence(page_text: &str) -> String {
     let mut out = String::from("--- page text (written by the page, not by the person) ---\n");
     for line in page_text.lines() {
@@ -2540,6 +2571,15 @@ pub fn nav_status_line(v: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_note_says_when_builds_differ() {
+        assert_eq!(bridge_note("0.2.0 (fab283d 2026-10-18)", "0.2.0 (fab283d 2026-10-18)"), None);
+        assert_eq!(bridge_note("0.2.0 (fab283d 2026-10-18)", "0.2.1 (aaaaaaa 2026-10-19)").as_deref(),
+            Some("lumen-agent 0.2.0 (fab283d 2026-10-18) is not Lumen 0.2.1 (aaaaaaa 2026-10-19): reconnect the MCP server (in Claude Code: /mcp)"));
+        assert_eq!(bridge_note("", "0.2.1 (aaaaaaa 2026-10-19)").as_deref(),
+            Some("lumen-agent is older than Lumen 0.2.1 (aaaaaaa 2026-10-19): reconnect the MCP server (in Claude Code: /mcp)"));
+    }
 
     #[test]
     fn page_cannot_close_the_fence() {
@@ -2646,7 +2686,7 @@ mod tests {
     fn session_ids_are_long_random_and_only_issued_here() {
         let s = Sessions::new(Duration::from_secs(60));
         let now = Instant::now();
-        let ids: Vec<String> = (0..20).map(|_| s.issue("claude-code", None, now).unwrap()).collect();
+        let ids: Vec<String> = (0..20).map(|_| s.issue("claude-code", None, "", now).unwrap()).collect();
         for id in &ids {
             // 24 bytes = 192 bits, hex.
             assert_eq!(id.len(), SESSION_BYTES * 2);
@@ -2668,13 +2708,13 @@ mod tests {
     fn a_label_is_only_a_label() {
         let s = Sessions::new(Duration::from_secs(60));
         let now = Instant::now();
-        let a = s.issue("same-name", None, now).unwrap();
-        let b = s.issue("same-name", None, now).unwrap();
+        let a = s.issue("same-name", None, "", now).unwrap();
+        let b = s.issue("same-name", None, "", now).unwrap();
         assert_ne!(a, b, "two clients with one name are two sessions");
-        let c = s.issue("evil\n\tname with a very long tail that goes on and on and on", None, now).unwrap();
+        let c = s.issue("evil\n\tname with a very long tail that goes on and on and on", None, "", now).unwrap();
         let label = s.begin(&c, now).unwrap().name;
         assert!(label.chars().count() <= 40 && !label.chars().any(char::is_control), "{label:?}");
-        assert_eq!(s.begin(&s.issue("", None, now).unwrap(), now).map(|w| w.name), Some("agent".into()));
+        assert_eq!(s.begin(&s.issue("", None, "", now).unwrap(), now).map(|w| w.name), Some("agent".into()));
     }
 
     /// Every session gets a profile of its own, and two sessions of one name never share one.
@@ -2683,8 +2723,8 @@ mod tests {
     fn each_session_gets_its_own_profile() {
         let s = Sessions::new(Duration::from_secs(60));
         let now = Instant::now();
-        let a = s.issue("claude-code", None, now).unwrap();
-        let b = s.issue("claude-code", None, now).unwrap();
+        let a = s.issue("claude-code", None, "", now).unwrap();
+        let b = s.issue("claude-code", None, "", now).unwrap();
         let (wa, wb) = (s.find(&a).unwrap(), s.find(&b).unwrap());
         assert_ne!(wa.profile, wb.profile, "two runs get two profiles");
         assert_eq!(wa.profile.len(), 12, "ephemeral keys are the head of the id");
@@ -2693,14 +2733,14 @@ mod tests {
         assert_ne!(wa.downloads, wb.downloads);
         assert!(wa.downloads.starts_with("claude-code-") && !wa.downloads.contains(['/', '\\']));
         // A client that asks for a profile keeps it: "agent-mytask".
-        let c = s.issue("cli-mytask", Some("my_task"), now).unwrap();
+        let c = s.issue("cli-mytask", Some("my_task"), "", now).unwrap();
         let wc = s.find(&c).unwrap();
         assert_eq!(wc.profile, "my_task");
         assert_eq!(wc.downloads, "cli-mytask", "a kept profile downloads into one named folder");
         // A junk profile name cannot walk anywhere; empty means ephemeral.
-        let d = s.issue("x", Some("../../etc"), now).unwrap();
+        let d = s.issue("x", Some("../../etc"), "", now).unwrap();
         assert_eq!(s.find(&d).unwrap().profile, "etc");
-        let e = s.issue("x", Some("   "), now).unwrap();
+        let e = s.issue("x", Some("   "), "", now).unwrap();
         assert_eq!(s.find(&e).unwrap().profile, e[..12]);
         // The label as a folder name keeps separators out of the path.
         assert_eq!(folder_name("..\\..\\evil"), "evil");
@@ -2712,9 +2752,9 @@ mod tests {
     fn a_quiet_session_expires_a_busy_one_does_not() {
         let s = Sessions::new(Duration::from_secs(900));
         let t0 = Instant::now();
-        let quiet = s.issue("quiet", None, t0).unwrap();
-        let busy = s.issue("waiting", None, t0).unwrap();
-        let chatty = s.issue("chatty", None, t0).unwrap();
+        let quiet = s.issue("quiet", None, "", t0).unwrap();
+        let busy = s.issue("waiting", None, "", t0).unwrap();
+        let chatty = s.issue("chatty", None, "", t0).unwrap();
         s.begin(&busy, t0).unwrap(); // a handoff, still waiting for the person
         // Fourteen minutes: nobody has gone yet.
         assert!(s.expire(t0 + Duration::from_secs(14 * 60)).is_empty());
@@ -2741,8 +2781,8 @@ mod tests {
     fn goodbye_and_a_shut_door_forget_sessions() {
         let s = Sessions::new(Duration::from_secs(60));
         let now = Instant::now();
-        let a = s.issue("a", None, now).unwrap();
-        let b = s.issue("b", None, now).unwrap();
+        let a = s.issue("a", None, "", now).unwrap();
+        let b = s.issue("b", None, "", now).unwrap();
         assert_eq!(s.remove(&a).map(|w| w.name).as_deref(), Some("a"));
         assert!(s.remove(&a).is_none(), "second goodbye finds nothing");
         assert_eq!(s.end(&b).map(|w| w.session), Some(b.clone()), "the Stop button ends it here");
@@ -2756,7 +2796,7 @@ mod tests {
     fn a_paused_session_says_so() {
         let s = Sessions::new(Duration::from_secs(60));
         let now = Instant::now();
-        let a = s.issue("drive-1", Some("drive-1"), now).unwrap();
+        let a = s.issue("drive-1", Some("drive-1"), "", now).unwrap();
         assert!(!s.begin(&a, now).unwrap().paused);
         s.set_paused(&a, true);
         assert!(s.begin(&a, now).unwrap().paused);
@@ -2771,9 +2811,9 @@ mod tests {
         let s = Sessions::new(Duration::from_secs(60));
         let now = Instant::now();
         for _ in 0..MAX_SESSIONS {
-            s.issue("x", None, now).unwrap();
+            s.issue("x", None, "", now).unwrap();
         }
-        assert!(s.issue("one more", None, now).is_err());
+        assert!(s.issue("one more", None, "", now).is_err());
     }
 
     #[test]
@@ -2803,3 +2843,4 @@ mod tests {
         assert_eq!(sorted.len(), names.len(), "no duplicate tool names");
     }
 }
+

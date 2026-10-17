@@ -438,7 +438,7 @@ mod tests {
     use std::fs;
 
     fn who(s: &str) -> Who {
-        Who { session: s.into(), name: s.into(), profile: s.into(), downloads: s.into(), keeps: false, paused: false }
+        Who { session: s.into(), name: s.into(), profile: s.into(), downloads: s.into(), keeps: false, paused: false, bridge: String::new() }
     }
 
     fn tab(id: u64, agent: bool, owner: &str, granted: bool) -> TabInfo {
