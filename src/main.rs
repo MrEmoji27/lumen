@@ -24,6 +24,7 @@ mod library;
 mod monitor;
 mod pacing;
 mod pagekit;
+mod privacy_stats;
 mod pins;
 mod recall;
 #[cfg(feature = "servo")]
