@@ -16,7 +16,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{GetClientRect, KillTimer, SetTimer},
 };
 
-use super::{Inner, TIMER_SHOT, UiDl, UiState, UiTab, UiVisit};
+use super::{Inner, TIMER_SHOT, UiDl, UiMark, UiState, UiTab, UiVisit};
 
 fn dir() -> Option<PathBuf> {
     std::env::var_os("LUMEN_TEST_SHOT").map(PathBuf::from)
@@ -178,6 +178,28 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             let _ = PostMessageW(Some(edit), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
                         }
                     }
+                    "drag" => {
+                        // Press at (x1, y1), walk to (x2, y2) in a few steps, let go there.
+                        let n: Vec<isize> = args.iter().filter_map(|v| v.parse().ok()).collect();
+                        if n.len() == 4 {
+                            let at = |x: isize, y: isize| LPARAM((y << 16) | (x & 0xffff));
+                            let _ = PostMessageW(Some(hwnd), WM_MOUSEMOVE, WPARAM(0), at(n[0], n[1]));
+                            let _ = PostMessageW(Some(hwnd), WM_LBUTTONDOWN, WPARAM(1), at(n[0], n[1]));
+                            for s in 1..=8 {
+                                std::thread::sleep(std::time::Duration::from_millis(40));
+                                let (x, y) = (n[0] + (n[2] - n[0]) * s / 8, n[1] + (n[3] - n[1]) * s / 8);
+                                let _ = PostMessageW(Some(hwnd), WM_MOUSEMOVE, WPARAM(1), at(x, y));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(60));
+                            let _ = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), at(n[2], n[3]));
+                        }
+                    }
+                    "bmq" => {
+                        // Words into the Bookmarks search box (ID 103), as typing there would.
+                        if let Ok(edit) = GetDlgItem(Some(hwnd), 103) {
+                            let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(rest.trim()));
+                        }
+                    }
                     "vk" => {
                         let vk: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                         let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
@@ -200,10 +222,12 @@ pub fn fake(s: &mut UiState) {
             back: false,
             fwd: false,
             pinned: false,
+            pin_away: false,
             audio: false,
             muted: false,
             status: "live",
             agent: false,
+            agent_ok: false,
             reader: false,
             private: false,
             split: false,
@@ -214,7 +238,8 @@ pub fn fake(s: &mut UiState) {
         let mut v = vec![
             UiTab { pinned: true, ..t(9001, "Mail", "https://mail.example.com/") },
             UiTab { pinned: true, audio: true, ..t(9002, "Music", "https://music.example.com/") },
-            UiTab { pinned: true, ..t(9003, "Calendar", "https://calendar.example.com/") },
+            UiTab { pinned: true, status: "off", ..t(9003, "Calendar", "https://calendar.example.com/") },
+            UiTab { pinned: true, status: "off", ..t(9011, "Docs", "https://docs.example.com/") },
             t(9004, "The Rust Programming Language - a very long page title that cannot fit in the sidebar", "https://doc.rust-lang.org/book/"),
             UiTab { loading: true, ..t(9005, "Loading something", "https://slow.example.com/") },
             UiTab { audio: true, ..t(9006, "Lo-fi beats to study to", "https://video.example.com/watch") },
@@ -222,8 +247,8 @@ pub fn fake(s: &mut UiState) {
             UiTab { status: "off", ..t(9008, "Unloaded tab", "https://off.example.com/") },
             UiTab { agent: true, ..t(9009, "Agent research", "https://agent.example.com/") },
             UiTab { private: true, ..t(9010, "Private page", "https://private.example.com/") },
-            UiTab { split: true, muted: true, ..t(9011, "Split left page", "https://split.example.com/left") },
-            UiTab { split: true, translated: true, ..t(9012, "Split right page", "https://split.example.com/right") },
+            UiTab { split: true, muted: true, ..t(9021, "Split left page", "https://split.example.com/left") },
+            UiTab { split: true, translated: true, ..t(9022, "Split right page", "https://split.example.com/right") },
         ];
         s.tabs.append(&mut v);
     }
@@ -240,6 +265,18 @@ pub fn fake(s: &mut UiState) {
         s.bookmarked = true;
         s.listen = "playing";
         s.kdbx = vec!["doc.rust-lang.org".into()];
+    }
+    if fake_has("marks") && s.panel == "bookmarks" {
+        let m = |id: u64, title: &str, url: &str, folder: &str| UiMark { id, title: title.into(), url: url.into(), folder: folder.into() };
+        s.bm_folders = vec!["Work".into(), "Chrome".into(), "Reading".into()];
+        s.bookmarks = vec![
+            m(9201, "The Rust Programming Language", "https://doc.rust-lang.org/book/", ""),
+            m(9202, "Hacker News", "https://news.ycombinator.com/", ""),
+            m(9203, "Linear: issues for the team, with a title long enough that it has to be cut off", "https://linear.app/team/issues", "Work"),
+            m(9204, "Figma", "https://www.figma.com/files", "Work"),
+            m(9205, "Direct2D - Wikipedia", "https://en.wikipedia.org/wiki/Direct2D", "Chrome"),
+            m(9206, "crates.io: Rust Package Registry", "https://crates.io/", "Chrome"),
+        ];
     }
     if fake_has("mem") {
         s.mem = Some((412 * 1024 * 1024, 9));

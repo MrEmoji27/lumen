@@ -154,7 +154,7 @@ fn main() -> ExitCode {
         Some("journal") => journal_report(&args[1..]),
         Some(tool) => {
             let tool = tool.to_string();
-            once(&tool, &args[1..], if session.is_empty() { "cli".into() } else { format!("cli-{session}") })
+            once(&tool, &args[1..], &session)
         }
     }
 }
@@ -211,11 +211,14 @@ fn stdio() -> ExitCode {
         }
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         let method = msg["method"].as_str().unwrap_or("");
+        if method == "initialize" {
+            // Kept, so a session Lumen dropped (it was quiet for too long) can be opened again.
+            hello = Some(msg.clone());
+        }
         if door.is_none() {
             let id = msg.get("id").cloned();
             let local = match (method, &card, id) {
                 ("initialize", Some(c), Some(id)) => {
-                    hello = Some(msg.clone());
                     Some(json!({"jsonrpc": "2.0", "id": id, "result": {
                         "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                         "capabilities": {"tools": {}},
@@ -253,7 +256,19 @@ fn stdio() -> ExitCode {
             }
         }
         let Some(door) = door.as_ref() else { continue };
-        let reply = match door.post(&msg, &session) {
+        let mut sent = door.post(&msg, &session);
+        if matches!(sent, Ok((404, ..)))
+            && method != "initialize"
+            && let Some(h) = &hello
+            && let Ok((200, sid, _)) = door.post(h, "")
+            && !sid.is_empty()
+        {
+            // Lumen forgot this session (idle for 15 minutes, or Lumen restarted). Open a new one
+            // and say it again. Tabs of the old session are gone; the agent will be told so.
+            session = sid;
+            sent = door.post(&msg, &session);
+        }
+        let reply = match sent {
             Ok((200, sid, body)) => {
                 if !sid.is_empty() {
                     session = sid;
@@ -326,7 +341,89 @@ fn parse_args(a: &[String]) -> Result<Value, String> {
     Ok(Value::Object(m))
 }
 
-fn once(tool: &str, rest: &[String], session: String) -> ExitCode {
+// ------------------------------------------------------------ named sessions
+
+/// A `--session NAME` is only a name on this side. Lumen never takes a name for a session: it
+/// hands out the id at `initialize`, and this program keeps that id in a file, one per name, so
+/// the next one-shot call finds its tabs again.
+fn clean_name(name: &str) -> String {
+    let n: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || "-_".contains(*c)).take(40).collect();
+    if n.is_empty() { "cli".into() } else { n }
+}
+
+fn session_dir() -> PathBuf {
+    data_dir().join("agent_sessions")
+}
+
+fn session_file(name: &str) -> PathBuf {
+    session_dir().join(format!("{}.id", clean_name(name)))
+}
+
+/// Only this Windows user may read the folder: no inherited rights, full control for the user.
+/// Best effort. The folder sits under the user's own data folder anyway.
+fn lock_to_user(dir: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    let Ok(user) = std::env::var("USERNAME") else { return };
+    let _ = Command::new("icacls")
+        .arg(dir)
+        .args(["/inheritance:r", "/grant:r", &format!("{user}:(OI)(CI)F")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .status();
+}
+
+fn save_session(name: &str, id: &str) {
+    let dir = session_dir();
+    if !dir.is_dir() {
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        lock_to_user(&dir);
+    }
+    let path = session_file(name);
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, id).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The id Lumen gave this name last time, if it is a plausible id.
+fn saved_session(name: &str) -> String {
+    let id = std::fs::read_to_string(session_file(name)).map(|s| s.trim().to_string()).unwrap_or_default();
+    if id.len() >= 32 && id.chars().all(|c| c.is_ascii_alphanumeric()) { id } else { String::new() }
+}
+
+/// Ask Lumen for a new session under this name and remember it.
+fn open_session(door: &Door, name: &str) -> Result<String, String> {
+    let label = if clean_name(name) == "cli" { "cli".to_string() } else { format!("cli-{}", clean_name(name)) };
+    let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": env!("CARGO_PKG_VERSION")}}});
+    match door.post(&hello, "")? {
+        (200, sid, _) if !sid.is_empty() => {
+            save_session(name, &sid);
+            Ok(sid)
+        }
+        (code, ..) => Err(format!("Lumen answered HTTP {code} to initialize")),
+    }
+}
+
+/// One message in the named session. A session Lumen no longer knows (idle too long, or Lumen
+/// restarted) is replaced by a new one and the message is sent again.
+fn post_named(door: &Door, msg: &Value, name: &str) -> Result<(u16, String, String), String> {
+    let saved = saved_session(name);
+    if !saved.is_empty() {
+        let sent = door.post(msg, &saved)?;
+        if sent.0 != 404 {
+            return Ok(sent);
+        }
+    }
+    let id = open_session(door, name)?;
+    door.post(msg, &id)
+}
+
+fn once(tool: &str, rest: &[String], session: &str) -> ExitCode {
     let door = match reach() {
         Ok(d) => d,
         Err(e) => {
@@ -347,7 +444,7 @@ fn once(tool: &str, rest: &[String], session: String) -> ExitCode {
         };
         json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}})
     };
-    let body = match door.post(&msg, &session) {
+    let body = match post_named(&door, &msg, session) {
         Ok((200, _, b)) => b,
         Ok((code, _, _)) => {
             eprintln!("lumen-agent: Lumen answered HTTP {code}");
@@ -709,6 +806,22 @@ mod tests {
         assert_eq!(parse_args(&["text=42".into()]).unwrap(), json!({"text": "42"}));
         assert_eq!(parse_args(&["{\"tab\": 1}".into()]).unwrap(), json!({"tab": 1}));
         assert!(parse_args(&["oops".into()]).is_err());
+    }
+
+    #[test]
+    fn a_session_name_cannot_walk_out_of_its_folder() {
+        assert_eq!(clean_name("..\\..\\x"), "x");
+        assert_eq!(clean_name("a/b:c"), "abc");
+        assert_eq!(clean_name(""), "cli");
+        assert_eq!(clean_name("...."), "cli");
+        assert_eq!(clean_name(&"z".repeat(100)).len(), 40);
+        assert!(session_file("../../evil").starts_with(session_dir()));
+    }
+
+    #[test]
+    fn a_saved_id_must_look_like_one() {
+        // No file: no id. The file is whatever the user's disk holds, so it is checked.
+        assert_eq!(saved_session("no-such-name-ever-written"), "");
     }
 
     /// A fixture the size of a short session, read back the way Lumen wrote it.
