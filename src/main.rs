@@ -4,6 +4,7 @@
 //! One window. A slim UI page for the sidebar. Pages beside it.
 //! Rust decides who lives, who sleeps, and when the UI hears about it.
 
+mod address;
 mod aria;
 mod agent;
 mod agent_policy;
@@ -17,6 +18,7 @@ mod journal;
 mod kdbx;
 mod library;
 mod monitor;
+mod pacing;
 mod pagekit;
 mod recall;
 #[cfg(feature = "servo")]
@@ -42,7 +44,7 @@ use tao::{
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, Event, StartCause, WindowEvent},
     keyboard::{KeyCode, ModifiersState},
-    event_loop::{ControlFlow, EventLoopBuilder},
+    event_loop::{ControlFlow, DeviceEventFilter, EventLoopBuilder},
     platform::windows::{IconExtWindows, WindowBuilderExtWindows, WindowExtWindows},
     window::{Fullscreen, Icon, ResizeDirection, Theme as WinTheme, WindowBuilder},
 };
@@ -131,6 +133,74 @@ struct Tab {
     hidden_at: Option<Instant>,
     /// Its page window is on screen right now.
     visible: bool,
+    /// Typed in the address bar as a bare host and not yet answered. See `Typed`.
+    typed: Option<Typed>,
+}
+
+/// What the sleep policy needs to know about a hidden tab.
+#[derive(Clone, Copy)]
+struct SleepState {
+    audio: bool,
+    trimmed: bool,
+    suspended: bool,
+    pinned: bool,
+}
+
+/// One thing the sleep policy does to a hidden tab.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum SleepStep {
+    /// Lower the memory target. The page keeps running.
+    Trim,
+    /// Freeze it.
+    Suspend,
+    /// Drop the page, keep the tab.
+    Discard,
+}
+
+/// The step a hidden tab is owed `idle` after it was hidden, if any. A tab that
+/// is playing audio is trimmed and nothing more: frozen or dropped, the music
+/// would stop. Its clock restarts when the audio does (see `Ev::Audio`).
+fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Duration) -> Option<SleepStep> {
+    if t.audio {
+        return (idle >= TRIM_AFTER && !t.trimmed).then_some(SleepStep::Trim);
+    }
+    if idle >= discard && !t.pinned {
+        Some(SleepStep::Discard)
+    } else if idle >= sleep && !t.suspended {
+        Some(SleepStep::Suspend)
+    } else if idle >= TRIM_AFTER && !t.trimmed {
+        Some(SleepStep::Trim)
+    } else {
+        None
+    }
+}
+
+/// How long after hiding the tab's next step comes, for the loop's next wake.
+fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> Option<Duration> {
+    if !t.trimmed {
+        Some(TRIM_AFTER)
+    } else if t.audio {
+        None
+    } else if !t.suspended {
+        Some(sleep)
+    } else if !t.pinned {
+        Some(discard)
+    } else {
+        // Pinned and frozen: nothing left to do to it.
+        None
+    }
+}
+
+/// A bare host typed in the address bar (`youtube.musik`, not a link, not a
+/// search). If the name does not exist, the person meant words: search for them.
+struct Typed {
+    /// What was typed, for the search.
+    raw: String,
+    /// The URL it was turned into.
+    url: String,
+    /// The page load for that URL has started. Anything else loading first
+    /// (a link, a script) means the typed page was never the answer.
+    started: bool,
 }
 
 impl Tab {
@@ -164,7 +234,13 @@ impl Tab {
             servo: None,
             hidden_at: None,
             visible: false,
+            typed: None,
         }
+    }
+
+    /// What the sleep policy looks at.
+    fn sleep_state(&self) -> SleepState {
+        SleepState { audio: self.audio, trimmed: self.trimmed, suspended: self.suspended, pinned: self.pinned }
     }
 
     /// The tab has a live page, of whichever engine. A Servo tab has no WebView2.
@@ -417,6 +493,11 @@ fn main() {
     journal::start(&settings, restored_tabs(&session));
 
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
+    // Lumen never reads a raw device event. By default tao registers for raw mouse
+    // and keyboard input while the window has focus, and wakes the loop once per
+    // mouse sample (125 to 1000 a second) for events nobody looks at. This is what
+    // the journal's `wake` storms were: wakes follow the pointer, not the page.
+    event_loop.set_device_event_filter(DeviceEventFilter::Always);
     let (w, h) = if session.width >= 720.0 && session.height >= 480.0 {
         (session.width, session.height)
     } else {
@@ -619,6 +700,28 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     if !headless() {
         app.focus_page();
     }
+    // Test hooks for the chrome screenshots (LUMEN_TEST_SHOT, see chrome/shot.rs):
+    // LUMEN_TEST_COMPACT=1 starts with the icon-only sidebar, LUMEN_TEST_PANEL=
+    // downloads|control|history|bookmarks|settings opens that page.
+    if cfg!(debug_assertions) {
+        if std::env::var_os("LUMEN_TEST_COMPACT").is_some() {
+            app.settings.compact = true;
+        }
+        let panel = match std::env::var("LUMEN_TEST_PANEL").as_deref() {
+            Ok("downloads") => Panel::Downloads,
+            Ok("control") => Panel::Control,
+            Ok("history") => Panel::History,
+            Ok("bookmarks") => Panel::Bookmarks,
+            Ok("settings") => Panel::Settings,
+            _ => Panel::None,
+        };
+        if panel != Panel::None || app.settings.compact {
+            app.set_panel(panel);
+        }
+        // LUMEN_TEST_SCRIPT: timed key/click/shot steps, see chrome/shot.rs.
+        #[cfg(debug_assertions)]
+        chrome::test_script(app.ctx.proxy.clone(), app.chrome.hwnd);
+    }
     // Test hook: LUMEN_TEST_PRIVATE=1 opens one normal and one private tab, so a
     // headless run can prove a private tab leaves no trace in session.json. The
     // private tab gets a url of its own: its Nav line in the log is the proof the
@@ -743,7 +846,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             journal::stop(true, app.born.elapsed());
             *cf = ControlFlow::Exit;
         } else {
-            *cf = ControlFlow::WaitUntil(app.next_wake(Instant::now()));
+            let now = Instant::now();
+            // A deadline that is already past must not turn into a spin.
+            *cf = ControlFlow::WaitUntil(pacing::clamp_wake(now, app.next_wake(now)));
         }
     });
 }
@@ -872,34 +977,62 @@ fn bang(s: &str) -> Option<String> {
 
 /// Omnibox text in, URL out. A bang: that site. Looks like an address: go there. Else: search.
 fn resolve_input(raw: &str, search: &str) -> Option<String> {
+    classify_input(raw, search).map(|(url, _)| url)
+}
+
+/// Like `resolve_input`, and says whether the text was a bare host (`github.com`,
+/// `localhost:3000`): the one kind of typing that may turn out to be a typo, and
+/// so the one that gets a search if the name does not exist.
+fn classify_input(raw: &str, search: &str) -> Option<(String, bool)> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
     }
     if let Some(u) = bang(s) {
-        return Some(u);
+        return Some((u, false));
     }
     let lower = s.to_ascii_lowercase();
     const SCHEMES: [&str; 8] = ["http://", "https://", "file:", "about:", "data:", "view-source:", "edge://", "magnet:"];
     if SCHEMES.iter().any(|p| lower.starts_with(p)) {
-        return Some(s.to_string());
+        return Some((s.to_string(), false));
     }
-    if !s.contains(char::is_whitespace) {
+    if !s.contains(char::is_whitespace) && address::looks_like_host(s) {
         let host = lower.split(['/', '?', '#']).next().unwrap_or("");
-        let host_only = host.rsplit_once(':').map_or(host, |(h, port)| {
-            if port.chars().all(|c| c.is_ascii_digit()) { h } else { host }
-        });
-        if host_only == "localhost" || host_only.parse::<std::net::Ipv4Addr>().is_ok() {
-            return Some(format!("http://{s}"));
-        }
-        if let Some((_, tld)) = host_only.rsplit_once('.')
-            && tld.len() >= 2
-            && tld.chars().all(|c| c.is_ascii_alphabetic())
-        {
-            return Some(format!("https://{s}"));
-        }
+        let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+        let plain = host.rsplit_once(':').map_or(host, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host });
+        // Local and numeric hosts have no certificate to speak of: plain http.
+        let local = plain == "localhost" || plain.parse::<std::net::Ipv4Addr>().is_ok() || plain.starts_with('[');
+        return Some((format!("{}://{s}", if local { "http" } else { "https" }), true));
     }
-    Some(search.replace("%s", &url_encode(s)))
+    Some((search.replace("%s", &url_encode(s)), false))
+}
+
+/// The same page, give or take case and a trailing slash.
+fn same_page(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/').eq_ignore_ascii_case(b.trim_end_matches('/'))
+}
+
+/// What a typed host's answer means.
+#[derive(Debug, PartialEq)]
+enum TypedVerdict {
+    /// Not the answer to this typing (or not yet): keep waiting.
+    Wait,
+    /// It loaded, or failed some way a search would not mend: let go.
+    Forget,
+    /// The name does not exist: search for the words.
+    Search,
+}
+
+/// WebView2's web error status for a name that did not resolve.
+const ERR_NAME_NOT_RESOLVED: i32 = 13;
+/// ... and for a load another load cut short.
+const ERR_CANCELED: i32 = 14;
+
+fn typed_verdict(started: bool, ok: bool, err: i32) -> TypedVerdict {
+    if !started || (!ok && err == ERR_CANCELED) {
+        return TypedVerdict::Wait;
+    }
+    if !ok && err == ERR_NAME_NOT_RESOLVED { TypedVerdict::Search } else { TypedVerdict::Forget }
 }
 
 fn url_encode(s: &str) -> String {
@@ -1148,6 +1281,13 @@ impl App {
         self.page_fs || self.user_fs
     }
 
+    /// Fullscreen as the layout sees it: the page fills the window. A panel (Downloads,
+    /// Control...) is drawn by the chrome, which fullscreen hides, so with one open the
+    /// window shows the chrome and its inset stage instead of a blank screen.
+    fn fullscreen_view(&self) -> bool {
+        self.fullscreen() && self.panel == Panel::None
+    }
+
     fn pinned_count(&self) -> usize {
         self.tabs.iter().filter(|t| t.pinned).count()
     }
@@ -1165,7 +1305,7 @@ impl App {
     /// The page rectangle, in window coordinates.
     fn stage(&self) -> (f64, f64, f64, f64) {
         let (w, h) = logical_size(&self.ctx);
-        if self.fullscreen() {
+        if self.fullscreen_view() {
             return (0.0, 0.0, w, h);
         }
         let side = self.sidebar_w();
@@ -1239,7 +1379,7 @@ impl App {
 
     fn layout(&mut self) {
         let (w, h) = logical_size(&self.ctx);
-        let fs = self.fullscreen();
+        let fs = self.fullscreen_view();
         self.chrome.set_visible(!fs);
         if !fs {
             let side = self.sidebar_w();
@@ -2388,7 +2528,7 @@ impl App {
     }
 
     fn navigate(&mut self, raw: &str) {
-        let Some(url) = resolve_input(raw, &self.settings.search) else { return };
+        let Some((url, bare)) = classify_input(raw, &self.settings.search) else { return };
         // A magnet link is not a page: hand it to aria2 instead of loading it.
         // The person typed it, so it runs at once.
         if url.starts_with("magnet:") {
@@ -2397,6 +2537,9 @@ impl App {
         }
         let i = self.active_idx();
         self.leave_panel();
+        // A bare host is remembered until the page answers: if the name turns out
+        // not to exist, the person gets a search for what they typed.
+        self.tabs[i].typed = bare.then(|| Typed { raw: raw.trim().to_string(), url: url.clone(), started: false });
         // The other engine: a host from the "Servo sites" list is a Servo page, and
         // one that left the list goes back to WebView2.
         #[cfg(feature = "servo")]
@@ -2482,8 +2625,9 @@ impl App {
 
     fn sample(&mut self) {
         self.next_sample = Some(Instant::now() + SAMPLE);
-        if let Some(env) = self.ctx.env.borrow().as_ref() {
-            monitor::sample(env, self.ctx.proxy.clone());
+        match self.ctx.env.borrow().as_ref() {
+            Some(env) => monitor::sample(env, self.ctx.proxy.clone()),
+            None => monitor::sample_host(self.ctx.proxy.clone()),
         }
     }
 
@@ -2603,6 +2747,10 @@ impl App {
     fn apply_settings(&mut self, mut new: Settings) {
         new.clamp();
         let old = std::mem::replace(&mut self.settings, new);
+        // Switching compact either way (Ctrl+B, the toggle) is a fresh start for the peek.
+        if old.compact != self.settings.compact {
+            self.peek = false;
+        }
         if old.theme != self.settings.theme {
             self.retheme();
         } else if old.backdrop != self.settings.backdrop {
@@ -2665,12 +2813,10 @@ impl App {
             Ev::Key(a) => self.on_key(a),
             Ev::Title(id, t) => {
                 if let Some(i) = self.idx(id) {
-                    if !self.off_record(&self.tabs[i]) {
-                        self.library.set_title(&self.tabs[i].url, &t);
+                    // The page paces its own titles (engine.rs); one that is already shown is nothing.
+                    if self.tabs[i].title != t {
+                        self.show_title(i, t);
                     }
-                    self.tabs[i].title = t;
-                    self.dirty = true;
-                    self.push();
                 }
             }
             Ev::Url(id, u) => {
@@ -2815,13 +2961,43 @@ impl App {
             }
             // The journal's timing of a page. A private tab is not in it.
             Ev::NavStart(id, url) => {
+                if let Some(i) = self.idx(id) {
+                    // The page the person typed is the one now loading, or it never will be.
+                    match self.tabs[i].typed.as_mut() {
+                        Some(t) if same_page(&t.url, &url) => t.started = true,
+                        Some(_) => self.tabs[i].typed = None,
+                        None => {}
+                    }
+                }
                 let (agent, private) = self.idx(id).map_or((false, true), |i| (self.tabs[i].agent, self.tabs[i].private));
                 journal::nav_started(id, &url, agent, private, self.blocked_count());
             }
-            Ev::NavDone(id, ok, err, http) => journal::nav_done(id, ok, err, http, self.blocked_count()),
+            Ev::NavDone(id, ok, err, http) => {
+                journal::nav_done(id, ok, err, http, self.blocked_count());
+                self.typed_done(id, ok, err);
+            }
+            // The server sent the typed page somewhere else: that is not a typo.
+            Ev::NavRedirected(id) => {
+                if let Some(i) = self.idx(id) {
+                    self.tabs[i].typed = None;
+                }
+            }
             Ev::Audio(id, on) => {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].audio = on;
+                    if on {
+                        // Sound from a page that was frozen a moment ago: let it go on.
+                        if self.tabs[i].suspended
+                            && let Some(v) = &self.tabs[i].view
+                        {
+                            engine::resume(v);
+                            self.tabs[i].suspended = false;
+                        }
+                    } else if self.tabs[i].hidden_at.is_some() {
+                        // The music stopped: the sleep timer starts now, not from the
+                        // minute the tab was hidden.
+                        self.tabs[i].hidden_at = Some(Instant::now());
+                    }
                     self.push();
                 }
             }
@@ -4405,28 +4581,47 @@ impl App {
 
     /// The next sleep-policy step of any hidden tab, in the past if one is due:
     /// trim at TRIM_AFTER, freeze at sleep_after_min, discard at discard_after_min.
-    /// A crashed page is already dead and audio plays on: nothing to do to those.
+    /// A crashed page is already dead; a page playing audio is only ever trimmed.
     fn next_tab_wake(&self) -> Option<Instant> {
         let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
         let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
         self.tabs
             .iter()
-            .filter(|t| t.has_page() && !t.audio && !t.crashed && !self.on_stage(t.id))
-            .filter_map(|t| {
-                let at = t.hidden_at?;
-                let step = if !t.trimmed {
-                    TRIM_AFTER
-                } else if !t.suspended {
-                    sleep
-                } else if !t.pinned {
-                    discard
-                } else {
-                    // Pinned and frozen: nothing left to do to it.
-                    return None;
-                };
-                Some(at + step)
-            })
+            .filter(|t| t.has_page() && !t.crashed && !self.on_stage(t.id))
+            .filter_map(|t| Some(t.hidden_at? + next_sleep_step_after(&t.sleep_state(), sleep, discard)?))
             .min()
+    }
+
+    /// The page a typed host led to has answered. A name that does not exist
+    /// becomes a search for the words; anything else lets the typing go.
+    fn typed_done(&mut self, id: u64, ok: bool, err: i32) {
+        let Some(i) = self.idx(id) else { return };
+        let Some(t) = &self.tabs[i].typed else { return };
+        match typed_verdict(t.started, ok, err) {
+            TypedVerdict::Wait => {}
+            TypedVerdict::Forget => self.tabs[i].typed = None,
+            TypedVerdict::Search => {
+                let Some(t) = self.tabs[i].typed.take() else { return };
+                let url = self.settings.search.replace("%s", &url_encode(&t.raw));
+                journal::feature("typed_name_search", self.tabs[i].private);
+                if let Some(v) = &self.tabs[i].view {
+                    let _ = v.load_url(&url);
+                }
+                self.tabs[i].url = url;
+                self.dirty = true;
+                self.push();
+            }
+        }
+    }
+
+    /// A title reaches the chrome, the history and the session.
+    fn show_title(&mut self, i: usize, t: String) {
+        if !self.off_record(&self.tabs[i]) {
+            self.library.set_title(&self.tabs[i].url, &t);
+        }
+        self.tabs[i].title = t;
+        self.dirty = true;
+        self.push();
     }
 
     /// Trim, freeze and discard hidden tabs, enforce the RAM cap, save what changed.
@@ -4452,23 +4647,27 @@ impl App {
                 continue;
             }
             let t = &mut self.tabs[i];
-            if !t.has_page() || t.audio {
+            if !t.has_page() {
                 continue;
             }
             let Some(at) = t.hidden_at else { continue };
-            let idle = now - at;
-            if idle >= discard && !t.pinned {
-                self.discard(i);
-                self.push();
-            } else if idle >= sleep && !t.suspended {
-                if let Some(v) = &t.view {
-                    engine::try_suspend(v, t.id, self.ctx.proxy.clone());
+            match due_sleep_step(&t.sleep_state(), now - at, sleep, discard) {
+                Some(SleepStep::Discard) => {
+                    self.discard(i);
+                    self.push();
                 }
-            } else if idle >= TRIM_AFTER && !t.trimmed {
-                if let Some(v) = &t.view {
-                    let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
+                Some(SleepStep::Suspend) => {
+                    if let Some(v) = &t.view {
+                        engine::try_suspend(v, t.id, self.ctx.proxy.clone());
+                    }
                 }
-                t.trimmed = true;
+                Some(SleepStep::Trim) => {
+                    if let Some(v) = &t.view {
+                        let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
+                    }
+                    t.trimmed = true;
+                }
+                None => {}
             }
         }
 
@@ -4992,7 +5191,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tab, keepable, magnet_hold, magnet_name, resolve_input, should_auto_resume};
+    use super::{SleepState, SleepStep, TRIM_AFTER, Tab, classify_input, due_sleep_step, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
     #[test]
@@ -5064,5 +5263,85 @@ mod tests {
         assert_eq!(resolve_input(m, "https://duckduckgo.com/?q=%s").as_deref(), Some(m));
         // And an ordinary https URL is still just itself.
         assert_eq!(resolve_input("https://a.test/", "x").as_deref(), Some("https://a.test/"));
+    }
+
+    const DDG: &str = "https://duckduckgo.com/?q=%s";
+
+    /// What the address bar does with a word: go there, or search for it.
+    #[test]
+    fn address_bar_classifies_typing() {
+        let url = |s: &str| classify_input(s, DDG).unwrap();
+        // Not a real TLD: a search, not a dead page.
+        assert_eq!(url("youtube.music"), ("https://duckduckgo.com/?q=youtube.music".into(), false));
+        assert_eq!(url("index.html").0, "https://duckduckgo.com/?q=index.html");
+        assert_eq!(url("rust lang"), ("https://duckduckgo.com/?q=rust+lang".into(), false));
+        // Places.
+        assert_eq!(url("music.youtube.com"), ("https://music.youtube.com".into(), true));
+        assert_eq!(url("localhost:3000"), ("http://localhost:3000".into(), true));
+        assert_eq!(url("192.168.1.1"), ("http://192.168.1.1".into(), true));
+        assert_eq!(url("example.co.uk"), ("https://example.co.uk".into(), true));
+        assert_eq!(url("github.com/rust-lang/rust").0, "https://github.com/rust-lang/rust");
+        // A scheme says it all, even for a name that is not a TLD.
+        assert_eq!(url("https://youtube.music"), ("https://youtube.music".into(), false));
+        assert_eq!(classify_input("  ", DDG), None);
+    }
+
+    /// A typed host that does not exist becomes a search, once, and only if it
+    /// was the page that was loading.
+    #[test]
+    fn typed_host_falls_back_to_search_only_for_missing_names() {
+        use crate::TypedVerdict::*;
+        assert_eq!(typed_verdict(true, false, 13), Search);
+        // Not started: an older page's ending is not the answer.
+        assert_eq!(typed_verdict(false, false, 13), Wait);
+        // Cut short by another load: keep waiting for the real one.
+        assert_eq!(typed_verdict(true, false, 14), Wait);
+        // Loaded, or failed in a way a search would not mend.
+        assert_eq!(typed_verdict(true, true, 0), Forget);
+        assert_eq!(typed_verdict(true, false, 9), Forget);
+        assert_eq!(typed_verdict(true, false, 6), Forget);
+        assert!(same_page("https://a.com", "https://A.com/"));
+        assert!(!same_page("https://a.com", "https://b.com/"));
+    }
+
+    fn st(audio: bool, trimmed: bool, suspended: bool, pinned: bool) -> SleepState {
+        SleepState { audio, trimmed, suspended, pinned }
+    }
+
+    /// A tab playing audio is trimmed, never frozen and never dropped, however
+    /// long it has been hidden.
+    #[test]
+    fn sleep_policy_never_freezes_or_drops_a_playing_tab() {
+        use std::time::Duration;
+        let (sleep, discard) = (Duration::from_secs(300), Duration::from_secs(1800));
+        let hours = Duration::from_secs(5 * 3600);
+        // Playing and not yet trimmed: trim once, after the usual wait, and not before.
+        assert_eq!(due_sleep_step(&st(true, false, false, false), Duration::from_secs(1), sleep, discard), None);
+        assert_eq!(due_sleep_step(&st(true, false, false, false), TRIM_AFTER, sleep, discard), Some(SleepStep::Trim));
+        // An hour in, trimmed, still playing: nothing, ever.
+        assert_eq!(due_sleep_step(&st(true, true, false, false), hours, sleep, discard), None);
+        // Even straight from untrimmed after a very long hide: trim, not discard.
+        assert_eq!(due_sleep_step(&st(true, false, false, false), hours, sleep, discard), Some(SleepStep::Trim));
+        assert_eq!(next_sleep_step_after(&st(true, true, false, false), sleep, discard), None);
+        assert_eq!(next_sleep_step_after(&st(true, false, false, false), sleep, discard), Some(TRIM_AFTER));
+    }
+
+    /// Silent tabs keep the policy they always had; a tab whose audio just
+    /// stopped is silent, so its steps come back.
+    #[test]
+    fn sleep_policy_for_silent_tabs_is_unchanged() {
+        use std::time::Duration;
+        let (sleep, discard) = (Duration::from_secs(300), Duration::from_secs(1800));
+        let s = |x| Duration::from_secs(x);
+        assert_eq!(due_sleep_step(&st(false, false, false, false), s(10), sleep, discard), None);
+        assert_eq!(due_sleep_step(&st(false, false, false, false), s(31), sleep, discard), Some(SleepStep::Trim));
+        assert_eq!(due_sleep_step(&st(false, true, false, false), s(301), sleep, discard), Some(SleepStep::Suspend));
+        assert_eq!(due_sleep_step(&st(false, true, true, false), s(301), sleep, discard), None);
+        assert_eq!(due_sleep_step(&st(false, true, true, false), s(1801), sleep, discard), Some(SleepStep::Discard));
+        // Pinned tabs freeze but are never dropped.
+        assert_eq!(due_sleep_step(&st(false, true, true, true), s(99999), sleep, discard), None);
+        assert_eq!(next_sleep_step_after(&st(false, true, true, true), sleep, discard), None);
+        assert_eq!(next_sleep_step_after(&st(false, true, false, false), sleep, discard), Some(sleep));
+        assert_eq!(next_sleep_step_after(&st(false, true, true, false), sleep, discard), Some(discard));
     }
 }

@@ -12,6 +12,7 @@ use windows::core::{PCWSTR, PWSTR};
 use super::{
     Hit, Inner, UiDl, UiState, send,
     gfx::{Align, Font, R},
+    style::*,
     theme::{Color, PALETTES, Theme},
 };
 use crate::store::Settings;
@@ -28,6 +29,8 @@ pub enum PageHit {
     Nav(usize),
     Done,
     Unload(u64),
+    /// A row of a list: only there so it can light up under the mouse.
+    Row(u64),
     ClearPasswords,
     KdbxOpen,
     KdbxLock,
@@ -62,6 +65,8 @@ struct Slide {
 #[derive(Default)]
 pub struct Page {
     pub scroll: f32,
+    /// The panel the scroll offset belongs to.
+    pub(super) which: &'static str,
     max: f32,
     pub usage: Option<Value>,
     slide: Option<Slide>,
@@ -136,7 +141,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Seg("ui_font", "Interface font", "Atkinson Hyperlegible is designed for easy reading.", &[("segoe", "Segoe"), ("instrument", "Instrument"), ("figtree", "Figtree"), ("atkinson", "Atkinson")]),
             Seg("display_font", "Display font", "The clock and page titles.", &[("instrument", "Instrument Serif"), ("fraunces", "Fraunces"), ("newsreader", "Newsreader")]),
             Seg("sidebar_side", "Sidebar", "", &[("left", "Left"), ("right", "Right")]),
-            Range("sidebar_width", "Sidebar width", "", Scale::Linear(180.0, 400.0, 4.0), "px"),
+            Range("sidebar_width", "Sidebar width", "", Scale::Linear(232.0, 400.0, 4.0), "px"),
             Toggle("compact", "Compact sidebar", "Icons only. Ctrl+B toggles it."),
             Range("gap", "Page margin", "", Scale::Linear(0.0, 24.0, 1.0), "px"),
             Range("radius", "Page corners", "", Scale::Linear(0.0, 20.0, 1.0), "px"),
@@ -322,6 +327,25 @@ fn value_at(scale: Scale, r: f32) -> f32 {
 // -------------------------------------------------------------------- draw
 
 pub fn draw(i: &mut Inner, st: R, s: &UiState) {
+    // Each page starts at its top. The scroll offset used to survive a change of page, so a
+    // long Settings page left Downloads and Control scrolled off the top of a short page: blank.
+    if i.page.which != s.panel {
+        i.page.which = s.panel;
+        i.page.scroll = 0.0;
+    }
+    let first = i.hits.len();
+    draw_page(i, st, s);
+    // The content can shrink under the offset (a finished row cleared, a window made taller).
+    // The height is only known after drawing, so draw once more from the clamped offset.
+    if i.page.scroll > i.page.max {
+        i.page.scroll = i.page.max;
+        i.hits.truncate(first);
+        i.gfx.round(st, s.settings.radius as f32, i.theme.raise);
+        draw_page(i, st, s);
+    }
+}
+
+fn draw_page(i: &mut Inner, st: R, s: &UiState) {
     i.page.sliders.clear();
     i.page.view = st;
     match s.panel {
@@ -332,14 +356,31 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     }
 }
 
-fn row_label(i: &Inner, r: R, label: &str, hint: &str) {
+/// A setting's name and its hint, on the left. `control_w` is what the control on the right
+/// takes, so a long hint wraps to a second line instead of running under it. Returns the
+/// row's height: 54, or taller when the hint needs more lines.
+fn row_label(i: &Inner, r: R, label: &str, hint: &str, control_w: f32) -> f32 {
     let th = i.theme;
+    let avail = (r.w - control_w - S5).max(r.w * 0.4);
     if hint.is_empty() {
-        i.gfx.text(label, R::new(r.x, r.y, r.w * 0.55, r.h), Font::ui(13.0, 500), th.text);
-    } else {
-        i.gfx.text(label, R::new(r.x, r.y + 8.0, r.w * 0.55, 20.0), Font::ui(13.0, 500), th.text);
-        i.gfx.text(hint, R::new(r.x, r.y + 27.0, r.w * 0.6, 18.0), Font::ui(12.0, 400), th.faint);
+        i.gfx.text(label, R::new(r.x, r.y, avail, 54.0), Font::ui(13.0, 500), th.text);
+        return 54.0;
     }
+    i.gfx.text(label, R::new(r.x, r.y + 8.0, avail, 20.0), Font::ui(13.0, 500), th.text);
+    // Words do not fill a line to the last pixel; ask for a little more room than the sum.
+    let lines = ((i.gfx.measure(hint, SMALL) / (avail * 0.94)).ceil() as usize).clamp(1, 3);
+    if lines == 1 {
+        i.gfx.text(hint, R::new(r.x, r.y + 27.0, avail, 18.0), SMALL, th.faint);
+    } else {
+        i.gfx.text_wrap(hint, R::new(r.x, r.y + 28.0, avail, 16.0 * lines as f32 + 2.0), SMALL, th.faint);
+    }
+    28.0 + 16.0 * lines as f32 + 10.0
+}
+
+/// How wide a segmented control is.
+fn seg_width(i: &Inner, opts: &[(&str, &str)]) -> f32 {
+    let f = Font::ui(13.0, 450).align(Align::Center);
+    opts.iter().map(|(_, l)| i.gfx.measure(l, f) + 22.0).sum::<f32>() + 4.0
 }
 
 fn draw_seg(i: &mut Inner, right: f32, cy: f32, key: &'static str, opts: &'static [(&'static str, &'static str)], cur: &str) {
@@ -395,7 +436,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
     let right = r.right();
     match it {
         Item::Swatch => {
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Palette", "");
+            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Palette", "", 0.0);
             let cur = s.settings.palette.clone();
             let mut x = right - PALETTES.len() as f32 * 36.0 + 8.0;
             for (key, label) in PALETTES {
@@ -414,22 +455,23 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             54.0
         }
         Item::Accent => {
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Accent", "Focus rings, toggles, the loading ring.");
-            let sw = R::new(right - 28.0, r.y + 13.0, 28.0, 28.0);
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "Accent", "Focus rings, toggles, the loading ring.", 100.0);
+            let cy = r.y + h / 2.0;
+            let sw = R::new(right - 28.0, cy - 14.0, 28.0, 28.0);
             i.gfx.round(sw, 8.0, th.accent);
             i.gfx.round_stroke(sw, 8.0, th.line, 1.0);
             i.hit(sw, Hit::Page(PageHit::Accent));
-            let reset = R::new(sw.x - 60.0, r.y + 17.0, 50.0, 20.0);
-            let h = Hit::Page(PageHit::AccentReset);
-            i.gfx.text("Reset", reset, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
-            i.hit(reset, h);
-            54.0
+            let reset = R::new(sw.x - 60.0, cy - 10.0, 50.0, 20.0);
+            let hh = Hit::Page(PageHit::AccentReset);
+            i.gfx.text("Reset", reset, SMALL.align(Align::Right), if i.is_hover(&hh) { th.text } else { th.faint });
+            i.hit(reset, hh);
+            h
         }
         Item::Seg(k, label, hint, opts) => {
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint);
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint, seg_width(i, opts));
             let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
-            draw_seg(i, right, r.y + 27.0, k, opts, &cur);
-            54.0
+            draw_seg(i, right, r.y + h / 2.0, k, opts, &cur);
+            h
         }
         Item::Pick(k, label, hint, opts) => {
             // Label and hint on their own lines, then the choices wrap across the row:
@@ -441,7 +483,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             i.gfx.text(label, R::new(r.x, y, r.w, 20.0), Font::ui(13.0, 500), th.text);
             y += 20.0;
             if !hint.is_empty() {
-                i.gfx.text_wrap(hint, R::new(r.x, y, r.w, 34.0), Font::ui(12.0, 400), th.faint);
+                i.gfx.text_wrap(hint, R::new(r.x, y, r.w, 34.0), SMALL, th.faint);
                 y += 36.0;
             }
             y += 4.0;
@@ -467,31 +509,33 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             y + 26.0 - r.y + 14.0
         }
         Item::Toggle(k, label, hint) => {
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint);
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint, 34.0);
             let on = get(&s.settings, k).as_bool().unwrap_or(false);
-            draw_toggle(i, right, r.y + 27.0, k, on, true);
-            54.0
+            draw_toggle(i, right, r.y + h / 2.0, k, on, true);
+            h
         }
         Item::Range(k, label, hint, scale, unit) => {
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint);
+            let limited = limit_toggle(k).is_some();
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint, if limited { 290.0 } else { 240.0 });
+            let cy = r.y + h / 2.0;
             let v = get(&s.settings, k).as_f64().unwrap_or(0.0) as f32;
             match limit_toggle(k) {
                 Some(t) => {
                     let enabled = *k != "cpu_limit_pct" || s.cpu_cap;
                     let on = get(&s.settings, t).as_bool().unwrap_or(false) && enabled;
-                    draw_toggle(i, right, r.y + 27.0, t, on, enabled);
-                    draw_slider(i, right - 50.0, r.y + 27.0, k, *scale, unit, v, !on);
+                    draw_toggle(i, right, cy, t, on, enabled);
+                    draw_slider(i, right - 50.0, cy, k, *scale, unit, v, !on);
                 }
-                None => draw_slider(i, right, r.y + 27.0, k, *scale, unit, v, false),
+                None => draw_slider(i, right, cy, k, *scale, unit, v, false),
             }
-            54.0
+            h
         }
         Item::Engine => {
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Search engine", "");
             let f = Font::ui(13.0, 450).align(Align::Center);
             let widths: Vec<f32> = ENGINES.iter().map(|(l, _)| i.gfx.measure(l, f) + 22.0).collect();
             let total: f32 = widths.iter().sum::<f32>() + 4.0;
-            let pill = R::new(right - total, r.y + 12.0, total, 30.0);
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "Search engine", "", total);
+            let pill = R::new(right - total, r.y + h / 2.0 - 15.0, total, 30.0);
             i.gfx.round(pill, 9.0, th.bg);
             let mut x = pill.x + 2.0;
             for (n, ((label, url), w)) in ENGINES.iter().zip(widths).enumerate() {
@@ -505,12 +549,13 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
                 i.hit(rr, h);
                 x += w;
             }
-            54.0
+            h
         }
         Item::Button(label, hint, action, hit) => {
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint);
-            draw_button(i, right, r.y + 27.0, action, hit.clone());
-            54.0
+            let bw = i.gfx.measure(action, Font::ui(13.0, 450).align(Align::Center)) + 26.0;
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint, bw);
+            draw_button(i, right, r.y + h / 2.0, action, hit.clone());
+            h
         }
         Item::KeePass => {
             // A fresh note (a wrong password, an unreadable file) takes the
@@ -521,38 +566,32 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
                     note = Some(msg.clone());
                 }
             }
-            if let Some(note) = note {
-                row_label(i, R::new(r.x, r.y, r.w, 54.0), "KeePass file", &note);
+            let hint = if let Some(note) = note {
+                note
             } else if s.vault > 0 {
-                let hint = format!("{} entries open. Ones matching the page you are on appear by the address bar. Locks after 10 idle minutes.", s.vault);
-                row_label(i, R::new(r.x, r.y, r.w, 54.0), "KeePass file", &hint);
+                format!("{} entries open. Ones matching the page you are on appear by the address bar. Locks after 10 idle minutes.", s.vault)
             } else {
-                row_label(
-                    i,
-                    R::new(r.x, r.y, r.w, 54.0),
-                    "KeePass file",
-                    "Reads a .kdbx on this PC. The password stays in memory and locks after 10 idle minutes.",
-                );
-            }
-            if s.vault > 0 {
-                draw_button(i, right, r.y + 27.0, "Lock now", PageHit::KdbxLock);
-            } else {
-                draw_button(i, right, r.y + 27.0, "Open KeePass file…", PageHit::KdbxOpen);
-            }
-            54.0
+                "Reads a .kdbx on this PC. The password stays in memory and locks after 10 idle minutes.".to_string()
+            };
+            let action = if s.vault > 0 { "Lock now" } else { "Open KeePass file…" };
+            let bw = i.gfx.measure(action, Font::ui(13.0, 450).align(Align::Center)) + 26.0;
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "KeePass file", &hint, bw);
+            draw_button(i, right, r.y + h / 2.0, action, if s.vault > 0 { PageHit::KdbxLock } else { PageHit::KdbxOpen });
+            h
         }
         Item::AgentSetup => {
             let on = s.settings.agent;
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Connect an AI agent", if on { "Claude Code, opencode, Codex, Cursor: run lumen-agent.exe mcp. Copy gives the Claude Code line." } else { "Turn the agent on first." });
+            let hint = if on { "Claude Code, opencode, Codex, Cursor: run lumen-agent.exe mcp. Copy gives the Claude Code line." } else { "Turn the agent on first." };
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "Connect an AI agent", hint, if on { 180.0 } else { 0.0 });
             if on {
-                draw_button(i, right, r.y + 27.0, "Copy setup command", PageHit::CopyAgent);
+                draw_button(i, right, r.y + h / 2.0, "Copy setup command", PageHit::CopyAgent);
             }
-            54.0
+            h
         }
         Item::SitePerms => {
             if s.rules.is_empty() {
-                i.gfx.text("No answers remembered yet. When a site asks for your camera, location or similar, the sidebar asks you.", R::new(r.x, r.y, r.w, 36.0), Font::ui(12.5, 400), th.faint);
-                return 40.0;
+                i.gfx.text_wrap("No answers remembered yet. When a site asks for your camera, location or similar, the sidebar asks you.", R::new(r.x, r.y + 6.0, r.w, 36.0), Font::ui(12.5, 400), th.faint);
+                return 44.0;
             }
             let mut y = r.y;
             for (n, (origin, kind, allow)) in s.rules.iter().enumerate() {
@@ -560,7 +599,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
                 i.gfx.text(&format!("{kind} · {}", if *allow { "Allowed" } else { "Blocked" }), R::new(r.x + r.w * 0.45, y, r.w * 0.35, 40.0), Font::ui(12.5, 400), if *allow { th.dim } else { th.faint });
                 let br = R::new(right - 60.0, y + 8.0, 60.0, 24.0);
                 let h = Hit::Page(PageHit::PermReset(n));
-                i.gfx.text("Reset", br, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
+                i.gfx.text("Reset", br, SMALL.align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
                 i.hit(br, h);
                 i.gfx.line(r.x, y + 40.0, right, y + 40.0, th.line, 1.0);
                 y += 41.0;
@@ -705,7 +744,7 @@ fn status_line(d: &UiDl) -> String {
         _ => fmt_bytes(d.received),
     };
     if !host.is_empty() {
-        s.push_str(&format!("   {host}"));
+        s.push_str(&format!(" · {host}"));
     }
     s
 }
@@ -975,105 +1014,209 @@ fn chip_label(kbps: u32) -> &'static str {
     }
 }
 
-/// A quiet text button in the header row, right-aligned from `x` inwards.
-fn head_action(i: &mut Inner, x: f32, y: f32, label: &str, h: Hit) -> f32 {
+// ------------------------------------------------------------ page parts
+//
+// What every list page is made of: a centred column, a title with an optional line under
+// it, toolbar buttons, rows that light up under the mouse, an empty state that says what to
+// do, and a close button that stays put while the page scrolls.
+
+/// The content column of a list page: centred, capped, and never closer to the edge than
+/// the margin.
+fn column(st: R, max_w: f32) -> R {
+    let w = (st.w - 2.0 * COL_MARGIN).clamp(120.0, max_w);
+    R::new(st.x + (st.w - w) / 2.0, st.y, w, st.h)
+}
+
+/// The close button, top right of the page, drawn last so it sits over whatever scrolls
+/// beneath it. Esc does the same.
+fn close_button(i: &mut Inner, st: R) {
     let th = i.theme;
-    let w = i.gfx.measure(label, Font::ui(12.0, 400));
-    let r = R::new(x - w, y, w, 20.0);
-    i.gfx.text(label, r, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
+    let r = R::new(st.right() - S4 - 32.0, st.y + S4, 32.0, 32.0);
+    let h = Hit::Page(PageHit::Done);
+    let hov = i.is_hover(&h);
+    i.gfx.round(r, R_MD, if hov { th.hover } else { th.raise });
+    i.gfx.icon("close", r.x + 8.0, r.y + 8.0, 16.0, if hov { th.text } else { th.dim });
     i.hit(r, h);
-    x - w - 18.0
+}
+
+/// Page title, and one quiet line under it when there is something to say. Returns the y
+/// the content starts at.
+fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> f32 {
+    let th = i.theme;
+    i.gfx.text(title, R::new(col.x, y, col.w - 48.0, 40.0), TITLE, th.text);
+    if sub.is_empty() {
+        return y + 52.0;
+    }
+    i.gfx.text(sub, R::new(col.x, y + 38.0, col.w - 48.0, 20.0), SMALL, th.faint);
+    y + 68.0
+}
+
+/// A button at (x, y), 30 high. Outlined and quiet, or (primary) filled with the accent.
+/// Returns its rectangle so the caller can step along.
+fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageHit, primary: bool) -> R {
+    let th = i.theme;
+    let f = if primary { BODY_STRONG } else { BODY }.align(Align::Center);
+    let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * S4, 30.0);
+    let h = Hit::Page(hit);
+    let hov = i.is_hover(&h);
+    if primary {
+        i.gfx.round(r, R_MD, if hov { th.accent } else { th.accent.alpha(0.88) });
+        i.gfx.text(label, r, f, th.bg);
+    } else {
+        if hov {
+            i.gfx.round(r, R_MD, th.hover);
+        }
+        i.gfx.round_stroke(r, R_MD, th.line, 1.0);
+        i.gfx.text(label, r, f, if hov { th.text } else { th.dim });
+    }
+    i.hit(r, h);
+    r
+}
+
+/// A text action on a row, 28 high, its right edge at `right`. Returns its left edge.
+fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: PageHit) -> f32 {
+    let th = i.theme;
+    let f = SMALL_STRONG.align(Align::Center);
+    let w = i.gfx.measure(label, f) + 2.0 * S3;
+    let r = R::new(right - w, y, w, 28.0);
+    let h = Hit::Page(hit);
+    let hov = i.is_hover(&h);
+    if hov {
+        i.gfx.round(r, R_SM, th.press);
+    }
+    i.gfx.text(label, r, f, if hov { th.text } else { th.dim });
+    i.hit(r, h);
+    r.x - S1
+}
+
+/// A small caps label that opens a group of rows. Returns the y after it.
+fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -> f32 {
+    let th = i.theme;
+    let label = if count > 0 { format!("{}  {count}", text.to_uppercase()) } else { text.to_uppercase() };
+    i.gfx.text(&label, R::new(col.x, y, col.w, 20.0), CAPTION, th.faint);
+    y + 26.0
+}
+
+/// What a page shows when it has nothing to list: a mark, a plain sentence, and what to do
+/// about it. Centred in `area`; returns its bottom.
+fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint: &str) -> f32 {
+    let th = i.theme;
+    let cx = area.x + area.w / 2.0;
+    i.gfx.circle(cx, area.y + 28.0, 28.0, th.bg);
+    i.gfx.icon(icon, cx - 12.0, area.y + 16.0, 24.0, th.faint);
+    i.gfx.text(title, R::new(area.x, area.y + 70.0, area.w, 26.0), Font::ui(15.0, 550).align(Align::Center), th.text);
+    i.gfx.text_wrap(hint, R::new(cx - 210.0, area.y + 100.0, 420.0, 50.0), SMALL.align(Align::Center), th.faint);
+    area.y + 150.0
+}
+
+/// A row's hover plate. The row also registers itself, so anything drawn on it afterwards
+/// (buttons) takes the mouse first.
+fn row_plate(i: &mut Inner, r: R, id: u64) -> bool {
+    let th = i.theme;
+    let h = Hit::Page(PageHit::Row(id));
+    let hov = i.is_hover(&h) || i.hover.as_ref().is_some_and(|x| matches!(x, Hit::Page(PageHit::Dl(_, d)) if *d == id));
+    if hov {
+        i.gfx.round(r, R_LG, th.hover);
+    }
+    i.hit(r, h);
+    hov
+}
+
+/// Letters for a download's tile: its extension, or what kind of thing it is.
+fn tile_label(d: &UiDl) -> String {
+    let ext = d.name.rsplit_once('.').map(|(_, e)| e).filter(|e| !e.is_empty() && e.len() <= 4 && e.chars().all(|c| c.is_ascii_alphanumeric()));
+    match (ext, d.kind) {
+        (Some(e), _) => e.to_uppercase(),
+        (None, "torrent") => "TOR".into(),
+        (None, "video") => "VID".into(),
+        _ => "FILE".into(),
+    }
 }
 
 fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
-    let col = R::new(st.x + ((st.w - 760.0) / 2.0).max(40.0), st.y, st.w.min(760.0 + 80.0) - 80.0, st.h);
+    let col = column(st, COL_W);
     i.gfx.clip(st);
-    let mut y = st.y + 26.0 - i.page.scroll;
-    i.gfx.text("Downloads", R::new(col.x, y, 300.0, 40.0), Font::serif(30.0), th.text);
-    // Actions right of Done, laid out right to left so new ones never collide.
-    done_button(i, R::new(col.right() - 90.0, y + 5.0, 90.0, 30.0));
-    let mut x = col.right() - 90.0 - 18.0;
-    if s.downloads.iter().any(|d| d.state == "done" || d.state == "failed") {
-        x = head_action(i, x, y + 10.0, "Clear finished", Hit::Page(PageHit::DlClear));
-    }
-    x = head_action(i, x, y + 10.0, "Open folder", Hit::Page(PageHit::DlOpenFolder));
-    x = head_action(i, x, y + 10.0, "Open torrent…", Hit::Page(PageHit::DlTorrentPick));
-    head_action(i, x, y + 10.0, "Add link", Hit::Page(PageHit::DlAddLink));
-    y += 52.0;
+    let mut y = st.y + S5 + 2.0 - i.page.scroll;
 
-    // The summary line, or the short-lived "copy a link" note in its place.
+    // The line under the title: the short-lived "copy a link" note, else what is running.
     let mut flash_gone = false;
+    let mut sub = String::new();
     if let Some((msg, at)) = &i.page.flash {
         if at.elapsed().as_secs_f32() < 3.0 {
-            i.gfx.text(msg, R::new(col.x, y, col.w - 160.0, 22.0), Font::ui(12.5, 400), th.faint);
+            sub = msg.clone();
         } else {
             flash_gone = true;
-        }
-    } else {
-        let active: Vec<&UiDl> = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused")).collect();
-        let down: i64 = active.iter().map(|d| d.speed as i64).sum();
-        let up: i64 = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused" | "seeding")).map(|d| d.up as i64).sum();
-        let t = summary(active.len(), down, up, s.upnp_port_open);
-        if !t.is_empty() {
-            i.gfx.text(&t, R::new(col.x, y, col.w - 160.0, 22.0), Font::ui(12.5, 400), th.faint);
         }
     }
     if flash_gone {
         i.page.flash = None;
     }
-    // The speed-limit chip: what aria2 is capped at, if anything.
-    let chip = chip_label(s.settings.download_limit_kbps);
-    let cw = i.gfx.measure(chip, Font::ui(11.5, 500)) + 16.0;
-    let cr = R::new(col.right() - cw, y - 1.0, cw, 22.0);
+    if sub.is_empty() {
+        let active: Vec<&UiDl> = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused")).collect();
+        let down: i64 = active.iter().map(|d| d.speed as i64).sum();
+        let up: i64 = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused" | "seeding")).map(|d| d.up as i64).sum();
+        sub = summary(active.len(), down, up, s.upnp_port_open);
+    }
+    y = title_block(i, col, y, "Downloads", &sub);
+
+    // Toolbar: things to add on the left, the cap and the cleanup on the right.
+    let mut x = col.x;
+    for (label, hit) in [("Add link", PageHit::DlAddLink), ("Open torrent…", PageHit::DlTorrentPick), ("Open folder", PageHit::DlOpenFolder)] {
+        x = outline_button(i, x, y, label, hit, false).right() + S2;
+    }
+    let chip = format!("Speed limit: {}", chip_label(s.settings.download_limit_kbps));
+    let cf = SMALL_STRONG.align(Align::Center);
+    let cw = i.gfx.measure(&chip, cf) + 2.0 * S3;
+    let cr = R::new(col.right() - cw, y + 1.0, cw, 28.0);
     let ch = Hit::Page(PageHit::DlLimit);
-    i.gfx.round(cr, 11.0, if i.is_hover(&ch) { th.hover } else { th.press });
-    i.gfx.text(chip, cr, Font::ui(11.5, 500).align(Align::Center), th.dim);
+    let chov = i.is_hover(&ch);
+    i.gfx.round(cr, 14.0, if chov { th.press } else { th.hover });
+    i.gfx.text(&chip, cr, cf, if chov { th.text } else { th.dim });
     i.hit(cr, ch);
-    y += 34.0;
+    if s.downloads.iter().any(|d| d.state == "done" || d.state == "failed") {
+        row_action(i, cr.x - S2, y + 1.0, "Clear finished", PageHit::DlClear);
+    }
+    y += 30.0 + S4;
 
     if s.downloads.is_empty() {
-        i.gfx.text("Nothing yet. Files you download show up here.", R::new(col.x, y, col.w, 30.0), Font::ui(13.0, 400), th.faint);
-        y += 30.0;
+        let area = R::new(col.x, y + 56.0, col.w, 200.0);
+        empty_state(i, area, "download", "No downloads yet", "Files you download show up here. To start one yourself, copy a link or magnet and press Add link.");
+        i.gfx.unclip();
+        i.page.max = 0.0;
+        close_button(i, st);
+        return;
     }
+
     for g in group_order() {
         let rows: Vec<&UiDl> = s.downloads.iter().filter(|d| group(d.state) == g).collect();
         if rows.is_empty() {
             continue;
         }
-        y += 8.0;
-        i.gfx.text(&g.to_uppercase(), R::new(col.x, y, col.w, 22.0), Font::ui(11.0, 600), th.faint);
-        y += 26.0;
+        y += S3;
+        y = group_label(i, col, y, g, rows.len());
         // The firewall note rides under the first header that actually has a torrent.
         if s.settings.torrent_note && rows.iter().any(|d| d.kind == "torrent") {
-            let msg = "Windows may ask to let aria2 through the firewall; allow it for faster torrents.";
+            let msg = "Windows may ask to let aria2 through the firewall. Allow it for faster torrents. (click to hide)";
             let h = Hit::Page(PageHit::DlNote);
-            i.gfx.text(msg, R::new(col.x, y, col.w, 20.0), Font::ui(11.5, 400), if i.is_hover(&h) { th.text } else { th.faint });
-            i.hit(R::new(col.x, y, col.w, 20.0), h);
+            i.gfx.text(msg, R::new(col.x, y - 4.0, col.w, 20.0), SMALL, if i.is_hover(&h) { th.text } else { th.faint });
+            i.hit(R::new(col.x, y - 4.0, col.w, 20.0), h);
             y += 24.0;
         }
         for d in rows {
-            let r = R::new(col.x, y, col.w, 64.0);
-            let mut tx = r.x;
-            // The kind tag: File / Torrent / Video, small caps, quiet.
-            let kind = match d.kind {
-                "torrent" => "Torrent",
-                "video" => "Video",
-                _ => "File",
-            };
-            let kw = i.gfx.measure(kind, Font::ui(9.5, 700)) + 12.0;
-            let kr = R::new(tx, r.y + 10.0, kw, 16.0);
-            i.gfx.round(kr, 4.0, th.press);
-            i.gfx.text(kind, kr, Font::ui(9.5, 700).align(Align::Center), th.faint);
-            tx += kw + 8.0;
-            i.gfx.text(&d.name, R::new(tx, r.y + 8.0, r.right() - 220.0 - tx, 22.0), Font::ui(13.5, 500), if d.state == "failed" { th.faint } else { th.text });
-            i.gfx.text(&status_line(d), R::new(r.x, r.y + 32.0, r.w - 220.0, 18.0), Font::ui(12.0, 400), th.faint);
-            if d.state == "progress" || d.state == "paused" {
-                let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
-                let bar = R::new(r.x, r.bottom() - 6.0, r.w - 220.0, 3.0);
-                i.gfx.round(bar, 1.5, th.press);
-                i.gfx.round(R::new(bar.x, bar.y, bar.w * pct.min(1.0), 3.0), 1.5, th.accent);
+            let r = R::new(col.x - S2, y, col.w + 2.0 * S2, 72.0);
+            if r.bottom() < st.y || r.y > st.bottom() {
+                y += 74.0;
+                continue;
             }
+            row_plate(i, r, d.id);
+            let failed = d.state == "failed";
+            // The tile: what the file is, in its own letters.
+            let tile = R::new(col.x, y + 18.0, 36.0, 36.0);
+            i.gfx.round(tile, R_MD, th.bg);
+            let live = matches!(d.state, "progress" | "seeding");
+            i.gfx.text(&tile_label(d), tile, Font::ui(10.0, 700).align(Align::Center), if failed { th.faint.alpha(0.7) } else if live { th.accent } else { th.dim });
+            // The actions, right to left; the text takes whatever they leave.
             let acts: &[(&str, &'static str)] = match d.state {
                 "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
                 "paused" => &[("Resume", "resume"), ("Cancel", "cancel")],
@@ -1082,106 +1225,121 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
                 "failed" if d.url.starts_with("http") => &[("Retry", "retry")],
                 _ => &[],
             };
-            // Finished rows can go: a quiet x at the far right.
-            let mut x = r.right();
+            let mut right = col.right();
             if d.state == "done" || d.state == "failed" {
-                let xr = R::new(x - 26.0, r.y + 21.0, 22.0, 22.0);
+                let xr = R::new(right - 28.0, y + 22.0, 28.0, 28.0);
                 let h = Hit::Page(PageHit::Dl("remove", d.id));
-                if i.is_hover(&h) {
-                    i.gfx.round(xr, 6.0, th.press);
+                let hov = i.is_hover(&h);
+                if hov {
+                    i.gfx.round(xr, R_SM, th.press);
                 }
-                i.gfx.icon("close", xr.x + 4.0, xr.y + 4.0, 14.0, if i.is_hover(&h) { th.text } else { th.faint });
+                i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if hov { th.text } else { th.faint });
                 i.hit(xr, h);
-                x -= 30.0;
+                right = xr.x - S1;
             }
             for (label, a) in acts.iter().rev() {
-                let w = i.gfx.measure(label, Font::ui(12.5, 450)) + 18.0;
-                let br = R::new(x - w, r.y + 18.0, w, 28.0);
-                let h = Hit::Page(PageHit::Dl(a, d.id));
-                if i.is_hover(&h) {
-                    i.gfx.round(br, 7.0, th.hover);
-                }
-                i.gfx.text(label, br, Font::ui(12.5, 450).align(Align::Center), th.dim);
-                i.hit(br, h);
-                x -= w + 4.0;
+                right = row_action(i, right, y + 22.0, label, PageHit::Dl(a, d.id));
             }
-            i.gfx.line(col.x, r.bottom(), col.right(), r.bottom(), th.line, 1.0);
-            y += 65.0;
+            let tx = tile.right() + S3;
+            let tw = (right - S3 - tx).max(60.0);
+            i.gfx.text(&d.name, R::new(tx, y + 13.0, tw, 22.0), BODY_STRONG, if failed { th.dim } else { th.text });
+            i.gfx.text(&status_line(d), R::new(tx, y + 35.0, tw, 18.0), SMALL, th.faint);
+            if d.state == "progress" || d.state == "paused" {
+                let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
+                let bar = R::new(tx, y + 59.0, col.right() - tx, 4.0);
+                i.gfx.round(bar, 2.0, th.press);
+                if pct > 0.0 {
+                    i.gfx.round(R::new(bar.x, bar.y, (bar.w * pct.min(1.0)).max(4.0), 4.0), 2.0, if d.state == "paused" { th.faint } else { th.accent });
+                }
+            }
+            y += 74.0;
         }
     }
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+    close_button(i, st);
 }
 
 /// History (grouped by day) or bookmarks: one quiet list, click to open, x to remove.
 fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let history = s.panel == "history";
-    let col = R::new(st.x + ((st.w - 760.0) / 2.0).max(40.0), st.y, st.w.min(760.0 + 80.0) - 80.0, st.h);
+    let col = column(st, COL_W);
     i.gfx.clip(st);
-    let mut y = st.y + 26.0 - i.page.scroll;
-    i.gfx.text(if history { "History" } else { "Bookmarks" }, R::new(col.x, y, 300.0, 40.0), Font::serif(30.0), th.text);
-    done_button(i, R::new(col.right() - 90.0, y + 5.0, 90.0, 30.0));
+    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    let (title, sub) = if history {
+        ("History", "Newest first. Private tabs are never recorded.")
+    } else {
+        ("Bookmarks", "Ctrl+D, or the star in the address bar, adds one.")
+    };
+    let title_y = y;
+    y = title_block(i, col, y, title, sub);
     if history && !s.history.is_empty() {
-        let r = R::new(col.right() - 210.0, y + 10.0, 110.0, 20.0);
-        let h = Hit::Page(PageHit::ClearHistory);
-        i.gfx.text("Clear history", r, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
-        i.hit(r, h);
+        let w = i.gfx.measure("Clear history…", BODY.align(Align::Center)) + 2.0 * S4;
+        outline_button(i, col.right() - w - 48.0, title_y + 4.0, "Clear history…", PageHit::ClearHistory, false);
     }
-    y += 60.0;
     let rows: Vec<(String, String, String, String)> = if history {
         s.history.iter().map(|v| (v.url.clone(), v.title.clone(), v.day.clone(), v.time.clone())).collect()
     } else {
         s.bookmarks.iter().map(|(u, t)| (u.clone(), t.clone(), String::new(), String::new())).collect()
     };
     if rows.is_empty() {
-        let msg = if history { "Nothing yet. Pages you visit show up here." } else { "No bookmarks yet. Press Ctrl+D or the star in the address bar." };
-        i.gfx.text(msg, R::new(col.x, y, col.w, 30.0), Font::ui(13.0, 400), th.faint);
+        let (icon, head, hint) = if history {
+            ("clock", "No history yet", "Pages you visit show up here, newest first.")
+        } else {
+            ("star", "No bookmarks yet", "Press Ctrl+D, or the star in the address bar, to keep a page here.")
+        };
+        empty_state(i, R::new(col.x, y + 56.0, col.w, 200.0), icon, head, hint);
+        i.gfx.unclip();
+        i.page.max = 0.0;
+        close_button(i, st);
+        return;
     }
     let mut last_day = String::new();
     for (url, title, day, time) in rows {
         if history && day != last_day {
-            y += 8.0;
-            i.gfx.text(&day.to_uppercase(), R::new(col.x, y, col.w, 22.0), Font::ui(11.0, 600), th.faint);
-            y += 28.0;
+            y += S2;
+            y = group_label(i, col, y, &day, 0);
             last_day = day;
         }
-        let r = R::new(col.x - 8.0, y, col.w + 16.0, 36.0);
-        if y > st.bottom() || y + 36.0 < st.y {
-            y += 37.0;
+        let r = R::new(col.x - S2, y, col.w + 2.0 * S2, 38.0);
+        if y > st.bottom() || y + 38.0 < st.y {
+            y += 40.0;
             continue;
         }
         let open = Hit::Page(PageHit::Open(url.clone()));
         let rm = Hit::Page(if history { PageHit::Forget(url.clone()) } else { PageHit::Unbookmark(url.clone()) });
         let hov = i.is_hover(&open) || i.is_hover(&rm);
         if hov {
-            i.gfx.round(r, 8.0, th.hover);
+            i.gfx.round(r, R_MD, th.hover);
         }
         let mut x = col.x;
         if history {
-            i.gfx.text(&time, R::new(x, y, 44.0, 36.0), Font::ui(12.0, 400), th.faint);
-            x += 54.0;
+            i.gfx.text(&time, R::new(x, y, 44.0, 38.0), SMALL, th.faint);
+            x += 56.0;
         }
-        let name = if title.is_empty() { url.clone() } else { title };
+        // The host sits at the right, the title takes what is left, cut with an ellipsis.
         let host = super::host(&url);
-        let hw = i.gfx.measure(&host, Font::ui(12.0, 400)) + 20.0;
-        let nw = (col.right() - x - hw - 40.0).max(80.0);
-        i.gfx.text(&name, R::new(x, y, nw, 36.0), Font::ui(13.0, 450), th.text);
-        let used = i.gfx.measure(&name, Font::ui(13.0, 450)).min(nw);
-        i.gfx.text(&host, R::new(x + used + 12.0, y, hw, 36.0), Font::ui(12.0, 400), th.faint);
+        let hw = (i.gfx.measure(&host, SMALL) + 4.0).min(220.0);
+        let hx = col.right() - 32.0 - hw;
+        let name = if title.is_empty() { url.clone() } else { title };
+        i.gfx.text(&name, R::new(x, y, (hx - S4 - x).max(60.0), 38.0), BODY, th.text);
+        i.gfx.text(&host, R::new(hx, y, hw, 38.0), SMALL.align(Align::Right), th.faint);
         i.hit(r, open);
         if hov {
-            let xr = R::new(col.right() - 26.0, y + 7.0, 22.0, 22.0);
-            if i.is_hover(&rm) {
-                i.gfx.round(xr, 6.0, th.press);
+            let xr = R::new(col.right() - 28.0, y + 5.0, 28.0, 28.0);
+            let xh = i.is_hover(&rm);
+            if xh {
+                i.gfx.round(xr, R_SM, th.press);
             }
-            i.gfx.icon("close", xr.x + 4.0, xr.y + 4.0, 14.0, th.dim);
+            i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if xh { th.text } else { th.dim });
             i.hit(xr, rm);
         }
-        y += 37.0;
+        y += 40.0;
     }
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+    close_button(i, st);
 }
 
 fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
@@ -1189,29 +1347,28 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     let schema = settings_schema();
     // Left: title and sections.
     let nav = R::new(st.x, st.y, 190.0, st.h);
-    i.gfx.line(nav.right(), st.y + 16.0, nav.right(), st.bottom() - 16.0, th.line, 1.0);
-    i.gfx.text("Settings", R::new(nav.x + 22.0, nav.y + 22.0, 160.0, 40.0), Font::serif(28.0), th.text);
+    i.gfx.line(nav.right(), st.y + S4, nav.right(), st.bottom() - S4, th.line, 1.0);
+    i.gfx.text("Settings", R::new(nav.x + 22.0, nav.y + 22.0, 160.0, 40.0), TITLE, th.text);
     let current = i.page.sections.iter().rposition(|y| *y <= i.page.scroll + 30.0).unwrap_or(0);
     for (n, (name, _)) in schema.iter().enumerate() {
-        let r = R::new(nav.x + 12.0, nav.y + 78.0 + n as f32 * 32.0, nav.w - 24.0, 30.0);
+        let r = R::new(nav.x + S3, nav.y + 78.0 + n as f32 * 32.0, nav.w - S5, 30.0);
         let h = Hit::Page(PageHit::Nav(n));
         if n == current || i.is_hover(&h) {
-            i.gfx.round(r, 7.0, th.hover);
+            i.gfx.round(r, R_MD, th.hover);
         }
-        i.gfx.text(name, R::new(r.x + 10.0, r.y, r.w - 20.0, r.h), Font::ui(13.0, 450), if n == current { th.text } else { th.dim });
+        i.gfx.text(name, R::new(r.x + 10.0, r.y, r.w - 20.0, r.h), BODY, if n == current { th.text } else { th.dim });
         i.hit(r, h);
     }
-    done_button(i, R::new(nav.x + 12.0, nav.bottom() - 46.0, nav.w - 24.0, 30.0));
 
     // Right: the rows, scrolled.
     let body = R::new(nav.right() + 1.0, st.y, st.w - nav.w - 1.0, st.h);
-    let col = R::new(body.x + 40.0, body.y, (body.w - 80.0).min(640.0), body.h);
+    let col = R::new(body.x + 40.0, body.y, (body.w - 80.0).clamp(160.0, 640.0), body.h);
     i.gfx.clip(body);
     let mut y = body.y + 26.0 - i.page.scroll;
     let mut sections = Vec::new();
     for (name, items) in &schema {
         sections.push(y + i.page.scroll - body.y - 26.0);
-        i.gfx.text(name, R::new(col.x, y, col.w, 30.0), Font::serif(22.0), th.text);
+        i.gfx.text(name, R::new(col.x, y, col.w, 30.0), H2, th.text);
         y += 40.0;
         for (n, it) in items.iter().enumerate() {
             let h = draw_item(i, it, R::new(col.x, y, col.w, 54.0), s);
@@ -1226,17 +1383,7 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.unclip();
     i.page.sections = sections;
     i.page.max = (y + i.page.scroll - body.bottom() + 20.0).max(0.0);
-}
-
-fn done_button(i: &mut Inner, r: R) {
-    let th = i.theme;
-    let h = Hit::Page(PageHit::Done);
-    if i.is_hover(&h) {
-        i.gfx.round(r, 7.0, th.hover);
-    }
-    i.gfx.text("Done", R::new(r.x + 10.0, r.y, 60.0, r.h), Font::ui(13.0, 450), th.dim);
-    i.gfx.text("Esc", R::new(r.x, r.y, r.w - 10.0, r.h), Font::ui(11.5, 400).align(Align::Right), th.faint);
-    i.hit(r, h);
+    close_button(i, st);
 }
 
 fn mem(b: f64) -> String {
@@ -1264,43 +1411,67 @@ fn net(bps: f64) -> String {
     }
 }
 
+/// One line of the Control table. `id` is the tab's id; 0 for the rows that are not tabs.
+struct UsageRow {
+    id: u64,
+    name: String,
+    state: &'static str,
+    mem: f64,
+    cpu: f64,
+    /// Bytes per second, or None for rows that have no network figure of their own.
+    net: Option<f64>,
+    live: bool,
+    /// The tab can be unloaded from here.
+    unload: bool,
+}
+
 fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
+    let have = i.page.usage.is_some();
     let u = i.page.usage.clone().unwrap_or(json!({}));
-    let col = R::new(st.x + ((st.w - 860.0) / 2.0).max(40.0), st.y, st.w.min(860.0 + 80.0) - 80.0, st.h);
+    let col = column(st, 860.0);
     i.gfx.clip(st);
-    let mut y = st.y + 26.0 - i.page.scroll;
-    i.gfx.text("Control", R::new(col.x, y, 300.0, 40.0), Font::serif(30.0), th.text);
-    done_button(i, R::new(col.right() - 90.0, y + 5.0, 90.0, 30.0));
-    y += 60.0;
-    // Totals.
+    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    y = title_block(i, col, y, "Control", if have { "What each tab costs, right now. Updates every second." } else { "Measuring…" });
+
+    // Four totals, side by side.
     let t = &u["total"];
-    let stats = [
-        (t["mem"].as_f64().map(mem).unwrap_or("—".into()), "MEMORY"),
-        (t["cpu"].as_f64().map(cpu).unwrap_or("—".into()), "CPU"),
-        (t["net"].as_f64().map(net).unwrap_or("—".into()), "NETWORK"),
-        (t["procs"].as_u64().map(|p| p.to_string()).unwrap_or("—".into()), "PROCESSES"),
+    let tiles = [
+        ("MEMORY", t["mem"].as_f64().map(mem), "all processes"),
+        ("CPU", t["cpu"].as_f64().map(cpu), "of the whole machine"),
+        ("NETWORK", t["net"].as_f64().map(|n| if n < 1.0 { "0 KB/s".into() } else { net(n) }), "pages, all tabs"),
+        ("PROCESSES", t["procs"].as_u64().map(|p| p.to_string()), "Lumen and its pages"),
     ];
-    let mut x = col.x;
-    for (v, label) in stats {
-        let w = i.gfx.measure(&v, Font::serif(30.0)).max(90.0) + 40.0;
-        i.gfx.text(&v, R::new(x, y, w, 36.0), Font::serif(30.0), th.text);
-        i.gfx.text(label, R::new(x, y + 38.0, w, 16.0), Font::ui(11.0, 500), th.faint);
-        x += w;
+    let gap = S3;
+    let tw = (col.w - 3.0 * gap) / 4.0;
+    for (n, (label, value, note)) in tiles.into_iter().enumerate() {
+        let r = R::new(col.x + n as f32 * (tw + gap), y, tw, 92.0);
+        i.gfx.round(r, R_LG, th.bg);
+        i.gfx.text(label, R::new(r.x + S4, r.y + S3, r.w - 2.0 * S4, 16.0), CAPTION, th.faint);
+        let (v, c) = match value {
+            Some(v) => (v, th.text),
+            None => ("—".to_string(), th.faint),
+        };
+        i.gfx.text(&v, R::new(r.x + S4, r.y + 28.0, r.w - 2.0 * S4, 40.0), BIG_NUM, c);
+        i.gfx.text(note, R::new(r.x + S4, r.y + 68.0, r.w - 2.0 * S4, 18.0), SMALL, th.faint);
     }
-    y += 74.0;
+    y += 92.0 + S5;
+
+    // The table. Columns hang off the right edge so they line up from row to row.
+    let net_r = col.right() - 80.0;
+    let cpu_r = net_r - 96.0;
+    let mem_r = cpu_r - 72.0;
+    let bar_x = mem_r - 80.0 - S4 - 96.0;
+    let name_w = (bar_x - S4 - col.x).max(80.0);
+    i.gfx.text("TAB", R::new(col.x, y, 200.0, 20.0), CAPTION, th.faint);
+    for (label, right) in [("MEMORY", mem_r), ("CPU", cpu_r), ("NETWORK", net_r)] {
+        i.gfx.text(label, R::new(right - 90.0, y, 90.0, 20.0), CAPTION.align(Align::Right), th.faint);
+    }
+    y += 24.0;
     i.gfx.line(col.x, y, col.right(), y, th.line, 1.0);
-    y += 12.0;
-    // Table.
-    let cols = [col.right() - 290.0, col.right() - 200.0, col.right() - 100.0];
-    let head = Font::ui(11.0, 500);
-    i.gfx.text("TAB", R::new(col.x, y, 200.0, 24.0), head, th.faint);
-    for (n, h) in ["MEMORY", "CPU", "NETWORK"].iter().enumerate() {
-        i.gfx.text(h, R::new(cols[n] - 80.0, y, 80.0, 24.0), head.align(Align::Right), th.faint);
-    }
-    y += 30.0;
-    let total_mem = t["mem"].as_f64().unwrap_or(1.0).max(1.0);
-    let mut rows: Vec<(String, String, f64, f64, f64, bool, Option<u64>)> = Vec::new();
+
+    let total_mem = t["mem"].as_f64().unwrap_or(0.0).max(1.0);
+    let mut rows: Vec<UsageRow> = Vec::new();
     for tab in &s.tabs {
         let x = &u["tabs"][tab.id.to_string()];
         let live = tab.status == "live" || tab.status == "asleep";
@@ -1312,52 +1483,82 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
             _ => "",
         };
         let name = if tab.title.is_empty() { if tab.status == "new" { "New tab".into() } else { super::host(&tab.url) } } else { tab.title.clone() };
-        rows.push((
+        rows.push(UsageRow {
+            id: tab.id,
             name,
-            state.into(),
-            x["mem"].as_f64().unwrap_or(0.0),
-            x["cpu"].as_f64().unwrap_or(0.0),
-            x["net"].as_f64().unwrap_or(0.0),
+            state,
+            mem: x["mem"].as_f64().unwrap_or(0.0),
+            cpu: x["cpu"].as_f64().unwrap_or(0.0),
+            net: Some(x["net"].as_f64().unwrap_or(0.0)),
             live,
-            (live && tab.id != s.active).then_some(tab.id),
-        ));
+            unload: live && tab.id != s.active,
+        });
     }
-    rows.sort_by(|a, b| b.2.total_cmp(&a.2));
-    let ui = &u["ui"];
-    let core = &u["core"];
-    rows.push(("Lumen".into(), "interface".into(), ui["mem"].as_f64().unwrap_or(0.0), ui["cpu"].as_f64().unwrap_or(0.0), -1.0, true, None));
-    rows.push(("Browser core".into(), String::new(), core["mem"].as_f64().unwrap_or(0.0), core["cpu"].as_f64().unwrap_or(0.0), -1.0, true, None));
-    for (name, state, m, c, n, live, unload) in rows {
-        let r = R::new(col.x, y, col.w, 40.0);
-        let c_text = if live { th.text } else { th.faint };
-        let nw = i.gfx.measure(&name, Font::ui(13.0, 450)).min(cols[0] - 120.0 - col.x - 120.0);
-        i.gfx.text(&name, R::new(r.x, r.y, nw + 2.0, r.h), Font::ui(13.0, 450), c_text);
-        if !state.is_empty() {
-            i.gfx.text(&state, R::new(r.x + nw + 10.0, r.y, 110.0, r.h), Font::ui(11.5, 400), th.faint);
+    rows.sort_by(|a, b| b.mem.total_cmp(&a.mem));
+    let (ui, core) = (&u["ui"], &u["core"]);
+    for (name, state, v) in [("Lumen", "interface", ui), ("Browser core", "shared", core)] {
+        rows.push(UsageRow { id: 0, name: name.into(), state, mem: v["mem"].as_f64().unwrap_or(0.0), cpu: v["cpu"].as_f64().unwrap_or(0.0), net: None, live: true, unload: false });
+    }
+    for (n, row) in rows.iter().enumerate() {
+        let r = R::new(col.x - S2, y + 2.0, col.w + 2.0 * S2, ROW_H - 4.0);
+        // Tab rows light up; the two rows that are not tabs are only there to add up.
+        let hov = row.id != 0 && i.is_hover(&Hit::Page(PageHit::Row(row.id)));
+        if row.id != 0 {
+            i.hit(r, Hit::Page(PageHit::Row(row.id)));
+        }
+        if hov {
+            i.gfx.round(r, R_MD, th.hover);
+        }
+        let c_text = if row.live { th.text } else { th.faint };
+        // A live tab with no process found yet has no figures, not zeros.
+        let known = row.live && row.mem > 0.0;
+        let nw = i.gfx.measure(&row.name, BODY).min(name_w - 90.0).max(40.0);
+        i.gfx.text(&row.name, R::new(col.x, y, nw + 2.0, ROW_H), BODY, c_text);
+        if !row.state.is_empty() {
+            let c = if row.state == "Active" { th.accent } else { th.faint };
+            i.gfx.text(row.state, R::new(col.x + nw + S3, y, 90.0, ROW_H), SMALL, c);
+        }
+        if known {
+            // Share of everything Lumen uses: a track and a fill, so the heavy rows show.
+            let bar = R::new(bar_x, y + ROW_H / 2.0 - 2.0, 96.0, 4.0);
+            i.gfx.round(bar, 2.0, th.press);
+            let w = (96.0 * (row.mem / total_mem).min(1.0) as f32).max(if row.mem > 0.0 { 3.0 } else { 0.0 });
+            if w > 0.0 {
+                i.gfx.round(R::new(bar.x, bar.y, w, 4.0), 2.0, th.accent.alpha(0.8));
+            }
         }
         let vals = [
-            if live { mem(m) } else { "—".into() },
-            if live { cpu(c) } else { "—".into() },
-            if n < 0.0 || !live { "—".into() } else { net(n) },
+            if known { mem(row.mem) } else { "—".into() },
+            if known { cpu(row.cpu) } else { "—".into() },
+            match row.net {
+                Some(b) if known => net(b),
+                _ => "—".into(),
+            },
         ];
-        for (k, v) in vals.iter().enumerate() {
-            i.gfx.text(v, R::new(cols[k] - 90.0, r.y, 90.0, r.h), Font::ui(13.0, if k == 0 { 500 } else { 400 }).align(Align::Right), if k == 0 { c_text } else { th.dim });
+        for (k, (v, right)) in vals.iter().zip([mem_r, cpu_r, net_r]).enumerate() {
+            let strong = k == 0 && row.live;
+            let c = if !row.live || v == "—" { th.faint } else if k == 0 { th.text } else { th.dim };
+            i.gfx.text(v, R::new(right - 90.0, y, 90.0, ROW_H), Font::ui(13.0, if strong { 550 } else { 400 }).align(Align::Right), c);
         }
-        if live {
-            let bw = 90.0 * (m / total_mem).min(1.0) as f32;
-            i.gfx.round(R::new(cols[0] - bw, r.bottom() - 7.0, bw, 2.0), 1.0, th.acc_soft);
+        if row.unload {
+            row_action(i, col.right(), y + (ROW_H - 28.0) / 2.0, "Unload", PageHit::Unload(row.id));
         }
-        if let Some(id) = unload {
-            let br = R::new(col.right() - 70.0, r.y + 8.0, 70.0, 24.0);
-            let h = Hit::Page(PageHit::Unload(id));
-            i.gfx.text("Unload", br, Font::ui(12.0, 400).align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
-            i.hit(br, h);
+        y += ROW_H;
+        if n + 1 < rows.len() {
+            i.gfx.line(col.x, y, col.right(), y, th.line.alpha(0.6), 1.0);
         }
-        i.gfx.line(col.x, r.bottom(), col.right(), r.bottom(), th.line, 1.0);
-        y += 41.0;
     }
-    y += 26.0;
-    i.gfx.text("Limits", R::new(col.x, y, 300.0, 30.0), Font::serif(22.0), th.text);
+    // The sum, set apart: what the whole browser is using.
+    i.gfx.line(col.x, y, col.right(), y, th.faint.alpha(0.5), 1.0);
+    i.gfx.text("Total", R::new(col.x, y, 200.0, ROW_H), BODY_STRONG, th.text);
+    let totals = [t["mem"].as_f64().map(mem), t["cpu"].as_f64().map(cpu), t["net"].as_f64().map(net)];
+    for (v, right) in totals.iter().zip([mem_r, cpu_r, net_r]) {
+        let text = v.clone().unwrap_or_else(|| "—".into());
+        i.gfx.text(&text, R::new(right - 90.0, y, 90.0, ROW_H), BODY_STRONG.align(Align::Right), if v.is_some() { th.text } else { th.faint });
+    }
+    y += ROW_H + S5 + S2;
+
+    i.gfx.text("Limits", R::new(col.x, y, 300.0, 30.0), H2, th.text);
     y += 40.0;
     let items = limits_schema();
     for (n, it) in items.iter().enumerate() {
@@ -1370,8 +1571,9 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     }
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
-    let _: Color = th.text;
+    close_button(i, st);
 }
+
 
 // ------------------------------------------------------------------- input
 
@@ -1427,6 +1629,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
         }
         PageHit::Done => send(&i.proxy, json!({"t": "panel", "open": false})),
         PageHit::Unload(id) => send(&i.proxy, json!({"t": "sleep", "id": id})),
+        PageHit::Row(_) => {}
         PageHit::Slider(_) => {}
         PageHit::ClearPasswords => send(&i.proxy, json!({"t": "clearPasswords"})),
         PageHit::KdbxOpen => {
@@ -1555,7 +1758,8 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_link, days_from_civil, fmt_bytes, group, midnight, summary, unix_now};
+    use super::{classify_link, column, days_from_civil, fmt_bytes, group, midnight, summary, tile_label, unix_now};
+    use crate::chrome::gfx::R;
     use crate::chrome::UiDl;
 
     fn dl(state: &'static str, kind: &'static str) -> UiDl {
@@ -1634,7 +1838,7 @@ mod tests {
         d.ratio = 0.42;
         d.peers = 9;
         // The host rides along at the end, like every status line on this page.
-        assert_eq!(super::status_line(&d), "Seeding · up 300 KB/s · ratio 0.42 · 9 peers   example.com");
+        assert_eq!(super::status_line(&d), "Seeding · up 300 KB/s · ratio 0.42 · 9 peers · example.com");
 
         let mut d = dl("progress", "torrent");
         d.received = 120 * 1048576;
@@ -1662,5 +1866,27 @@ mod tests {
     fn fmt_bytes_rounds_like_the_brief() {
         assert_eq!(fmt_bytes(4_404_019), "4.2 MB");
         assert_eq!(fmt_bytes(317_440), "310 KB");
+    }
+
+    #[test]
+    fn tile_says_what_the_file_is() {
+        let named = |n: &str, kind: &'static str| UiDl { name: n.into(), ..dl("done", kind) };
+        assert_eq!(tile_label(&named("report.pdf", "file")), "PDF");
+        assert_eq!(tile_label(&named("a.tar.gz", "file")), "GZ");
+        // No extension, or one too long to be one: say the kind instead.
+        assert_eq!(tile_label(&named("README", "file")), "FILE");
+        assert_eq!(tile_label(&named("some file.not an ext", "file")), "FILE");
+        assert_eq!(tile_label(&named("movie", "video")), "VID");
+        assert_eq!(tile_label(&named("ubuntu", "torrent")), "TOR");
+    }
+
+    #[test]
+    fn column_is_centred_capped_and_keeps_its_margin() {
+        let wide = column(R::new(300.0, 0.0, 1400.0, 800.0), 760.0);
+        assert_eq!(wide.w, 760.0);
+        assert_eq!(wide.x, 300.0 + (1400.0 - 760.0) / 2.0);
+        // Narrow: never closer to either edge than the margin the close button needs.
+        let narrow = column(R::new(0.0, 0.0, 400.0, 800.0), 760.0);
+        assert!(narrow.x >= 56.0 && narrow.right() <= 400.0 - 56.0 + 0.01);
     }
 }

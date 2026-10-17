@@ -7,6 +7,7 @@ use std::{
     collections::HashMap,
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 use tao::{event_loop::EventLoopProxy, window::Window};
@@ -68,6 +69,8 @@ pub enum Ev {
     NavStart(u64, String),
     /// It ended: (tab, ok, WebErrorStatus code, HTTP status). One per top-level page.
     NavDone(u64, bool, i32, i32),
+    /// A server redirect began: the page is not the one that was asked for.
+    NavRedirected(u64),
     Audio(u64, bool),
     FullScreen(u64, bool),
     CloseMe(u64),
@@ -392,9 +395,7 @@ fn build_tab_in(
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
-        .with_document_title_changed_handler(move |t| {
-            let _ = p_title.send_event(Ev::Title(id, t));
-        })
+        .with_document_title_changed_handler(title_pacer(id, p_title))
         .with_on_page_load_handler(move |e, _| {
             let _ = p_load.send_event(Ev::Loading(id, matches!(e, PageLoadEvent::Started)));
         })
@@ -482,6 +483,52 @@ fn content_bounds_now(ctx: &Ctx) -> Rect {
 
 // ------------------------------------------------------------------- hooks
 
+/// A page may change its title a hundred times a second (a chat that streams,
+/// a ticker). Every change would wake the main loop and redraw the sidebar.
+/// This lets one through per `TITLE_GAP`, and a thread sends the newest one when
+/// the gap is over, so the tab always ends on the last title the page set.
+fn title_pacer(id: u64, proxy: EventLoopProxy<Ev>) -> impl Fn(String) + 'static {
+    use crate::pacing::{TITLE_GAP, Throttle};
+    use std::sync::{Arc, Mutex};
+    struct State {
+        gate: Throttle<String>,
+        /// What the main loop was last told.
+        sent: String,
+        /// A thread is waiting to send the newest title.
+        waiting: bool,
+    }
+    let st = Arc::new(Mutex::new(State { gate: Throttle::default(), sent: String::new(), waiting: false }));
+    move |t: String| {
+        let Ok(mut s) = st.lock() else { return };
+        let now = Instant::now();
+        match s.gate.offer(now, TITLE_GAP, t) {
+            Some(t) => {
+                if t != s.sent {
+                    s.sent = t.clone();
+                    let _ = proxy.send_event(Ev::Title(id, t));
+                }
+            }
+            None if !s.waiting => {
+                s.waiting = true;
+                let (st, proxy) = (st.clone(), proxy.clone());
+                let wait = s.gate.due(TITLE_GAP).map_or(TITLE_GAP, |d| d.saturating_duration_since(now));
+                let _ = std::thread::Builder::new().name("lumen-title".into()).spawn(move || {
+                    std::thread::sleep(wait + Duration::from_millis(2));
+                    let Ok(mut s) = st.lock() else { return };
+                    s.waiting = false;
+                    if let Some(t) = s.gate.release(Instant::now(), TITLE_GAP)
+                        && t != s.sent
+                    {
+                        s.sent = t.clone();
+                        let _ = proxy.send_event(Ev::Title(id, t));
+                    }
+                });
+            }
+            None => {}
+        }
+    }
+}
+
 fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<Rc<dyn Fn(&str) -> Option<String>>>) {
     let core = wv.webview();
     let mut token = 0i64;
@@ -495,6 +542,7 @@ fn hook_page(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, rewrite: Option<R
                 let mut redirected = Default::default();
                 let _ = args.IsRedirected(&mut redirected);
                 if redirected.as_bool() {
+                    let _ = p.send_event(Ev::NavRedirected(id));
                     return Ok(());
                 }
                 let mut u = PWSTR::null();
@@ -1250,6 +1298,15 @@ pub fn try_suspend(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
                 let _ = proxy.send_event(Ev::Suspended(id, hr.is_ok() && ok));
                 Ok(())
             })));
+        }
+    }
+}
+
+/// Thaw a page `try_suspend` froze.
+pub fn resume(wv: &WebView) {
+    if let Ok(c3) = wv.webview().cast::<ICoreWebView2_3>() {
+        unsafe {
+            let _ = c3.Resume();
         }
     }
 }
