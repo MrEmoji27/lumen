@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 380" width="780" height="380" role="img" aria-label="Renderer processes 54 to 23; forty heavy tabs peak 2.7 GB, settle at 1.1 GB" font-family='system-ui, -apple-system, "Segoe UI", sans-serif'>
+<rect x="0.5" y="0.5" width="779" height="379" rx="12" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<text x="28" y="38" font-size="17" font-weight="600" fill="#f0efec">Forty tabs: 31 fewer processes, and 1.1 GB once they sleep</text>
+<text x="28" y="60" font-size="12.5" fill="#c3c2b7">Release build, the same forty tabs before and after each change</text>
+<text x="44.0" y="92.0" font-size="13" font-weight="600" fill="#f0efec" text-anchor="start">Renderer processes</text>
+<line x1="84" x2="360" y1="316.0" y2="316.0" stroke="#383835" stroke-width="1"/>
+<text x="74.0" y="320.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">0</text>
+<line x1="84" x2="360" y1="248.0" y2="248.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="74.0" y="252.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">20</text>
+<line x1="84" x2="360" y1="180.0" y2="180.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="74.0" y="184.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">40</text>
+<line x1="84" x2="360" y1="112.0" y2="112.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="74.0" y="116.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">60</text>
+<path d="M141.0,316.0 L141.0,136.4 Q141.0,132.4 145.0,132.4 L161.0,132.4 Q165.0,132.4 165.0,136.4 L165.0,316.0 Z" fill="#5a5955"><title>One per tab: 54</title></path>
+<text x="153.0" y="122.4" font-size="12.5" font-weight="600" fill="#f0efec" text-anchor="middle">54</text>
+<text x="153.0" y="338.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">One per tab</text>
+<path d="M279.0,316.0 L279.0,241.8 Q279.0,237.8 283.0,237.8 L299.0,237.8 Q303.0,237.8 303.0,241.8 L303.0,316.0 Z" fill="#3987e5"><title>One per site: 23</title></path>
+<text x="291.0" y="227.8" font-size="12.5" font-weight="600" fill="#f0efec" text-anchor="middle">23</text>
+<text x="291.0" y="338.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">One per site</text>
+<text x="424.0" y="92.0" font-size="13" font-weight="600" fill="#f0efec" text-anchor="start">Memory, forty heavy tabs</text>
+<line x1="464" x2="740" y1="316.0" y2="316.0" stroke="#383835" stroke-width="1"/>
+<text x="454.0" y="320.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">0 GB</text>
+<line x1="464" x2="740" y1="248.0" y2="248.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="454.0" y="252.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">1 GB</text>
+<line x1="464" x2="740" y1="180.0" y2="180.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="454.0" y="184.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">2 GB</text>
+<line x1="464" x2="740" y1="112.0" y2="112.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="454.0" y="116.0" font-size="11.5" font-weight="400" fill="#898781" text-anchor="end">3 GB</text>
+<path d="M521.0,316.0 L521.0,136.4 Q521.0,132.4 525.0,132.4 L541.0,132.4 Q545.0,132.4 545.0,136.4 L545.0,316.0 Z" fill="#5a5955"><title>Peak: 2.7 GB</title></path>
+<text x="533.0" y="122.4" font-size="12.5" font-weight="600" fill="#f0efec" text-anchor="middle">2.7 GB</text>
+<text x="533.0" y="338.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">Peak</text>
+<path d="M659.0,316.0 L659.0,245.2 Q659.0,241.2 663.0,241.2 L679.0,241.2 Q683.0,241.2 683.0,245.2 L683.0,316.0 Z" fill="#3987e5"><title>Settled, tabs asleep: 1.1 GB</title></path>
+<text x="671.0" y="231.2" font-size="12.5" font-weight="600" fill="#f0efec" text-anchor="middle">1.1 GB</text>
+<text x="671.0" y="338.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">Settled, tabs asleep</text>
+<text x="28.0" y="366.0" font-size="12" font-weight="400" fill="#898781" text-anchor="start">Same forty tabs. Hidden tabs trim at 30 s, freeze at 5 min, unload at 30 min. CPU after settling: 0.4%.</text>
+</svg>
