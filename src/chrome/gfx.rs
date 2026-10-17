@@ -624,11 +624,14 @@ impl Gfx {
                 l(p(6.4, 3.4), p(6.4, 12.6));
             }
             "split" => {
-                // Two pages side by side, one focus: the split view's mark.
-                let (a, b) = (p(2.4, 3.4), p(7.6, 12.6));
-                self.round_stroke(R::new(a.0, a.1, b.0 - a.0, b.1 - a.1), 1.4 * k, c, w * 0.85);
-                let (a, b) = (p(9.0, 3.4), p(13.6, 12.6));
-                self.round_stroke(R::new(a.0, a.1, b.0 - a.0, b.1 - a.1), 1.4 * k, c, w * 0.85);
+                // One window cut in two, the left half filled: two pages, one in focus. Two
+                // separate outlines read as the digits "00" at this size.
+                let (a, b) = (p(2.4, 3.2), p(13.6, 12.8));
+                let r = R::new(a.0, a.1, b.0 - a.0, b.1 - a.1);
+                let half = R::new(r.x + w * 0.5, r.y + w * 0.5, (r.w / 2.0 - w * 0.5).max(1.0), r.h - w);
+                self.round(half, 1.2 * k, c.alpha(0.4));
+                self.round_stroke(r, 2.0 * k, c, w);
+                l(p(8.0, 3.4), p(8.0, 12.6));
             }
             _ => {}
         }
