@@ -12,7 +12,6 @@ use super::{
     pages::{close_button, column, fmt_bytes, title_block},
     report::fmt_time,
     send,
-    style::*,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,7 +61,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     let t = &u["total"];
     let col = column(st, 860.0);
     i.gfx.clip(st);
-    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
     y = title_block(i, col, y, "Dashboard", "Lumen at a glance. Live while this page is open.");
 
     let (open, live, asleep, off) = tab_counts(s);
@@ -110,65 +109,70 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         },
     ];
 
-    let gap = S3;
+    let gap = i.look.s3;
     let per = 3usize;
     let tw = (col.w - (per as f32 - 1.0) * gap) / per as f32;
     for (n, tile) in tiles.iter().enumerate() {
         let r = R::new(col.x + (n % per) as f32 * (tw + gap), y + (n / per) as f32 * (104.0 + gap), tw, 104.0);
         let h = tile.open.map(|p| Hit::Dash(Click::Open(p)));
         let hov = h.as_ref().is_some_and(|h| i.is_hover(h));
-        i.gfx.round(r, R_LG, if hov { th.hover } else { th.bg });
-        i.gfx.text(tile.caption, R::new(r.x + S4, r.y + S3, r.w - 2.0 * S4, 16.0), CAPTION, th.faint);
-        i.gfx.text(&tile.value, R::new(r.x + S4, r.y + 30.0, r.w - 2.0 * S4, 40.0), BIG_NUM, th.text);
-        i.gfx.text(&tile.note, R::new(r.x + S4, r.y + 74.0, r.w - 2.0 * S4, 18.0), SMALL, th.faint);
+        i.gfx.round(r, i.look.r_lg, if hov { th.hover } else { th.bg });
+        i.gfx.text(tile.caption, R::new(r.x + i.look.s4, r.y + i.look.s3, r.w - 2.0 * i.look.s4, 16.0), i.look.caption, th.faint);
+        i.gfx.text(&tile.value, R::new(r.x + i.look.s4, r.y + 30.0, r.w - 2.0 * i.look.s4, 40.0), i.look.big_num, th.text);
+        i.gfx.text(&tile.note, R::new(r.x + i.look.s4, r.y + 74.0, r.w - 2.0 * i.look.s4, 18.0), i.look.small, th.faint);
         if let Some(h) = h {
             i.hit(r, h);
         }
     }
-    y += 2.0 * 104.0 + gap + S5;
+    y += 2.0 * 104.0 + gap + i.look.s5;
 
-    // Two actions under the tiles.
+    // Actions under the tiles, and the pages that left the footer for here.
     let mut x = col.x;
-    for (label, c) in [("Free memory", Click::FreeMemory), ("Open Control", Click::Open("control"))] {
-        let f = SMALL_STRONG.align(Align::Center);
-        let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * S3, 30.0);
+    for (label, c) in [
+        ("Free memory", Click::FreeMemory),
+        ("Open Control", Click::Open("control")),
+        ("Bookmarks", Click::Open("bookmarks")),
+        ("Privacy report", Click::Open("report")),
+    ] {
+        let f = i.look.small_strong.align(Align::Center);
+        let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * i.look.s3, 30.0);
         let h = Hit::Dash(c);
         let hov = i.is_hover(&h);
         if hov {
-            i.gfx.round(r, R_MD, th.hover);
+            i.gfx.round(r, i.look.r_md, th.hover);
         }
-        i.gfx.round_stroke(r, R_MD, th.line, 1.0);
+        i.gfx.round_stroke(r, i.look.r_md, th.line, 1.0);
         i.gfx.text(label, r, f, if hov { th.text } else { th.dim });
         i.hit(r, h);
-        x = r.right() + S2;
+        x = r.right() + i.look.s2;
     }
-    y += 30.0 + S5;
+    y += 30.0 + i.look.s5;
 
     // Agents: who is working right now.
-    i.gfx.text("AGENTS", R::new(col.x, y, col.w, 20.0), CAPTION, th.faint);
+    i.gfx.text("AGENTS", R::new(col.x, y, col.w, 20.0), i.look.caption, th.faint);
     y += 26.0;
     if agents == 0 {
-        i.gfx.text("No agent is working. Agents connect through lumen-agent (Settings > AI agent).", R::new(col.x, y, col.w, 20.0), SMALL, th.dim);
+        i.gfx.text("No agent is working. Agents connect through lumen-agent (Settings > AI agent).", R::new(col.x, y, col.w, 20.0), i.look.small, th.dim);
         y += 30.0;
     } else {
         let line = format!("{agents} agent tab(s) open{}", if s.agent_busy { " · working now" } else { "" });
-        i.gfx.text(&line, R::new(col.x, y + 5.0, col.w - 160.0, 20.0), BODY, th.text);
+        i.gfx.text(&line, R::new(col.x, y + 5.0, col.w - 160.0, 20.0), i.look.body, th.text);
         let label = "Stop all agents";
-        let f = SMALL_STRONG.align(Align::Center);
-        let w = i.gfx.measure(label, f) + 2.0 * S3;
+        let f = i.look.small_strong.align(Align::Center);
+        let w = i.gfx.measure(label, f) + 2.0 * i.look.s3;
         let r = R::new(col.right() - w, y, w, 30.0);
         let h = Hit::Dash(Click::StopAgents);
         let hov = i.is_hover(&h);
-        i.gfx.round(r, R_MD, if hov { th.accent } else { th.accent.alpha(0.85) });
+        i.gfx.round(r, i.look.r_md, if hov { th.accent } else { th.accent.alpha(0.85) });
         i.gfx.text(label, r, f, th.bg);
         i.hit(r, h);
-        y += 30.0 + S2;
+        y += 30.0 + i.look.s2;
         for t in s.tabs.iter().filter(|t| t.agent).take(8) {
             let name = if t.title.is_empty() { super::host(&t.url) } else { t.title.clone() };
-            i.gfx.text(&format!("·  {name}"), R::new(col.x, y, col.w, 20.0), SMALL, th.dim);
+            i.gfx.text(&format!("·  {name}"), R::new(col.x, y, col.w, 20.0), i.look.small, th.dim);
             y += 22.0;
         }
-        y += S3;
+        y += i.look.s3;
     }
 
     i.gfx.unclip();

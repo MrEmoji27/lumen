@@ -3859,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "lumen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "adblock",
  "base64 0.23.1",

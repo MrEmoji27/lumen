@@ -257,3 +257,46 @@ presentation. Tearing on a real window is not measured here.
 ## Lucide icons
 
 Lucide icons (SVG rasterized once per size into alpha masks, tinted when drawn): idle private bytes of lumen.exe, debug build, headless, 25 s, 3 runs each: 31.5 MB before (31.4 to 31.8), 31.9 MB after (31.9 to 32.0). About +0.4 MB, mostly the masks and the SVG code; the Direct3D device used to rasterize is dropped after each frame that needed it.
+
+## Motion and customization (2026-10-17)
+
+The custom pass turned every colour, font, size and spacing into one `Look`
+derived from the settings, and added `src/chrome/motion.rs`, a spring and
+tween library every animation in the chrome runs on. The promise that matters
+here: **motion costs nothing when nothing moves.** The frame timer is armed
+only while `Motion::running()`, values nobody touches for a frame are dropped,
+and an idle Lumen therefore repaints exactly as often as it did before.
+
+Method: `tools`-style manual run, debug build (this pass is about a difference,
+not absolutes), headless, fresh profile under `%TEMP%`, `settings.json` with
+`{"agent": true, "agent_port": 476xx, "journal": true}`, `LUMEN_JOURNAL_SECS=10`
+so the journal samples every ten seconds, one `about:blank` tab opened through
+`lumen-agent`. 60 s window after 15 s of settling. Wakes are the journal's
+`wake` lines; CPU is the journal's own `cpu` sample (the whole process tree,
+percent of one core). Before is the branch point build; after is this branch.
+
+| run | wakes (per 10 s sample, steady state) | cpu samples | lumen private |
+|---|---|---|---|
+| before | 5, 5 | 0.00, 0.00 % | 31.0 MB |
+| after | 6, 5 | 0.01, 0.02 % | 20.7 MB |
+
+- **Wakes are where they were: 5–6 per ten seconds, and they are the loop's own
+  clocks** (the 3 s tick and the 5 s memory read with `show_memory` on), not the
+  chrome. The chrome's new 16 ms animation timer only runs while something is
+  moving; a settling entrance is over in under a third of a second.
+- **CPU is the same to the noise floor.** Both runs are under 0.1 %, and the
+  journal's own samples in the after run read 0.00 to 0.08 % across the whole
+  minute (page load included).
+- **Private bytes went down, not up, in this pair of runs:** 31.0 to 20.7 MB in
+  `lumen.exe` itself. Not chased: a single run either side of a large diff is
+  not evidence, and the after build does *more* (a full-window render target in
+  every layout, an installed-font list, the wallpaper path). What it says is
+  that nothing here blew memory up. Absolute numbers stay where `tools`-style
+  release runs put them.
+
+What is *not* measured here: the animation timer under a real window at 60 Hz,
+and the underlay repaint (the chrome now covers the whole window in every
+layout, with the page drawn over it). Both are visible in the journal's
+`ui_slow` counter over a day of use; the idle numbers above are the claim the
+brief asked to keep.
+

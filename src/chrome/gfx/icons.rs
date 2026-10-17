@@ -81,6 +81,8 @@ pub static TABLE: &[Entry] = &[
     lucide!("pause", "pause", filled),
     lucide!("sidebar", "panel-left"),
     lucide!("split", "columns-2"),
+    // The Drive panel: a task handed to an agent.
+    lucide!("send", "send"),
 ];
 
 /// Every name `Gfx::geometry_icon` can draw by hand. Lucide has all of them; the hand-made

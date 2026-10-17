@@ -11,7 +11,8 @@ mod agent_policy;
 mod agentkit;
 mod agent_result;
 mod agent_tasks;
-mod agent_consent;mod aloud;
+mod agent_consent;
+mod aloud;
 mod blocker;
 mod bookmarks;
 mod chrome;
@@ -48,6 +49,10 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -87,6 +92,7 @@ enum Panel {
     Downloads,
     History,
     Bookmarks,
+    Drive,
     Report,
     Dashboard,
     /// What each site may do, and the zoom and http choices kept per site.
@@ -107,10 +113,79 @@ impl Panel {
             Panel::Downloads => "downloads",
             Panel::History => "history",
             Panel::Bookmarks => "bookmarks",
+            Panel::Drive => "drive",
             Panel::Report => "report",
             Panel::Dashboard => "dashboard",
             Panel::Sites => "sites",
         }
+    }
+}
+
+/// One line of a Drive CLI's output, without the colors a terminal would read.
+fn clean_line(line: &str) -> String {
+    let mut out = String::new();
+    let mut in_escape = false;
+    for c in line.chars() {
+        if c == '\u{1b}' {
+            in_escape = true;
+            continue;
+        }
+        if in_escape {
+            if c.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            continue;
+        }
+        if !c.is_control() || c == '\t' {
+            out.push(c);
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// One of a Drive CLI's pipes, read a line at a time into the run's log. The flag says
+/// the pipe is done, which is how the run notices its CLI has ended.
+fn drive_pipe(pipe: impl std::io::Read + Send + 'static, out: Arc<Mutex<std::collections::VecDeque<String>>>, done: Arc<AtomicBool>) {
+    let reader = std::io::BufReader::new(pipe);
+    for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+        let line = clean_line(&line);
+        if line.is_empty() {
+            continue;
+        }
+        let mut q = out.lock().unwrap_or_else(|e| e.into_inner());
+        if q.len() >= 400 {
+            q.pop_front();
+        }
+        q.push_back(line);
+    }
+    done.store(true, Ordering::Relaxed);
+}
+
+/// One Drive run: the agent CLI Lumen started with the person's task, its output, and
+/// where the run is. Every run is its own MCP session, in its own profile.
+struct Drive {
+    /// The name this run's session keeps (`drive-3`): the CLI's label, its profile and
+    /// the folder its downloads land in.
+    name: String,
+    task: String,
+    child: std::process::Child,
+    /// What the CLI printed, newest last: the agent's own messages.
+    out: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// The reader threads are done: the CLI has ended.
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    started: Instant,
+    /// The MCP session, once the CLI has opened one.
+    session: Option<String>,
+    /// The person took the tab over: only browser_handoff gets the agent back in.
+    paused: bool,
+    exit: Option<i32>,
+}
+
+impl Drive {
+    /// How long the run has been going, for the panel's title line.
+    fn ago(&self) -> String {
+        let s = self.started.elapsed().as_secs();
+        if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m", s / 60) } else { format!("{}h {:02}m", s / 3600, (s % 3600) / 60) }
     }
 }
 
@@ -150,6 +225,14 @@ struct Tab {
     /// For agent tabs: the MCP session that owns it, and its client's name.
     owner: String,
     owner_name: String,
+    /// For agent tabs: the profile key its own WebView2 profile is named after
+    /// (`agent-<profile>`), so its cookies and storage never meet another agent's.
+    profile: String,
+    /// For agent tabs: its own folder under "Agent downloads".
+    downloads: String,
+    /// The session asked for strict isolation: its own environment, its own browser
+    /// process. Cleared if WebView2 will not make one, so the tab still opens.
+    own_env: bool,
     /// For a tab of the person's: the site (scheme://host) they said agents may use it on.
     /// Ends with a move to another site and with the tab.
     agent_ok: Option<String>,
@@ -264,6 +347,9 @@ impl Tab {
             private: false,
             owner: String::new(),
             owner_name: String::new(),
+            profile: String::new(),
+            downloads: String::new(),
+            own_env: false,
             agent_ok: None,
             view: None,
             #[cfg(feature = "servo")]
@@ -426,8 +512,19 @@ struct App {
     agent_logs: agentkit::Logs,
     /// An agent waiting for the person: (tab, agent name, message, where to say Done).
     handoff: Option<(u64, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,
-    consent: Option<(u64, String, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,    /// URLs agents asked to download: they land in "Agent downloads" and show in browser_downloads.
-    agent_dl: HashSet<String>,
+    /// A consent the agent asked the person for: (tab, agent name, kind, message, reply).
+    consent: Option<(u64, String, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,
+    /// URLs agents asked to download, and the session folder each belongs to: they land
+    /// in "Agent downloads\<folder>" and show in browser_downloads of that agent only.
+    agent_dl: HashMap<String, String>,
+    /// Strict-isolation agent tabs waiting for their browser to be made.
+    pending_own: Vec<u64>,
+    /// The Drive panel's run, if there is one.
+    drive: Option<Drive>,
+    /// How many Drive runs this Lumen has started: run N is `drive-N`.
+    drive_n: u32,
+    /// When the run next wants a look (its output, its session, its end).
+    next_drive: Instant,
     /// What aria2 was given per gid, so a failed download can be tried again.
     aria_meta: HashMap<String, (String, Vec<String>, Option<String>)>,
     /// Gids the person started: a paused one with its metadata in gets
@@ -471,6 +568,10 @@ struct App {
     clear_pending: bool,
     /// Read aloud: the reader-view tab being spoken, if any.
     aloud: Option<Aloud>,
+    /// The sidebar's width right now, and where it is gliding to (compact, peek,
+    /// or the person's own width). `from, to, when it started`.
+    side_w: f64,
+    side_anim: Option<(f64, f64, Instant)>,
     /// SponsorBlock: a fetched skip script waiting for its tab to finish
     /// loading, so it lands in the new document and not the one going away.
     spb: HashMap<u64, String>,
@@ -566,7 +667,15 @@ fn show_window(w: &tao::window::Window) {
     }
 }
 
+/// Which Lumen this is: the version, then the commit it was built from and its date.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LUMEN_BUILD"), ")");
+
 fn main() {
+    // `lumen.exe --version`: say which build this is, then done. No window.
+    if std::env::args().any(|a| a == "--version") {
+        say_on_console(&format!("Lumen {VERSION}"));
+        return;
+    }
     HEADLESS.store(
         std::env::var_os("LUMEN_HEADLESS").is_some_and(|v| v != "0") || std::env::args().any(|a| a == "--headless"),
         std::sync::atomic::Ordering::Relaxed,
@@ -586,6 +695,9 @@ fn main() {
     let job = monitor::Job::adopt_self();
     let mut settings = store::load_settings();
     let session = store::load_session();
+    // Agent profiles whose sessions ended while Lumen was running: their folders are
+    // deleted now, before WebView2 touches any profile.
+    engine::purge_at_start();
     // The journal opens before anything else runs, so a run that never gets a
     // window up still says hello. Also the one place old journals are cleaned.
     journal::start(&settings, restored_tabs(&session));
@@ -639,6 +751,10 @@ fn main() {
         dark_js: RefCell::new(None),
         rewrite: RefCell::new(None),
         dark_ids: Rc::new(RefCell::new(HashMap::new())),
+        own_envs: RefCell::new(HashMap::new()),
+        pending_envs: RefCell::new(Vec::new()),
+        own_env_failed: RefCell::new(HashSet::new()),
+        profiles: RefCell::new(HashMap::new()),
         https: Rc::new(RefCell::new(https_policy(&settings))),
         gpc: Cell::new(settings.gpc),
         popup_info: Rc::new(RefCell::new(std::collections::VecDeque::new())),
@@ -680,6 +796,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     // Read before the struct literal moves `settings` into the app.
     let keep_seeding = settings.keep_seeding;
     let dl_limit = settings.download_limit_kbps;
+    // The sidebar starts at its width; folding and peeking glide from here.
+    let side_w = if settings.compact { COMPACT_W } else { settings.sidebar_width as f64 };
     // Ensure the torrent port is chosen (picks once, saves, returns it).
     let bt_port = settings.ensure_bt_port();
     // Start UPnP mapping for the torrent port if enabled.
@@ -750,7 +868,12 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         recall: recall::Recall::start(&store::data_dir()),
         agent_logs: Default::default(),
         handoff: None,
-        consent: None,        agent_dl: HashSet::new(),
+        consent: None,
+        agent_dl: HashMap::new(),
+        pending_own: Vec::new(),
+        drive: None,
+        drive_n: 0,
+        next_drive: Instant::now(),
         aria_meta: HashMap::new(),
         aria_person: HashSet::new(),
         aria_page: HashSet::new(),
@@ -771,6 +894,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         test_translate: false,
         clear_pending: false,
         aloud: None,
+        side_w,
+        side_anim: None,
         spb: HashMap::new(),
         vault: None,
         vault_seen: Instant::now(),
@@ -828,6 +953,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             Ok("history") => Panel::History,
             Ok("bookmarks") => Panel::Bookmarks,
             Ok("settings") => Panel::Settings,
+            Ok("drive") => Panel::Drive,
             Ok("report") => Panel::Report,
             Ok("dashboard") => Panel::Dashboard,
             Ok("sites") => Panel::Sites,
@@ -897,6 +1023,10 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 let now = Instant::now();
+                // The sidebar's width glides: a step is what wakes for it.
+                if app.side_anim.is_some() {
+                    app.layout();
+                }
                 if app.next_sample.is_some_and(|t| t <= now) {
                     app.sample();
                 }
@@ -1441,8 +1571,57 @@ impl App {
         self.tabs.iter().filter(|t| t.pinned).count()
     }
 
+    /// The sidebar's width right now: folded, peeked open, or the person's own.
+    /// The value glides (Compact, Ctrl+B, a peek) instead of jumping.
     fn sidebar_w(&self) -> f64 {
+        self.side_w
+    }
+
+    /// Where the sidebar is headed.
+    fn side_target(&self) -> f64 {
         if self.settings.compact && !self.peek { COMPACT_W } else { self.settings.sidebar_width as f64 }
+    }
+
+    /// Step the sidebar's width toward its target. Returns whether it is still
+    /// moving, so the loop can keep waking for it and stop when it lands. Motion
+    /// off (or reduced) means it lands at once.
+    fn step_side(&mut self, now: Instant) -> bool {
+        const SIDE_MS: f64 = 0.16;
+        let target = self.side_target();
+        if (target - self.side_w).abs() < 0.5 {
+            self.side_w = target;
+            self.side_anim = None;
+            return false;
+        }
+        if !self.chrome.look().motion.enabled {
+            // Motion off (or the system asking for less): it lands at once.
+            self.side_w = target;
+            self.side_anim = None;
+            return false;
+        }
+        if self.side_anim.as_ref().is_none_or(|(_, to, _)| (*to - target).abs() > 0.01) {
+            self.side_anim = Some((self.side_w, target, now));
+        }
+        let (from, to, at) = self.side_anim.unwrap_or((self.side_w, target, now));
+        let t = ((now - at).as_secs_f64() / SIDE_MS).clamp(0.0, 1.0);
+        self.side_w = from + (to - from) * chrome::ease_out(t as f32) as f64;
+        if t >= 1.0 {
+            self.side_w = to;
+            self.side_anim = None;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// The chrome's top rows: the tab strip, toolbar and bookmarks bar, for the
+    /// layouts that have them. Zero for the vertical sidebar.
+    fn top_h(&self) -> f64 {
+        chrome::Metrics::new(self.layout_kind(), self.settings.compact, self.settings.bm_bar).top() as f64
+    }
+
+    fn layout_kind(&self) -> chrome::Kind {
+        chrome::Kind::of(&self.settings.layout)
     }
 
     /// The UI needs the whole window only for the new tab page and settings.
@@ -1458,9 +1637,17 @@ impl App {
             return (0.0, 0.0, w, h);
         }
         let side = self.sidebar_w();
-        let g = self.settings.gap as f64;
-        let x = if self.settings.sidebar_side == "right" { g } else { side };
-        (x, g, (w - side - g).max(1.0), (h - 2.0 * g).max(1.0))
+        let right = self.settings.sidebar_side == "right";
+        let (x, y, sw, sh) = chrome::layout::stage(
+            self.layout_kind(),
+            w as f32,
+            h as f32,
+            side as f32,
+            right,
+            self.top_h() as f32,
+            self.settings.gap as f32,
+        );
+        (x as f64, y as f64, sw as f64, sh as f64)
     }
 
     /// The stage cut in two: the active tab's rectangle, the split tab's, and the
@@ -1527,19 +1714,17 @@ impl App {
     }
 
     fn layout(&mut self) {
+        // The sidebar's width glides; a step here is what moves it.
+        let moving = self.step_side(Instant::now());
         let (w, h) = logical_size(&self.ctx);
         let fs = self.fullscreen_view();
         self.chrome.set_visible(!fs);
         if !fs {
-            let side = self.sidebar_w();
-            let (x, cw) = if self.ui_full() {
-                (0.0, w)
-            } else if self.settings.sidebar_side == "right" {
-                (w - side, side)
-            } else {
-                (0.0, side)
-            };
-            self.chrome.set_bounds(x, 0.0, cw, h);
+            // The chrome's own rectangle for this layout. The horizontal layout
+            // is a strip across the top; the hybrid one is an underlay the page
+            // is drawn over; the vertical one is the sidebar itself.
+            let (x, y, cw, ch) = chrome::Chrome::bounds_for(self.layout_kind(), w, h);
+            self.chrome.set_bounds(x, y, cw, ch);
         }
         self.sync_panes();
         let (act, other, div) = self.panes();
@@ -1597,6 +1782,10 @@ impl App {
             self.chrome.set_glance_dim(x, y, sw, sh);
             engine::raise(v);
         }
+        // A moving sidebar is a moving layout: keep the chrome drawing with it.
+        if moving {
+            self.push();
+        }
     }
 
     fn focus_page(&self) {
@@ -1634,8 +1823,11 @@ impl App {
         if self.ui_dirty {
             self.ui_dirty = false;
             let (sx, sy, sw, sh) = self.stage();
-            // Chrome coordinates: full mode starts at the window origin; strip mode is the sidebar only.
-            let off = if !self.ui_full() && self.settings.sidebar_side == "right" { logical_size(&self.ctx).0 - self.sidebar_w() } else { 0.0 };
+            // Chrome coordinates: full mode starts at the window origin; a sidebar
+            // on the right is the one place the stage sits left of the chrome.
+            let (cx, _, _, _) = chrome::Chrome::bounds_for(self.layout_kind(), logical_size(&self.ctx).0, logical_size(&self.ctx).1);
+            let off = cx;
+            let bar_bookmarks = self.settings.bm_bar && self.layout_kind().top_toolbar();
             let state = chrome::UiState {
                 tabs: self
                     .tabs
@@ -1660,6 +1852,10 @@ impl App {
                         translated: t.translated.is_some(),
                         translating: t.translating,
                         servo: is_servo(t),
+                        // The sidebar groups agent tabs per session: the id is what a
+                        // Stop button ends, the name is what the group header shows.
+                        owner: t.owner.clone(),
+                        owner_name: t.owner_name.clone(),
                     })
                     .collect(),
                 active: self.active,
@@ -1726,7 +1922,7 @@ impl App {
                 } else {
                     Vec::new()
                 },
-                bookmarks: if self.panel == Panel::Bookmarks {
+                bookmarks: if self.panel == Panel::Bookmarks || bar_bookmarks {
                     self.library.bookmarks().into_iter().map(ui_mark).collect()
                 } else {
                     Vec::new()
@@ -1753,6 +1949,7 @@ impl App {
                     .iter()
                     .flat_map(|(o, r)| r.iter().map(move |(k, a)| (o.clone(), k.clone(), *a)))
                     .collect(),
+                drive: self.drive_view(),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
                 zoom: self.active_tab().map_or(100, |t| t.zoom),
                 zooms: self.zooms.iter().map(|(h, p)| (h.clone(), *p)).collect(),
@@ -1832,6 +2029,17 @@ impl App {
         self.activate(id);
     }
 
+    /// The WebView2 world this tab belongs to: the person's own, or its agent session's.
+    /// A session with strict isolation gets an environment of its own; until that one is
+    /// ready (WebView2 makes it in its own time) the tab still has no page.
+    fn tab_profile(&self, t: &Tab) -> engine::Profile {
+        if t.agent && !self.settings.agent_shared_profile {
+            if t.own_env { engine::Profile::Own(t.profile.clone()) } else { engine::Profile::Shared(t.profile.clone()) }
+        } else {
+            engine::Profile::Main
+        }
+    }
+
     fn ensure_view(&mut self, i: usize) {
         #[cfg(feature = "servo")]
         {
@@ -1849,17 +2057,40 @@ impl App {
         if self.tabs[i].view.is_some() || self.tabs[i].url.is_empty() {
             return;
         }
+        let profile = match self.tab_profile(&self.tabs[i]) {
+            engine::Profile::Own(key) => {
+                if engine::own_env(&self.ctx, &key).is_some() {
+                    engine::Profile::Own(key)
+                } else if engine::own_env_failed(&self.ctx, &key) {
+                    // No browser of its own on this machine. The agent still gets a
+                    // profile of its own in the shared one: isolated, just not separate.
+                    self.tabs[i].own_env = false;
+                    engine::Profile::Shared(key)
+                } else {
+                    // Its browser is being made right now. Come back for this tab when
+                    // it is ready (`poll_own_envs`), never open it in the shared one.
+                    engine::start_own_env(&self.ctx, &key);
+                    if !self.pending_own.contains(&self.tabs[i].id) {
+                        self.pending_own.push(self.tabs[i].id);
+                    }
+                    return;
+                }
+            }
+            p => p,
+        };
         let (x, y, w, h) = self.stage();
         let t = &mut self.tabs[i];
-        let isolated = t.agent && !self.settings.agent_shared_profile;
         // An agent's page starts blank, so the recording is on before the first request.
         let first = if t.agent { None } else { Some(t.url.as_str()) };
-        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), isolated, t.private, t.agent) {
+        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), profile.clone(), t.private) {
             if t.muted {
                 engine::set_muted(&v, true);
             }
             if t.agent {
                 agentkit::watch(&v, t.id, &self.agent_logs);
+                engine::remember_profile(&self.ctx, &t.profile, &v);
+                // WebView2's own downloads of this agent land in its own folder too.
+                engine::set_profile_download_dir(&v, &agent_policy::agent_downloads_dir_for(&t.downloads));
                 let _ = v.load_url(&t.url);
             }
             t.view = Some(v);
@@ -1869,6 +2100,39 @@ impl App {
         let want = self.wanted_zoom(i);
         self.put_zoom(i, want);
         self.limit_tab(i);
+    }
+
+    /// Strict-isolation browsers that came back since the last look: build the tabs
+    /// that were waiting for them, and fall back to a named profile for the sessions
+    /// WebView2 refused to give a process of their own.
+    fn poll_own_envs(&mut self) {
+        if self.pending_own.is_empty() {
+            return;
+        }
+        let ready = engine::poll_own_envs(&self.ctx);
+        if ready.is_empty() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.pending_own);
+        let mut retry = Vec::new();
+        for id in waiting {
+            let Some(i) = self.idx(id) else { continue };
+            if !ready.contains(&self.tabs[i].profile) {
+                retry.push(id);
+                continue;
+            }
+            // It came back decided. With no environment, the agent still gets a profile
+            // of its own in the shared browser: isolated, just not in its own process.
+            if engine::own_env(&self.ctx, &self.tabs[i].profile).is_none() {
+                self.tabs[i].own_env = false;
+                journal::error("agent", "strict isolation unavailable; a named profile of the shared environment instead");
+            }
+            self.ensure_view(i);
+            if self.tabs[i].view.is_none() && self.tabs[i].own_env {
+                retry.push(id);
+            }
+        }
+        self.pending_own = retry;
     }
 
     /// New page: give it the bandwidth cap and, if the Control page is open, a byte counter.
@@ -2279,7 +2543,7 @@ impl App {
         let (x, y, w, h) = self.stage();
         // The card is 80% of the stage, centred; layout sizes the dim to match.
         let rect = logical_rect(x + w * 0.1, y + h * 0.1, w * 0.8, h * 0.8);
-        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, false, false, false) else { return };
+        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, engine::Profile::Main, false) else { return };
         // The card takes Escape and Enter itself while it has focus.
         glance::hook_keys(&v, self.ctx.proxy.clone());
         if !headless() {
@@ -3564,13 +3828,19 @@ impl App {
                 // A download started by a private tab leaves no row on disk either.
                 let jar = self.idx(tab).map_or(0, |i| self.jar(&self.tabs[i]));
                 let private = jar == 2;
-                // What an agent asked for, or an agent's page offered, goes in its own folder.
-                let from_agent = self.agent_dl.contains(&url) || self.idx(tab).is_some_and(|i| self.tabs[i].agent);
-                let agent_dir = from_agent.then(|| {
-                    let dir = agent_policy::agent_downloads_dir();
-                    let _ = std::fs::create_dir_all(&dir);
-                    dir
-                });
+                // What an agent asked for, or an agent's page offered, goes in that
+                // session's own folder: two agents never write over each other's files.
+                let agent_dir = self
+                    .agent_dl
+                    .get(&url)
+                    .cloned()
+                    .or_else(|| self.idx(tab).filter(|&i| self.tabs[i].agent).map(|i| self.tabs[i].downloads.clone()))
+                    .filter(|f| !f.is_empty())
+                    .map(|folder| {
+                        let dir = agent_policy::agent_downloads_dir_for(&folder);
+                        let _ = std::fs::create_dir_all(&dir);
+                        dir
+                    });
                 let start = move |cookie: String| {
                     if !cookie.is_empty() {
                         headers.push(format!("Cookie: {cookie}"));
@@ -4030,7 +4300,13 @@ impl App {
             Ev::Popup(id, parent) => {
                 let private = self.idx(parent).is_some_and(|i| self.tabs[i].private);
                 let agent = self.idx(parent).is_some_and(|i| self.tabs[i].agent);
-                let (owner, owner_name) = self.idx(parent).map(|i| (self.tabs[i].owner.clone(), self.tabs[i].owner_name.clone())).unwrap_or_default();
+                let (owner, owner_name, profile, downloads, own_env) = self
+                    .idx(parent)
+                    .map(|i| {
+                        let t = &self.tabs[i];
+                        (t.owner.clone(), t.owner_name.clone(), t.profile.clone(), t.downloads.clone(), t.own_env)
+                    })
+                    .unwrap_or_default();
                 let found = {
                     let mut p = self.ctx.popups.borrow_mut();
                     p.iter().position(|(pid, _)| *pid == id).map(|k| p.remove(k).1)
@@ -4041,6 +4317,11 @@ impl App {
                     t.private = private;
                     t.owner = owner;
                     t.owner_name = owner_name;
+                    // The popup is the same agent's, in the same profile and folder: an
+                    // OAuth popup must see the cookies its opener is logged in with.
+                    t.profile = profile;
+                    t.downloads = downloads;
+                    t.own_env = own_env;
                     t.popup = true;
                     if agent {
                         agentkit::watch(&v, id, &self.agent_logs);
@@ -4360,6 +4641,27 @@ impl App {
                     self.apply_settings(s);
                 }
             }
+            "dashboard" => {
+                // The dashboard is Lumen's own home: the clock, the search box and
+                // the speed dial. Opening it means an empty page on this tab.
+                let i = self.active_idx();
+                self.leave_panel();
+                self.tabs[i].url.clear();
+                self.tabs[i].title.clear();
+                self.tabs[i].typed = None;
+                // The page goes; the tab stays.
+                self.tabs[i].view = None;
+                self.tabs[i].visible = false;
+                self.tabs[i].suspended = false;
+                self.tabs[i].trimmed = false;
+                self.tabs[i].crashed = false;
+                self.tabs[i].reader = None;
+                self.tabs[i].translated = None;
+                self.layout();
+                self.focus_page();
+                self.dirty = true;
+                self.push();
+            }
             "panel" => {
                 let p = match (m["open"].as_bool().unwrap_or(false), m["which"].as_str()) {
                     (false, _) => Panel::None,
@@ -4367,6 +4669,7 @@ impl App {
                     (true, Some("downloads")) => Panel::Downloads,
                     (true, Some("history")) => Panel::History,
                     (true, Some("bookmarks")) => Panel::Bookmarks,
+                    (true, Some("drive")) => Panel::Drive,
                     (true, Some("report")) => Panel::Report,
                     (true, Some("dashboard")) => Panel::Dashboard,
                     (true, Some("sites")) => Panel::Sites,
@@ -4930,8 +5233,19 @@ impl App {
                 if let Some((_, _, _, r)) = self.handoff.take() {
                     let _ = r.send(Ok(Value::Null));
                 }
+                // A paused Drive run gets its tab back when the person presses Done:
+                // that is what "pause and take over" is waiting for.
+                if let Some(sid) = self.drive.as_ref().filter(|d| d.paused).and_then(|d| d.session.clone()) {
+                    self.agent.set_paused(&sid, false);
+                    if let Some(d) = self.drive.as_mut() {
+                        d.paused = false;
+                    }
+                }
                 self.push();
             }
+            "driveStart" => self.drive_start(),
+            "driveStop" => self.drive_stop("stopped by the person"),
+            "drivePause" => self.drive_pause(),
             "handoffDecline" => {
                 if let Some((_, _, _, r)) = self.handoff.take() {
                     let _ = r.send(Err("declined".into()));
@@ -4949,19 +5263,31 @@ impl App {
                     let _ = r.send(Err("declined".into()));
                 }
                 self.push();
-            }            "agentStop" => {
+            }
+            "agentStop" => {
                 if let Some((_, _, _, r)) = self.handoff.take() {
                     let _ = r.send(Err("the person stopped the agents".into()));
                 }
-                // The kill switch: door shut, agent tabs gone.
+                // The kill switch: door shut, agent tabs gone, their profile data wiped.
                 let mut s = self.settings.clone();
                 s.agent = false;
                 self.apply_settings(s);
-                let ids: Vec<u64> = self.tabs.iter().filter(|t| t.agent).map(|t| t.id).collect();
-                for id in ids {
-                    self.close(id);
-                }
+                self.end_all_agent_sessions();
                 self.agent_seen = None;
+                self.push();
+            }
+            "agentStopSession" => {
+                // The per-agent Stop in the sidebar: this session ends now. Its id stops
+                // working, its tabs close, and what it left behind is wiped.
+                let session = m["session"].as_str().unwrap_or("");
+                if let Some((_, _, _, r)) = self.handoff.take() {
+                    let _ = r.send(Err("the person stopped this agent".into()));
+                }
+                if let Some(who) = self.agent.end_session(session) {
+                    self.end_agent_session(&who);
+                    journal::agent_session(&who.session, &format!("{} (stopped)", who.name));
+                }
+                self.chrome.flash("Agent stopped, its data deleted".into());
                 self.push();
             }
             _ => {}
@@ -5203,6 +5529,15 @@ impl App {
         if self.dirty || self.dl_dirty || self.agent_seen.is_some() || self.settings.ram_limit {
             return true;
         }
+        // A strictly isolated agent's browser is being made: the tick is what
+        // notices it is ready and gives the waiting tabs their page.
+        if !self.pending_own.is_empty() {
+            return true;
+        }
+        // A Drive run is going: its output and its session want a look.
+        if self.drive.is_some() && now >= self.next_drive {
+            return true;
+        }
         // The window not shown yet (the 3 s fallback), and a headless Lumen, which
         // must notice when agents have gone quiet and leave.
         if !self.shown || headless() {
@@ -5218,6 +5553,10 @@ impl App {
     /// turn when something waits for it, IDLE_TICK when nothing does.
     fn next_wake(&self, now: Instant) -> Instant {
         let mut at = now + IDLE_TICK;
+        // A gliding sidebar wants the next frame, and only while it glides.
+        if self.side_anim.is_some() {
+            at = at.min(now + Duration::from_millis(16));
+        }
         // The memory read, which the journal's minute rides on. Idle means idle:
         // neither clock is armed when nothing is on screen and nothing is loading,
         // so the journal never wakes an idle Lumen.
@@ -5289,6 +5628,12 @@ impl App {
     /// Trim, freeze and discard hidden tabs, enforce the RAM cap, save what changed.
     fn tick(&mut self) {
         let now = Instant::now();
+        // Strictly isolated agents whose browser came back since the last look.
+        self.poll_own_envs();
+        // A Drive run's output, session and end.
+        if self.drive.is_some() && now >= self.next_drive {
+            self.drive_poll();
+        }
         // Started headless for agents, never shown to a person, no agent tab left, quiet for
         // ten minutes: nobody needs this Lumen. lumen-agent starts a new one when asked.
         if headless() && self.handoff.is_none() && !self.tabs.iter().any(|t| t.agent) && now - self.agent_last > agent_idle() {
@@ -5469,6 +5814,9 @@ impl App {
         use agent::Op;
         self.agent_seen = Some(Instant::now());
         self.agent_last = Instant::now();
+        // A strictly isolated browser made since the last call: its waiting tabs get
+        // their page now, so the call below finds the tab it asked for.
+        self.poll_own_envs();
         self.push();
         let (reply, who) = (call.reply, call.who);
         // One line per session, not per call. No tab, no page, no content.
@@ -5490,7 +5838,10 @@ impl App {
             Op::Policy => {
                 let tabs = self.tabs.iter().map(|t| agent_policy::TabInfo { id: t.id, agent: t.agent, owner: t.owner.clone(), granted: self.agent_granted(t) }).collect();
                 let s = &self.settings;
-                let _ = reply.send(Ok(agent_policy::ctx_value(tabs, s.agent_shared_profile, s.agent_upload, &s.agent_upload_dir)));
+                // The pause flag is read fresh here, so a Drive run paused from the panel
+                // sees it on its very next call.
+                let paused = self.agent.session(&who.session).is_some_and(|w| w.paused);
+                let _ = reply.send(Ok(agent_policy::ctx_value(tabs, s.agent_shared_profile, s.agent_upload, &s.agent_upload_dir, paused)));
             }
             Op::TestState => {
                 let all: Vec<Value> = self
@@ -5507,6 +5858,29 @@ impl App {
                         Ok(json!({"url": self.tabs[i].url, "granted": self.agent_granted(&self.tabs[i])}))
                     }
                     _ => Err(format!("no tab {tab}")),
+                };
+                let _ = reply.send(r);
+            }
+            Op::TestProfile { tab } => {
+                // Debug builds only: which WebView2 profile this tab lives in. The
+                // integration test uses it to watch a profile folder appear and go.
+                let r = match (self.idx(tab), cfg!(debug_assertions)) {
+                    (Some(i), true) => match self.tabs[i].view.as_ref().and_then(engine::webview_profile) {
+                        Some(p) => Ok(json!({"profile": engine::profile_name(&p), "path": engine::profile_path(&p).map(|d| d.display().to_string())})),
+                        None => Err("the tab has no page yet".into()),
+                    },
+                    _ => Err(format!("no tab {tab}")),
+                };
+                let _ = reply.send(r);
+            }
+            Op::TestPause { paused } => {
+                // Debug builds only: the same pause "Pause and take over" sets, so the
+                // integration test can watch the door answer drive_paused.
+                let r = if cfg!(debug_assertions) {
+                    self.agent.set_paused(&who.session, paused);
+                    Ok(json!({"paused": paused}))
+                } else {
+                    Err("no such thing".into())
                 };
                 let _ = reply.send(r);
             }
@@ -5542,7 +5916,8 @@ impl App {
                 } else {
                     let _ = reply.send(Err("no such thing".into()));
                 }
-            }            Op::TestDone => {
+            }
+            Op::TestDone => {
                 // Debug builds only: stands in for the person pressing Done.
                 match self.handoff.take() {
                     Some((_, _, _, r)) if cfg!(debug_assertions) => {
@@ -5566,6 +5941,11 @@ impl App {
                 t.agent = true;
                 t.owner = who.session.clone();
                 t.owner_name = who.name.clone();
+                t.profile = who.profile.clone();
+                t.downloads = who.downloads.clone();
+                // Strict isolation, when the person turned it on, applies to the tabs a
+                // session opens. A kept profile keeps: its own folder holds its cookies.
+                t.own_env = self.settings.agent_strict_isolation;
                 self.tabs.push(t);
                 if activate {
                     self.activate(id);
@@ -5691,7 +6071,12 @@ impl App {
                     return;
                 };
                 let out = if network {
-                    json!(log.net.iter().map(|n| json!({"method": n.method, "url": n.url, "kind": n.kind, "status": n.status, "failed": n.failed})).collect::<Vec<_>>())
+                    json!(
+                        log.net
+                            .iter()
+                            .map(|n| json!({"id": n.id, "method": n.method, "url": n.url, "kind": n.kind, "status": n.status, "failed": n.failed, "mime": n.mime}))
+                            .collect::<Vec<_>>()
+                    )
                 } else {
                     json!(log.console.iter().collect::<Vec<_>>())
                 };
@@ -5703,6 +6088,56 @@ impl App {
                     }
                 }
                 let _ = reply.send(Ok(out));
+            }
+            Op::NetIdle { tab } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                let idle = self.agent_logs.borrow().get(&tab).is_none_or(|log| log.net_idle(Duration::from_millis(400)));
+                let _ = reply.send(Ok(json!(idle)));
+            }
+            Op::Contexts { tab } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                let out = self
+                    .agent_logs
+                    .borrow()
+                    .get(&tab)
+                    .map(|log| json!(log.contexts.iter().map(|(f, c)| json!({"frame": f, "context": c})).collect::<Vec<_>>()))
+                    .unwrap_or_else(|| json!([]));
+                let _ = reply.send(Ok(out));
+            }
+            Op::CdpForSession { tab, session, method, params } => {
+                let Some(i) = mine(self, tab) else {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                };
+                if !self.tabs[i].agent && !agent_policy::cdp_allowed_on_person_tab(&method) {
+                    let _ = reply.send(Err(format!("{method} is not allowed in the person's tab")));
+                    return;
+                }
+                if self.tabs[i].view.is_none() {
+                    self.ensure_view(i);
+                }
+                match &self.tabs[i].view {
+                    Some(v) => agentkit::cdp_session(v, &session, &method, &params, move |r| {
+                        let _ = reply.send(r);
+                    }),
+                    None => {
+                        let _ = reply.send(Err("tab has no page".into()));
+                    }
+                }
+            }
+            Op::DragData { tab, take } => {
+                if mine(self, tab).is_none() {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                }
+                let data = self.agent_logs.borrow_mut().get_mut(&tab).and_then(|log| if take { log.drag.take() } else { log.drag.clone() });
+                let _ = reply.send(Ok(data.unwrap_or(Value::Null)));
             }
             Op::Dialogs { tab, accept, text } => {
                 if mine(self, tab).is_none() {
@@ -5765,10 +6200,7 @@ impl App {
                 let _ = reply.send(Ok(Value::Null));
             }
             Op::End => {
-                let ids: Vec<u64> = self.tabs.iter().filter(|t| t.agent && t.owner == who.session).map(|t| t.id).collect();
-                for id in ids {
-                    self.close(id);
-                }
+                self.end_agent_session(&who);
                 let _ = reply.send(Ok(Value::Null));
             }
             Op::Download { url, tab } => {
@@ -5778,25 +6210,267 @@ impl App {
                 }
                 let tab = tab.filter(|t| mine(self, *t).is_some()).unwrap_or(0);
                 let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
-                // It goes to "Agent downloads", and is the agent's to see.
+                // It goes to this agent's own folder under "Agent downloads", and is
+                // the agent's to see.
                 if self.agent_dl.len() > 500 {
                     self.agent_dl.clear();
                 }
-                self.agent_dl.insert(url.clone());
+                self.agent_dl.insert(url.clone(), who.downloads.clone());
                 let _ = self.ctx.proxy.send_event(Ev::Handoff(tab, url, page, String::new()));
                 let _ = reply.send(Ok(Value::Null));
             }
             Op::Downloads => {
-                // Only what agents downloaded. The person's own downloads are not the agents' to list.
+                // This agent's own files: its folder, or a download it asked for. The
+                // person's downloads and other agents' files are not its business.
+                let dir = agent_policy::agent_downloads_dir_for(&who.downloads);
                 let list: Vec<Value> = self
                     .downloads
                     .iter()
-                    .filter(|d| !d.private && agent_policy::is_agent_download(&d.path, &d.url, |u| self.agent_dl.contains(u)))
+                    .filter(|d| !d.private && agent_policy::is_agent_download(&dir, &d.path, &d.url, |u| self.agent_dl.get(u) == Some(&who.downloads)))
                     .map(|d| json!({"url": d.url, "path": d.path, "state": d.state, "size": d.received, "total": d.total, "note": d.note}))
                     .collect();
                 let _ = reply.send(Ok(Value::Array(list)));
             }
         }
+    }
+
+    /// The end of one agent session: its tabs close and its profile data is wiped. An
+    /// ephemeral session leaves nothing behind: not a cookie, not a stored page. A kept
+    /// profile (`--session NAME`) keeps its cookies and its folder: that is the point.
+    fn end_agent_session(&mut self, who: &agent::Who) {
+        let ids: Vec<u64> = self.tabs.iter().filter(|t| t.agent && t.owner == who.session).map(|t| t.id).collect();
+        for id in ids {
+            self.close(id);
+        }
+        if who.profile.is_empty() || who.keeps {
+            return;
+        }
+        engine::purge_profile(&self.ctx, &who.profile, self.settings.agent_strict_isolation);
+    }
+
+    /// Closing everything an agent opened, and wiping what each session left: the person
+    /// shut the door, and the agents have no business keeping data after that.
+    fn end_all_agent_sessions(&mut self) {
+        // What each session left behind, before its tabs go: (profile, strict, kept).
+        let sessions: Vec<(String, bool, bool)> = self
+            .tabs
+            .iter()
+            .filter(|t| t.agent && !t.profile.is_empty())
+            .map(|t| {
+                let keeps = self.agent.session(&t.owner).is_some_and(|w| w.keeps);
+                (t.profile.clone(), t.own_env, keeps)
+            })
+            .collect();
+        let ids: Vec<u64> = self.tabs.iter().filter(|t| t.agent).map(|t| t.id).collect();
+        for id in ids {
+            self.close(id);
+        }
+        let strict = self.settings.agent_strict_isolation;
+        for (profile, own, keeps) in sessions {
+            // A kept profile is a place the person asked for; the door shutting does not
+            // delete it. Everything else is wiped.
+            if !keeps {
+                engine::purge_profile(&self.ctx, &profile, strict && own);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- drive
+
+    /// Start a Drive run: the person's task goes to an agent CLI Lumen starts itself,
+    /// with Lumen as its MCP server. The run gets its own session, its own profile and
+    /// its own download folder; nothing of it touches the person's tabs or logins.
+    fn drive_start(&mut self) {
+        if self.drive.as_ref().is_some_and(|d| d.exit.is_none()) {
+            self.chrome.flash("a Drive run is going; stop it first".into());
+            self.push();
+            return;
+        }
+        let task = self.chrome.drive_task();
+        if task.trim().is_empty() {
+            self.chrome.flash("type a task in the Drive panel first".into());
+            self.push();
+            return;
+        }
+        if !self.settings.agent {
+            self.chrome.flash("the AI agent door is off: turn on Settings > AI agent first".into());
+            self.push();
+            return;
+        }
+        let Some((program, args)) = store::drive_command(&self.settings.drive_cmd, &task) else {
+            self.chrome.flash("the Drive command in Settings needs to say where {task} goes".into());
+            self.push();
+            return;
+        };
+        self.drive_n += 1;
+        let name = format!("drive-{}", self.drive_n);
+        let out: Arc<Mutex<std::collections::VecDeque<String>>> = Arc::new(Mutex::new(Default::default()));
+        let finished = Arc::new(AtomicBool::new(false));
+        // The run's own session: the CLI labels itself cli-<name>, asks for a profile of
+        // that name, and finds this Lumen through LUMEN_DATA. Nothing is shared.
+        let env = |cmd: &mut std::process::Command| {
+            cmd.env("LUMEN_SESSION", &name)
+                .env("LUMEN_DATA", store::data_dir())
+                .env("LUMEN_DOWNLOADS", store::download_dir())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flashes up
+        };
+        let mut cmd = std::process::Command::new(&program);
+        cmd.args(&args);
+        env(&mut cmd);
+        let child = cmd.spawn().or_else(|_| {
+            // A CLI that is a .cmd shim (npm) is not a program Windows can start itself:
+            // hand the whole line to cmd.
+            let line = self.settings.drive_cmd.replace("{task}", &store::drive_prompt(&task));
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/C").arg(&line);
+            env(&mut c);
+            c.spawn()
+        });
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                self.chrome.flash(format!("could not start the Drive command: {e}"));
+                self.push();
+                return;
+            }
+        };
+        let mut child = child;
+        if let Some(pipe) = child.stdout.take() {
+            let (o, f) = (out.clone(), finished.clone());
+            let _ = std::thread::Builder::new().name("lumen-drive-out".into()).spawn(move || drive_pipe(pipe, o, f));
+        }
+        if let Some(pipe) = child.stderr.take() {
+            let o = out.clone();
+            let _ = std::thread::Builder::new().name("lumen-drive-err".into()).spawn(move || drive_pipe(pipe, o, Arc::new(AtomicBool::new(false))));
+        }
+        journal::feature("drive", false);
+        // A task the person typed does not belong in the journal: only that it ran.
+        journal::error("agent", "drive run started");
+        self.drive = Some(Drive {
+            name,
+            task,
+            child,
+            out,
+            finished,
+            started: Instant::now(),
+            session: None,
+            paused: false,
+            exit: None,
+        });
+        self.next_drive = Instant::now();
+        self.panel = Panel::Drive;
+        self.chrome.flash("Drive run started: its tabs show up in the sidebar under its name".into());
+        self.push();
+    }
+
+    /// Stop the run: the CLI is killed, its session ends, and its profile data goes.
+    fn drive_stop(&mut self, why: &str) {
+        let Some(d) = self.drive.as_mut() else { return };
+        if d.exit.is_some() {
+            self.chrome.flash("nothing is running".into());
+            self.push();
+            return;
+        }
+        let _ = d.child.kill();
+        d.exit = Some(-1);
+        let (name, session) = (d.name.clone(), d.session.clone());
+        // Handoff is waiting on that tab: the run is over, so it ends too.
+        if self.handoff.as_ref().is_some_and(|h| self.idx(h.0).is_some_and(|i| self.tabs[i].owner == session.clone().unwrap_or_default())) {
+            if let Some((_, _, _, r)) = self.handoff.take() {
+                let _ = r.send(Err("the Drive run was stopped".into()));
+            }
+        }
+        if let Some(sid) = session
+            && let Some(who) = self.agent.end_session(&sid)
+        {
+            self.drive_end_session(&who);
+        }
+        self.chrome.flash(format!("{name} stopped: {why}"));
+        self.push();
+    }
+
+    /// A Drive run is over: its tabs close and its profile data is deleted. A run is not
+    /// a worker to come back to; what it downloaded under its own name stays.
+    fn drive_end_session(&mut self, who: &agent::Who) {
+        let own = self.tabs.iter().find(|t| t.agent && t.owner == who.session).is_some_and(|t| t.own_env);
+        self.end_agent_session(who);
+        if !who.profile.is_empty() {
+            engine::purge_profile(&self.ctx, &who.profile, own);
+        }
+    }
+
+    /// "Pause and take over": the run's tab comes to the front, the agent may only ask
+    /// for it back (browser_handoff), and Done hands it over again.
+    fn drive_pause(&mut self) {
+        let Some(d) = self.drive.as_mut() else { return };
+        let Some(sid) = d.session.clone() else {
+            self.chrome.flash("the run has not opened a tab yet".into());
+            self.push();
+            return;
+        };
+        d.paused = true;
+        self.agent.set_paused(&sid, true);
+        let tab = self.tabs.iter().find(|t| t.agent && t.owner == sid).map(|t| t.id);
+        let name = d.name.clone();
+        if let Some(id) = tab {
+            self.activate(id);
+            // The person holds the tab until they press Done; a pause is a handoff.
+            let (tx, _rx) = std::sync::mpsc::channel();
+            self.handoff = Some((id, name.clone(), "Paused: the tab is yours. Press Done when the run may have it back.".into(), tx));
+        }
+        self.chrome.flash(format!("{name} paused; it may only ask for the tab back now"));
+        self.push();
+    }
+
+    /// A look at the run, while it is going: its output, its session, its end.
+    fn drive_poll(&mut self) {
+        self.next_drive = Instant::now() + Duration::from_millis(500);
+        let Some(d) = self.drive.as_mut() else { return };
+        if d.session.is_none() {
+            // The CLI opens its session on its first call; its label is cli-<name>.
+            d.session = self.agent.session_by_label(&format!("cli-{}", d.name)).map(|w| w.session);
+        }
+        if d.exit.is_some() || !d.finished.load(Ordering::Relaxed) {
+            return;
+        }
+        let code = d.child.try_wait().ok().flatten().and_then(|s| s.code());
+        d.exit = Some(code.unwrap_or(-1));
+        let (name, session) = (d.name.clone(), d.session.clone());
+        // The run is over: its tabs close and its profile data goes.
+        if let Some(sid) = session
+            && let Some(who) = self.agent.end_session(&sid)
+        {
+            self.drive_end_session(&who);
+        }
+        // Nothing of the run is left to remember but its own step list, which the panel
+        // still shows; the session's state goes when a new run starts.
+        self.chrome.flash(format!("Drive run {name} finished"));
+        self.push();
+    }
+
+    /// What the Drive panel shows: this run's steps and the tail of the CLI's words.
+    /// Filled only while the panel is open.
+    fn drive_view(&self) -> Option<chrome::DriveView> {
+        if self.panel != Panel::Drive {
+            return None;
+        }
+        let d = self.drive.as_ref()?;
+        let steps = d.session.as_deref().map(|s| self.agent.steps(s)).unwrap_or_default();
+        let log: Vec<String> = d.out.lock().unwrap_or_else(|e| e.into_inner()).iter().rev().take(12).rev().cloned().collect();
+        Some(chrome::DriveView {
+            name: d.name.clone(),
+            running: d.exit.is_none(),
+            paused: d.paused,
+            task: d.task.clone(),
+            elapsed: d.ago(),
+            steps,
+            log,
+            exit: d.exit,
+        })
     }
 
     /// Clearing everything also clears the site icons: they are a list of the sites that were

@@ -205,6 +205,11 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         let vk: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                         let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
                     }
+                    "char" => {
+                        // A character to the chrome window, as typing would send it.
+                        let ch: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let _ = PostMessageW(Some(hwnd), WM_CHAR, WPARAM(ch), LPARAM(0));
+                    }
                     _ => {}
                 }
             }
@@ -235,6 +240,8 @@ pub fn fake(s: &mut UiState) {
             translated: false,
             translating: false,
             servo: false,
+            owner: String::new(),
+            owner_name: String::new(),
         };
         let mut v = vec![
             UiTab { pinned: true, ..t(9001, "Mail", "https://mail.example.com/") },
@@ -267,7 +274,7 @@ pub fn fake(s: &mut UiState) {
         s.listen = "playing";
         s.kdbx = vec!["doc.rust-lang.org".into()];
     }
-    if fake_has("marks") && s.panel == "bookmarks" {
+    if fake_has("marks") && (s.panel == "bookmarks" || s.settings.bm_bar) {
         let m = |id: u64, title: &str, url: &str, folder: &str| UiMark { id, title: title.into(), url: url.into(), folder: folder.into() };
         s.bm_folders = vec!["Work".into(), "Chrome".into(), "Reading".into()];
         s.bookmarks = vec![

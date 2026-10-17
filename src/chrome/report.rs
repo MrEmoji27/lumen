@@ -10,7 +10,7 @@ use super::{
     gfx::{Align, R},
     pages::{close_button, column, empty_state, fmt_bytes, group_label, title_block},
     send,
-    style::*,
+    style::ROW_H,
     theme::Theme,
 };
 use crate::privacy_stats::{Counts, SiteRow, Snapshot};
@@ -77,24 +77,24 @@ fn trend(now: u64, prev: u64, range: &str) -> Option<String> {
 
 /// One tile of a section: caption, big number, and a note under it.
 fn tile(i: &mut Inner, th: Theme, r: R, label: &str, value: &str, note: &str) {
-    i.gfx.round(r, R_LG, th.bg);
-    i.gfx.text(label, R::new(r.x + S4, r.y + S3, r.w - 2.0 * S4, 16.0), CAPTION, th.faint);
-    i.gfx.text(value, R::new(r.x + S4, r.y + 28.0, r.w - 2.0 * S4, 40.0), BIG_NUM, th.text);
+    i.gfx.round(r, i.look.r_lg, th.bg);
+    i.gfx.text(label, R::new(r.x + i.look.s4, r.y + i.look.s3, r.w - 2.0 * i.look.s4, 16.0), i.look.caption, th.faint);
+    i.gfx.text(value, R::new(r.x + i.look.s4, r.y + 28.0, r.w - 2.0 * i.look.s4, 40.0), i.look.big_num, th.text);
     if !note.is_empty() {
-        i.gfx.text_wrap(note, R::new(r.x + S4, r.y + 68.0, r.w - 2.0 * S4, 30.0), SMALL, th.faint);
+        i.gfx.text_wrap(note, R::new(r.x + i.look.s4, r.y + 68.0, r.w - 2.0 * i.look.s4, 30.0), i.look.small, th.faint);
     }
 }
 
 /// A row of tiles for one section. `n` tiles, gap between them, height ~100.
 fn tile_row(i: &mut Inner, th: Theme, col: R, y: f32, tiles: &[(&str, &str, &str)]) -> f32 {
-    let gap = S3;
+    let gap = i.look.s3;
     let n = tiles.len() as f32;
     let tw = (col.w - (n - 1.0) * gap) / n;
     for (k, (label, value, note)) in tiles.iter().enumerate() {
         let r = R::new(col.x + k as f32 * (tw + gap), y, tw, 100.0);
         tile(i, th, r, label, value, note);
     }
-    y + 100.0 + S4
+    y + 100.0 + i.look.s4
 }
 
 pub fn draw(i: &mut Inner, st: R, s: &UiState) {
@@ -102,27 +102,27 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     let snap = s.report.clone().unwrap_or_default();
     let col = column(st, 860.0);
     i.gfx.clip(st);
-    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
     y = title_block(i, col, y, "Privacy report", "What Lumen stopped. Data and time saved are estimates.");
 
     // The range, as a row of small pills.
     let mut x = col.x;
     for (key, label) in RANGES {
         let on = snap.range == key || (snap.range.is_empty() && key == "today");
-        let f = SMALL_STRONG.align(Align::Center);
-        let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * S3, 28.0);
+        let f = i.look.small_strong.align(Align::Center);
+        let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * i.look.s3, 28.0);
         let h = Hit::Report(Click::Range(key));
         let hov = i.is_hover(&h);
         if on {
-            i.gfx.round(r, R_MD, th.accent.alpha(0.18));
+            i.gfx.round(r, i.look.r_md, th.accent.alpha(0.18));
         } else if hov {
-            i.gfx.round(r, R_MD, th.hover);
+            i.gfx.round(r, i.look.r_md, th.hover);
         }
         i.gfx.text(label, r, f, if on { th.accent } else if hov { th.text } else { th.dim });
         i.hit(r, h);
-        x = r.right() + S1;
+        x = r.right() + i.look.s1;
     }
-    y += 28.0 + S4;
+    y += 28.0 + i.look.s4;
 
     let empty = snap.all.blocked() == 0
         && snap.all.cosmetic == 0
@@ -137,7 +137,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     if empty {
         y = empty_state(
             i,
-            R::new(col.x, y + S5, col.w, 160.0),
+            R::new(col.x, y + i.look.s5, col.w, 160.0),
             "shield",
             "Nothing blocked yet",
             "Browse a little. Every ad, popup and tracker Lumen stops is counted here, with the data and time it saved you.",
@@ -177,7 +177,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     );
     let more = extras(&c);
     if !more.is_empty() {
-        i.gfx.text_wrap(&more, R::new(col.x, y - S2, col.w, 36.0), SMALL, th.dim);
+        i.gfx.text_wrap(&more, R::new(col.x, y - i.look.s2, col.w, 36.0), i.look.small, th.dim);
         y += 24.0;
     }
 
@@ -215,7 +215,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
             ("HTTPS UPGRADES", &c.https_up.to_string(), "Plain http pages moved to https."),
         ],
     );
-    y += S2;
+    y += i.look.s2;
 
     if let Some(site) = &snap.site {
         y = draw_site(i, col, y, site);
@@ -227,23 +227,23 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
 
     if snap.agent.blocked() > 0 {
         let line = format!("AI agent tabs, counted apart: {} blocked, {} saved.", snap.agent.blocked(), fmt_bytes(snap.agent.bytes as i64));
-        i.gfx.text(&line, R::new(col.x, y, col.w, 20.0), SMALL, th.faint);
+        i.gfx.text(&line, R::new(col.x, y, col.w, 20.0), i.look.small, th.faint);
         y += 28.0;
     }
 
     // Reset, quiet, at the end.
     let label = "Reset statistics";
-    let f = SMALL_STRONG.align(Align::Center);
-    let r = R::new(col.x, y + S2, i.gfx.measure(label, f) + 2.0 * S3, 28.0);
+    let f = i.look.small_strong.align(Align::Center);
+    let r = R::new(col.x, y + i.look.s2, i.gfx.measure(label, f) + 2.0 * i.look.s3, 28.0);
     let h = Hit::Report(Click::Reset);
     let hov = i.is_hover(&h);
     if hov {
-        i.gfx.round(r, R_SM, th.press);
+        i.gfx.round(r, i.look.r_sm, th.press);
     }
-    i.gfx.round_stroke(r, R_SM, th.line, 1.0);
+    i.gfx.round_stroke(r, i.look.r_sm, th.line, 1.0);
     i.gfx.text(label, r, f, if hov { th.text } else { th.dim });
     i.hit(r, h);
-    y = r.bottom() + S5;
+    y = r.bottom() + i.look.s5;
 
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
@@ -268,9 +268,9 @@ fn draw_bars(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
         i.gfx.round(R::new(x, y + h - bh, w, bh.max(1.0)), 2.0, if b.blocked > 0 { th.accent.alpha(0.75) } else { th.line });
     }
     let (first, last) = (&bars[0].day, &bars[bars.len() - 1].day);
-    i.gfx.text(first, R::new(col.x, y + h + S1, 120.0, 16.0), CAPTION, th.faint);
-    i.gfx.text(last, R::new(col.right() - 120.0, y + h + S1, 120.0, 16.0), CAPTION.align(Align::Right), th.faint);
-    y + h + 24.0 + S4
+    i.gfx.text(first, R::new(col.x, y + h + i.look.s1, 120.0, 16.0), i.look.caption, th.faint);
+    i.gfx.text(last, R::new(col.right() - 120.0, y + h + i.look.s1, 120.0, 16.0), i.look.caption.align(Align::Right), th.faint);
+    y + h + 24.0 + i.look.s4
 }
 
 /// Sites where the most was blocked; a click shows one site alone.
@@ -281,22 +281,22 @@ fn draw_sites(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     }
     let mut y = group_label(i, col, y, "Sites", snap.sites.len().min(10));
     for row in snap.sites.iter().take(10) {
-        let r = R::new(col.x - S2, y, col.w + 2.0 * S2, ROW_H);
+        let r = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, ROW_H);
         let h = Hit::Report(Click::Site(row.host.clone()));
         if i.is_hover(&h) {
-            i.gfx.round(r, R_LG, th.hover);
+            i.gfx.round(r, i.look.r_lg, th.hover);
         }
         i.hit(r, h);
         let cy = y + (ROW_H - 18.0) / 2.0;
-        i.gfx.text(&row.host, R::new(col.x, cy, col.w * 0.5, 18.0), BODY, th.text);
+        i.gfx.text(&row.host, R::new(col.x, cy, col.w * 0.5, 18.0), i.look.body, th.text);
         let bar = R::new(col.x + col.w * 0.55, y + ROW_H / 2.0 - 2.0, col.w * 0.25, 4.0);
         i.gfx.round(bar, 2.0, th.line);
         i.gfx.round(R::new(bar.x, bar.y, (bar.w * row.share).max(2.0), 4.0), 2.0, th.accent.alpha(0.8));
         let n = format!("{} blocked", row.counts.blocked());
-        i.gfx.text(&n, R::new(col.right() - 120.0, cy, 120.0, 18.0), SMALL.align(Align::Right), th.dim);
+        i.gfx.text(&n, R::new(col.right() - 120.0, cy, 120.0, 18.0), i.look.small.align(Align::Right), th.dim);
         y += ROW_H;
     }
-    y + S4
+    y + i.look.s4
 }
 
 /// Tracker domains stopped most often.
@@ -308,27 +308,27 @@ fn draw_domains(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     let mut y = group_label(i, col, y, "Blocked most often", snap.domains.len().min(10));
     for (domain, n) in snap.domains.iter().take(10) {
         let cy = y + (32.0 - 18.0) / 2.0;
-        i.gfx.text(domain, R::new(col.x, cy, col.w - 140.0, 18.0), BODY, th.text);
-        i.gfx.text(&n.to_string(), R::new(col.right() - 120.0, cy, 120.0, 18.0), SMALL.align(Align::Right), th.dim);
+        i.gfx.text(domain, R::new(col.x, cy, col.w - 140.0, 18.0), i.look.body, th.text);
+        i.gfx.text(&n.to_string(), R::new(col.right() - 120.0, cy, 120.0, 18.0), i.look.small.align(Align::Right), th.dim);
         y += 32.0;
     }
-    y + S4
+    y + i.look.s4
 }
 
 /// One site, everything counted for it, and the way back.
 fn draw_site(i: &mut Inner, col: R, y: f32, site: &SiteRow) -> f32 {
     let th = i.theme;
-    let f = SMALL_STRONG.align(Align::Center);
+    let f = i.look.small_strong.align(Align::Center);
     let label = "← All sites";
-    let back = R::new(col.x, y, i.gfx.measure(label, f) + 2.0 * S3, 28.0);
+    let back = R::new(col.x, y, i.gfx.measure(label, f) + 2.0 * i.look.s3, 28.0);
     let h = Hit::Report(Click::AllSites);
     if i.is_hover(&h) {
-        i.gfx.round(back, R_SM, th.press);
+        i.gfx.round(back, i.look.r_sm, th.press);
     }
     i.gfx.text(label, back, f, th.dim);
     i.hit(back, h);
-    let mut y = back.bottom() + S3;
-    i.gfx.text(&site.host, R::new(col.x, y, col.w, 30.0), H2, th.text);
+    let mut y = back.bottom() + i.look.s3;
+    i.gfx.text(&site.host, R::new(col.x, y, col.w, 30.0), i.look.h2, th.text);
     y += 40.0;
     let c = &site.counts;
     for (label, v) in [
@@ -349,15 +349,15 @@ fn draw_site(i: &mut Inner, col: R, y: f32, site: &SiteRow) -> f32 {
         if v == 0 {
             continue;
         }
-        i.gfx.text(label, R::new(col.x, y + 7.0, col.w - 140.0, 18.0), BODY, th.dim);
-        i.gfx.text(&v.to_string(), R::new(col.right() - 120.0, y + 7.0, 120.0, 18.0), BODY_STRONG.align(Align::Right), th.text);
+        i.gfx.text(label, R::new(col.x, y + 7.0, col.w - 140.0, 18.0), i.look.body, th.dim);
+        i.gfx.text(&v.to_string(), R::new(col.right() - 120.0, y + 7.0, 120.0, 18.0), i.look.body_strong.align(Align::Right), th.text);
         y += 32.0;
     }
     if !site.last.is_empty() {
-        i.gfx.text(&format!("Last seen {}", site.last), R::new(col.x, y + S2, col.w, 18.0), SMALL, th.faint);
+        i.gfx.text(&format!("Last seen {}", site.last), R::new(col.x, y + i.look.s2, col.w, 18.0), i.look.small, th.faint);
         y += 32.0;
     }
-    y + S4
+    y + i.look.s4
 }
 
 /// A click on the page, sent to the main loop.
