@@ -197,10 +197,15 @@ pub struct Settings {
     pub agent_port: u32,
     /// Agent tabs use the user's profile (logins, cookies) instead of their own.
     pub agent_shared_profile: bool,
+    /// Every agent gets its own WebView2 environment: its own user-data folder, so its
+    /// own browser process. The hardest wall between agents; costs memory per agent.
+    pub agent_strict_isolation: bool,
     /// Let agents put files into web pages (browser_upload). Off by default.
     pub agent_upload: bool,
     /// The one folder agents may upload from. Empty means "Lumen agent uploads" in the home folder.
     pub agent_upload_dir: String,
+    /// The Drive panel's command. `{task}` is replaced by the person's task.
+    pub drive_cmd: String,
     /// Keep a local usage journal: speed, memory, crashes and errors, on this PC
     /// only, hosts instead of URLs. Nothing is ever sent anywhere.
     pub journal: bool,
@@ -305,8 +310,10 @@ impl Default for Settings {
             agent: false,
             agent_port: 47615,
             agent_shared_profile: false,
+            agent_strict_isolation: false,
             agent_upload: false,
             agent_upload_dir: String::new(),
+            drive_cmd: DEFAULT_DRIVE_CMD.into(),
             journal: true,
             ram_limit: false,
             ram_limit_mb: 2048,
@@ -335,6 +342,58 @@ const SETTINGS_VERSION: u32 = 3;
 /// Where the torrent port may live. High enough to dodge the usual listeners.
 pub(crate) const BT_PORT_MIN: u16 = 20000;
 pub(crate) const BT_PORT_MAX: u16 = 60000;
+
+/// The Drive panel's default command: an agent CLI already installed, run once with the
+/// task. Presets for other CLIs live in the panel's settings row.
+pub const DEFAULT_DRIVE_CMD: &str = "opencode run --model opencode/mimo-v2.6-flash-free \"{task}\"";
+/// What a Drive command must not be: run with no task and no room for one.
+pub(crate) fn drive_cmd_usable(cmd: &str) -> bool {
+    let c = cmd.trim();
+    !c.is_empty() && c.contains("{task}") && c.len() <= 600 && !c.chars().any(char::is_control)
+}
+
+/// The task Lumen hands the Drive agent: the person's own words, plus the one rule that
+/// stands above the task. The text carries no URL and nothing about the person.
+pub fn drive_prompt(task: &str) -> String {
+    let task: String = task
+        .chars()
+        .map(|c| if c == '"' { '\'' } else if c.is_control() { ' ' } else { c })
+        .take(2000)
+        .collect();
+    format!(
+        "{}\n\nYou are working in the person's Lumen browser: the browser_* tools are MCP calls into it. \
+Work only in the tabs you open. Before you pay, send a message, delete anything, or log in, stop and call \
+browser_handoff with one line for the person, and wait for them to hand the tab back. Never do those alone. \
+When the task is done, say what you did in one line.",
+        task.trim()
+    )
+}
+
+/// A command template as a program and its arguments. Double quotes group words (they
+/// are not passed on); `{task}` becomes the full prompt. None when there is nothing to run.
+pub fn drive_command(template: &str, task: &str) -> Option<(String, Vec<String>)> {
+    let line = template.replace("{task}", &drive_prompt(task));
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for c in line.trim().chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    let mut it = tokens.into_iter();
+    let program = it.next()?;
+    Some((program, it.collect()))
+}
 
 /// The looks that may be chosen, so a bad file cannot pick a fifth one.
 pub const LAYOUTS: [(&str, &str); 3] = [("vertical", "Vertical"), ("horizontal", "Horizontal"), ("hybrid", "Hybrid")];
@@ -456,6 +515,10 @@ impl Settings {
         self.servo_sites.iter_mut().for_each(|h| *h = h.trim().to_string());
         self.servo_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
         self.servo_sites.truncate(500);
+        // A Drive command without `{task}` could never run anything useful.
+        if !drive_cmd_usable(&self.drive_cmd) {
+            self.drive_cmd = DEFAULT_DRIVE_CMD.into();
+        }
     }
 
     /// The torrent port, chosen once and saved. 0 means it has never been chosen,
@@ -644,6 +707,32 @@ mod tests {
         let back: SavedTab = serde_json::from_str(&serde_json::to_string(&tab).expect("to json")).expect("from json");
         assert_eq!(back.pin_url, "https://music.youtube.com/");
         assert_eq!(back.url, "https://www.youtube.com/watch?v=1");
+    }
+
+    /// The Drive command becomes a program and arguments, with the task inside the
+    /// prompt and the handoff rule always in it.
+    #[test]
+    fn a_drive_command_carries_the_task_and_the_rule() {
+        let (program, args) = drive_command(DEFAULT_DRIVE_CMD, "buy the cheapest kettle").unwrap();
+        assert_eq!(program, "opencode");
+        assert_eq!(args[0], "run");
+        assert_eq!(args[1], "--model");
+        assert_eq!(args[2], "opencode/mimo-v2.6-flash-free");
+        assert!(args[3].starts_with("buy the cheapest kettle"), "{}", args[3]);
+        assert!(args[3].contains("browser_handoff"), "{}", args[3]);
+        assert!(args[3].contains("pay"), "{}", args[3]);
+        // A quote in the task cannot break out of the template's own quotes.
+        let (program, args) = drive_command("cmdc -p \"{task}\"", "say \"hi\" now").unwrap();
+        assert_eq!(program, "cmdc");
+        assert_eq!(args.len(), 2, "{args:?}");
+        assert!(args[1].contains("say 'hi' now"), "{:?}", args[1]);
+        // A template with nothing in it, and one with no {task}, are not runnable.
+        assert!(drive_command("", "x").is_none());
+        assert!(drive_command("   ", "x").is_none());
+        assert!(!drive_cmd_usable("opencode run"));
+        assert!(drive_cmd_usable(DEFAULT_DRIVE_CMD));
+        // The prompt never carries a newline the command line cannot hold.
+        assert!(!drive_prompt("a\nb").contains('\r'));
     }
 
     /// A settings.json written before the field existed still loads, and reads as off.

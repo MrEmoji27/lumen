@@ -39,7 +39,7 @@ use windows::{
         },
         System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW},
         UI::{
-            Controls::{EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE},
+            Controls::{EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE},
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{
                 GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL,
@@ -92,6 +92,10 @@ pub struct UiTab {
     pub translating: bool,
     /// The page runs in Servo rather than WebView2.
     pub servo: bool,
+    /// Agent tabs: the MCP session that owns the tab, and the name its client gave.
+    /// The sidebar groups agent tabs by owner and puts a Stop on each group.
+    pub owner: String,
+    pub owner_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -169,6 +173,8 @@ pub struct UiState {
     pub privacy_today: Option<crate::privacy_stats::Counts>,
     /// A download ended while the page was closed: a small dot on the footer button.
     pub dl_unseen: bool,
+    /// The Drive panel's run: steps, the agent's own words. Filled only while it is open.
+    pub drive: Option<DriveView>,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
     pub upnp_port_open: bool,
     /// The active page's zoom, in percent.
@@ -191,6 +197,64 @@ pub struct UiOther {
     pub ws_name: String,
     pub title: String,
     pub url: String,
+}
+
+/// What the Drive panel shows of one run: whether it is going, its step list (the tool
+/// calls, newest last), the tail of what the agent said, and how it ended.
+#[derive(Clone, Debug, Default)]
+pub struct DriveView {
+    pub name: String,
+    pub running: bool,
+    pub paused: bool,
+    /// The person's words, as typed.
+    pub task: String,
+    /// How long the run has been going, e.g. "4m".
+    pub elapsed: String,
+    pub steps: Vec<(String, String)>,
+    pub log: Vec<String>,
+    /// The CLI's exit code, once it is over.
+    pub exit: Option<i32>,
+}
+
+/// One agent's block in the sidebar list: its group header (a tab of that session, for
+/// the owner id and the name) and the tabs it opened.
+struct AgentGroup<'a> {
+    head: &'a UiTab,
+    tabs: Vec<&'a UiTab>,
+}
+
+/// One line of the sidebar list: a tab, or the header of an agent's block.
+enum Row<'a> {
+    Tab(&'a UiTab),
+    Header(&'a UiTab),
+}
+
+/// The agent tabs, grouped by session, in the order the sessions first appear.
+fn agent_groups(s: &UiState) -> Vec<AgentGroup<'_>> {
+    let mut out: Vec<AgentGroup> = Vec::new();
+    for t in s.tabs.iter().filter(|t| t.agent && !t.pinned) {
+        match out.iter_mut().find(|g| g.head.owner == t.owner) {
+            Some(g) => g.tabs.push(t),
+            None => out.push(AgentGroup { head: t, tabs: vec![t] }),
+        }
+    }
+    out
+}
+
+/// A colour per agent, from the session id: the dot on its group header, and nothing
+/// else. Two agents in the sidebar are told apart at a glance.
+fn agent_color(owner: &str) -> theme::Color {
+    const DOTS: [(f32, f32, f32); 6] = [
+        (0.47, 0.67, 1.00),
+        (1.00, 0.67, 0.47),
+        (0.59, 0.86, 0.59),
+        (0.90, 0.59, 0.90),
+        (0.94, 0.82, 0.47),
+        (0.55, 0.84, 0.88),
+    ];
+    let h = owner.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    let (r, g, b) = DOTS[(h % DOTS.len() as u32) as usize];
+    theme::Color(r, g, b, 1.0)
 }
 
 #[derive(Clone, Debug)]
@@ -249,7 +313,11 @@ pub enum Hit {
     DlFooter,
     /// The star in the footer: the Bookmarks page.
     BookmarksFooter,
+    /// The arrow in the footer: the Drive panel.
+    DriveFooter,
     AgentStop,
+    /// The Stop button on one agent's group header, for that MCP session.
+    AgentStopSession(String),
     PermAllow(u64),
     HandoffDone,
     PermBlock(u64),
@@ -488,6 +556,10 @@ pub(crate) struct Inner {
     ntp_edit: HWND,
     /// The Bookmarks page's search box.
     bm_edit: HWND,
+    /// The Drive panel's task box.
+    drive_edit: HWND,
+    /// The Drive page just opened: give its task box the cursor once.
+    drive_focus: bool,
     edit_font: HFONT,
     /// The family the edit boxes were made with, to remake them when it changes.
     edit_face: String,
@@ -572,7 +644,8 @@ const CLASS: PCWSTR = w!("LumenChrome");
 const ID_EDIT: usize = 101;
 const ID_NTP: usize = 102;
 const ID_BM: usize = 103;
-const ID_SRCH: usize = 104;
+const ID_DRIVE: usize = 104;
+const ID_SRCH: usize = 105;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -791,6 +864,21 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
+            let drive_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_DRIVE as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
             let search_edit = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 w!("EDIT"),
@@ -806,10 +894,14 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit, search_edit] {
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit] {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
+            // The Drive panel's task box says what it is for, in the box itself: an empty
+            // edit box shows nothing of the drawn placeholder behind it.
+            let cue = HSTRING::from("Find the cheapest X and put it in the cart, stop before paying");
+            let _ = SendMessageW(drive_edit, EM_SETCUEBANNER, Some(WPARAM(1)), Some(LPARAM(cue.as_ptr() as isize)));
             let dpi = GetDpiForWindow(hwnd) as f32;
             let gfx = Gfx::new(hwnd, dpi).expect("direct2d");
             let fonts = Rc::new(gfx.installed_families().to_vec());
@@ -832,6 +924,8 @@ impl Chrome {
                 edit,
                 ntp_edit,
                 bm_edit,
+                drive_edit,
+                drive_focus: false,
                 edit_font: HFONT::default(),
                 edit_face: String::new(),
                 ntp_font: HFONT::default(),
@@ -951,6 +1045,11 @@ impl Chrome {
     pub fn set_state(&self, s: UiState) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         i.apply(s);
+    }
+
+    /// What the person typed in the Drive panel's task box. Empty when it was never opened.
+    pub fn drive_task(&self) -> String {
+        self.inner.try_borrow().map(|i| wide_text(i.drive_edit)).unwrap_or_default()
     }
 
     /// A short-lived note: a failed KeePass unlock, shown where it happened.
@@ -1116,7 +1215,8 @@ impl Inner {
             SendMessageW(self.edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.ntp_edit, WM_SETFONT, Some(WPARAM(self.ntp_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.bm_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            for e in [self.edit, self.ntp_edit, self.bm_edit] {
+            SendMessageW(self.drive_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
+            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit] {
                 SendMessageW(e, EM_SETMARGINS, Some(WPARAM((EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize)), Some(LPARAM(0)));
             }
         }
@@ -1199,6 +1299,10 @@ impl Inner {
                 SetWindowTextW(self.bm_edit, &HSTRING::new()).ok();
             }
             self.page.bm_collapsed.clear();
+            // The Drive page opens with the cursor in its task box: typing is the point.
+            if s.panel == "drive" {
+                self.drive_focus = true;
+            }
             self.page.font_pick = None;
             self.page.theme_name.clear();
         }
@@ -1395,7 +1499,7 @@ impl Inner {
     }
 
     /// Edit boxes are real windows; keep them on top of what is drawn under them.
-    fn layout_edits(&self) {
+    fn layout_edits(&mut self) {
         let Some(s) = &self.state else { return };
         let k = self.k();
         let place = |e: HWND, r: R, show: bool| unsafe {
@@ -1419,6 +1523,17 @@ impl Inner {
         place(self.ntp_edit, R::new(f.x + 42.0, f.y + (f.h - 22.0) / 2.0, f.w - 58.0, 22.0), box_on && ntp_live);
         let b = pages::bm_search_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3), self.look.s5);
         place(self.bm_edit, R::new(b.x + 34.0, b.y + (b.h - 20.0) / 2.0, b.w - 46.0, 20.0), s.full && s.panel == "bookmarks");
+        // The Drive panel's task box, always shown while that page is: it is where the
+        // task is typed, so it holds the focus as soon as the panel opens.
+        let d = pages::drive_task_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3), self.look.s5);
+        let show = s.full && s.panel == "drive";
+        place(self.drive_edit, R::new(d.x + 8.0, d.y + (d.h - 22.0) / 2.0, d.w - 16.0, 22.0), show);
+        // The Drive page takes the cursor once, when it opens.
+        if show && std::mem::take(&mut self.drive_focus) {
+            unsafe {
+                let _ = SetFocus(Some(self.drive_edit));
+            }
+        }
         // The tab search's filter, inside the card over the sidebar.
         if let Some(sb) = self.sidebar() {
             let q = wide_text(self.search_edit).trim().to_lowercase();
@@ -2041,8 +2156,11 @@ impl Inner {
         // A workspace switch cross-fades the list.
         let wf = self.motion.enter(Id::Workspace(s.active_workspace), Prop::Opacity, 1.0, 1.0, 150, Ease::OutCubic).min(1.0);
         let mut y = list.y - self.scroll;
-        let pins: Vec<UiTab> = s.tabs.iter().filter(|t| t.pinned).cloned().collect();
-        let rests: Vec<UiTab> = s.tabs.iter().filter(|t| !t.pinned).cloned().collect();
+        // Agent tabs are grouped per agent: their own section, under a header with the
+        // agent's name, its colour and a Stop that ends that agent alone.
+        let groups = agent_groups(s);
+        let pins: Vec<UiTab> = s.tabs.iter().filter(|t| t.pinned && !t.agent).cloned().collect();
+        let rests: Vec<UiTab> = s.tabs.iter().filter(|t| !t.pinned && !t.agent).cloned().collect();
         if !pins.is_empty() {
             let cols = if compact { 1 } else { (((sb.w - 2.0 * pad) + 4.0) / 44.0).floor().max(1.0) as usize };
             let tw = ((sb.w - 2.0 * pad) - 4.0 * (cols as f32 - 1.0)) / cols as f32;
@@ -2054,31 +2172,54 @@ impl Inner {
             self.gfx.line(sb.x + pad, y, sb.right() - pad, y, th.line.alpha(wf), 1.0);
             y += 9.0;
         }
-        // Where each tab's row belongs, in the list's own space. Rows are drawn
-        // at their animated place: an added, closed or reordered tab makes the
-        // ones around it glide instead of jump.
-        let mut want = Vec::with_capacity(rests.len());
-        let mut at = y - list.y + self.scroll;
-        for _ in &rests {
-            want.push(at);
-            at += step;
+        // Every row of the list: the person's tabs first, then one block per agent
+        // under its header. Header rows carry their own height, so the highlight and
+        // the drops land right. Where each row belongs, in the list's own space. Rows
+        // are drawn at their animated place: an added, closed or reordered tab makes
+        // the ones around it glide instead of jump.
+        let mut rows: Vec<(Row<'_>, f32)> = rests.iter().map(|t| (Row::Tab(t), step)).collect();
+        for (i, g) in groups.iter().enumerate() {
+            if i == 0 || !compact {
+                rows.push((Row::Header(g.head), if compact { 6.0 } else { 26.0 }));
+            }
+            for t in &g.tabs {
+                rows.push((Row::Tab(t), step));
+            }
         }
+        let mut want = Vec::with_capacity(rows.len());
+        let mut at = y - list.y + self.scroll;
+        for (_, h) in &rows {
+            want.push(at);
+            at += h;
+        }
+        let rows_h = at - (y - list.y + self.scroll);
         // The highlight slides between tabs, in list space, following its row.
-        if let Some(n) = rests.iter().position(|t| t.id == s.active)
+        if let Some(n) = rows.iter().position(|(r, _)| matches!(r, Row::Tab(t) if t.id == s.active))
             && !self.drag.as_ref().is_some_and(|d| d.moved && d.id == s.active)
         {
-            let target = y - list.y + self.scroll + want[n];
-            let slid = self.motion.spring(Id::Named("active-y"), Prop::Y, target, 220);
+            let slid = self.motion.spring(Id::Named("active-y"), Prop::Y, want[n], 220);
             self.gfx.round(R::new(sb.x + pad, list.y - self.scroll + slid, sb.w - 2.0 * pad, row_h), lo.r_md, th.raise.alpha(wf));
         }
-        for (t, want_y) in rests.iter().zip(want.iter().copied()) {
-            let oy = self.motion.spring(Id::Tab(t.id), Prop::Y, want_y, 220);
-            let r = R::new(sb.x + pad, list.y - self.scroll + oy, sb.w - 2.0 * pad, row_h);
-            let a = self.motion.enter(Id::Tab(t.id), Prop::Opacity, 0.0, 1.0, 160, Ease::OutCubic) * wf;
-            if r.bottom() >= list.y && r.y <= list.bottom() {
-                self.draw_tab(t, r, s, false, a);
+        for ((row, h), want_y) in rows.iter().zip(want.iter().copied()) {
+            match row {
+                Row::Tab(t) => {
+                    let oy = self.motion.spring(Id::Tab(t.id), Prop::Y, want_y, 220);
+                    let r = R::new(sb.x + pad, list.y - self.scroll + oy, sb.w - 2.0 * pad, row_h);
+                    let a = self.motion.enter(Id::Tab(t.id), Prop::Opacity, 0.0, 1.0, 160, Ease::OutCubic) * wf;
+                    if r.bottom() >= list.y && r.y <= list.bottom() {
+                        self.draw_tab(t, r, s, false, a);
+                    }
+                    self.seen_tabs.insert(t.id);
+                }
+                Row::Header(head) => {
+                    let oy = self.motion.spring(Id::Group(head.id), Prop::Y, want_y, 220);
+                    let r = R::new(sb.x + pad, list.y - self.scroll + oy, sb.w - 2.0 * pad, *h - 2.0);
+                    if *h > 8.0 && r.bottom() >= list.y && r.y <= list.bottom() {
+                        let n = groups.iter().find(|g| g.head.id == head.id).map_or(0, |g| g.tabs.len());
+                        self.draw_agent_group(head, r, n, wf);
+                    }
+                }
             }
-            self.seen_tabs.insert(t.id);
         }
         // The ghosts of just-closed tabs: their rows collapse and fade in place.
         let ghosts: Vec<(UiTab, f32)> = self.closing.iter().map(|c| (c.tab.clone(), c.y)).collect();
@@ -2092,7 +2233,7 @@ impl Inner {
                 self.draw_tab_body(tab, r, s, false, false, o * wf);
             }
         }
-        let nr = R::new(sb.x + pad, y + want.len() as f32 * step + 3.0, sb.w - 2.0 * pad, row_h);
+        let nr = R::new(sb.x + pad, y + rows_h + 3.0, sb.w - 2.0 * pad, row_h);
         let hov = self.is_hover(&Hit::NewTab);
         let a = self.motion.hover(Id::Button("newtab"), if hov { 1.0 } else { 0.0 });
         if a > 0.01 {
@@ -2108,7 +2249,7 @@ impl Inner {
         if nr.y < list.bottom() {
             self.hit(nr, Hit::NewTab);
         }
-        self.list_max = (y + want.len() as f32 * step + 3.0 + row_h + self.scroll - list.y - list.h).max(0.0);
+        self.list_max = (y + rows_h + 3.0 + row_h + self.scroll - list.y - list.h).max(0.0);
         // Drag ghost on top.
         if let Some(d) = &self.drag
             && d.moved
@@ -2127,7 +2268,7 @@ impl Inner {
 
     /// The footer: the memory readout and the agent chip (left), then the
     /// downloads, bookmarks, privacy report, dashboard and settings buttons
-    /// (right). The compact sidebar keeps the two that fit; the agent chip is a
+    /// (right), Drive among them. The compact sidebar keeps the two that fit; the agent chip is a
     /// status, and shows wherever it fits.
     fn draw_footer(&mut self, s: &UiState, sb: R, compact: bool) {
         let lo = self.look.clone();
@@ -2135,7 +2276,7 @@ impl Inner {
         let fy = sb.bottom() - 38.0;
         let size = 28.0;
         let agent = s.agent_busy && !compact;
-        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 90.0 };
+        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 120.0 };
         if lo.footer_btns {
             let gear = if compact {
                 R::new(sb.x + 28.0, fy + 3.0, 26.0, 26.0)
@@ -2149,7 +2290,10 @@ impl Inner {
                 // an eye on, then the settings.
                 let bm = R::new(dl.x - size - 2.0, dl.y, size, size);
                 self.footer_page_button(bm, s, "star", "bookmarks", Hit::BookmarksFooter);
-                let pv = R::new(bm.x - size - 2.0, bm.y, size, size);
+                // Drive: an arrow taking off, lit while a run is going.
+                let dr = R::new(bm.x - size - 2.0, bm.y, size, size);
+                self.footer_page_button(dr, s, "send", "drive", Hit::DriveFooter);
+                let pv = R::new(dr.x - size - 2.0, dr.y, size, size);
                 self.footer_page_button(pv, s, "shield", "report", Hit::ReportFooter);
                 let db = R::new(pv.x - size - 2.0, pv.y, size, size);
                 self.footer_page_button(db, s, "dashboard", "dashboard", Hit::DashFooter);
@@ -2350,13 +2494,34 @@ impl Inner {
         }
     }
 
+    /// The header of one agent's block: its colour dot, its name, how many tabs it has,
+    /// and Stop, which ends that agent (its tabs close and its profile data is deleted).
+    fn draw_agent_group(&mut self, head: &UiTab, r: R, tabs: usize, alpha: f32) {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let dot = agent_color(&head.owner);
+        self.gfx.circle(r.x + 9.0, r.y + r.h / 2.0, 4.0, dot.alpha(alpha));
+        let name = if head.owner_name.trim().is_empty() { "agent" } else { head.owner_name.trim() };
+        let label = if tabs > 1 { format!("{name} · {tabs} tabs") } else { name.to_string() };
+        let stop = R::new(r.right() - 46.0, r.y + 3.0, 46.0, r.h - 6.0);
+        let hit = Hit::AgentStopSession(head.owner.clone());
+        let a = self.motion.hover(Self::button_id(&hit), if self.is_hover(&hit) { 1.0 } else { 0.0 });
+        if a > 0.01 {
+            self.gfx.round(stop, lo.r_sm, th.accent.alpha(0.22 * a.min(1.0) * alpha));
+        }
+        self.gfx.text(&label, R::new(r.x + 19.0, r.y, stop.x - r.x - 23.0, r.h), lo.font(11.5, 600), th.dim.alpha(alpha));
+        self.gfx.text("Stop", stop, lo.font(11.0, 600).align(Align::Center), (if a > 0.5 { th.text } else { th.accent }).alpha(alpha));
+        self.hit(stop, hit);
+    }
+
     /// One of the footer's page buttons: a square that opens a panel, lit while
     /// that panel is the open one. Bookmarks, the privacy report and the
     /// dashboard share it.
     fn footer_page_button(&mut self, r: R, s: &UiState, icon: &str, panel: &str, hit: Hit) {
         let lo = self.look.clone();
         let th = lo.theme;
-        let on = s.panel == panel;
+        // Drive is also lit while its run is going, wherever the person is.
+        let on = s.panel == panel || (panel == "drive" && s.drive.as_ref().is_some_and(|d| d.running));
         let hov = self.is_hover(&hit);
         let a = self.motion.hover(Self::button_id(&hit), if hov { 1.0 } else { 0.0 });
         if a > 0.01 {
@@ -3343,7 +3508,12 @@ impl Inner {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "bookmarks");
                 send(p, json!({"t": "panel", "open": open, "which": "bookmarks"}));
             }
+            Hit::DriveFooter => {
+                let open = self.state.as_ref().is_some_and(|s| s.panel != "drive");
+                send(p, json!({"t": "panel", "open": open, "which": "drive"}));
+            }
             Hit::AgentStop => send(p, json!({"t": "agentStop"})),
+            Hit::AgentStopSession(session) => send(p, json!({"t": "agentStopSession", "session": session})),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => {
@@ -4071,6 +4241,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         i.page.scroll = 0.0;
                     }
                     i.invalidate();
+                } else if id == ID_DRIVE && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    i.invalidate();
                 } else if id == ID_SRCH && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
                     // Typing filters the tab list; the pick starts over at the best match.
                     if code == EN_CHANGE {
@@ -4083,7 +4255,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_CTLCOLOREDIT => {
                 let hdc = HDC(wp.0 as _);
                 // The Bookmarks search sits in a field drawn in the sidebar's color, like the new tab one.
-                let is_ntp = HWND(lp.0 as _) == i.ntp_edit || HWND(lp.0 as _) == i.bm_edit;
+                let h = HWND(lp.0 as _);
+                let is_ntp = h == i.ntp_edit || h == i.bm_edit || h == i.drive_edit;
                 let _ = SetTextColor(hdc, COLORREF(i.theme.text.colorref()));
                 let bg = if is_ntp { i.theme.bg } else { i.theme.raise };
                 let _ = SetBkColor(hdc, COLORREF(bg.colorref()));
@@ -4206,6 +4379,22 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         SetWindowTextW(hwnd, &HSTRING::new()).ok();
                     }
                     return LRESULT(0);
+                } else if id == ID_DRIVE {
+                    // Enter in the task box starts the run; Escape leaves the page.
+                    if vk == VK_RETURN.0 {
+                        if !wide_text(hwnd).trim().is_empty() {
+                            send(&i.proxy, json!({"t": "driveStart"}));
+                        }
+                        return LRESULT(0);
+                    }
+                    if vk == VK_ESCAPE.0 {
+                        if wide_text(hwnd).is_empty() {
+                            send(&i.proxy, json!({"t": "panel", "open": false}));
+                        } else {
+                            SetWindowTextW(hwnd, &HSTRING::new()).ok();
+                        }
+                        return LRESULT(0);
+                    }
                 } else if id == ID_SRCH {
                     match vk {
                         v if v == VK_RETURN.0 => {
@@ -4289,6 +4478,8 @@ mod tests {
             translated: false,
             translating: false,
             servo: false,
+            owner: String::new(),
+            owner_name: String::new(),
         }
     }
 

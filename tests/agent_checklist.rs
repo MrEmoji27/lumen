@@ -21,7 +21,7 @@ fn tmp(name: &str) -> PathBuf {
     dir
 }
 
-// Operate via raw HTTP with header capture.
+// Operate the door over raw HTTP, keeping the session id header.
 fn raw_post(port: u16, token: &str, sid: Option<&str>, body: &Value) -> (u16, String, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(60))).ok();

@@ -25,6 +25,8 @@ pub enum Id {
     Tab(u64),
     /// A tab that just closed: the row it leaves behind, collapsing.
     Ghost(u64),
+    /// An agent's group header in the tab list, by its first tab.
+    Group(u64),
     /// A chrome button by name: "back", "reload", "gear", "menu", ...
     Button(&'static str),
     /// A panel, by the panel's name. Its fade and rise.

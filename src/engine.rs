@@ -5,6 +5,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    path::PathBuf,
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -33,7 +34,7 @@ use windows::{
             WindowsAndMessaging::{GetClientRect, HWND_TOP, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE},
         },
     },
-    core::{Interface, HSTRING, PWSTR},
+    core::{Interface, HSTRING, PCWSTR, PWSTR},
 };
 use wry::{
     NewWindowResponse, PageLoadEvent, Rect, Theme, WebView, WebViewBuilder,
@@ -273,10 +274,28 @@ pub struct Ctx {
     pub rewrite: RefCell<Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>>,
     /// Per tab: the id WebView2 gave the injected Dark Reader script.
     pub dark_ids: Rc<RefCell<HashMap<u64, String>>>,
+    /// Strict isolation: one environment per agent profile, made on first use.
+    pub own_envs: RefCell<HashMap<String, ICoreWebView2Environment>>,
+    /// The ones being made right now. WebView2 answers on the UI thread's next turn,
+    /// so nobody waits: the tick picks the answer up and builds the waiting tabs.
+    pub pending_envs: RefCell<Vec<PendingEnv>>,
+    /// Profiles the machine would not give a browser of their own. Asking again would
+    /// fail the same way; those agents fall back to a named profile of the shared one.
+    pub own_env_failed: RefCell<std::collections::HashSet<String>>,
+    /// The WebView2 profile of each agent (by profile key). Kept past its tabs, because
+    /// a profile outlives them: its cookies are still there when the session ends and
+    /// must be wiped then.
+    pub profiles: RefCell<HashMap<String, ICoreWebView2Profile>>,
     /// Plain http pages: whether to try https first, and the hosts left alone.
     pub https: Rc<RefCell<crate::sites::HttpsPolicy>>,
     /// Send the Global Privacy Control signal to pages (the header lives in the blocker).
     pub gpc: Cell<bool>,
+}
+
+/// A strict-isolation environment on its way. See `start_own_env` / `poll_own_envs`.
+pub struct PendingEnv {
+    pub key: String,
+    rx: std::sync::mpsc::Receiver<Result<ICoreWebView2Environment, String>>,
 }
 
 impl Ctx {
@@ -380,14 +399,45 @@ pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
     a
 }
 
-/// One page. All pages share the UI's environment, so one browser process,
-/// one GPU process, one network process for the whole app.
-/// `isolated`: the page lives in the separate "agent" profile (own cookies and storage).
+/// Which WebView2 world a page lives in. Every agent session gets its own: its own cookies,
+/// storage, cache and permissions, whatever the others are doing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Profile {
+    /// The person's own pages: the unnamed profile of the shared environment.
+    Main,
+    /// An agent in the shared environment, in a profile of its own (`agent-<key>`).
+    /// One browser process for the whole app, one cookie jar per agent.
+    Shared(String),
+    /// An agent with an environment of its own: its own user-data folder, so its own
+    /// browser process. The hardest wall; costs about one browser process per agent.
+    Own(String),
+}
+
+impl Profile {
+    /// The profile key, or "" for the person's own pages.
+    #[allow(dead_code)]
+    pub fn key(&self) -> &str {
+        match self {
+            Profile::Main => "",
+            Profile::Shared(k) | Profile::Own(k) => k,
+        }
+    }
+
+    /// An agent page, in whichever mode.
+    pub fn agent(&self) -> bool {
+        !matches!(self, Profile::Main)
+    }
+}
+
+/// One page. Person's pages share the UI's environment, so one browser process,
+/// one GPU process, one network process for the whole app. An agent's pages live in
+/// their own profile (own cookies and storage) and, with strict isolation, in their
+/// own environment and user-data folder.
 /// `private`: WebView2 InPrivate. No cookies outlive the last private page, and
 /// nothing the page does reaches this profile's history.
-pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, isolated: bool, private: bool, agent: bool) -> wry::Result<WebView> {
+pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, profile: Profile, private: bool) -> wry::Result<WebView> {
     let env = ctx.env.borrow().clone();
-    build_tab_in(ctx, id, url, bounds, env, isolated, private, agent)
+    build_tab_in(ctx, id, url, bounds, env, &profile, private)
 }
 
 fn build_tab_in(
@@ -395,19 +445,32 @@ fn build_tab_in(
     id: u64,
     url: Option<&str>,
     bounds: Rect,
-    env: Option<ICoreWebView2Environment>,
-    isolated: bool,
+    opener_env: Option<ICoreWebView2Environment>,
+    profile: &Profile,
     private: bool,
-    agent: bool,
 ) -> wry::Result<WebView> {
     let dark = ctx.dark.get();
     // Who this page is: whose tab, private or not, person's or agent's. The
     // blocker counts everything that happens here against this.
-    let who = crate::privacy_stats::Who::new(id, private, agent);
+    let who = crate::privacy_stats::Who::new(id, private, profile.agent());
     let p_title = ctx.proxy.clone();
     let p_load = ctx.proxy.clone();
     let popup_ctx = ctx.clone();
+    let popup_profile = profile.clone();
 
+    // A popup lives in its opener's environment, named profile and all: the cookie jar
+    // of an OAuth popup must be the one its opener is logged in with. An agent with an
+    // environment of its own never takes the shared one, whoever is calling.
+    let env = match profile {
+        Profile::Own(key) => own_env(ctx, key),
+        _ => opener_env.clone(),
+    };
+    // An Own-environment page with no environment ready yet: the caller was too early
+    // (the door builds the page when the environment lands). Never a fallback into the
+    // shared environment: that would put the agent in the person's own cookie jar.
+    if matches!(profile, Profile::Own(_)) && env.is_none() {
+        return Err(wry::Error::InitScriptError);
+    }
     // No environment yet: this page is the first, and it makes one for everyone.
     let first = env.is_none();
     let mut wc = first.then(|| ctx.web_context.borrow_mut());
@@ -416,7 +479,12 @@ fn build_tab_in(
         (None, Some(wc)) => WebViewBuilder::new_with_web_context(wc).with_additional_browser_args(ctx.args.clone()),
         (None, None) => unreachable!(),
     };
-    let base = if isolated { base.with_profile_name("agent") } else { base };
+    // A named profile is what keeps two agents' cookies apart inside one environment.
+    // In an Own environment the whole folder is the agent's, so the default profile is fine.
+    let base = match profile {
+        Profile::Shared(key) => base.with_profile_name(format!("agent-{key}")),
+        _ => base,
+    };
     let mut b = base
         .with_bounds(bounds)
         .with_visible(false)
@@ -441,7 +509,7 @@ fn build_tab_in(
             let ctx = &popup_ctx;
             let new_id = ctx.alloc_id();
             let bounds = content_bounds_now(ctx);
-            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), isolated, private, agent) {
+            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), &popup_profile, private) {
                 Ok(wv) => {
                     let core = wv.webview();
                     ctx.popups.borrow_mut().push((new_id, wv));
@@ -453,7 +521,8 @@ fn build_tab_in(
         });
     // Dark pages: the script must be in place before the first document, so that
     // navigation waits for WebView2 to confirm it (set_dark starts it).
-    let dark_first = !isolated && ctx.dark_js.borrow().is_some();
+    let agent_page = profile.agent();
+    let dark_first = !agent_page && ctx.dark_js.borrow().is_some();
     if let Some(u) = url
         && !dark_first
     {
@@ -472,11 +541,11 @@ fn build_tab_in(
     crate::glance::hook(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv, id, private);
     hook_crash(&wv, id, ctx.proxy.clone());
-    hook_permissions(ctx, &wv, id, isolated);
-    hook_external(&wv, id, ctx.proxy.clone(), isolated);
-    // Password saving is per profile. The agent's profile never saves passwords,
+    hook_permissions(ctx, &wv, id, agent_page);
+    hook_external(&wv, id, ctx.proxy.clone(), agent_page);
+    // Password saving is per profile. An agent's profile never saves passwords,
     // and InPrivate keeps nothing anyway, so private pages get it off too.
-    set_passwords(&wv, ctx.passwords.get() && !isolated && !private);
+    set_passwords(&wv, ctx.passwords.get() && !agent_page && !private);
     hook_keys(&wv, ctx.proxy.clone());
     hook_focus(&wv, id, ctx.proxy.clone());
     if crate::headless() {
@@ -484,13 +553,263 @@ fn build_tab_in(
     }
     // A new view has no scripts yet; forget any id an older view of this tab had.
     ctx.dark_ids.borrow_mut().remove(&id);
-    if !isolated {
+    if !agent_page {
         set_dark(ctx, &wv, id, false, url.filter(|_| dark_first).map(str::to_string));
     }
     if let Some(f) = ctx.on_built.borrow().as_ref() {
         f(&wv, who);
     }
     Ok(wv)
+}
+
+// ------------------------------------------------------------ agent profiles
+
+/// A profile key as a folder name. Keys are hex from Lumen or a client name already
+/// cleaned once; this is the last line of defence before a path.
+fn safe_key(key: &str) -> String {
+    let k: String = key.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(48).collect();
+    if k.is_empty() || k == "." || k == ".." { "agent".into() } else { k }
+}
+
+/// The user-data folder of one strictly isolated agent. A folder of its own means a
+/// browser process of its own: its cookies, cache and everything else are its own.
+pub fn own_env_dir(key: &str) -> PathBuf {
+    crate::store::data_dir().join("agent_envs").join(safe_key(key))
+}
+
+/// The environment of one strictly isolated agent, if it is ready.
+pub fn own_env(ctx: &Rc<Ctx>, key: &str) -> Option<ICoreWebView2Environment> {
+    ctx.own_envs.borrow().get(&safe_key(key)).cloned()
+}
+
+/// Whether this machine said no to a browser of its own for this agent. Asked once,
+/// not per tab: the answer will not change.
+pub fn own_env_failed(ctx: &Rc<Ctx>, key: &str) -> bool {
+    ctx.own_env_failed.borrow().contains(&safe_key(key))
+}
+
+/// Ask for one agent's environment. False when it is already made, already on its way,
+/// already refused, or the folder cannot be made. Nothing is waited on here: WebView2
+/// answers through the thread's message turn and `poll_own_envs` picks it up.
+pub fn start_own_env(ctx: &Rc<Ctx>, key: &str) -> bool {
+    let key = safe_key(key);
+    if ctx.own_envs.borrow().contains_key(&key) || ctx.own_env_failed.borrow().contains(&key) || ctx.pending_envs.borrow().iter().any(|p| p.key == key) {
+        return false;
+    }
+    let dir = own_env_dir(&key);
+    if std::fs::create_dir_all(&dir).is_err() {
+        eprintln!("lumen: strict isolation: no folder for agent {key}");
+        ctx.own_env_failed.borrow_mut().insert(key);
+        return false;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let args = ctx.args.clone();
+    let made = unsafe {
+        let options = webview2_com::CoreWebView2EnvironmentOptions::default();
+        if !args.is_empty() {
+            options.set_additional_browser_arguments(args);
+        }
+        CreateCoreWebView2EnvironmentWithOptions(
+            PCWSTR::null(),
+            &HSTRING::from(dir.as_os_str()),
+            &ICoreWebView2EnvironmentOptions::from(options),
+            &webview2_com::CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |hr, env| {
+                let out = match (hr, env) {
+                    (Ok(()), Some(env)) => Ok(env),
+                    (Err(e), _) => Err(e.to_string()),
+                    (_, None) => Err("WebView2 gave no environment".to_string()),
+                };
+                let _ = tx.send(out);
+                Ok(())
+            })),
+        )
+    };
+    if let Err(e) = made {
+        eprintln!("lumen: strict isolation: could not ask for agent {key}'s browser: {e}");
+        ctx.own_env_failed.borrow_mut().insert(key);
+        return false;
+    }
+    ctx.pending_envs.borrow_mut().push(PendingEnv { key, rx });
+    true
+}
+
+/// Whatever came back from the strict-isolation environments asked for so far. The keys
+/// returned are decided: the environment is in `own_envs`, or it failed and the agent
+/// falls back to a named profile of the shared environment.
+pub fn poll_own_envs(ctx: &Rc<Ctx>) -> Vec<String> {
+    let mut ready = Vec::new();
+    let mut keep = Vec::new();
+    for p in ctx.pending_envs.borrow_mut().drain(..) {
+        match p.rx.try_recv() {
+            Ok(Ok(env)) => {
+                ctx.own_envs.borrow_mut().insert(p.key.clone(), env);
+                ready.push(p.key);
+            }
+            Ok(Err(e)) => {
+                eprintln!("lumen: strict isolation: no browser of its own for agent {}: {e}", p.key);
+                ctx.own_env_failed.borrow_mut().insert(p.key.clone());
+                ready.push(p.key);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => keep.push(p),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                ctx.own_env_failed.borrow_mut().insert(p.key.clone());
+                ready.push(p.key);
+            }
+        }
+    }
+    *ctx.pending_envs.borrow_mut() = keep;
+    ready
+}
+
+/// The WebView2 profile a page lives in. Own cookies, storage, permissions.
+pub fn webview_profile(wv: &WebView) -> Option<ICoreWebView2Profile> {
+    unsafe { wv.webview().cast::<ICoreWebView2_13>().ok()?.Profile().ok() }
+}
+
+/// A profile's WebView2 name ("", the unnamed one, for the person's own pages).
+pub fn profile_name(profile: &ICoreWebView2Profile) -> String {
+    let mut p = PWSTR::null();
+    unsafe { profile.ProfileName(&mut p).ok() };
+    take(p)
+}
+
+/// A profile's folder on disk. None when WebView2 will not say.
+pub fn profile_path(profile: &ICoreWebView2Profile) -> Option<PathBuf> {
+    let mut p = PWSTR::null();
+    unsafe { profile.ProfilePath(&mut p).ok()? };
+    let s = take(p);
+    (!s.is_empty()).then(|| PathBuf::from(s))
+}
+
+/// Point a profile's own downloads (the ones WebView2 handles itself) at one folder.
+pub fn set_profile_download_dir(wv: &WebView, dir: &std::path::Path) {
+    if let Some(profile) = webview_profile(wv) {
+        unsafe {
+            let _ = profile.SetDefaultDownloadFolderPath(&HSTRING::from(dir.as_os_str()));
+        }
+    }
+}
+
+/// Wipe a profile's cookies, storage, cache and permissions. An ephemeral session is
+/// over: its profile data goes with it. Asynchronous; WebView2 does it when it can.
+pub fn clear_profile(profile: &ICoreWebView2Profile) {
+    let Ok(p2) = profile.cast::<ICoreWebView2Profile2>() else { return };
+    let done = webview2_com::ClearBrowsingDataCompletedHandler::create(Box::new(|_| Ok(())));
+    unsafe {
+        let _ = p2.ClearBrowsingData(COREWEBVIEW2_BROWSING_DATA_KINDS_ALL_PROFILE, &done);
+    }
+}
+
+/// Remember an agent page's profile, so its cookies and storage can be wiped when the
+/// session ends. The profile outlives its tabs; the handle must too.
+pub fn remember_profile(ctx: &Rc<Ctx>, key: &str, wv: &WebView) {
+    if key.is_empty() {
+        return;
+    }
+    if let Some(p) = webview_profile(wv) {
+        ctx.profiles.borrow_mut().entry(safe_key(key)).or_insert(p);
+    }
+}
+
+/// The end of one agent session: its profile's cookies, storage, cache and permissions
+/// are gone at once, and its folder is deleted. WebView2 keeps a live profile's files
+/// open for the browser's whole life, so a folder of the shared environment goes at the
+/// next start, before anything has touched it (see `purge_at_start`). A session with an
+/// environment of its own loses its whole user-data folder right now.
+/// Ephemeral sessions are ephemeral: nothing is kept for the next run.
+pub fn purge_profile(ctx: &Rc<Ctx>, key: &str, strict: bool) {
+    if key.is_empty() {
+        return;
+    }
+    let key = safe_key(key);
+    if let Some(p) = ctx.profiles.borrow_mut().remove(&key) {
+        clear_profile(&p);
+    }
+    if strict {
+        // Its own environment: let go of it first. That ends the agent's browser
+        // process, and with it the last holds on the folder.
+        ctx.own_envs.borrow_mut().remove(&key);
+        own_env_dir(&key).is_dir().then(|| delete_profile_files(own_env_dir(&key)));
+    }
+    queue_purge_in(&crate::store::data_dir(), &key);
+}
+
+/// The profiles whose folders are waiting for the browser that holds them to go.
+fn purge_queue_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("agent_purge.json")
+}
+
+/// Remember one profile's folder for the next start.
+fn queue_purge_in(dir: &std::path::Path, key: &str) {
+    let path = purge_queue_path(dir);
+    let mut list: Vec<String> = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let key = safe_key(key);
+    if !list.contains(&key) {
+        list.push(key);
+    }
+    list.truncate(200);
+    let tmp = path.with_extension("tmp");
+    if let Ok(json) = serde_json::to_string(&list)
+        && std::fs::write(&tmp, json).is_ok()
+    {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Delete the folders of sessions that ended while Lumen was running. Called once at
+/// startup, before any page is built, so nothing holds those profiles yet.
+pub fn purge_at_start() {
+    purge_at_start_in(&crate::store::data_dir(), &crate::store::data_dir().join("WebView2").join("EBWebView"));
+}
+
+fn purge_at_start_in(dir: &std::path::Path, wv_root: &std::path::Path) {
+    let path = purge_queue_path(dir);
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let _ = std::fs::remove_file(&path);
+    let list: Vec<String> = serde_json::from_str(&text).unwrap_or_default();
+    for key in list {
+        let key = safe_key(&key);
+        for p in profile_dirs(wv_root, &key) {
+            let _ = std::fs::remove_dir_all(p);
+        }
+        let env = dir.join("agent_envs").join(&key);
+        if env.is_dir() {
+            let _ = std::fs::remove_dir_all(env);
+        }
+    }
+}
+
+/// Every folder that looks like one profile's: WebView2's own naming, and anything in
+/// the user-data folder whose name ends with this profile's name.
+fn profile_dirs(wv_root: &std::path::Path, key: &str) -> Vec<PathBuf> {
+    let needle = format!("agent-{}", safe_key(key));
+    let mut out = vec![wv_root.join(format!("WV2Profile_{needle}"))];
+    for e in std::fs::read_dir(wv_root).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.ends_with(&needle) && e.path().is_dir() {
+            out.push(e.path());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Delete a profile's folder, over a few tries: the browser lets go of the last files a
+/// moment after its last page of that profile closes. On its own thread, so the door
+/// answering in between.
+pub fn delete_profile_files(dir: PathBuf) {
+    let _ = std::thread::Builder::new().name("lumen-agent-purge".into()).spawn(move || {
+        for _ in 0..12 {
+            if !dir.exists() {
+                return;
+            }
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(350));
+        }
+    });
 }
 
 /// A page of Lumen's own, off screen: for work that needs a web engine but not the
@@ -1280,7 +1599,7 @@ pub fn clean_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, clean_url, map_key, origin_of};
+    use super::{Action, clean_url, map_key, origin_of, purge_at_start_in, purge_queue_path, queue_purge_in, safe_key};
 
     #[test]
     fn ctrl_shift_n_is_a_new_private_tab() {
@@ -1305,6 +1624,53 @@ mod tests {
     #[test]
     fn origins() {
         assert_eq!(origin_of("https://meet.example.com:8443/room?x=1"), "https://meet.example.com:8443");
+    }
+
+    /// A session that ended queues its profile: the next start deletes the folder, both
+    /// WebView2's own naming and any other that ends with the profile's name.
+    #[test]
+    fn finished_profiles_are_deleted_at_the_next_start() {
+        let dir = std::env::temp_dir().join(format!("lumen-purge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("WebView2").join("EBWebView");
+        std::fs::create_dir_all(&root).unwrap();
+        let key = "a1b2c3d4e5f6";
+        let mine = root.join(format!("WV2Profile_agent-{key}"));
+        let its = root.join("WV2Profile_agent-other");
+        let unrelated = root.join("Default");
+        for d in [&mine, &its, &unrelated] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("Cookies"), "x").unwrap();
+        }
+        queue_purge_in(&dir, key);
+        // Twice: one profile is one entry.
+        queue_purge_in(&dir, key);
+        assert_eq!(std::fs::read_to_string(purge_queue_path(&dir)).unwrap(), format!("[\"{key}\"]"));
+        purge_at_start_in(&dir, &root);
+        assert!(!mine.exists(), "the ended session's folder is gone");
+        assert!(its.exists() && unrelated.exists(), "no other profile was touched");
+        assert!(!purge_queue_path(&dir).exists(), "the queue is emptied");
+        // A queue file that is junk does nothing at all.
+        std::fs::write(purge_queue_path(&dir), "{not json").unwrap();
+        purge_at_start_in(&dir, &root);
+        assert!(its.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A profile key can never name a folder somewhere else.
+    #[test]
+    fn a_profile_key_names_one_folder() {
+        assert_eq!(safe_key("a1b2"), "a1b2");
+        // Separators never survive, and ".." is a name like any other: one folder, here.
+        assert_eq!(safe_key("../../windows"), "....windows");
+        for bad in ["..", "../..", "a\\b", "C:/x", "", "  "] {
+            let k = safe_key(bad);
+            assert!(!k.is_empty() && !k.contains(['/', '\\']), "{bad:?} -> {k:?}");
+        }
+        assert_eq!(safe_key(".."), "agent");
+        assert_eq!(safe_key("a\\b/c:d"), "abcd");
+        let long = safe_key(&"z".repeat(100));
+        assert!(!long.is_empty() && long.len() <= 48);
     }
 }
 

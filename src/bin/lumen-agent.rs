@@ -150,7 +150,7 @@ fn main() -> ExitCode {
             println!("{}", HELP);
             ExitCode::SUCCESS
         }
-        Some("mcp") => stdio(),
+        Some("mcp") => stdio(&session),
         Some("journal") => journal_report(&args[1..]),
         Some(tool) => {
             let tool = tool.to_string();
@@ -190,7 +190,9 @@ fn card() -> Option<Value> {
 /// MCP over stdio: one JSON-RPC message per line in, one per line out.
 /// Lumen is started only when a tool is really called; until then the handshake and the
 /// tool list come from agent_tools.json, so opening an agent session costs nothing.
-fn stdio() -> ExitCode {
+/// `named` (`--session NAME`) asks Lumen to keep this client's profile under that name,
+/// so its logins outlive the session.
+fn stdio(named: &str) -> ExitCode {
     let mut door = running();
     let card = card();
     if door.is_none() && card.is_none() {
@@ -209,15 +211,21 @@ fn stdio() -> ExitCode {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-        let method = msg["method"].as_str().unwrap_or("");
+        let Ok(mut msg) = serde_json::from_str::<Value>(&line) else { continue };
+        let method = msg["method"].as_str().unwrap_or("").to_string();
         if method == "initialize" {
+            // --session NAME: ask Lumen to keep this client's profile under that name.
+            if !named.trim().is_empty()
+                && let Some(params) = msg["params"].as_object_mut()
+            {
+                params.insert("_meta".into(), json!({"lumen": {"profile": clean_name(named)}}));
+            }
             // Kept, so a session Lumen dropped (it was quiet for too long) can be opened again.
             hello = Some(msg.clone());
         }
         if door.is_none() {
             let id = msg.get("id").cloned();
-            let local = match (method, &card, id) {
+            let local = match (method.as_str(), &card, id) {
                 ("initialize", Some(c), Some(id)) => {
                     Some(json!({"jsonrpc": "2.0", "id": id, "result": {
                         "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
@@ -395,11 +403,14 @@ fn saved_session(name: &str) -> String {
     if id.len() >= 32 && id.chars().all(|c| c.is_ascii_alphanumeric()) { id } else { String::new() }
 }
 
-/// Ask Lumen for a new session under this name and remember it.
+/// Ask Lumen for a new session under this name and remember it. A named session keeps
+/// its profile (`_meta.lumen.profile`): its cookies and logins outlive the call, so the
+/// next worker under the same name starts logged in.
 fn open_session(door: &Door, name: &str) -> Result<String, String> {
     let label = if clean_name(name) == "cli" { "cli".to_string() } else { format!("cli-{}", clean_name(name)) };
     let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": env!("CARGO_PKG_VERSION")}}});
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": env!("CARGO_PKG_VERSION")},
+        "_meta": {"lumen": {"profile": clean_name(name)}}}});
     match door.post(&hello, "")? {
         (200, sid, _) if !sid.is_empty() => {
             save_session(name, &sid);

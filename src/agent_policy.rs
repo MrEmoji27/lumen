@@ -64,6 +64,8 @@ pub struct PolicyCtx {
     /// Settings > AI agent > Let agents upload files.
     pub upload_on: bool,
     pub upload_dir: PathBuf,
+    /// This Drive run was paused and taken over by the person: only browser_handoff runs.
+    pub paused: bool,
 }
 
 impl PolicyCtx {
@@ -88,6 +90,7 @@ impl PolicyCtx {
             shared_profile: v["shared"].as_bool().unwrap_or(false),
             upload_on: v["upload"].as_bool().unwrap_or(false),
             upload_dir: upload_dir(v["upload_dir"].as_str().unwrap_or("")),
+            paused: v["paused"].as_bool().unwrap_or(false),
         }
     }
 }
@@ -154,6 +157,14 @@ pub const RULES: &[Rule] = &[
     rule("browser_eval", Scope::OwnTab, Gate::Eval),
     rule("browser_console", Scope::Tab, Gate::Nothing),
     rule("browser_network", Scope::Tab, Gate::Nothing),
+    rule("browser_network_body", Scope::Tab, Gate::Nothing),
+    // Cookies and storage are the agent's own profile's, so a shared profile is refused
+    // the same way eval is: a file of the person's cookies must never leave their jar.
+    rule("browser_state_save", Scope::OwnTab, Gate::Eval),
+    rule("browser_state_load", Scope::OwnTab, Gate::Eval),
+    rule("browser_record_start", Scope::Free, Gate::Nothing),
+    rule("browser_record_stop", Scope::Free, Gate::Nothing),
+    rule("browser_replay", Scope::TabOpt, Gate::Nothing),
     rule("browser_dialogs", Scope::Tab, Gate::Nothing),
     rule("browser_resize", Scope::OwnTab, Gate::Nothing),
     rule("browser_tabs", Scope::Free, Gate::Nothing),
@@ -175,6 +186,8 @@ const TEST_RULES: &[Rule] = &[
     rule("browser_test_done", Scope::Free, Gate::Nothing),
     rule("browser_test_state", Scope::Free, Gate::Nothing),
     rule("browser_test_grant", Scope::Free, Gate::Nothing),
+    rule("browser_test_profile", Scope::Tab, Gate::Nothing),
+    rule("browser_test_pause", Scope::Free, Gate::Nothing),
     rule("browser_test_decline", Scope::Free, Gate::Nothing),
     rule("browser_test_consent_approve", Scope::Free, Gate::Nothing),
     rule("browser_test_consent_decline", Scope::Free, Gate::Nothing),
@@ -210,6 +223,16 @@ pub fn authorize(who: &Who, tool: &str, args: &Value, ctx: &PolicyCtx) -> Result
     let Some(rule) = find(tool) else {
         return Err(denied("unknown_tool", format!("unknown tool {tool}")));
     };
+    // A Drive run the person paused: the tab is theirs now. The one thing the agent may
+    // still do is ask for it back, and that is exactly browser_handoff. (The pause hook a
+    // debug build has is the person's own hand on that switch, so it passes too.)
+    let test_hook = cfg!(debug_assertions) && tool == "browser_test_pause";
+    if ctx.paused && tool != "browser_handoff" && !test_hook {
+        return Err(denied(
+            "drive_paused",
+            "the person paused this run and took the tab over. Call browser_handoff with a short message when you are ready for them to hand it back.",
+        ));
+    }
     if rule.scope != Scope::Free {
         match args["tab"].as_u64() {
             // A missing tab is the tool's own error to give ("missing tab id").
@@ -374,26 +397,38 @@ fn simplify(p: &Path) -> PathBuf {
 
 // ---------------------------------------------------------------- downloads
 
-/// Agents' downloads and PDFs land here, apart from the person's own.
+/// Agents' downloads and PDFs land here, apart from the person's own. Every session gets a
+/// folder of its own inside it; see `agent_downloads_dir_for`.
 pub fn agent_downloads_dir() -> PathBuf {
     crate::store::download_dir().join("Agent downloads")
 }
 
-/// Whether a download row is an agent's, for browser_downloads: agents see their own files and
-/// nothing of the person's downloads.
-pub fn is_agent_download(path: &str, url: &str, started_by_agent: impl Fn(&str) -> bool) -> bool {
+/// One agent's own folder under "Agent downloads". `folder` is the session's cleaned
+/// folder name; anything path-like is refused, so a label can never write elsewhere.
+pub fn agent_downloads_dir_for(folder: &str) -> PathBuf {
+    let root = agent_downloads_dir();
+    let name = folder.trim();
+    if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+        return root;
+    }
+    root.join(name)
+}
+
+/// Whether a download row is this agent's own, for browser_downloads: inside its folder,
+/// or started by it. The person's downloads and other agents' files are not its business.
+pub fn is_agent_download(dir: &Path, path: &str, url: &str, started_by_agent: impl Fn(&str) -> bool) -> bool {
     if started_by_agent(url) {
         return true;
     }
-    let root = agent_downloads_dir().display().to_string().to_ascii_lowercase();
+    let root = dir.display().to_string().to_ascii_lowercase();
     !path.is_empty() && path.to_ascii_lowercase().starts_with(&root)
 }
 
 /// What `Op::Policy` answers, built from plain values so the UI thread can fill it in.
-pub fn ctx_value(tabs: Vec<TabInfo>, shared: bool, upload: bool, upload_dir: &str) -> Value {
+pub fn ctx_value(tabs: Vec<TabInfo>, shared: bool, upload: bool, upload_dir: &str, paused: bool) -> Value {
     json!({
         "tabs": tabs.iter().map(|t| json!({"id": t.id, "agent": t.agent, "owner": t.owner, "granted": t.granted})).collect::<Vec<_>>(),
-        "shared": shared, "upload": upload, "upload_dir": upload_dir,
+        "shared": shared, "upload": upload, "upload_dir": upload_dir, "paused": paused,
     })
 }
 
@@ -403,7 +438,7 @@ mod tests {
     use std::fs;
 
     fn who(s: &str) -> Who {
-        Who { session: s.into(), name: s.into() }
+        Who { session: s.into(), name: s.into(), profile: s.into(), downloads: s.into(), keeps: false, paused: false }
     }
 
     fn tab(id: u64, agent: bool, owner: &str, granted: bool) -> TabInfo {
@@ -424,6 +459,7 @@ mod tests {
             shared_profile: false,
             upload_on: true,
             upload_dir: dir.to_path_buf(),
+            paused: false,
         }
     }
 
@@ -682,27 +718,52 @@ mod tests {
     #[test]
     fn agents_see_only_their_own_downloads() {
         let started = |u: &str| u == "https://example.com/mine.bin";
-        assert!(is_agent_download("", "https://example.com/mine.bin", started));
-        let mine = agent_downloads_dir().join("x.pdf").display().to_string();
-        assert!(is_agent_download(&mine, "https://other/x", started));
-        assert!(is_agent_download(&mine.to_ascii_uppercase(), "https://other/x", started));
+        let mine = agent_downloads_dir_for("agent-a1b2");
+        assert!(is_agent_download(&mine, "", "https://example.com/mine.bin", started));
+        let f = mine.join("x.pdf").display().to_string();
+        assert!(is_agent_download(&mine, &f, "https://other/x", started));
+        assert!(is_agent_download(&mine, &f.to_ascii_uppercase(), "https://other/x", started));
+        // Another agent's folder is not this one's, and neither is the person's downloads.
+        let other = agent_downloads_dir_for("agent-c3d4").join("y.pdf").display().to_string();
+        assert!(!is_agent_download(&mine, &other, "https://other/y", started));
         let theirs = crate::store::download_dir().join("tax-return.pdf").display().to_string();
-        assert!(!is_agent_download(&theirs, "https://bank.example/tax", started));
-        assert!(!is_agent_download("", "https://bank.example/tax", started));
+        assert!(!is_agent_download(&mine, &theirs, "https://bank.example/tax", started));
+        assert!(!is_agent_download(&mine, "", "https://bank.example/tax", started));
+        // The folder name only ever names a folder: no separators, no walk up.
+        assert_eq!(agent_downloads_dir_for(""), agent_downloads_dir());
+        assert_eq!(agent_downloads_dir_for("..\\..\\x"), agent_downloads_dir());
+        assert_eq!(agent_downloads_dir_for("a/b"), agent_downloads_dir());
+        assert_eq!(agent_downloads_dir_for("ok-1"), agent_downloads_dir().join("ok-1"));
     }
 
     #[test]
     fn the_context_round_trips() {
         let dir = tmp("ctx");
-        let v = ctx_value(vec![tab(1, true, "A", false), tab(4, false, "", true)], true, true, &dir.display().to_string());
+        let v = ctx_value(vec![tab(1, true, "A", false), tab(4, false, "", true)], true, true, &dir.display().to_string(), true);
         let c = PolicyCtx::from_value(&v);
         assert_eq!(c.tabs.len(), 2);
-        assert!(c.shared_profile && c.upload_on);
+        assert!(c.shared_profile && c.upload_on && c.paused);
         assert_eq!(c.upload_dir, dir);
         // Nothing sent: everything off, the default folder.
         let c = PolicyCtx::from_value(&json!({}));
-        assert!(!c.shared_profile && !c.upload_on && c.tabs.is_empty());
+        assert!(!c.shared_profile && !c.upload_on && !c.paused && c.tabs.is_empty());
         assert!(c.upload_dir.ends_with("Lumen agent uploads"));
+    }
+
+    /// A paused Drive run: the agent may ask the person to hand the tab back and do
+    /// nothing else, whatever its rights would otherwise be.
+    #[test]
+    fn a_paused_run_may_only_ask_for_the_tab_back() {
+        let mut c = ctx(&tmp("paused"));
+        c.paused = true;
+        for tool in ["browser_click", "browser_snapshot", "browser_eval", "browser_download", "browser_close"] {
+            let e = authorize(&who("A"), tool, &json!({"tab": 1, "script": "1", "url": "https://example.com"}), &c).unwrap_err();
+            assert_eq!(e.code, "drive_paused", "{tool}");
+        }
+        assert!(authorize(&who("A"), "browser_handoff", &json!({"tab": 1, "message": "done"}), &c).is_ok());
+        // Unpausing gives everything back.
+        c.paused = false;
+        assert!(authorize(&who("A"), "browser_click", &json!({"tab": 1}), &c).is_ok());
     }
 
     #[cfg(debug_assertions)]

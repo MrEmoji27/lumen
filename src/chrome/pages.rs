@@ -74,6 +74,10 @@ pub enum PageHit {
     BmImport,
     ClearHistory,
     ClearData,
+    /// The Drive panel: start the run, stop it, or take the tab over.
+    DriveStart,
+    DriveStop,
+    DrivePause,
     /// Settings: write Lumen's browser entries and open Windows' Default apps page.
     DefaultMake,
     /// Settings: take Lumen's browser entries out again.
@@ -347,7 +351,13 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("AI agent", vec![
             Toggle("agent", "Let AI agents browse", "A local MCP server. Agents open their own tabs, marked AI, and you can stop them any time."),
             Toggle("agent_shared_profile", "Agents use my profile", "Off: agent tabs have their own cookies and logins. On: their own tabs carry your logins. Your tabs stay yours until you right-click one: Let agents use this tab."),
+            Toggle("agent_strict_isolation", "Strict isolation: a browser per agent", "Each agent gets its own user-data folder and browser process: nothing shared at all. Measured: about 130 MB more memory and two more processes per agent. Off, agents still get their own profiles."),
             Toggle("agent_upload", "Let agents upload files", "Off: agents cannot put files into pages. On: only files in the Lumen agent uploads folder in your home folder (agent_upload_dir in settings.json changes it)."),
+            Seg("drive_cmd", "Drive panel's command", "The agent CLI the Drive panel starts, with {task} where the task goes. Presets for the CLIs set up on this PC; any other command goes in drive_cmd in settings.json.", &[
+                ("opencode run --model opencode/mimo-v2.6-flash-free \"{task}\"", "opencode"),
+                ("cmdc -p \"{task}\"", "cmdc"),
+                ("claude -p \"{task}\"", "claude"),
+            ]),
             AgentSetup,
         ]),
         ("Privacy", vec![
@@ -537,11 +547,102 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
         "downloads" => draw_downloads(i, st, s),
         "history" => draw_library(i, st, s),
         "bookmarks" => draw_bookmarks(i, st, s),
+        "drive" => draw_drive(i, st, s),
         "sites" => draw_sites(i, st, s),
         "report" => super::report::draw(i, st, s),
         "dashboard" => super::dashboard::draw(i, st, s),
         _ => draw_control(i, st, s),
     }
+}
+
+/// Where the Drive panel's task box sits, in stage coordinates. The native text box is
+/// placed here too, so what is typed and what is drawn agree.
+pub fn drive_task_rect(st: R, s5: f32) -> R {
+    let col = column(st, 760.0);
+    R::new(col.x, st.y + s5 + 96.0, col.w, 40.0)
+}
+
+/// The Drive panel: type a task, an agent runs it in Lumen. The steps are its tool
+/// calls, the lines under them are what it said. Stop ends the run; "Pause and take
+/// over" hands the tab to the person and only browser_handoff gets the agent back in.
+fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
+    let lo = i.look.clone();
+    let th = i.theme;
+    let col = column(st, 760.0);
+    i.gfx.clip(st);
+    let running = s.drive.as_ref().is_some_and(|d| d.running);
+    let sub = match &s.drive {
+        Some(d) if d.running && d.paused => format!("{} is paused ({}): the tab is yours. Hand it back with Done.", d.name, d.elapsed),
+        Some(d) if d.running => format!("{} is working ({}). Stop ends it.", d.name, d.elapsed),
+        Some(d) => format!("{} finished{}.", d.name, d.exit.map(|c| format!(" (exit code {c})")).unwrap_or_default()),
+        None => "An agent CLI runs the task in Lumen over MCP: its own profile, its own tabs.".to_string(),
+    };
+    title_block(i, col, st.y + lo.s5 + 2.0 - i.page.scroll, "Drive", &sub);
+
+    // The task box. The control itself is a real Win32 edit box placed over this rect.
+    let field = drive_task_rect(st, lo.s5);
+    i.gfx.round(field, lo.r_md, th.bg);
+    let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.drive_edit;
+    i.gfx.round_stroke(field, lo.r_md, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
+    // Both buttons right-aligned under the box: Run (or Stop), and Pause beside it.
+    let paused = s.drive.as_ref().is_some_and(|d| d.paused);
+    let f = lo.body.align(Align::Center);
+    let run_label = if running { "Stop" } else { "Run" };
+    let run_w = i.gfx.measure(run_label, f) + 2.0 * lo.s4;
+    let pause_w = if running && !paused { i.gfx.measure("Pause and take over", f) + 2.0 * lo.s4 } else { 0.0 };
+    let run_x = field.right() - run_w;
+    let pause = R::new(run_x - lo.s3 - pause_w, field.bottom() + lo.s3, pause_w, 30.0);
+    outline_button(i, run_x, field.bottom() + lo.s3, run_label, if running { PageHit::DriveStop } else { PageHit::DriveStart }, true);
+    if pause_w > 0.0 {
+        let h = Hit::Page(PageHit::DrivePause);
+        let hov = i.is_hover(&h);
+        if hov {
+            i.gfx.round(pause, lo.r_md, th.hover);
+        }
+        i.gfx.round_stroke(pause, lo.r_md, th.line, 1.0);
+        i.gfx.text("Pause and take over", pause, f, if hov { th.text } else { th.dim });
+        i.hit(pause, h);
+    }
+    // The command this panel runs, straight from the settings row.
+    i.gfx.text(&format!("Command: {}", s.settings.drive_cmd), R::new(col.x, field.bottom() + lo.s3 + 38.0, col.w, 20.0), lo.small, th.faint);
+    i.gfx.text("Safety: the task Lumen sends tells the agent to call browser_handoff before paying, sending or deleting.", R::new(col.x, field.bottom() + lo.s3 + 58.0, col.w, 20.0), lo.small, th.faint);
+    let mut y = field.bottom() + lo.s3 + 88.0;
+    if let Some(d) = s.drive.as_ref().filter(|d| !d.task.is_empty()) {
+        i.gfx.text(&format!("Task: {}", d.task), R::new(col.x, y, col.w, 20.0), lo.small, th.dim);
+        y += 26.0;
+    }
+
+    match &s.drive {
+        None => {
+            let hint = "Give it a task and press Run. It browses in its own agent tabs, in a profile of its own: it never touches your tabs or your logins. Everything it downloads lands in \"Agent downloads\" under its own name.";
+            empty_state(i, R::new(col.x, y, col.w, 170.0), "send", "Nothing has run yet", hint);
+        }
+        Some(d) => {
+            y = group_label(i, col, y, "Steps", d.steps.len());
+            for (tool, note) in &d.steps {
+                i.gfx.text(tool.trim_start_matches("browser_").trim_start_matches('_'), R::new(col.x, y, 200.0, 26.0), lo.body_strong, th.text);
+                i.gfx.text(note, R::new(col.x + 205.0, y, col.w - 205.0, 26.0), lo.body, th.dim);
+                y += 26.0;
+            }
+            if d.steps.is_empty() {
+                i.gfx.text("no tool calls yet", R::new(col.x, y, col.w, 24.0), lo.body, th.faint);
+                y += 26.0;
+            }
+            y += lo.s3;
+            y = group_label(i, col, y, "The agent said", d.log.len());
+            for line in &d.log {
+                i.gfx.text(line, R::new(col.x, y, col.w, 22.0), lo.small, th.dim);
+                y += 22.0;
+            }
+            if d.log.is_empty() {
+                i.gfx.text("nothing yet", R::new(col.x, y, col.w, 22.0), lo.small, th.faint);
+                y += 24.0;
+            }
+        }
+    }
+    i.gfx.unclip();
+    i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+    close_button(i, st);
 }
 
 /// A setting's name and its hint, on the left. `control_w` is what the control on the right
@@ -2862,6 +2963,9 @@ pub fn click(i: &mut Inner, p: PageHit) {
             };
             send(&i.proxy, json!({"t": "bmImport", "browser": browser}));
         }
+        PageHit::DriveStart => send(&i.proxy, json!({"t": "driveStart"})),
+        PageHit::DriveStop => send(&i.proxy, json!({"t": "driveStop"})),
+        PageHit::DrivePause => send(&i.proxy, json!({"t": "drivePause"})),
         PageHit::ClearHistory => {
             // One native menu of time ranges first, then the wipe.
             if let Some(since) = ask_range(i) {

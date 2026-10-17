@@ -240,6 +240,8 @@ pub fn fake(s: &mut UiState) {
             translated: false,
             translating: false,
             servo: false,
+            owner: String::new(),
+            owner_name: String::new(),
         };
         let mut v = vec![
             UiTab { pinned: true, ..t(9001, "Mail", "https://mail.example.com/") },
