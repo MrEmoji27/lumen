@@ -7,6 +7,12 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.2.1 — 2026-10-18
+
+- Memory: idle back from 24.6 MB to 18.5 MB. The ad blocker's matcher had been built in debug
+  mode for the privacy report; a 380 KB tracker host table answers "ad or tracker" instead.
+  Old matcher files (about 31 MB on disk) are deleted.
+
 ## 0.2.0 — 2026-10-18
 
 - Agents: per-agent profiles, frames, response bodies, saved state, record and replay, the Drive
