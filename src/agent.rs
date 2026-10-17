@@ -899,7 +899,7 @@ fn text(s: String) -> Vec<Value> {
 
 /// The page script that finds a ref, first. Refs live in a Map (shadow DOM included) and
 /// as data-lumen-ref attributes (survive a script that replaced the Map).
-const EL_JS: &str = r#"const __el=(r,rr)=>{const m=window.__lumenRefs;let e=m&&m.get(r);if(!e||!e.isConnected)e=document.querySelector('[data-lumen-ref="'+r+'"]');if(e&&e.getAttribute('data-lumen-gen')!==String(window.__lumenGen||0)){if(!rr)return null;e=null}if(!e&&rr){const info=(window.__lumenRefInfo||{})[r];if(info){for(const el of document.querySelectorAll('*')){if(!el.isConnected)continue;const rr2=el.getAttribute('role')||el.tagName.toLowerCase();const nm=(el.getAttribute('aria-label')||el.innerText||el.value||el.placeholder||'').replace(/\s+/g,' ').trim();if(rr2===info.role&&nm===info.name){e=el;break}}}return e};"#;
+const EL_JS: &str = r#"const __el=(r,rr)=>{const m=window.__lumenRefs;let e=m&&m.get(r);if(!e||!e.isConnected)e=document.querySelector('[data-lumen-ref="'+r+'"]');if(e&&e.getAttribute('data-lumen-gen')!==String(window.__lumenGen||0)){if(!rr)return null;e=null}if(!e&&rr){const info=(window.__lumenRefInfo||{})[r];if(info){for(const el of document.querySelectorAll('*')){if(!el.isConnected)continue;const rr2=el.getAttribute('role')||el.tagName.toLowerCase();const nm=(el.getAttribute('aria-label')||el.innerText||el.value||el.placeholder||'').replace(/\s+/g,' ').trim();if(rr2===info.role&&nm===info.name){e=el;break}}}}return e};"#;
 
 fn with_el(r: &str, body: &str, rr: bool) -> String {
     format!("(()=>{{{EL_JS}const R={};const e=__el(R,{rr});if(!e)return {{error:'stale_ref: no element '+R+' on this page now; take a new browser_snapshot'}};{body}}})()", json!(r), rr=if rr {"true"} else {"false"})
@@ -2414,6 +2414,53 @@ return {title:a.title||document.title,url:location.href,byline:a.byline||'',text
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Braces and parens of a script, outside its strings and regexes. A script that
+    /// does not parse fails every action that uses it, and only a live browser shows it.
+    fn balanced(js: &str) -> bool {
+        let (mut depth, mut quote, mut esc) = (Vec::new(), None::<char>, false);
+        let mut prev = ' ';
+        for c in js.chars() {
+            if let Some(q) = quote {
+                if esc {
+                    esc = false;
+                } else if c == '\\' {
+                    esc = true;
+                } else if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '\'' | '"' | '`' => quote = Some(c),
+                // A regex literal starts after these; division never does in our scripts.
+                '/' if "(,=:[!&|?{};".contains(prev) => quote = Some('/'),
+                '(' | '{' | '[' => depth.push(c),
+                ')' | '}' | ']' => {
+                    let want = match c { ')' => '(', '}' => '{', _ => '[' };
+                    if depth.pop() != Some(want) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            if !c.is_whitespace() {
+                prev = c;
+            }
+        }
+        depth.is_empty() && quote.is_none()
+    }
+
+    #[test]
+    fn element_scripts_parse() {
+        assert!(balanced(EL_JS), "EL_JS");
+        for (name, body) in [("POINT_JS", POINT_JS), ("ACTIONABLE_JS", ACTIONABLE_JS)] {
+            assert!(balanced(&with_el("e1", body, false)), "{name} without re-resolve");
+            assert!(balanced(&with_el("e1", body, true)), "{name} with re-resolve");
+        }
+        // The checker itself: one brace short is caught.
+        assert!(!balanced("(()=>{if(a){b}})("));
+    }
 
     #[test]
     fn refs_take_any_form() {
