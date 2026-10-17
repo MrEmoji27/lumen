@@ -116,6 +116,10 @@ pub struct Settings {
     pub agent_port: u32,
     /// Agent tabs use the user's profile (logins, cookies) instead of their own.
     pub agent_shared_profile: bool,
+    /// Let agents put files into web pages (browser_upload). Off by default.
+    pub agent_upload: bool,
+    /// The one folder agents may upload from. Empty means "Lumen agent uploads" in the home folder.
+    pub agent_upload_dir: String,
     /// Keep a local usage journal: speed, memory, crashes and errors, on this PC
     /// only, hosts instead of URLs. Nothing is ever sent anywhere.
     pub journal: bool,
@@ -174,6 +178,8 @@ impl Default for Settings {
             agent: false,
             agent_port: 47615,
             agent_shared_profile: false,
+            agent_upload: false,
+            agent_upload_dir: String::new(),
             journal: true,
             ram_limit: false,
             ram_limit_mb: 2048,

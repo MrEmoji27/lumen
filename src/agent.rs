@@ -30,7 +30,10 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use tao::event_loop::EventLoopProxy;
 
-use crate::engine::Ev;
+use crate::{
+    agent_policy::{self, Approval, PolicyCtx, authorize},
+    engine::Ev,
+};
 
 /// Who is asking: the MCP session, and the name its client gave.
 #[derive(Clone, Debug)]
@@ -62,6 +65,10 @@ pub enum Op {
     End,
     Download { url: String, tab: Option<u64> },
     Downloads,
+    /// The facts `agent_policy::authorize` needs: tabs, owners, grants, settings.
+    Policy,
+    /// Test hook, debug builds only: press Done on the waiting handoff.
+    TestDone,
 }
 
 /// One primitive for the UI thread, and where to send the answer.
@@ -90,6 +97,8 @@ impl std::fmt::Debug for Call {
             Op::End => "end".to_string(),
             Op::Download { url, .. } => format!("download {url}"),
             Op::Downloads => "downloads".to_string(),
+            Op::Policy => "policy".to_string(),
+            Op::TestDone => "test done".to_string(),
         };
         write!(f, "Call({name} by {})", self.who.name)
     }
@@ -456,7 +465,10 @@ using those refs, and take a new browser_snapshot after the page changes (refs a
 browser_read adds the page text; browser_article gives just the article, cheapest for reading. \
 browser_wait waits for text or an element. browser_console and browser_network show what the page logged and \
 fetched. When a login, captcha or a choice needs the person, call browser_handoff and wait. \
-Tabs you open are yours alone; other agents cannot touch them. Close them when done.";
+Tabs you open are yours alone; other agents cannot touch them. Close them when done. \
+The person's own tabs are off limits unless they right-click one and choose \"Let agents use this tab\" \
+(and even then no eval, upload or close). browser_upload is off unless the person turns it on, and reads one \
+folder only. A refused call says which setting would allow it.";
 
 /// Constant-time compare, so the token cannot be guessed by timing.
 fn same(a: &[u8], b: &[u8]) -> bool {
@@ -469,7 +481,7 @@ fn rpc_err(id: Value, code: i32, msg: &str) -> Value {
 
 // ------------------------------------------------------------------- tools
 
-fn tools() -> Value {
+pub fn tools() -> Value {
     let tab = json!({"type": "integer", "description": "Tab id from browser_open or browser_tabs"});
     let r#ref = json!({"type": "string", "description": "Element ref from the last snapshot, e.g. \"e5\""});
     let t = |name: &str, desc: &str, props: Value, req: &[&str]| json!({"name": name, "description": desc, "inputSchema": {"type": "object", "properties": props, "required": req}});
@@ -694,13 +706,42 @@ fn href(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) -> String {
     eval(proxy, who, tab, "location.href").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
 }
 
-fn downloads_dir() -> PathBuf {
-    dirs::download_dir().unwrap_or_else(crate::store::data_dir)
+/// Where an agent's files go: a subfolder of the person's download folder, kept apart from theirs.
+fn agent_files_dir() -> PathBuf {
+    let dir = agent_policy::agent_downloads_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
+/// Every tool call passes `authorize` first. Nothing below runs for a call that does not.
 fn run(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value) -> Result<Vec<Value>, String> {
+    let ctx = PolicyCtx::from_value(&call(proxy, who, Op::Policy)?);
+    match authorize(who, name, args, &ctx) {
+        Ok(approval) => run_tool(proxy, who, name, args, &approval),
+        Err(d) => {
+            // The tool and why. No path, no URL, no page content.
+            if d.log {
+                crate::journal::error("agent", &format!("denied {name}: {}", d.code));
+            }
+            Err(d.text)
+        }
+    }
+}
+
+fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, approval: &Approval) -> Result<Vec<Value>, String> {
     let p = proxy;
     match name {
+        #[cfg(debug_assertions)]
+        "browser_test_crash" => {
+            // The renderer dies and never answers; do not wait for it.
+            let _ = call_for(p, who, Op::Cdp { tab: tab_arg(args)?, method: "Page.crash".into(), params: json!({}) }, Duration::from_secs(2));
+            Ok(text("crashed".into()))
+        }
+        #[cfg(debug_assertions)]
+        "browser_test_done" => {
+            call(p, who, Op::TestDone)?;
+            Ok(text("done pressed".into()))
+        }
         "browser_open" => {
             let url = args["url"].as_str().ok_or("missing url")?.to_string();
             let activate = !args["background"].as_bool().unwrap_or(false);
@@ -908,14 +949,10 @@ fn run(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value) -> Resul
         "browser_upload" => {
             let tab = tab_arg(args)?;
             let r = need_ref(args, "ref")?;
-            let paths: Vec<String> = args["paths"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+            // The paths authorize checked and made canonical, not the ones the agent typed.
+            let paths: Vec<String> = approval.files.clone();
             if paths.is_empty() {
                 return Err("missing paths".into());
-            }
-            for f in &paths {
-                if !Path::new(f).is_file() {
-                    return Err(format!("no file at {f}"));
-                }
             }
             let root = cdp(p, who, tab, "DOM.getDocument", json!({"depth": 0}))?;
             let node = cdp(p, who, tab, "DOM.querySelector", json!({"nodeId": root["root"]["nodeId"], "selector": format!("[data-lumen-ref=\"{r}\"]")}))?;
@@ -974,10 +1011,10 @@ fn run(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value) -> Resul
             let pdf = call_for(p, who, Op::Cdp { tab, method: "Page.printToPDF".into(), params: json!({"printBackground": true}) }, Duration::from_secs(90))?;
             let bytes = base64::engine::general_purpose::STANDARD.decode(pdf["data"].as_str().ok_or("no PDF came back")?).map_err(|e| e.to_string())?;
             let safe: String = title.chars().map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '_' } else { c }).take(80).collect();
-            let mut path = downloads_dir().join(format!("{}.pdf", if safe.trim().is_empty() { "page" } else { safe.trim() }));
+            let mut path = agent_files_dir().join(format!("{}.pdf", if safe.trim().is_empty() { "page" } else { safe.trim() }));
             let mut n = 1;
             while path.exists() {
-                path = downloads_dir().join(format!("{} ({n}).pdf", safe.trim()));
+                path = agent_files_dir().join(format!("{} ({n}).pdf", safe.trim()));
                 n += 1;
             }
             std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;

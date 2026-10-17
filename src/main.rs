@@ -6,6 +6,7 @@
 
 mod aria;
 mod agent;
+mod agent_policy;
 mod agentkit;
 mod aloud;
 mod blocker;
@@ -120,6 +121,9 @@ struct Tab {
     /// For agent tabs: the MCP session that owns it, and its client's name.
     owner: String,
     owner_name: String,
+    /// For a tab of the person's: the site (scheme://host) they said agents may use it on.
+    /// Ends with a move to another site and with the tab.
+    agent_ok: Option<String>,
     view: Option<WebView>,
     /// A Servo page, for the hosts in the "Servo sites" list. The other engine.
     #[cfg(feature = "servo")]
@@ -154,6 +158,7 @@ impl Tab {
             private: false,
             owner: String::new(),
             owner_name: String::new(),
+            agent_ok: None,
             view: None,
             #[cfg(feature = "servo")]
             servo: None,
@@ -285,6 +290,8 @@ struct App {
     agent_logs: agentkit::Logs,
     /// An agent waiting for the person: (tab, agent name, message, where to say Done).
     handoff: Option<(u64, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,
+    /// URLs agents asked to download: they land in "Agent downloads" and show in browser_downloads.
+    agent_dl: HashSet<String>,
     /// What aria2 was given per gid, so a failed download can be tried again.
     aria_meta: HashMap<String, (String, Vec<String>, Option<String>)>,
     /// Gids the person started: a paused one with its metadata in gets
@@ -551,6 +558,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         recall: recall::Recall::start(&store::data_dir()),
         agent_logs: Default::default(),
         handoff: None,
+        agent_dl: HashSet::new(),
         aria_meta: HashMap::new(),
         aria_person: HashSet::new(),
         aria_page: HashSet::new(),
@@ -1350,6 +1358,7 @@ impl App {
                         muted: t.muted,
                         status: t.status(),
                         agent: t.agent,
+                        agent_ok: self.agent_granted(t),
                         reader: t.reader.is_some(),
                         private: t.private,
                         split: self.split.is_some() && self.on_stage(t.id),
@@ -2624,6 +2633,10 @@ impl App {
         }
         if old.agent != self.settings.agent || old.agent_port != self.settings.agent_port {
             self.agent.set(self.settings.agent, self.settings.agent_port, &self.ctx.proxy);
+            if !self.settings.agent {
+                // Door shut: nothing the person allowed to agents outlasts it.
+                self.tabs.iter_mut().for_each(|t| t.agent_ok = None);
+            }
         }
         if old.journal != self.settings.journal {
             journal::set_enabled(self.settings.journal);
@@ -2692,6 +2705,10 @@ impl App {
                     // Agents browse off the record, and so do private tabs.
                     if !self.off_record(&self.tabs[i]) {
                         self.library.visit(&u, &self.tabs[i].title);
+                    }
+                    // The person let agents use this tab on one site; another site ends it.
+                    if self.tabs[i].agent_ok.as_deref().is_some_and(|site| site != engine::origin_of(&u)) {
+                        self.tabs[i].agent_ok = None;
                     }
                     // Another page: the original text went with the old document, and
                     // a translation still in the air is for a page that is gone.
@@ -2970,6 +2987,13 @@ impl App {
                 // A download started by a private tab leaves no row on disk either.
                 let jar = self.idx(tab).map_or(0, |i| self.jar(&self.tabs[i]));
                 let private = jar == 2;
+                // What an agent asked for, or an agent's page offered, goes in its own folder.
+                let from_agent = self.agent_dl.contains(&url) || self.idx(tab).is_some_and(|i| self.tabs[i].agent);
+                let agent_dir = from_agent.then(|| {
+                    let dir = agent_policy::agent_downloads_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    dir
+                });
                 let start = move |cookie: String| {
                     if !cookie.is_empty() {
                         headers.push(format!("Cookie: {cookie}"));
@@ -2978,7 +3002,7 @@ impl App {
                         let name = (!name.is_empty()).then_some(name);
                         // A page's download: the .torrent file itself is fetched
                         // like any file, but the torrent it spawns waits for Resume.
-                        let _ = match aria.add(&u, &headers, name.as_deref(), false) {
+                        let _ = match aria.add_in(&u, &headers, name.as_deref(), false, agent_dir.as_deref()) {
                             Ok(gid) => proxy.send_event(Ev::AriaAdded(Box::new(engine::Added {
                                 gid,
                                 url: u,
@@ -3583,6 +3607,15 @@ impl App {
             }
             "activate" => self.activate(id),
             "close" => self.close(id),
+            "agentGrant" => {
+                // Right-click > Let agents use this tab. Again: stop letting them. Only a tab
+                // of the person's, only with a real page, and only for the site it is on now.
+                if let Some(i) = self.idx(id) {
+                    let t = &mut self.tabs[i];
+                    t.agent_ok = if t.agent_ok.is_some() || t.agent || t.private || !t.url.starts_with("http") { None } else { Some(engine::origin_of(&t.url)) };
+                    self.push();
+                }
+            }
             "pin" => {
                 if let Some(i) = self.idx(id) {
                     let mut t = self.tabs.remove(i);
@@ -4552,8 +4585,14 @@ impl App {
         }
     }
 
-    /// One primitive for an agent. An agent may use the tabs its session opened, and, if the
-    /// person shared their profile, the person's own tabs. Never another agent's.
+    /// The person said agents may use this tab, and it is still on the site they said it for.
+    fn agent_granted(&self, t: &Tab) -> bool {
+        !t.agent && t.agent_ok.as_deref().is_some_and(|site| site == engine::origin_of(&t.url))
+    }
+
+    /// One primitive for an agent. An agent may use the tabs its session opened, and a tab of
+    /// the person's only while they have granted that tab. Never another agent's. The tool-level
+    /// rules (what may run where) are `agent_policy::authorize`, applied before this is reached.
     fn on_agent(&mut self, call: agent::Call) {
         use agent::Op;
         self.agent_seen = Some(Instant::now());
@@ -4562,18 +4601,38 @@ impl App {
         let (reply, who) = (call.reply, call.who);
         // One line per session, not per call. No tab, no page, no content.
         journal::agent_session(&who.session, &who.name);
-        let shared = self.settings.agent_shared_profile;
-        let mine = |app: &App, tab: u64| app.idx(tab).filter(|&i| if app.tabs[i].agent { app.tabs[i].owner == who.session } else { shared });
+        let access = |app: &App, t: &Tab| agent_policy::access(&who.session, t.agent, &t.owner, app.agent_granted(t));
+        let mine = |app: &App, tab: u64| app.idx(tab).filter(|&i| access(app, &app.tabs[i]).is_some());
         let no_tab = |tab: u64| Err(format!("no tab {tab} you may use; browser_tabs lists yours"));
+        let crashed = "this tab's page crashed; browser_reload brings it back".to_string();
         match call.op {
             Op::List => {
                 let list: Vec<Value> = self
                     .tabs
                     .iter()
-                    .filter(|t| if t.agent { t.owner == who.session } else { shared })
-                    .map(|t| json!({"tab": t.id, "title": t.title, "url": t.url, "front": t.id == self.active, "yours": t.agent}))
+                    .filter(|t| access(self, t).is_some())
+                    .map(|t| json!({"tab": t.id, "title": t.title, "url": t.url, "front": t.id == self.active, "yours": t.agent, "crashed": t.crashed}))
                     .collect();
                 let _ = reply.send(Ok(Value::Array(list)));
+            }
+            Op::Policy => {
+                let tabs = self.tabs.iter().map(|t| agent_policy::TabInfo { id: t.id, agent: t.agent, owner: t.owner.clone(), granted: self.agent_granted(t) }).collect();
+                let s = &self.settings;
+                let _ = reply.send(Ok(agent_policy::ctx_value(tabs, s.agent_shared_profile, s.agent_upload, &s.agent_upload_dir)));
+            }
+            Op::TestDone => {
+                // Debug builds only: stands in for the person pressing Done.
+                match self.handoff.take() {
+                    Some((_, _, _, r)) if cfg!(debug_assertions) => {
+                        let _ = r.send(Ok(Value::Null));
+                        let _ = reply.send(Ok(Value::Null));
+                        self.push();
+                    }
+                    other => {
+                        self.handoff = other;
+                        let _ = reply.send(Err("no handoff to finish".into()));
+                    }
+                }
             }
             Op::Open { url, activate } => {
                 let Some(url) = resolve_input(&url, &self.settings.search) else {
@@ -4600,6 +4659,7 @@ impl App {
                         Some(v) => {
                             let _ = v.load_url(&url);
                             self.tabs[i].url = url;
+                            self.tabs[i].crashed = false;
                         }
                         None => {
                             self.tabs[i].url = url;
@@ -4619,7 +4679,25 @@ impl App {
                     Op::Reload { tab } => (tab, "location.reload()"),
                     _ => return,
                 };
-                let Some(v) = mine(self, tab).and_then(|i| self.tabs[i].view.as_ref()) else {
+                let Some(i) = mine(self, tab) else {
+                    let _ = reply.send(no_tab(tab));
+                    return;
+                };
+                // A dead renderer cannot run a script. Load the page again: that makes a new one.
+                if self.tabs[i].crashed {
+                    let url = self.tabs[i].url.clone();
+                    let sent = match (&self.tabs[i].view, js) {
+                        (Some(v), "location.reload()") => v.load_url(&url).is_ok(),
+                        _ => false,
+                    };
+                    if sent {
+                        self.tabs[i].crashed = false;
+                        self.push();
+                    }
+                    let _ = reply.send(if sent { Ok(Value::Null) } else { Err(crashed) });
+                    return;
+                }
+                let Some(v) = &self.tabs[i].view else {
                     let _ = reply.send(no_tab(tab));
                     return;
                 };
@@ -4631,6 +4709,10 @@ impl App {
                     let _ = reply.send(no_tab(tab));
                     return;
                 };
+                if self.tabs[i].crashed {
+                    let _ = reply.send(Err(crashed));
+                    return;
+                }
                 if self.tabs[i].view.is_none() {
                     self.ensure_view(i);
                 }
@@ -4655,6 +4737,15 @@ impl App {
                     let _ = reply.send(no_tab(tab));
                     return;
                 };
+                // The person's tab may be steered, not scripted: no code, no file picker.
+                if !self.tabs[i].agent && !agent_policy::cdp_allowed_on_person_tab(&method) {
+                    let _ = reply.send(Err(format!("{method} is not allowed in the person's tab")));
+                    return;
+                }
+                if self.tabs[i].crashed {
+                    let _ = reply.send(Err(crashed));
+                    return;
+                }
                 if self.tabs[i].view.is_none() {
                     self.ensure_view(i);
                 }
@@ -4725,7 +4816,8 @@ impl App {
                 self.push();
             }
             Op::Close { tab } => {
-                if mine(self, tab).is_none() {
+                // Only a tab the agent opened. A granted tab of the person's stays the person's to close.
+                if mine(self, tab).is_none_or(|i| !self.tabs[i].agent) {
                     let _ = reply.send(no_tab(tab));
                     return;
                 }
@@ -4746,13 +4838,20 @@ impl App {
                 }
                 let tab = tab.filter(|t| mine(self, *t).is_some()).unwrap_or(0);
                 let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
+                // It goes to "Agent downloads", and is the agent's to see.
+                if self.agent_dl.len() > 500 {
+                    self.agent_dl.clear();
+                }
+                self.agent_dl.insert(url.clone());
                 let _ = self.ctx.proxy.send_event(Ev::Handoff(tab, url, page, String::new()));
                 let _ = reply.send(Ok(Value::Null));
             }
             Op::Downloads => {
+                // Only what agents downloaded. The person's own downloads are not the agents' to list.
                 let list: Vec<Value> = self
                     .downloads
                     .iter()
+                    .filter(|d| !d.private && agent_policy::is_agent_download(&d.path, &d.url, |u| self.agent_dl.contains(u)))
                     .map(|d| json!({"url": d.url, "path": d.path, "state": d.state, "size": d.received, "total": d.total, "note": d.note}))
                     .collect();
                 let _ = reply.send(Ok(Value::Array(list)));
