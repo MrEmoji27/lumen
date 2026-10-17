@@ -4,18 +4,19 @@
 
 use serde_json::{Value, json};
 use windows::Win32::UI::Controls::Dialogs::{
-    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
+    OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows::Win32::Foundation::COLORREF;
 use windows::core::{PCWSTR, PWSTR};
 
 use super::{
     Hit, Inner, UiDl, UiState, send,
-    gfx::{Align, Font, R},
-    style::*,
+    gfx::{Align, R},
+    style::{self, COL_MARGIN, COL_W, ROW_H, Look},
     theme::{Color, PALETTES, Theme},
 };
-use crate::store::Settings;
+use crate::store::{CLOSE_BTNS, DATE_FORMATS, DENSITIES, LAYOUTS, MOTIONS, Settings};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PageHit {
@@ -25,6 +26,25 @@ pub enum PageHit {
     Swatch(&'static str),
     Accent,
     AccentReset,
+    /// A custom colour, by its setting key.
+    Color(&'static str),
+    /// Back to the palette's own for that colour.
+    ColorClear(&'static str),
+    /// A text setting, edited in a native dialog.
+    Text(&'static str),
+    /// Open the searchable font list for a setting.
+    Fonts(&'static str),
+    /// Choose the nth family of the list the picker last drew.
+    FontPin(usize),
+    FontClose,
+    /// Save the current look under a name; apply or remove a saved one.
+    ThemeSave,
+    ThemeApply(usize),
+    ThemeDelete(usize),
+    ThemeExport,
+    ThemeImport,
+    /// Back to the defaults, for one group of the Appearance page.
+    ResetGroup(&'static str),
     Engine(usize),
     Nav(usize),
     Done,
@@ -90,6 +110,16 @@ struct Slide {
     scale: Scale,
 }
 
+/// The font list, open over the settings page: which setting is being chosen,
+/// the filter typed so far, and the list it last showed.
+pub(super) struct FontPick {
+    pub(super) key: &'static str,
+    pub(super) filter: String,
+    pub(super) scroll: f32,
+    /// The families the last draw showed, so a click lands on one.
+    pub(super) shown: Vec<String>,
+}
+
 #[derive(Default)]
 pub struct Page {
     pub scroll: f32,
@@ -109,12 +139,29 @@ pub struct Page {
     bm_drag: Option<BmDrag>,
     /// What the last Bookmarks frame drew, for working out where a drag lands.
     bm_rows: Vec<DropRow>,
+    /// The font list, open or not.
+    pub(super) font_pick: Option<FontPick>,
+    /// The name being typed for "save this look".
+    pub(super) theme_name: String,
+    /// The saved looks, read from disk the first time the page needs them.
+    themes: Option<Vec<style::ThemeFile>>,
 }
 
 struct BmDrag {
     id: u64,
     y0: f32,
     moved: bool,
+}
+
+impl Page {
+    /// Debug builds: start a page scrolled, for a screenshot of what is further
+    /// down. The content's height is only known after the first draw, and the
+    /// clamp must not eat the offset before that.
+    #[cfg(debug_assertions)]
+    pub(super) fn test_scroll(&mut self, px: f32) {
+        self.scroll = px;
+        self.max = f32::MAX;
+    }
 }
 
 /// A row or a folder header on the Bookmarks page, as the drag sees it. `id` 0 is a header.
@@ -128,14 +175,26 @@ struct DropRow {
 // ------------------------------------------------------------------ schema
 
 enum Item {
-    Swatch,
-    Accent,
+    /// Palette presets and the custom colours: the whole Colours group.
+    Colors,
+    /// The saved looks: save, apply, export, import.
+    Themes,
     Seg(&'static str, &'static str, &'static str, &'static [(&'static str, &'static str)]),
     /// Like Seg, but the choices wrap onto as many lines as they need. For lists
     /// that are too long for one pill (the translation languages).
     Pick(&'static str, &'static str, &'static str, &'static [(&'static str, &'static str)]),
     Toggle(&'static str, &'static str, &'static str),
     Range(&'static str, &'static str, &'static str, Scale, &'static str),
+    /// A font: the current family, and a button opening the searchable list.
+    Fonts(&'static str, &'static str, &'static str),
+    /// A text setting, typed into a native dialog.
+    Text(&'static str, &'static str, &'static str),
+    /// The wallpaper file, chosen with a native open dialog.
+    Wallpaper,
+    /// How the chrome is arranged: the whole Layout group, with its three shapes.
+    Layout,
+    /// A group's "reset to default" line.
+    Reset(&'static str, &'static str),
     Engine,
     Keys,
     Button(&'static str, &'static str, &'static str, PageHit),
@@ -148,6 +207,12 @@ enum Item {
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
 const NET: &[u32] = &[32, 64, 128, 256, 512, 1024, 2048, 5120, 10240, 25600, 51200, 102400];
 const DL_SPEEDS: &[u32] = &[0, 1024, 5120, 10240];
+/// The clock's size, in px. 0 follows the window.
+const CLOCK_SIZES: &[u32] = &[0, 48, 64, 80, 96, 112, 128, 152, 176];
+/// The speed-dial tile, in px.
+const TILES: &[u32] = &[44, 52, 60, 68, 76, 84, 92];
+/// The speed-dial columns. 0 follows the width.
+const DIAL_COLS: &[u32] = &[0, 3, 4, 5, 6, 7, 8];
 const ENGINES: [(&str, &str); 5] = [
     ("DuckDuckGo", "https://duckduckgo.com/?q=%s"),
     ("Google", "https://www.google.com/search?q=%s"),
@@ -197,19 +262,68 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
     vec![
         ("General", vec![DefaultBrowser]),
         ("Appearance", vec![
-            Swatch,
-            Accent,
-            Seg("theme", "Theme", "", &[("dark", "Dark"), ("light", "Light"), ("system", "System")]),
+            Colors,
+            Themes,
+            Seg("theme", "Theme", "Dark, light, or whatever Windows is doing.", &[("dark", "Dark"), ("light", "Light"), ("system", "System")]),
             Toggle("dark_pages", "Darken light sites", "When Lumen is dark, Dark Reader repaints sites that have no dark mode. Shift+F9 skips a site."),
-            Seg("ui_font", "Interface font", "Atkinson Hyperlegible is designed for easy reading.", &[("segoe", "Segoe"), ("instrument", "Instrument"), ("figtree", "Figtree"), ("atkinson", "Atkinson")]),
-            Seg("display_font", "Display font", "The clock and page titles.", &[("instrument", "Instrument Serif"), ("fraunces", "Fraunces"), ("newsreader", "Newsreader")]),
-            Toggle("speed_dial", "Speed dial on the new tab page", "Sites you keep as tiles under the search box. Off: just the clock and the search box."),
-            Seg("sidebar_side", "Sidebar", "", &[("left", "Left"), ("right", "Right")]),
+            Reset("colors", "Reset the colours"),
+        ]),
+        ("Fonts", vec![
+            Fonts("ui_font", "Interface font", "Everything you act on: the sidebar, the pages, the settings."),
+            Fonts("display_font", "Display font", "Titles, headers and the clock."),
+            Fonts("mono_font", "Monospace font", "Figures: the Control table and the memory readout."),
+            Range("font_scale", "Type size", "Every size on every screen, together.", Scale::Linear(90.0, 130.0, 5.0), "%"),
+            Range("title_weight", "Title weight", "How heavy the titles and the clock are set.", Scale::Linear(300.0, 800.0, 50.0), ""),
+            Reset("fonts", "Reset the fonts"),
+        ]),
+        ("Layout", vec![
+            Layout,
+            Toggle("bm_bar", "Bookmarks bar", "A row of your bookmarks under the toolbar. The horizontal layout."),
+            Seg("sidebar_side", "Sidebar side", "Which edge the tab sidebar sits on.", &[("left", "Left"), ("right", "Right")]),
             Range("sidebar_width", "Sidebar width", "", Scale::Linear(232.0, 400.0, 4.0), "px"),
-            Toggle("compact", "Compact sidebar", "Icons only. Ctrl+B toggles it."),
-            Range("gap", "Page margin", "", Scale::Linear(0.0, 24.0, 1.0), "px"),
+            Toggle("compact", "Compact", "The sidebar folds to icons; the toolbar and strip tighten up. Ctrl+B toggles it."),
+            Reset("layout", "Reset the layout"),
+        ]),
+        ("Clock and new tab", vec![
+            Toggle("clock", "Clock", ""),
+            Toggle("clock_24h", "24-hour clock", "Off: 12-hour with am/pm."),
+            Toggle("clock_seconds", "Seconds", "A small, quiet readout beside the minutes."),
+            Seg("date_format", "Date", "", &DATE_FORMATS),
+            Seg("clock_font", "Clock face", "", &[("display", "Display font"), ("ui", "Interface font")]),
+            Range("clock_size", "Clock size", "0 follows the window's width. px", Scale::Steps(CLOCK_SIZES), "px"),
+            Text("greeting", "Greeting", "A line above the clock, in your own words. Empty: none."),
+            Seg("ntp_bg", "Background", "Plain, or the wallpaper image below.", &[("plain", "Plain"), ("wallpaper", "Wallpaper")]),
+            Wallpaper,
+            Toggle("wallpaper_blur", "Blur the wallpaper", "Drawn from a small copy, enlarged: soft, and cheap."),
+            Range("wallpaper_dim", "Dim the wallpaper", "", Scale::Linear(0.0, 80.0, 5.0), "%"),
+            Toggle("speed_dial", "Speed dial", "Sites you keep as tiles under the search box."),
+            Range("dial_cols", "Tiles per row", "0 follows the window's width.", Scale::Steps(DIAL_COLS), ""),
+            Range("dial_tile", "Tile size", "", Scale::Steps(TILES), "px"),
+            Toggle("ntp_search", "Search box", ""),
+            Reset("ntp", "Reset the clock and new tab page"),
+        ]),
+        ("Sidebar", vec![
+            Range("tab_row_h", "Tab row height", "", Scale::Linear(28.0, 48.0, 1.0), "px"),
+            Toggle("show_favicons", "Site icons", "The site's favicon in a tab row. Off: the letter tile only."),
+            Seg("close_btn", "Tab close button", "", &CLOSE_BTNS),
+            Toggle("show_memory", "Memory readout", "The figure in the footer, above the buttons."),
+            Toggle("footer_btns", "Footer buttons", "Downloads, bookmarks and settings."),
+            Toggle("ws_row", "Workspace row", "The switcher at the top of the sidebar."),
+            Reset("sidebar", "Reset the sidebar"),
+        ]),
+        ("Shape", vec![
+            Seg("density", "Density", "", &DENSITIES),
+            Range("gap", "Page margin", "The space around the page.", Scale::Linear(0.0, 24.0, 1.0), "px"),
             Range("radius", "Page corners", "", Scale::Linear(0.0, 20.0, 1.0), "px"),
+            Toggle("page_border", "Border around the page", "A hairline, so the page is not just a hole in the window."),
             Range("default_zoom", "Default zoom", "Pages open at this size unless the site has a zoom of its own. Ctrl++ and Ctrl+- still zoom the page you are on.", Scale::Steps(ZOOM_STOPS), "%"),
+            Reset("shape", "Reset the shape"),
+        ]),
+        ("Motion", vec![
+            Seg("motion", "Animations", "Reduced draws no movement; off also rests the loading spinner.", &MOTIONS),
+            Range("motion_speed", "Motion speed", "How fast every animation runs, percent of the default.", Scale::Linear(50.0, 200.0, 10.0), "%"),
+            Toggle("motion_system", "Follow Windows", "Obey \"Show animations in Windows\" in Accessibility: no motion when it is off."),
+            Reset("motion", "Reset the motion"),
         ]),
         ("Search", vec![
             Engine,
@@ -227,7 +341,6 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Range("download_limit_kbps", "Download speed limit", "Caps aria2, the download engine. 0 is no limit.", Scale::Steps(DL_SPEEDS), "kbps"),
             Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),
             Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
-            Toggle("show_memory", "Memory in sidebar", ""),
         ]),
         ("Passwords", vec![
             Toggle("save_passwords", "Offer to save passwords", "Saved by WebView2, encrypted by Windows with your sign-in. Fills them in next time."),
@@ -295,9 +408,11 @@ fn set(i: &mut Inner, k: &str, v: Value) {
     all[k] = v;
     if let Ok(next) = serde_json::from_value::<Settings>(all) {
         st.settings = next.clone();
-        if k == "palette" || k == "accent" {
-            i.theme = Theme::new(&next.palette, i.theme.dark, &next.accent);
-        }
+        // The look follows at once, so a drag previews as it moves: the theme,
+        // the fonts, the spacing and the motion all come from the one struct.
+        let look = Look::of(&next, i.theme.dark, super::motion::system_allows());
+        i.theme = look.theme;
+        i.look = look;
         send(&i.proxy, json!({"t": "settings", "v": next}));
     }
     i.invalidate();
@@ -407,6 +522,9 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         i.page.which = s.panel;
         i.page.scroll = 0.0;
     }
+    if s.panel == "settings" && i.page.themes.is_none() {
+        i.page.themes = Some(style::saved_themes());
+    }
     let first = i.hits.len();
     draw_page(i, st, s);
     // The content can shrink under the offset (a finished row cleared, a window made taller).
@@ -414,9 +532,11 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     if i.page.scroll > i.page.max {
         i.page.scroll = i.page.max;
         i.hits.truncate(first);
-        i.gfx.round(st, s.settings.radius as f32, i.theme.raise);
+        i.gfx.round(st, i.look.page_radius, i.theme.raise);
         draw_page(i, st, s);
     }
+    // The font list sits over everything while it is open.
+    draw_picker(i, st, s);
 }
 
 fn draw_page(i: &mut Inner, st: R, s: &UiState) {
@@ -437,15 +557,16 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
 
 /// Where the Drive panel's task box sits, in stage coordinates. The native text box is
 /// placed here too, so what is typed and what is drawn agree.
-pub fn drive_task_rect(st: R) -> R {
+pub fn drive_task_rect(st: R, s5: f32) -> R {
     let col = column(st, 760.0);
-    R::new(col.x, st.y + S5 + 96.0, col.w, 40.0)
+    R::new(col.x, st.y + s5 + 96.0, col.w, 40.0)
 }
 
 /// The Drive panel: type a task, an agent runs it in Lumen. The steps are its tool
 /// calls, the lines under them are what it said. Stop ends the run; "Pause and take
 /// over" hands the tab to the person and only browser_handoff gets the agent back in.
 fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
+    let lo = i.look.clone();
     let th = i.theme;
     let col = column(st, 760.0);
     i.gfx.clip(st);
@@ -456,38 +577,38 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
         Some(d) => format!("{} finished{}.", d.name, d.exit.map(|c| format!(" (exit code {c})")).unwrap_or_default()),
         None => "An agent CLI runs the task in Lumen over MCP: its own profile, its own tabs.".to_string(),
     };
-    title_block(i, col, st.y + S5 + 2.0 - i.page.scroll, "Drive", &sub);
+    title_block(i, col, st.y + lo.s5 + 2.0 - i.page.scroll, "Drive", &sub);
 
     // The task box. The control itself is a real Win32 edit box placed over this rect.
-    let field = drive_task_rect(st);
-    i.gfx.round(field, R_MD, th.bg);
+    let field = drive_task_rect(st, lo.s5);
+    i.gfx.round(field, lo.r_md, th.bg);
     let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.drive_edit;
-    i.gfx.round_stroke(field, R_MD, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
+    i.gfx.round_stroke(field, lo.r_md, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
     // Both buttons right-aligned under the box: Run (or Stop), and Pause beside it.
     let paused = s.drive.as_ref().is_some_and(|d| d.paused);
-    let f = BODY.align(Align::Center);
+    let f = lo.body.align(Align::Center);
     let run_label = if running { "Stop" } else { "Run" };
-    let run_w = i.gfx.measure(run_label, f) + 2.0 * S4;
-    let pause_w = if running && !paused { i.gfx.measure("Pause and take over", f) + 2.0 * S4 } else { 0.0 };
+    let run_w = i.gfx.measure(run_label, f) + 2.0 * lo.s4;
+    let pause_w = if running && !paused { i.gfx.measure("Pause and take over", f) + 2.0 * lo.s4 } else { 0.0 };
     let run_x = field.right() - run_w;
-    let pause = R::new(run_x - S3 - pause_w, field.bottom() + S3, pause_w, 30.0);
-    outline_button(i, run_x, field.bottom() + S3, run_label, if running { PageHit::DriveStop } else { PageHit::DriveStart }, true);
+    let pause = R::new(run_x - lo.s3 - pause_w, field.bottom() + lo.s3, pause_w, 30.0);
+    outline_button(i, run_x, field.bottom() + lo.s3, run_label, if running { PageHit::DriveStop } else { PageHit::DriveStart }, true);
     if pause_w > 0.0 {
         let h = Hit::Page(PageHit::DrivePause);
         let hov = i.is_hover(&h);
         if hov {
-            i.gfx.round(pause, R_MD, th.hover);
+            i.gfx.round(pause, lo.r_md, th.hover);
         }
-        i.gfx.round_stroke(pause, R_MD, th.line, 1.0);
+        i.gfx.round_stroke(pause, lo.r_md, th.line, 1.0);
         i.gfx.text("Pause and take over", pause, f, if hov { th.text } else { th.dim });
         i.hit(pause, h);
     }
     // The command this panel runs, straight from the settings row.
-    i.gfx.text(&format!("Command: {}", s.settings.drive_cmd), R::new(col.x, field.bottom() + S3 + 38.0, col.w, 20.0), SMALL, th.faint);
-    i.gfx.text("Safety: the task Lumen sends tells the agent to call browser_handoff before paying, sending or deleting.", R::new(col.x, field.bottom() + S3 + 58.0, col.w, 20.0), SMALL, th.faint);
-    let mut y = field.bottom() + S3 + 88.0;
+    i.gfx.text(&format!("Command: {}", s.settings.drive_cmd), R::new(col.x, field.bottom() + lo.s3 + 38.0, col.w, 20.0), lo.small, th.faint);
+    i.gfx.text("Safety: the task Lumen sends tells the agent to call browser_handoff before paying, sending or deleting.", R::new(col.x, field.bottom() + lo.s3 + 58.0, col.w, 20.0), lo.small, th.faint);
+    let mut y = field.bottom() + lo.s3 + 88.0;
     if let Some(d) = s.drive.as_ref().filter(|d| !d.task.is_empty()) {
-        i.gfx.text(&format!("Task: {}", d.task), R::new(col.x, y, col.w, 20.0), SMALL, th.dim);
+        i.gfx.text(&format!("Task: {}", d.task), R::new(col.x, y, col.w, 20.0), lo.small, th.dim);
         y += 26.0;
     }
 
@@ -499,22 +620,22 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
         Some(d) => {
             y = group_label(i, col, y, "Steps", d.steps.len());
             for (tool, note) in &d.steps {
-                i.gfx.text(tool.trim_start_matches("browser_").trim_start_matches('_'), R::new(col.x, y, 200.0, 26.0), BODY_STRONG, th.text);
-                i.gfx.text(note, R::new(col.x + 205.0, y, col.w - 205.0, 26.0), BODY, th.dim);
+                i.gfx.text(tool.trim_start_matches("browser_").trim_start_matches('_'), R::new(col.x, y, 200.0, 26.0), lo.body_strong, th.text);
+                i.gfx.text(note, R::new(col.x + 205.0, y, col.w - 205.0, 26.0), lo.body, th.dim);
                 y += 26.0;
             }
             if d.steps.is_empty() {
-                i.gfx.text("no tool calls yet", R::new(col.x, y, col.w, 24.0), BODY, th.faint);
+                i.gfx.text("no tool calls yet", R::new(col.x, y, col.w, 24.0), lo.body, th.faint);
                 y += 26.0;
             }
-            y += S3;
+            y += lo.s3;
             y = group_label(i, col, y, "The agent said", d.log.len());
             for line in &d.log {
-                i.gfx.text(line, R::new(col.x, y, col.w, 22.0), SMALL, th.dim);
+                i.gfx.text(line, R::new(col.x, y, col.w, 22.0), lo.small, th.dim);
                 y += 22.0;
             }
             if d.log.is_empty() {
-                i.gfx.text("nothing yet", R::new(col.x, y, col.w, 22.0), SMALL, th.faint);
+                i.gfx.text("nothing yet", R::new(col.x, y, col.w, 22.0), lo.small, th.faint);
                 y += 24.0;
             }
         }
@@ -529,31 +650,31 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
 /// row's height: 54, or taller when the hint needs more lines.
 fn row_label(i: &Inner, r: R, label: &str, hint: &str, control_w: f32) -> f32 {
     let th = i.theme;
-    let avail = (r.w - control_w - S5).max(r.w * 0.4);
+    let avail = (r.w - control_w - i.look.s5).max(r.w * 0.4);
     if hint.is_empty() {
-        i.gfx.text(label, R::new(r.x, r.y, avail, 54.0), Font::ui(13.0, 500), th.text);
+        i.gfx.text(label, R::new(r.x, r.y, avail, 54.0), i.look.font(13.0, 500), th.text);
         return 54.0;
     }
-    i.gfx.text(label, R::new(r.x, r.y + 8.0, avail, 20.0), Font::ui(13.0, 500), th.text);
+    i.gfx.text(label, R::new(r.x, r.y + 8.0, avail, 20.0), i.look.font(13.0, 500), th.text);
     // Words do not fill a line to the last pixel; ask for a little more room than the sum.
-    let lines = ((i.gfx.measure(hint, SMALL) / (avail * 0.94)).ceil() as usize).clamp(1, 3);
+    let lines = ((i.gfx.measure(hint, i.look.small) / (avail * 0.94)).ceil() as usize).clamp(1, 3);
     if lines == 1 {
-        i.gfx.text(hint, R::new(r.x, r.y + 27.0, avail, 18.0), SMALL, th.faint);
+        i.gfx.text(hint, R::new(r.x, r.y + 27.0, avail, 18.0), i.look.small, th.faint);
     } else {
-        i.gfx.text_wrap(hint, R::new(r.x, r.y + 28.0, avail, 16.0 * lines as f32 + 2.0), SMALL, th.faint);
+        i.gfx.text_wrap(hint, R::new(r.x, r.y + 28.0, avail, 16.0 * lines as f32 + 2.0), i.look.small, th.faint);
     }
     28.0 + 16.0 * lines as f32 + 10.0
 }
 
 /// How wide a segmented control is.
 fn seg_width(i: &Inner, opts: &[(&str, &str)]) -> f32 {
-    let f = Font::ui(13.0, 450).align(Align::Center);
+    let f = i.look.font(13.0, 450).align(Align::Center);
     opts.iter().map(|(_, l)| i.gfx.measure(l, f) + 22.0).sum::<f32>() + 4.0
 }
 
 fn draw_seg(i: &mut Inner, right: f32, cy: f32, key: &'static str, opts: &'static [(&'static str, &'static str)], cur: &str) {
     let th = i.theme;
-    let f = Font::ui(13.0, 450).align(Align::Center);
+    let f = i.look.font(13.0, 450).align(Align::Center);
     let widths: Vec<f32> = opts.iter().map(|(_, l)| i.gfx.measure(l, f) + 22.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 4.0;
     let pill = R::new(right - total, cy - 15.0, total, 30.0);
@@ -588,7 +709,7 @@ fn draw_toggle(i: &mut Inner, right: f32, cy: f32, key: &'static str, on: bool, 
 fn draw_slider(i: &mut Inner, right: f32, cy: f32, key: &'static str, scale: Scale, unit: &str, v: f32, dim: bool) {
     let th = i.theme;
     let val = R::new(right - 64.0, cy - 10.0, 64.0, 20.0);
-    i.gfx.text(&fmt_value(v, unit), val, Font::ui(12.0, 450).align(Align::Right), if dim { th.faint } else { th.dim });
+    i.gfx.text(&fmt_value(v, unit), val, i.look.font(12.0, 450).align(Align::Right), if dim { th.faint } else { th.dim });
     let track = R::new(val.x - 12.0 - 160.0, cy - 2.0, 160.0, 4.0);
     let p = ratio(scale, v);
     i.gfx.round(track, 2.0, th.press);
@@ -599,40 +720,345 @@ fn draw_slider(i: &mut Inner, right: f32, cy: f32, key: &'static str, scale: Sca
     i.page.sliders.push((key, track, scale));
 }
 
+/// The family a font setting names, in words a person reads.
+fn font_shown(key: &str) -> String {
+    match key {
+        "segoe" => "Segoe UI (Windows)".into(),
+        "instrument" => "Instrument Sans".into(),
+        "figtree" => "Figtree".into(),
+        "atkinson" => "Atkinson Hyperlegible".into(),
+        "fraunces" => "Fraunces".into(),
+        "newsreader" => "Newsreader".into(),
+        "cascadia" => "Cascadia Mono".into(),
+        other => other.to_string(),
+    }
+}
+
+/// The key a font setting falls back to when the person picks "System default".
+fn font_default_key(key: &str) -> &'static str {
+    match key {
+        "display_font" => "instrument",
+        "mono_font" => "cascadia",
+        _ => "segoe",
+    }
+}
+
+/// The colour a role has right now: the custom one, or the palette's own.
+fn role_color(i: &Inner, k: &str, s: &UiState) -> Color {
+    let custom = get(&s.settings, k).as_str().unwrap_or("").to_string();
+    if let Some(c) = Color::from_hex(&custom) {
+        return c;
+    }
+    let th = i.theme;
+    match k {
+        "bg_color" => th.bg,
+        "side_color" => th.side,
+        "surface_color" => th.raise,
+        "text_color" => th.text,
+        _ => th.dim,
+    }
+}
+
+/// The Colours group: the five palettes, the accent, then the custom colours.
+fn draw_colors(i: &mut Inner, r: R, s: &UiState) -> f32 {
+    let th = i.theme;
+    let right = r.right();
+    let mut y = r.y;
+    row_label(i, R::new(r.x, y, r.w, 54.0), "Palette", "The five preset looks.", 0.0);
+    let cur = s.settings.palette.clone();
+    let mut x = right - PALETTES.len() as f32 * 40.0 + 8.0;
+    for (key, _label) in PALETTES {
+        let (tile, dot) = Theme::swatch(key);
+        let c = (x + 16.0, y + 27.0);
+        if key == cur {
+            i.gfx.ring(c.0, c.1, 18.0, 18.0, th.text, 1.5);
+        }
+        i.gfx.circle(c.0, c.1, 14.0, tile);
+        i.gfx.circle(c.0, c.1, 6.0, dot);
+        i.hit(R::new(x + 2.0, y + 13.0, 28.0, 28.0), Hit::Page(PageHit::Swatch(key)));
+        x += 40.0;
+    }
+    y += 54.0;
+    // The accent, and the way back to the palette's own.
+    let h = row_label(i, R::new(r.x, y, r.w, 40.0), "Accent", "Focus rings, toggles, the loading ring.", 110.0);
+    let cy = y + h / 2.0;
+    let sw = R::new(right - 28.0, cy - 14.0, 28.0, 28.0);
+    i.gfx.round(sw, i.look.r_md, th.accent);
+    i.gfx.round_stroke(sw, i.look.r_md, th.line, 1.0);
+    i.hit(sw, Hit::Page(PageHit::Accent));
+    if !s.settings.accent.is_empty() {
+        let reset = R::new(sw.x - 56.0, cy - 10.0, 48.0, 20.0);
+        let hh = self_hover(i, PageHit::AccentReset);
+        i.gfx.text("Clear", reset, i.look.small.align(Align::Right), if hh { th.text } else { th.faint });
+        i.hit(reset, Hit::Page(PageHit::AccentReset));
+    }
+    y += h;
+    // The custom colours: each shows the colour in use, custom or palette's own.
+    const ROLES: [(&str, &str); 5] = [
+        ("bg_color", "Background"),
+        ("side_color", "Sidebar and toolbar"),
+        ("surface_color", "Cards and fields"),
+        ("text_color", "Text"),
+        ("dim_color", "Dim text"),
+    ];
+    for (k, label) in ROLES {
+        let custom = get(&s.settings, k).as_str().unwrap_or("").to_string();
+        let hint = if custom.is_empty() { "The palette's own".to_string() } else { custom.clone() };
+        let h = row_label(i, R::new(r.x, y, r.w, 40.0), label, &hint, 120.0);
+        let cy = y + h / 2.0;
+        let chip = R::new(right - 28.0, cy - 14.0, 28.0, 28.0);
+        let c = role_color(i, k, s);
+        let hh = self_hover(i, PageHit::Color(k));
+        i.gfx.round(chip, i.look.r_md, c);
+        i.gfx.round_stroke(chip, i.look.r_md, if hh { th.accent } else { th.line }, 1.0);
+        i.hit(chip, Hit::Page(PageHit::Color(k)));
+        if !custom.is_empty() {
+            let clear = R::new(chip.x - 56.0, cy - 10.0, 48.0, 20.0);
+            let ch = self_hover(i, PageHit::Color(""));
+            i.gfx.text("Clear", clear, i.look.small.align(Align::Right), if ch { th.text } else { th.faint });
+            // One click target: the row's Clear clears this colour.
+            i.hit(clear, Hit::Page(PageHit::ColorClear(k)));
+        }
+        y += h;
+    }
+    y - r.y
+}
+
+/// A row's hover, for the small text actions.
+fn self_hover(i: &Inner, h: PageHit) -> bool {
+    i.is_hover(&Hit::Page(h))
+}
+
+/// The saved looks: save the current one, apply or remove one, export and import.
+fn draw_themes(i: &mut Inner, r: R, s: &UiState) -> f32 {
+    let _ = s;
+    let th = i.theme;
+    let right = r.right();
+    let mut y = r.y;
+    i.gfx.text("Saved themes", R::new(r.x, y, r.w, 30.0), i.look.body_strong, th.text);
+    // Right to left: Export, Import, Save.
+    let save_w = i.gfx.measure("Save this look…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
+    let export_w = i.gfx.measure("Export…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
+    let import_w = i.gfx.measure("Import…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
+    let save = outline_button(i, right - save_w, y - 2.0, "Save this look…", PageHit::ThemeSave, true).x;
+    let export = outline_button(i, save - i.look.s2 - export_w, y - 2.0, "Export…", PageHit::ThemeExport, false).x;
+    outline_button(i, export - i.look.s2 - import_w, y - 2.0, "Import…", PageHit::ThemeImport, false);
+    y += 38.0;
+    // The chips: click applies, the small × removes.
+    let list = i.page.themes.clone().unwrap_or_default();
+    if list.is_empty() {
+        i.gfx.text("No saved looks yet. Set the colours and fonts you like, then Save.", R::new(r.x, y, r.w, 24.0), i.look.small, th.faint);
+        return y + 30.0 - r.y;
+    }
+    let f = i.look.font(12.5, 500);
+    let mut x = r.x;
+    for (n, t) in list.iter().enumerate() {
+        let name = if t.name.is_empty() { "Untitled".to_string() } else { t.name.clone() };
+        let w = (i.gfx.measure(&name, f) + 52.0).min(220.0);
+        if x + w > right {
+            x = r.x;
+            y += 34.0;
+        }
+        let chip = R::new(x, y, w, 28.0);
+        let hit = Hit::Page(PageHit::ThemeApply(n));
+        let hov = i.is_hover(&hit);
+        i.gfx.round(chip, i.look.r_md, if hov { th.hover } else { th.bg });
+        i.gfx.round_stroke(chip, i.look.r_md, th.line, 1.0);
+        i.gfx.text(&name, R::new(chip.x + 8.0, chip.y, chip.w - 34.0, chip.h), f, if hov { th.text } else { th.dim });
+        i.hit(chip, hit);
+        let xr = R::new(chip.right() - 24.0, chip.y + 4.0, 20.0, 20.0);
+        let xh = self_hover(i, PageHit::ThemeDelete(n));
+        i.gfx.icon("close", xr.x + 3.0, xr.y + 3.0, 14.0, if xh { th.text } else { th.faint });
+        i.hit(xr, Hit::Page(PageHit::ThemeDelete(n)));
+        x += w + 6.0;
+    }
+    y + 38.0 - r.y
+}
+
+/// The Layout group: the three arrangements, each drawn as the shape it makes.
+fn draw_layout(i: &mut Inner, r: R, s: &UiState) -> f32 {
+    let th = i.theme;
+    let mut y = r.y;
+    i.gfx.text_wrap(
+        "Where the chrome lives. Switching moves the chrome and the page at once; nothing reloads.",
+        R::new(r.x, y, r.w, 34.0),
+        i.look.small,
+        th.faint,
+    );
+    y += 40.0;
+    let cur = s.settings.layout.clone();
+    let card_w = 168.0;
+    let card_h = 108.0;
+    let gap = 12.0;
+    for (n, (key, label)) in LAYOUTS.iter().enumerate() {
+        let cr = R::new(r.x + n as f32 * (card_w + gap), y, card_w, card_h);
+        let hit = Hit::Page(PageHit::Seg("layout", key));
+        let on = *key == cur;
+        let hov = i.is_hover(&hit);
+        i.gfx.round(cr, i.look.r_lg, if on { th.press } else if hov { th.hover } else { th.bg });
+        i.gfx.round_stroke(cr, i.look.r_lg, if on { th.accent } else { th.line.alpha(if hov { 1.0 } else { 0.6 }) }, if on { 1.5 } else { 1.0 });
+        draw_layout_shape(i, R::new(cr.x + 16.0, cr.y + 12.0, cr.w - 32.0, card_h - 46.0), key);
+        i.gfx.text(label, R::new(cr.x, cr.bottom() - 26.0, cr.w, 20.0), i.look.font(12.0, if on { 600 } else { 450 }).align(Align::Center), if on { th.text } else { th.dim });
+        i.hit(cr, hit);
+    }
+    y + card_h + 12.0 - r.y
+}
+
+/// The little diagram in a layout card: the chrome's strips and the page.
+fn draw_layout_shape(i: &mut Inner, a: R, kind: &str) {
+    let th = i.theme;
+    let chrome = th.accent.alpha(0.8);
+    let dim = th.accent.alpha(0.4);
+    // The page: a step off the card, so the shape reads at a glance.
+    let page = th.raise.mix(th.text, 0.06);
+    let bar = (a.h * 0.16).max(6.0);
+    let strip = (a.w * 0.26).max(10.0);
+    match kind {
+        "horizontal" => {
+            i.gfx.round(R::new(a.x, a.y, a.w, bar), 2.0, chrome);
+            i.gfx.round(R::new(a.x, a.y + bar + 3.0, a.w, bar * 0.8), 2.0, dim);
+            i.gfx.round(R::new(a.x, a.y + bar * 2.2, a.w, a.h - bar * 2.2), 3.0, page);
+        }
+        "hybrid" => {
+            i.gfx.round(R::new(a.x, a.y, a.w, bar), 2.0, chrome);
+            i.gfx.round(R::new(a.x, a.y + bar + 3.0, strip * 0.7, a.h - bar - 3.0), 2.0, dim);
+            i.gfx.round(R::new(a.x + strip * 0.7 + 3.0, a.y + bar + 3.0, a.w - strip * 0.7 - 3.0, a.h - bar - 3.0), 3.0, page);
+        }
+        _ => {
+            i.gfx.round(R::new(a.x, a.y, strip, a.h), 2.0, chrome);
+            i.gfx.round(R::new(a.x + strip + 3.0, a.y, a.w - strip - 3.0, a.h), 3.0, page);
+        }
+    }
+}
+
+/// The font list, over the settings page: a filter anyone can type into, and the
+/// families of this PC under it.
+pub(super) fn draw_picker(i: &mut Inner, st: R, s: &UiState) {
+    let Some(pick) = i.page.font_pick.as_ref() else { return };
+    let _ = s;
+    let th = i.theme;
+    let key = pick.key;
+    let filter = pick.filter.clone();
+    let scroll = pick.scroll;
+    let label = match key {
+        "display_font" => "Display font",
+        "mono_font" => "Monospace font",
+        _ => "Interface font",
+    };
+    // Anywhere else closes it.
+    i.hit(st, Hit::Page(PageHit::FontClose));
+    let card = R::new(st.x + (st.w - 540.0) / 2.0, st.y + 36.0, 540.0_f32.min((st.w - 40.0).max(200.0)), (st.h - 96.0).max(200.0));
+    i.gfx.round(card.inset(-2.0, -2.0), i.look.r_lg + 2.0, th.shade.alpha(0.5));
+    i.gfx.round(card, i.look.r_lg, th.raise);
+    i.gfx.round_stroke(card, i.look.r_lg, th.accent.alpha(0.4), 1.0);
+    i.gfx.text(label, R::new(card.x + 16.0, card.y + 8.0, card.w - 60.0, 24.0), i.look.body_strong, th.text);
+    let xr = R::new(card.right() - 40.0, card.y + 8.0, 28.0, 24.0);
+    let xh = self_hover(i, PageHit::FontClose);
+    i.gfx.icon("close", xr.x + 6.0, xr.y + 4.0, 16.0, if xh { th.text } else { th.dim });
+    i.hit(xr, Hit::Page(PageHit::FontClose));
+    // The filter: type, backspace, and the list follows.
+    let field = R::new(card.x + 16.0, card.y + 40.0, card.w - 32.0, 32.0);
+    i.gfx.round(field, i.look.r_md, th.bg);
+    i.gfx.round_stroke(field, i.look.r_md, th.acc_soft, 1.5);
+    let caret = (i.born.elapsed().as_secs_f32() * 1.6).fract() < 0.5;
+    let shown_text = if filter.is_empty() { "Type to search".to_string() } else { format!("{filter}{}", if caret { "|" } else { " " }) };
+    i.gfx.text(&shown_text, R::new(field.x + 10.0, field.y, field.w - 20.0, field.h), i.look.font(13.0, 450), if filter.is_empty() { th.faint } else { th.text });
+    // The list: the default first, then every family the filter lets through.
+    let list = R::new(card.x + 8.0, field.bottom() + 8.0, card.w - 16.0, card.bottom() - field.bottom() - 20.0);
+    i.gfx.clip(list);
+    let row_h = 26.0;
+    let f = i.look.font(13.0, 450);
+    let words: Vec<String> = filter.split_whitespace().map(|w| w.to_lowercase()).collect();
+    let mut shown: Vec<String> = Vec::new();
+    let mut y = list.y + 2.0 - scroll;
+    // Row 0 is always the way back to the default.
+    let default_row = R::new(list.x + 4.0, y, list.w - 8.0, row_h);
+    let dh = self_hover(i, PageHit::FontPin(0));
+    if y + row_h > list.y && y < list.bottom() {
+        if dh {
+            i.gfx.round(default_row, i.look.r_sm, th.hover);
+        }
+        i.gfx.text("Windows default", R::new(default_row.x + 8.0, default_row.y, default_row.w - 16.0, row_h), f, th.dim);
+        i.hit(default_row, Hit::Page(PageHit::FontPin(0)));
+    }
+    y += row_h;
+    let mut rows = 0usize;
+    let fonts = i.fonts.clone();
+    for fam in fonts.iter() {
+        let low = fam.to_lowercase();
+        if !words.iter().all(|w| low.contains(w.as_str())) {
+            continue;
+        }
+        let rr = R::new(list.x + 4.0, y, list.w - 8.0, row_h);
+        y += row_h;
+        rows += 1;
+        shown.push(fam.clone());
+        if rr.bottom() < list.y || rr.y > list.bottom() {
+            continue;
+        }
+        let hit = Hit::Page(PageHit::FontPin(shown.len()));
+        let hov = i.is_hover(&hit);
+        if hov {
+            i.gfx.round(rr, i.look.r_sm, th.hover);
+        }
+        i.gfx.text(fam, R::new(rr.x + 8.0, rr.y, rr.w - 16.0, row_h), f, if hov { th.text } else { th.dim });
+        i.hit(rr, hit);
+    }
+    i.gfx.unclip();
+    if rows == 0 {
+        i.gfx.text("No font here has that name.", R::new(list.x, list.y + 8.0, list.w, 24.0), i.look.small, th.faint);
+    }
+    // The filter changes what a click means: remember what was shown.
+    if let Some(p) = i.page.font_pick.as_mut() {
+        p.shown = shown;
+    }
+}
+
 fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
     let th = i.theme;
     let right = r.right();
     match it {
-        Item::Swatch => {
-            row_label(i, R::new(r.x, r.y, r.w, 54.0), "Palette", "", 0.0);
-            let cur = s.settings.palette.clone();
-            let mut x = right - PALETTES.len() as f32 * 36.0 + 8.0;
-            for (key, label) in PALETTES {
-                let (tile, dot) = Theme::swatch(key);
-                let c = (x + 14.0, r.y + 27.0);
-                if key == cur {
-                    i.gfx.ring(c.0, c.1, 17.0, 17.0, th.text, 1.5);
-                }
-                i.gfx.circle(c.0, c.1, 14.0, tile);
-                i.gfx.circle(c.0, c.1, 6.0, dot);
-                let hr = R::new(x, r.y + 13.0, 28.0, 28.0);
-                i.hit(hr, Hit::Page(PageHit::Swatch(key)));
-                let _ = label;
-                x += 36.0;
-            }
-            54.0
-        }
-        Item::Accent => {
-            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "Accent", "Focus rings, toggles, the loading ring.", 100.0);
+        Item::Colors => draw_colors(i, r, s),
+        Item::Themes => draw_themes(i, r, s),
+        Item::Layout => draw_layout(i, r, s),
+        Item::Fonts(k, label, hint) => {
+            let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
+            let bw = i.gfx.measure("Choose…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint, bw + 150.0);
             let cy = r.y + h / 2.0;
-            let sw = R::new(right - 28.0, cy - 14.0, 28.0, 28.0);
-            i.gfx.round(sw, 8.0, th.accent);
-            i.gfx.round_stroke(sw, 8.0, th.line, 1.0);
-            i.hit(sw, Hit::Page(PageHit::Accent));
-            let reset = R::new(sw.x - 60.0, cy - 10.0, 50.0, 20.0);
-            let hh = Hit::Page(PageHit::AccentReset);
-            i.gfx.text("Reset", reset, SMALL.align(Align::Right), if i.is_hover(&hh) { th.text } else { th.faint });
-            i.hit(reset, hh);
+            // The family in use, right up against the button that changes it.
+            let shown = font_shown(&cur);
+            let name_w = (i.gfx.measure(&shown, i.look.font(12.5, 500)) + 16.0).min(r.w * 0.5);
+            i.gfx.text(&shown, R::new(right - bw - 8.0 - name_w, cy - 10.0, name_w, 20.0), i.look.font(12.5, 500).align(Align::Right), th.dim);
+            draw_button(i, right, cy, "Choose…", PageHit::Fonts(k));
+            h
+        }
+        Item::Text(k, label, hint) => {
+            let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
+            let bw = i.gfx.measure("Edit…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint, bw + 150.0);
+            let cy = r.y + h / 2.0;
+            let shown = if cur.is_empty() { "None".to_string() } else { cur };
+            let name_w = (i.gfx.measure(&shown, i.look.font(12.5, 500)) + 16.0).min(r.w * 0.5);
+            i.gfx.text(&shown, R::new(right - bw - 8.0 - name_w, cy - 10.0, name_w, 20.0), i.look.font(12.5, 500).align(Align::Right), th.dim);
+            draw_button(i, right, cy, "Edit…", PageHit::Text(k));
+            h
+        }
+        Item::Wallpaper => {
+            let file = s.settings.wallpaper.clone();
+            let name = if file.is_empty() { "No image chosen".to_string() } else { file.rsplit(['\\', '/']).next().unwrap_or(&file).to_string() };
+            let bw = i.gfx.measure("Choose image…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "Wallpaper image", "A file on this PC: PNG, JPEG, BMP or GIF.", bw + 150.0);
+            let cy = r.y + h / 2.0;
+            let name_w = (i.gfx.measure(&name, i.look.font(12.5, 500)) + 16.0).min(r.w * 0.5);
+            i.gfx.text(&name, R::new(right - bw - 8.0 - name_w, cy - 10.0, name_w, 20.0), i.look.font(12.5, 500).align(Align::Right), th.dim);
+            draw_button(i, right, cy, "Choose image…", PageHit::Text("wallpaper"));
+            h
+        }
+        Item::Reset(group, hint) => {
+            let bw = i.gfx.measure("Reset", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
+            let h = row_label(i, R::new(r.x, r.y, r.w, 40.0), "", hint, bw);
+            draw_button(i, right, r.y + h / 2.0, "Reset", PageHit::ResetGroup(group));
             h
         }
         Item::Seg(k, label, hint, opts) => {
@@ -645,13 +1071,13 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             // Label and hint on their own lines, then the choices wrap across the row:
             // a list this long does not fit in the half a Seg gets, and one pill wide
             // enough for it would run off the page.
-            let f = Font::ui(12.5, 450).align(Align::Center);
+            let f = i.look.font(12.5, 450).align(Align::Center);
             let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
             let mut y = r.y;
-            i.gfx.text(label, R::new(r.x, y, r.w, 20.0), Font::ui(13.0, 500), th.text);
+            i.gfx.text(label, R::new(r.x, y, r.w, 20.0), i.look.font(13.0, 500), th.text);
             y += 20.0;
             if !hint.is_empty() {
-                i.gfx.text_wrap(hint, R::new(r.x, y, r.w, 34.0), SMALL, th.faint);
+                i.gfx.text_wrap(hint, R::new(r.x, y, r.w, 34.0), i.look.small, th.faint);
                 y += 36.0;
             }
             y += 4.0;
@@ -699,7 +1125,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             h
         }
         Item::Engine => {
-            let f = Font::ui(13.0, 450).align(Align::Center);
+            let f = i.look.font(13.0, 450).align(Align::Center);
             let widths: Vec<f32> = ENGINES.iter().map(|(l, _)| i.gfx.measure(l, f) + 22.0).collect();
             let total: f32 = widths.iter().sum::<f32>() + 4.0;
             let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "Search engine", "", total);
@@ -720,7 +1146,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             h
         }
         Item::Button(label, hint, action, hit) => {
-            let bw = i.gfx.measure(action, Font::ui(13.0, 450).align(Align::Center)) + 26.0;
+            let bw = i.gfx.measure(action, i.look.font(13.0, 450).align(Align::Center)) + 26.0;
             let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint, bw);
             draw_button(i, right, r.y + h / 2.0, action, hit.clone());
             h
@@ -742,7 +1168,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
                 "Reads a .kdbx on this PC. The password stays in memory and locks after 10 idle minutes.".to_string()
             };
             let action = if s.vault > 0 { "Lock now" } else { "Open KeePass file…" };
-            let bw = i.gfx.measure(action, Font::ui(13.0, 450).align(Align::Center)) + 26.0;
+            let bw = i.gfx.measure(action, i.look.font(13.0, 450).align(Align::Center)) + 26.0;
             let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "KeePass file", &hint, bw);
             draw_button(i, right, r.y + h / 2.0, action, if s.vault > 0 { PageHit::KdbxLock } else { PageHit::KdbxOpen });
             h
@@ -770,7 +1196,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             {
                 hint = msg.clone();
             }
-            let f = Font::ui(13.0, 450).align(Align::Center);
+            let f = i.look.font(13.0, 450).align(Align::Center);
             let make = "Make Lumen your default browser";
             let (w_make, w_off) = (i.gfx.measure(make, f) + 26.0, i.gfx.measure("Unregister", f) + 26.0);
             let both = st != Status::Absent;
@@ -784,16 +1210,16 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
         }
         Item::SitePerms => {
             if s.rules.is_empty() {
-                i.gfx.text_wrap("No answers remembered yet. When a site asks for your camera, location or similar, the sidebar asks you.", R::new(r.x, r.y + 6.0, r.w, 36.0), Font::ui(12.5, 400), th.faint);
+                i.gfx.text_wrap("No answers remembered yet. When a site asks for your camera, location or similar, the sidebar asks you.", R::new(r.x, r.y + 6.0, r.w, 36.0), i.look.font(12.5, 400), th.faint);
                 return 44.0;
             }
             let mut y = r.y;
             for (n, (origin, kind, allow)) in s.rules.iter().enumerate() {
-                i.gfx.text(&super::host(origin), R::new(r.x, y, r.w * 0.45, 40.0), Font::ui(13.0, 500), th.text);
-                i.gfx.text(&format!("{kind} · {}", if *allow { "Allowed" } else { "Blocked" }), R::new(r.x + r.w * 0.45, y, r.w * 0.35, 40.0), Font::ui(12.5, 400), if *allow { th.dim } else { th.faint });
+                i.gfx.text(&super::host(origin), R::new(r.x, y, r.w * 0.45, 40.0), i.look.font(13.0, 500), th.text);
+                i.gfx.text(&format!("{kind} · {}", if *allow { "Allowed" } else { "Blocked" }), R::new(r.x + r.w * 0.45, y, r.w * 0.35, 40.0), i.look.font(12.5, 400), if *allow { th.dim } else { th.faint });
                 let br = R::new(right - 60.0, y + 8.0, 60.0, 24.0);
                 let h = Hit::Page(PageHit::PermReset(n));
-                i.gfx.text("Reset", br, SMALL.align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
+                i.gfx.text("Reset", br, i.look.small.align(Align::Right), if i.is_hover(&h) { th.text } else { th.faint });
                 i.hit(br, h);
                 i.gfx.line(r.x, y + 40.0, right, y + 40.0, th.line, 1.0);
                 y += 41.0;
@@ -803,8 +1229,8 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
         Item::Keys => {
             let mut y = r.y;
             for (what, keys) in KEYS {
-                i.gfx.text(what, R::new(r.x, y, r.w * 0.6, 36.0), Font::ui(13.0, 400), th.dim);
-                i.gfx.text(keys, R::new(r.x + r.w * 0.4, y, r.w * 0.6, 36.0), Font::ui(12.5, 450).align(Align::Right), th.text);
+                i.gfx.text(what, R::new(r.x, y, r.w * 0.6, 36.0), i.look.font(13.0, 400), th.dim);
+                i.gfx.text(keys, R::new(r.x + r.w * 0.4, y, r.w * 0.6, 36.0), i.look.font(12.5, 450).align(Align::Right), th.text);
                 i.gfx.line(r.x, y + 36.0, right, y + 36.0, th.line, 1.0);
                 y += 37.0;
             }
@@ -815,7 +1241,7 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
 
 fn draw_button(i: &mut Inner, right: f32, cy: f32, label: &str, hit: PageHit) {
     let th = i.theme;
-    let f = Font::ui(13.0, 450).align(Align::Center);
+    let f = i.look.font(13.0, 450).align(Align::Center);
     let w = i.gfx.measure(label, f) + 26.0;
     let r = R::new(right - w, cy - 15.0, w, 30.0);
     let h = Hit::Page(hit);
@@ -999,6 +1425,120 @@ fn pick_kdbx(owner: windows::Win32::Foundation::HWND) -> Option<String> {
     }
     let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
     Some(String::from_utf16_lossy(&buf[..len]))
+}
+
+/// The file dialog for a wallpaper image. Returns the path.
+fn pick_image(owner: windows::Win32::Foundation::HWND) -> Option<String> {
+    let mut buf = vec![0u16; 32768];
+    let filter: Vec<u16> = "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.gif\0All files\0*.*\0\0".encode_utf16().collect();
+    let title: Vec<u16> = "Choose a wallpaper\0".encode_utf16().collect();
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !unsafe { GetOpenFileNameW(&mut ofn) }.as_bool() {
+        return None;
+    }
+    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
+/// A "save as" dialog for a theme file. Returns the chosen path.
+fn pick_save(owner: windows::Win32::Foundation::HWND, suggested: &str) -> Option<String> {
+    let mut buf = vec![0u16; 32768];
+    for (n, c) in suggested.encode_utf16().take(buf.len() - 1).enumerate() {
+        buf[n] = c;
+    }
+    let filter: Vec<u16> = "Lumen theme\0*.json\0All files\0*.*\0\0".encode_utf16().collect();
+    let title: Vec<u16> = "Export this look\0".encode_utf16().collect();
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !unsafe { GetSaveFileNameW(&mut ofn) }.as_bool() {
+        return None;
+    }
+    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
+/// An "open file" dialog for a theme file. Returns the chosen path.
+fn pick_open(owner: windows::Win32::Foundation::HWND) -> Option<String> {
+    let mut buf = vec![0u16; 32768];
+    let filter: Vec<u16> = "Lumen theme\0*.json\0All files\0*.*\0\0".encode_utf16().collect();
+    let title: Vec<u16> = "Import a look\0".encode_utf16().collect();
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !unsafe { GetOpenFileNameW(&mut ofn).as_bool() } {
+        return None;
+    }
+    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
+/// The settings one "Reset" button owns. Not the layout: a look is colours,
+/// fonts, clock, sidebar shape and motion, never where the chrome lives.
+fn group_keys(group: &str) -> &'static [&'static str] {
+    match group {
+        "colors" => &["palette", "accent", "bg_color", "side_color", "surface_color", "text_color", "dim_color"],
+        "fonts" => &["ui_font", "display_font", "mono_font", "font_scale", "title_weight"],
+        "layout" => &["layout", "bm_bar", "sidebar_side", "sidebar_width", "compact"],
+        "ntp" => &[
+            "clock", "clock_24h", "clock_seconds", "date_format", "clock_font", "clock_size", "greeting", "ntp_bg", "wallpaper",
+            "wallpaper_blur", "wallpaper_dim", "speed_dial", "dial_cols", "dial_tile", "ntp_search",
+        ],
+        "sidebar" => &["tab_row_h", "show_favicons", "close_btn", "show_memory", "footer_btns", "ws_row"],
+        "shape" => &["density", "gap", "radius", "page_border"],
+        "motion" => &["motion", "motion_speed", "motion_system"],
+        _ => &[],
+    }
+}
+
+/// Put one group of the Appearance page back to its defaults, in one message.
+fn reset_group(i: &mut Inner, group: &str) {
+    let Some(st) = i.state.as_ref().map(|s| s.settings.clone()) else { return };
+    let keys = group_keys(group);
+    if keys.is_empty() {
+        return;
+    }
+    let mut all = serde_json::to_value(&st).unwrap_or(json!({}));
+    let defaults = serde_json::to_value(Settings::default()).unwrap_or(json!({}));
+    for k in keys {
+        if let Some(v) = defaults.get(*k) {
+            all[*k] = v.clone();
+        }
+    }
+    if let Ok(next) = serde_json::from_value::<Settings>(all) {
+        let look = Look::of(&next, i.theme.dark, super::motion::system_allows());
+        i.theme = look.theme;
+        i.look = look;
+        if let Some(s) = i.state.as_mut() {
+            s.settings = next.clone();
+        }
+        send(&i.proxy, json!({"t": "settings", "v": next}));
+        i.page.flash = Some(("Back to the defaults".into(), std::time::Instant::now()));
+    }
+    i.invalidate();
 }
 
 /// Control ids. 1 and 2 are the ids Windows itself presses for Enter and
@@ -1225,10 +1765,10 @@ pub(super) fn column(st: R, max_w: f32) -> R {
 /// beneath it. Esc does the same.
 pub(super) fn close_button(i: &mut Inner, st: R) {
     let th = i.theme;
-    let r = R::new(st.right() - S4 - 32.0, st.y + S4, 32.0, 32.0);
+    let r = R::new(st.right() - i.look.s4 - 32.0, st.y + i.look.s4, 32.0, 32.0);
     let h = Hit::Page(PageHit::Done);
     let hov = i.is_hover(&h);
-    i.gfx.round(r, R_MD, if hov { th.hover } else { th.raise });
+    i.gfx.round(r, i.look.r_md, if hov { th.hover } else { th.raise });
     i.gfx.icon("close", r.x + 8.0, r.y + 8.0, 16.0, if hov { th.text } else { th.dim });
     i.hit(r, h);
 }
@@ -1237,11 +1777,11 @@ pub(super) fn close_button(i: &mut Inner, st: R) {
 /// the content starts at.
 pub(super) fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> f32 {
     let th = i.theme;
-    i.gfx.text(title, R::new(col.x, y, col.w - 48.0, 40.0), TITLE, th.text);
+    i.gfx.text(title, R::new(col.x, y, col.w - 48.0, 40.0), i.look.title, th.text);
     if sub.is_empty() {
         return y + 52.0;
     }
-    i.gfx.text(sub, R::new(col.x, y + 38.0, col.w - 48.0, 20.0), SMALL, th.faint);
+    i.gfx.text(sub, R::new(col.x, y + 38.0, col.w - 48.0, 20.0), i.look.small, th.faint);
     y + 68.0
 }
 
@@ -1249,18 +1789,18 @@ pub(super) fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> 
 /// Returns its rectangle so the caller can step along.
 pub(super) fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageHit, primary: bool) -> R {
     let th = i.theme;
-    let f = if primary { BODY_STRONG } else { BODY }.align(Align::Center);
-    let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * S4, 30.0);
+    let f = if primary { i.look.body_strong } else { i.look.body }.align(Align::Center);
+    let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * i.look.s4, 30.0);
     let h = Hit::Page(hit);
     let hov = i.is_hover(&h);
     if primary {
-        i.gfx.round(r, R_MD, if hov { th.accent } else { th.accent.alpha(0.88) });
+        i.gfx.round(r, i.look.r_md, if hov { th.accent } else { th.accent.alpha(0.88) });
         i.gfx.text(label, r, f, th.bg);
     } else {
         if hov {
-            i.gfx.round(r, R_MD, th.hover);
+            i.gfx.round(r, i.look.r_md, th.hover);
         }
-        i.gfx.round_stroke(r, R_MD, th.line, 1.0);
+        i.gfx.round_stroke(r, i.look.r_md, th.line, 1.0);
         i.gfx.text(label, r, f, if hov { th.text } else { th.dim });
     }
     i.hit(r, h);
@@ -1270,24 +1810,24 @@ pub(super) fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: Pa
 /// A text action on a row, 28 high, its right edge at `right`. Returns its left edge.
 pub(super) fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: PageHit) -> f32 {
     let th = i.theme;
-    let f = SMALL_STRONG.align(Align::Center);
-    let w = i.gfx.measure(label, f) + 2.0 * S3;
+    let f = i.look.small_strong.align(Align::Center);
+    let w = i.gfx.measure(label, f) + 2.0 * i.look.s3;
     let r = R::new(right - w, y, w, 28.0);
     let h = Hit::Page(hit);
     let hov = i.is_hover(&h);
     if hov {
-        i.gfx.round(r, R_SM, th.press);
+        i.gfx.round(r, i.look.r_sm, th.press);
     }
     i.gfx.text(label, r, f, if hov { th.text } else { th.dim });
     i.hit(r, h);
-    r.x - S1
+    r.x - i.look.s1
 }
 
 /// A small caps label that opens a group of rows. Returns the y after it.
 pub(super) fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -> f32 {
     let th = i.theme;
     let label = if count > 0 { format!("{}  {count}", text.to_uppercase()) } else { text.to_uppercase() };
-    i.gfx.text(&label, R::new(col.x, y, col.w, 20.0), CAPTION, th.faint);
+    i.gfx.text(&label, R::new(col.x, y, col.w, 20.0), i.look.caption, th.faint);
     y + 26.0
 }
 
@@ -1298,8 +1838,8 @@ pub(super) fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint:
     let cx = area.x + area.w / 2.0;
     i.gfx.circle(cx, area.y + 28.0, 28.0, th.bg);
     i.gfx.icon(icon, cx - 12.0, area.y + 16.0, 24.0, th.faint);
-    i.gfx.text(title, R::new(area.x, area.y + 70.0, area.w, 26.0), Font::ui(15.0, 550).align(Align::Center), th.text);
-    i.gfx.text_wrap(hint, R::new(cx - 210.0, area.y + 100.0, 420.0, 50.0), SMALL.align(Align::Center), th.faint);
+    i.gfx.text(title, R::new(area.x, area.y + 70.0, area.w, 26.0), i.look.font(15.0, 550).align(Align::Center), th.text);
+    i.gfx.text_wrap(hint, R::new(cx - 210.0, area.y + 100.0, 420.0, 50.0), i.look.small.align(Align::Center), th.faint);
     area.y + 150.0
 }
 
@@ -1310,7 +1850,7 @@ pub(super) fn row_plate(i: &mut Inner, r: R, id: u64) -> bool {
     let h = Hit::Page(PageHit::Row(id));
     let hov = i.is_hover(&h) || i.hover.as_ref().is_some_and(|x| matches!(x, Hit::Page(PageHit::Dl(_, d)) if *d == id));
     if hov {
-        i.gfx.round(r, R_LG, th.hover);
+        i.gfx.round(r, i.look.r_lg, th.hover);
     }
     i.hit(r, h);
     hov
@@ -1331,7 +1871,7 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let col = column(st, COL_W);
     i.gfx.clip(st);
-    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
 
     // The line under the title: the short-lived "copy a link" note, else what is running.
     let mut flash_gone = false;
@@ -1357,11 +1897,11 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     // Toolbar: things to add on the left, the cap and the cleanup on the right.
     let mut x = col.x;
     for (label, hit) in [("Add link", PageHit::DlAddLink), ("Open torrent…", PageHit::DlTorrentPick), ("Open folder", PageHit::DlOpenFolder)] {
-        x = outline_button(i, x, y, label, hit, false).right() + S2;
+        x = outline_button(i, x, y, label, hit, false).right() + i.look.s2;
     }
     let chip = format!("Speed limit: {}", chip_label(s.settings.download_limit_kbps));
-    let cf = SMALL_STRONG.align(Align::Center);
-    let cw = i.gfx.measure(&chip, cf) + 2.0 * S3;
+    let cf = i.look.small_strong.align(Align::Center);
+    let cw = i.gfx.measure(&chip, cf) + 2.0 * i.look.s3;
     let cr = R::new(col.right() - cw, y + 1.0, cw, 28.0);
     let ch = Hit::Page(PageHit::DlLimit);
     let chov = i.is_hover(&ch);
@@ -1369,9 +1909,9 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.text(&chip, cr, cf, if chov { th.text } else { th.dim });
     i.hit(cr, ch);
     if s.downloads.iter().any(|d| d.state == "done" || d.state == "failed") {
-        row_action(i, cr.x - S2, y + 1.0, "Clear finished", PageHit::DlClear);
+        row_action(i, cr.x - i.look.s2, y + 1.0, "Clear finished", PageHit::DlClear);
     }
-    y += 30.0 + S4;
+    y += 30.0 + i.look.s4;
 
     if s.downloads.is_empty() {
         let area = R::new(col.x, y + 56.0, col.w, 200.0);
@@ -1387,18 +1927,18 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
         if rows.is_empty() {
             continue;
         }
-        y += S3;
+        y += i.look.s3;
         y = group_label(i, col, y, g, rows.len());
         // The firewall note rides under the first header that actually has a torrent.
         if s.settings.torrent_note && rows.iter().any(|d| d.kind == "torrent") {
             let msg = "Windows may ask to let aria2 through the firewall. Allow it for faster torrents. (click to hide)";
             let h = Hit::Page(PageHit::DlNote);
-            i.gfx.text(msg, R::new(col.x, y - 4.0, col.w, 20.0), SMALL, if i.is_hover(&h) { th.text } else { th.faint });
+            i.gfx.text(msg, R::new(col.x, y - 4.0, col.w, 20.0), i.look.small, if i.is_hover(&h) { th.text } else { th.faint });
             i.hit(R::new(col.x, y - 4.0, col.w, 20.0), h);
             y += 24.0;
         }
         for d in rows {
-            let r = R::new(col.x - S2, y, col.w + 2.0 * S2, 72.0);
+            let r = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, 72.0);
             if r.bottom() < st.y || r.y > st.bottom() {
                 y += 74.0;
                 continue;
@@ -1407,9 +1947,9 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
             let failed = d.state == "failed";
             // The tile: what the file is, in its own letters.
             let tile = R::new(col.x, y + 18.0, 36.0, 36.0);
-            i.gfx.round(tile, R_MD, th.bg);
+            i.gfx.round(tile, i.look.r_md, th.bg);
             let live = matches!(d.state, "progress" | "seeding");
-            i.gfx.text(&tile_label(d), tile, Font::ui(10.0, 700).align(Align::Center), if failed { th.faint.alpha(0.7) } else if live { th.accent } else { th.dim });
+            i.gfx.text(&tile_label(d), tile, i.look.font(10.0, 700).align(Align::Center), if failed { th.faint.alpha(0.7) } else if live { th.accent } else { th.dim });
             // The actions, right to left; the text takes whatever they leave.
             let acts: &[(&str, &'static str)] = match d.state {
                 "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
@@ -1425,19 +1965,19 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
                 let h = Hit::Page(PageHit::Dl("remove", d.id));
                 let hov = i.is_hover(&h);
                 if hov {
-                    i.gfx.round(xr, R_SM, th.press);
+                    i.gfx.round(xr, i.look.r_sm, th.press);
                 }
                 i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if hov { th.text } else { th.faint });
                 i.hit(xr, h);
-                right = xr.x - S1;
+                right = xr.x - i.look.s1;
             }
             for (label, a) in acts.iter().rev() {
                 right = row_action(i, right, y + 22.0, label, PageHit::Dl(a, d.id));
             }
-            let tx = tile.right() + S3;
-            let tw = (right - S3 - tx).max(60.0);
-            i.gfx.text(&d.name, R::new(tx, y + 13.0, tw, 22.0), BODY_STRONG, if failed { th.dim } else { th.text });
-            i.gfx.text(&status_line(d), R::new(tx, y + 35.0, tw, 18.0), SMALL, th.faint);
+            let tx = tile.right() + i.look.s3;
+            let tw = (right - i.look.s3 - tx).max(60.0);
+            i.gfx.text(&d.name, R::new(tx, y + 13.0, tw, 22.0), i.look.body_strong, if failed { th.dim } else { th.text });
+            i.gfx.text(&status_line(d), R::new(tx, y + 35.0, tw, 18.0), i.look.small, th.faint);
             if d.state == "progress" || d.state == "paused" {
                 let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
                 let bar = R::new(tx, y + 59.0, col.right() - tx, 4.0);
@@ -1460,11 +2000,11 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     let history = true;
     let col = column(st, COL_W);
     i.gfx.clip(st);
-    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
     let title_y = y;
     y = title_block(i, col, y, "History", "Newest first. Private tabs are never recorded.");
     if !s.history.is_empty() {
-        let w = i.gfx.measure("Clear history…", BODY.align(Align::Center)) + 2.0 * S4;
+        let w = i.gfx.measure("Clear history…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
         outline_button(i, col.right() - w - 48.0, title_y + 4.0, "Clear history…", PageHit::ClearHistory, false);
     }
     let rows: Vec<(String, String, String, String)> =
@@ -1479,11 +2019,11 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     let mut last_day = String::new();
     for (url, title, day, time) in rows {
         if history && day != last_day {
-            y += S2;
+            y += i.look.s2;
             y = group_label(i, col, y, &day, 0);
             last_day = day;
         }
-        let r = R::new(col.x - S2, y, col.w + 2.0 * S2, 38.0);
+        let r = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, 38.0);
         if y > st.bottom() || y + 38.0 < st.y {
             y += 40.0;
             continue;
@@ -1492,26 +2032,26 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
         let rm = Hit::Page(PageHit::Forget(url.clone()));
         let hov = i.is_hover(&open) || i.is_hover(&rm);
         if hov {
-            i.gfx.round(r, R_MD, th.hover);
+            i.gfx.round(r, i.look.r_md, th.hover);
         }
         let mut x = col.x;
         if history {
-            i.gfx.text(&time, R::new(x, y, 44.0, 38.0), SMALL, th.faint);
+            i.gfx.text(&time, R::new(x, y, 44.0, 38.0), i.look.small, th.faint);
             x += 56.0;
         }
         // The host sits at the right, the title takes what is left, cut with an ellipsis.
         let host = super::host(&url);
-        let hw = (i.gfx.measure(&host, SMALL) + 4.0).min(220.0);
+        let hw = (i.gfx.measure(&host, i.look.small) + 4.0).min(220.0);
         let hx = col.right() - 32.0 - hw;
         let name = if title.is_empty() { url.clone() } else { title };
-        i.gfx.text(&name, R::new(x, y, (hx - S4 - x).max(60.0), 38.0), BODY, th.text);
-        i.gfx.text(&host, R::new(hx, y, hw, 38.0), SMALL.align(Align::Right), th.faint);
+        i.gfx.text(&name, R::new(x, y, (hx - i.look.s4 - x).max(60.0), 38.0), i.look.body, th.text);
+        i.gfx.text(&host, R::new(hx, y, hw, 38.0), i.look.small.align(Align::Right), th.faint);
         i.hit(r, open);
         if hov {
             let xr = R::new(col.right() - 28.0, y + 5.0, 28.0, 28.0);
             let xh = i.is_hover(&rm);
             if xh {
-                i.gfx.round(xr, R_SM, th.press);
+                i.gfx.round(xr, i.look.r_sm, th.press);
             }
             i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if xh { th.text } else { th.dim });
             i.hit(xr, rm);
@@ -1530,10 +2070,11 @@ const BM_BUTTONS_W: f32 = 270.0;
 const BM_ROW_H: f32 = 38.0;
 
 /// The search box of the Bookmarks page. Fixed under the title; the list scrolls below it.
-/// The edit control (mod.rs) sits on top of this rectangle.
-pub fn bm_search_rect(st: R) -> R {
+/// The edit control (mod.rs) sits on top of this rectangle. `top` is the space the
+/// title block takes, from the look that is drawing.
+pub fn bm_search_rect(st: R, top: f32) -> R {
     let col = column(st, COL_W);
-    R::new(col.x, st.y + S5 + 2.0 + 68.0, (col.w - BM_BUTTONS_W).max(140.0), 34.0)
+    R::new(col.x, st.y + top + 2.0 + 68.0, (col.w - BM_BUTTONS_W).max(140.0), 34.0)
 }
 
 /// Every word typed is somewhere in the title or the address.
@@ -1583,8 +2124,8 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     let col = column(st, COL_W);
     let q = super::wide_text(i.bm_edit);
     let q = q.trim().to_string();
-    let sr = bm_search_rect(st);
-    let top = sr.bottom() + S3;
+    let sr = bm_search_rect(st, i.look.s5);
+    let top = sr.bottom() + i.look.s3;
     let list = R::new(st.x, top, st.w, st.bottom() - top);
     let groups = bm_groups(&s.bookmarks, &s.bm_folders, &q);
     let total: usize = groups.iter().map(|g| g.1.len()).sum();
@@ -1610,13 +2151,13 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
         // A header when there is a folder to name, or Unsorted needs telling apart from them.
         if !folder.is_empty() || named {
             let label = if folder.is_empty() { "UNSORTED" } else { &folder.to_uppercase() };
-            let h = R::new(col.x - S2, y, col.w + 2.0 * S2, 30.0);
+            let h = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, 30.0);
             if h.bottom() >= top && h.y <= st.bottom() {
                 let hit = Hit::Page(PageHit::BmFolder(folder.to_string()));
                 let folded = i.page.bm_collapsed.contains(*folder) && !searching;
                 let hov = i.is_hover(&hit);
                 if hov {
-                    i.gfx.round(h, R_MD, th.hover);
+                    i.gfx.round(h, i.look.r_md, th.hover);
                 }
                 // A chevron: down when open, right when folded.
                 let (cx, cy) = (col.x + 6.0, y + 15.0);
@@ -1628,22 +2169,22 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
                     i.gfx.line(cx - 4.0, cy - 2.0, cx, cy + 2.0, c, 1.5);
                     i.gfx.line(cx, cy + 2.0, cx + 4.0, cy - 2.0, c, 1.5);
                 }
-                i.gfx.text(&format!("{label}  {}", rows.len()), R::new(col.x + 20.0, y, col.w - 20.0, 30.0), CAPTION, th.faint);
+                i.gfx.text(&format!("{label}  {}", rows.len()), R::new(col.x + 20.0, y, col.w - 20.0, 30.0), i.look.caption, th.faint);
                 i.hit(h, hit);
                 i.page.bm_rows.push(DropRow { r: h, folder: folder.to_string(), id: 0 });
             }
             y += 30.0;
         }
         if i.page.bm_collapsed.contains(*folder) && !searching {
-            y += S2;
+            y += i.look.s2;
             continue;
         }
         if rows.is_empty() {
-            i.gfx.text("Empty. Drag a bookmark here, or use Move to folder.", R::new(col.x + 20.0, y, col.w - 20.0, 28.0), SMALL, th.faint);
+            i.gfx.text("Empty. Drag a bookmark here, or use Move to folder.", R::new(col.x + 20.0, y, col.w - 20.0, 28.0), i.look.small, th.faint);
             y += 30.0;
         }
         for m in rows {
-            let r = R::new(col.x - S2, y, col.w + 2.0 * S2, BM_ROW_H);
+            let r = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, BM_ROW_H);
             y += BM_ROW_H + 2.0;
             if r.bottom() < top || r.y > st.bottom() {
                 continue;
@@ -1654,7 +2195,7 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
             let hov = i.is_hover(&open) || i.is_hover(&rm);
             let lifted = dragging == Some(m.id);
             if hov && !lifted {
-                i.gfx.round(r, R_MD, th.hover);
+                i.gfx.round(r, i.look.r_md, th.hover);
             }
             let tile = R::new(col.x, y - BM_ROW_H - 2.0 + 8.0, 22.0, 22.0);
             let name = if m.title.is_empty() { m.url.clone() } else { m.title.clone() };
@@ -1662,25 +2203,25 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
             let letter = host.chars().next().or_else(|| name.chars().next()).unwrap_or('·').to_uppercase().to_string();
             let fade = if lifted { 0.4 } else { 1.0 };
             i.gfx.round(tile, 6.0, th.press.mix(th.accent, 0.3).alpha(fade));
-            i.gfx.text(&letter, tile, Font::ui(11.0, 650).align(Align::Center), th.text.alpha(fade));
-            let hw = (i.gfx.measure(&host, SMALL) + 4.0).min(220.0);
+            i.gfx.text(&letter, tile, i.look.font(11.0, 650).align(Align::Center), th.text.alpha(fade));
+            let hw = (i.gfx.measure(&host, i.look.small) + 4.0).min(220.0);
             let hx = col.right() - 32.0 - hw;
             let tx = col.x + 34.0;
             let ry = y - BM_ROW_H - 2.0;
-            i.gfx.text(&name, R::new(tx, ry, (hx - S4 - tx).max(60.0), BM_ROW_H), BODY, th.text.alpha(fade));
-            i.gfx.text(&host, R::new(hx, ry, hw, BM_ROW_H), SMALL.align(Align::Right), th.faint.alpha(fade));
+            i.gfx.text(&name, R::new(tx, ry, (hx - i.look.s4 - tx).max(60.0), BM_ROW_H), i.look.body, th.text.alpha(fade));
+            i.gfx.text(&host, R::new(hx, ry, hw, BM_ROW_H), i.look.small.align(Align::Right), th.faint.alpha(fade));
             i.hit(r, open);
             if hov && dragging.is_none() {
                 let xr = R::new(col.right() - 28.0, ry + 5.0, 28.0, 28.0);
                 let xh = i.is_hover(&rm);
                 if xh {
-                    i.gfx.round(xr, R_SM, th.press);
+                    i.gfx.round(xr, i.look.r_sm, th.press);
                 }
                 i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if xh { th.text } else { th.dim });
                 i.hit(xr, rm);
             }
         }
-        y += S2;
+        y += i.look.s2;
     }
     // Where a dragged row would land: a line between rows, or the folder lit.
     if dragging.is_some()
@@ -1695,7 +2236,7 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
             Some(ly) => i.gfx.line(col.x, ly, col.right(), ly, th.accent, 2.0),
             None => {
                 if let Some(h) = rows.iter().find(|d| d.folder == folder && d.id == 0) {
-                    i.gfx.round_stroke(h.r, R_MD, th.accent, 1.5);
+                    i.gfx.round_stroke(h.r, i.look.r_md, th.accent, 1.5);
                 }
             }
         }
@@ -1710,20 +2251,20 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
         1 => "1 bookmark. Ctrl+Shift+O opens this page.".to_string(),
         n => format!("{n} bookmarks. Ctrl+Shift+O opens this page."),
     });
-    title_block(i, col, st.y + S5 + 2.0, "Bookmarks", &sub);
+    title_block(i, col, st.y + i.look.s5 + 2.0, "Bookmarks", &sub);
     let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.bm_edit;
-    i.gfx.round(sr, R_MD, th.bg);
-    i.gfx.round_stroke(sr, R_MD, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
+    i.gfx.round(sr, i.look.r_md, th.bg);
+    i.gfx.round_stroke(sr, i.look.r_md, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
     i.gfx.icon("search", sr.x + 10.0, sr.y + 9.0, 16.0, th.faint);
     if q.is_empty() && !focused {
-        i.gfx.text("Search bookmarks", R::new(sr.x + 34.0, sr.y, sr.w - 44.0, sr.h), BODY, th.faint);
+        i.gfx.text("Search bookmarks", R::new(sr.x + 34.0, sr.y, sr.w - 44.0, sr.h), i.look.body, th.faint);
     }
-    let bf = BODY.align(Align::Center);
-    let w_import = i.gfx.measure("Import…", bf) + 2.0 * S4;
-    let w_folder = i.gfx.measure("New folder", bf) + 2.0 * S4;
+    let bf = i.look.body.align(Align::Center);
+    let w_import = i.gfx.measure("Import…", bf) + 2.0 * i.look.s4;
+    let w_folder = i.gfx.measure("New folder", bf) + 2.0 * i.look.s4;
     let by = sr.y + 2.0;
     let bx = outline_button(i, col.right() - w_import, by, "Import…", PageHit::BmImport, false).x;
-    outline_button(i, bx - S2 - w_folder, by, "New folder", PageHit::BmNewFolder, false);
+    outline_button(i, bx - i.look.s2 - w_folder, by, "New folder", PageHit::BmNewFolder, false);
     close_button(i, st);
 }
 
@@ -1732,16 +2273,16 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     let schema = settings_schema();
     // Left: title and sections.
     let nav = R::new(st.x, st.y, 190.0, st.h);
-    i.gfx.line(nav.right(), st.y + S4, nav.right(), st.bottom() - S4, th.line, 1.0);
-    i.gfx.text("Settings", R::new(nav.x + 22.0, nav.y + 22.0, 160.0, 40.0), TITLE, th.text);
+    i.gfx.line(nav.right(), st.y + i.look.s4, nav.right(), st.bottom() - i.look.s4, th.line, 1.0);
+    i.gfx.text("Settings", R::new(nav.x + 22.0, nav.y + 22.0, 160.0, 40.0), i.look.title, th.text);
     let current = i.page.sections.iter().rposition(|y| *y <= i.page.scroll + 30.0).unwrap_or(0);
     for (n, (name, _)) in schema.iter().enumerate() {
-        let r = R::new(nav.x + S3, nav.y + 78.0 + n as f32 * 32.0, nav.w - S5, 30.0);
+        let r = R::new(nav.x + i.look.s3, nav.y + 78.0 + n as f32 * 32.0, nav.w - i.look.s5, 30.0);
         let h = Hit::Page(PageHit::Nav(n));
         if n == current || i.is_hover(&h) {
-            i.gfx.round(r, R_MD, th.hover);
+            i.gfx.round(r, i.look.r_md, th.hover);
         }
-        i.gfx.text(name, R::new(r.x + 10.0, r.y, r.w - 20.0, r.h), BODY, if n == current { th.text } else { th.dim });
+        i.gfx.text(name, R::new(r.x + 10.0, r.y, r.w - 20.0, r.h), i.look.body, if n == current { th.text } else { th.dim });
         i.hit(r, h);
     }
 
@@ -1753,7 +2294,7 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     let mut sections = Vec::new();
     for (name, items) in &schema {
         sections.push(y + i.page.scroll - body.y - 26.0);
-        i.gfx.text(name, R::new(col.x, y, col.w, 30.0), H2, th.text);
+        i.gfx.text(name, R::new(col.x, y, col.w, 30.0), i.look.h2, th.text);
         y += 40.0;
         for (n, it) in items.iter().enumerate() {
             let h = draw_item(i, it, R::new(col.x, y, col.w, 54.0), s);
@@ -1784,11 +2325,11 @@ enum PermTarget<'a> {
 /// ask). A default row offers Block and Ask only: there is nothing to allow before a site asks.
 fn perm_chips(i: &mut Inner, right: f32, y: f32, target: PermTarget<'_>, cur: Option<bool>) -> f32 {
     let th = i.theme;
-    let f = SMALL_STRONG.align(Align::Center);
+    let f = i.look.small_strong.align(Align::Center);
     let opts: &[(&'static str, Option<bool>)] =
         if matches!(target, PermTarget::Site(..)) { &[("Allow", Some(true)), ("Block", Some(false)), ("Ask", None)] } else { &[("Block", Some(false)), ("Ask", None)] };
-    let widths: Vec<f32> = opts.iter().map(|(l, _)| i.gfx.measure(l, f) + 2.0 * S3).collect();
-    let total: f32 = widths.iter().sum::<f32>() + S1 * (opts.len() - 1) as f32;
+    let widths: Vec<f32> = opts.iter().map(|(l, _)| i.gfx.measure(l, f) + 2.0 * i.look.s3).collect();
+    let total: f32 = widths.iter().sum::<f32>() + i.look.s1 * (opts.len() - 1) as f32;
     let mut x = right - total;
     for ((label, v), w) in opts.iter().zip(widths) {
         let r = R::new(x, y, w, 26.0);
@@ -1797,13 +2338,13 @@ fn perm_chips(i: &mut Inner, right: f32, y: f32, target: PermTarget<'_>, cur: Op
             PermTarget::Default(kind) => PageHit::PermDefault(kind, if *label == "Block" { "block" } else { "ask" }),
         });
         if *v == cur {
-            i.gfx.round(r, R_SM, th.press);
+            i.gfx.round(r, i.look.r_sm, th.press);
         } else if i.is_hover(&h) {
-            i.gfx.round(r, R_SM, th.hover);
+            i.gfx.round(r, i.look.r_sm, th.hover);
         }
         i.gfx.text(label, r, f, if *v == cur { th.text } else { th.dim });
         i.hit(r, h);
-        x += w + S1;
+        x += w + i.look.s1;
     }
     right - total
 }
@@ -1823,7 +2364,7 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let col = column(st, COL_W);
     i.gfx.clip(st);
-    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
     let origins: Vec<&str> = {
         let mut o: Vec<&str> = s.rules.iter().map(|(o, _, _)| o.as_str()).collect();
         o.dedup();
@@ -1845,7 +2386,7 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
         Scale::Steps(ZOOM_STOPS),
         "%",
     );
-    y += draw_item(i, &range, R::new(col.x, y, col.w, 54.0), s) + S5;
+    y += draw_item(i, &range, R::new(col.x, y, col.w, 54.0), s) + i.look.s5;
 
     // The default answer per kind.
     y = group_label(i, col, y, "When a site has no answer", 0);
@@ -1855,12 +2396,12 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
             continue;
         }
         let cur = chip_state(crate::sites::default_for(&s.settings.perm_defaults, kind.key));
-        i.gfx.text(kind.label, R::new(col.x, y + 3.0, col.w * 0.5, 28.0), BODY, th.dim);
+        i.gfx.text(kind.label, R::new(col.x, y + 3.0, col.w * 0.5, 28.0), i.look.body, th.dim);
         perm_chips(i, col.right(), y + 3.0, PermTarget::Default(kind.key), cur);
         i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
         y += 34.0;
     }
-    y += S5;
+    y += i.look.s5;
 
     // One block per site: its remembered answers, and what its data is worth.
     y = group_label(i, col, y, "Answers remembered", origins.len());
@@ -1868,7 +2409,7 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
         i.gfx.text_wrap(
             "No site has an answer yet. When a site asks for your camera, location or similar, the answer is remembered here and can be changed.",
             R::new(col.x, y + 4.0, col.w, 40.0),
-            SMALL,
+            i.look.small,
             th.faint,
         );
         y += 46.0;
@@ -1882,7 +2423,7 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
             .collect();
         let header = y > st.bottom() - 40.0 || y + 80.0 < st.y;
         if !header {
-            i.gfx.text(&super::host(origin), R::new(col.x, y + 3.0, col.w * 0.6, 30.0), BODY_STRONG, th.text);
+            i.gfx.text(&super::host(origin), R::new(col.x, y + 3.0, col.w * 0.6, 30.0), i.look.body_strong, th.text);
             let right = row_action(i, col.right(), y + 4.0, "Clear data", PageHit::SiteClear(origin.to_string()));
             row_action(i, right, y + 4.0, "Reset all", PageHit::SiteReset(origin.to_string()));
         }
@@ -1892,19 +2433,19 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
                 y += 33.0;
                 continue;
             }
-            i.gfx.text(&crate::sites::label(kind), R::new(col.x + S3, y + 3.0, col.w * 0.5, 28.0), BODY, th.dim);
+            i.gfx.text(&crate::sites::label(kind), R::new(col.x + i.look.s3, y + 3.0, col.w * 0.5, 28.0), i.look.body, th.dim);
             perm_chips(i, col.right(), y + 3.0, PermTarget::Site(origin, kind), Some(allow));
-            i.gfx.line(col.x + S3, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
+            i.gfx.line(col.x + i.look.s3, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
             y += 34.0;
         }
-        y += S2;
+        y += i.look.s2;
     }
-    y += S5 - S2;
+    y += i.look.s5 - i.look.s2;
 
     // Zoom by site: what the person chose, and the way back to the default.
     y = group_label(i, col, y, "Zoom by site", s.zooms.len());
     if s.zooms.is_empty() {
-        i.gfx.text("Every site opens at the default zoom.", R::new(col.x, y + 4.0, col.w, 28.0), SMALL, th.faint);
+        i.gfx.text("Every site opens at the default zoom.", R::new(col.x, y + 4.0, col.w, 28.0), i.look.small, th.faint);
         y += 34.0;
     }
     for (host, pct) in &s.zooms {
@@ -1912,13 +2453,13 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
             y += 34.0;
             continue;
         }
-        i.gfx.text(host, R::new(col.x, y + 3.0, col.w * 0.6, 28.0), BODY, th.text);
+        i.gfx.text(host, R::new(col.x, y + 3.0, col.w * 0.6, 28.0), i.look.body, th.text);
         row_action(i, col.right(), y + 4.0, "Reset", PageHit::SiteZoom(host.clone()));
-        i.gfx.text(&format!("{pct}%"), R::new(col.right() - 130.0, y + 3.0, 60.0, 28.0), SMALL.align(Align::Right), th.dim);
+        i.gfx.text(&format!("{pct}%"), R::new(col.right() - 130.0, y + 3.0, 60.0, 28.0), i.look.small.align(Align::Right), th.dim);
         i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
         y += 34.0;
     }
-    y += S5;
+    y += i.look.s5;
 
     // The hosts that may stay on plain http.
     if !s.settings.http_ok.is_empty() {
@@ -1928,7 +2469,7 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
                 y += 34.0;
                 continue;
             }
-            i.gfx.text(host, R::new(col.x, y + 3.0, col.w * 0.6, 28.0), BODY, th.text);
+            i.gfx.text(host, R::new(col.x, y + 3.0, col.w * 0.6, 28.0), i.look.body, th.text);
             row_action(i, col.right(), y + 4.0, "Reset", PageHit::SiteHttp(host.clone()));
             i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
             y += 34.0;
@@ -1985,7 +2526,7 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     let u = i.page.usage.clone().unwrap_or(json!({}));
     let col = column(st, 860.0);
     i.gfx.clip(st);
-    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
     y = title_block(i, col, y, "Control", if have { "What each tab costs, right now. Updates every second." } else { "Measuring…" });
 
     // Four totals, side by side.
@@ -1996,30 +2537,30 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
         ("NETWORK", t["net"].as_f64().map(|n| if n < 1.0 { "0 KB/s".into() } else { net(n) }), "pages, all tabs"),
         ("PROCESSES", t["procs"].as_u64().map(|p| p.to_string()), "Lumen and its pages"),
     ];
-    let gap = S3;
+    let gap = i.look.s3;
     let tw = (col.w - 3.0 * gap) / 4.0;
     for (n, (label, value, note)) in tiles.into_iter().enumerate() {
         let r = R::new(col.x + n as f32 * (tw + gap), y, tw, 92.0);
-        i.gfx.round(r, R_LG, th.bg);
-        i.gfx.text(label, R::new(r.x + S4, r.y + S3, r.w - 2.0 * S4, 16.0), CAPTION, th.faint);
+        i.gfx.round(r, i.look.r_lg, th.bg);
+        i.gfx.text(label, R::new(r.x + i.look.s4, r.y + i.look.s3, r.w - 2.0 * i.look.s4, 16.0), i.look.caption, th.faint);
         let (v, c) = match value {
             Some(v) => (v, th.text),
             None => ("—".to_string(), th.faint),
         };
-        i.gfx.text(&v, R::new(r.x + S4, r.y + 28.0, r.w - 2.0 * S4, 40.0), BIG_NUM, c);
-        i.gfx.text(note, R::new(r.x + S4, r.y + 68.0, r.w - 2.0 * S4, 18.0), SMALL, th.faint);
+        i.gfx.text(&v, R::new(r.x + i.look.s4, r.y + 28.0, r.w - 2.0 * i.look.s4, 40.0), i.look.big_num, c);
+        i.gfx.text(note, R::new(r.x + i.look.s4, r.y + 68.0, r.w - 2.0 * i.look.s4, 18.0), i.look.small, th.faint);
     }
-    y += 92.0 + S5;
+    y += 92.0 + i.look.s5;
 
     // The table. Columns hang off the right edge so they line up from row to row.
     let net_r = col.right() - 80.0;
     let cpu_r = net_r - 96.0;
     let mem_r = cpu_r - 72.0;
-    let bar_x = mem_r - 80.0 - S4 - 96.0;
-    let name_w = (bar_x - S4 - col.x).max(80.0);
-    i.gfx.text("TAB", R::new(col.x, y, 200.0, 20.0), CAPTION, th.faint);
+    let bar_x = mem_r - 80.0 - i.look.s4 - 96.0;
+    let name_w = (bar_x - i.look.s4 - col.x).max(80.0);
+    i.gfx.text("TAB", R::new(col.x, y, 200.0, 20.0), i.look.caption, th.faint);
     for (label, right) in [("MEMORY", mem_r), ("CPU", cpu_r), ("NETWORK", net_r)] {
-        i.gfx.text(label, R::new(right - 90.0, y, 90.0, 20.0), CAPTION.align(Align::Right), th.faint);
+        i.gfx.text(label, R::new(right - 90.0, y, 90.0, 20.0), i.look.caption.align(Align::Right), th.faint);
     }
     y += 24.0;
     i.gfx.line(col.x, y, col.right(), y, th.line, 1.0);
@@ -2054,23 +2595,23 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
         rows.push(UsageRow { id: 0, name: name.into(), state, mem: v["mem"].as_f64().unwrap_or(0.0), cpu: v["cpu"].as_f64().unwrap_or(0.0), net: None, live: true, unload: false });
     }
     for (n, row) in rows.iter().enumerate() {
-        let r = R::new(col.x - S2, y + 2.0, col.w + 2.0 * S2, ROW_H - 4.0);
+        let r = R::new(col.x - i.look.s2, y + 2.0, col.w + 2.0 * i.look.s2, ROW_H - 4.0);
         // Tab rows light up; the two rows that are not tabs are only there to add up.
         let hov = row.id != 0 && i.is_hover(&Hit::Page(PageHit::Row(row.id)));
         if row.id != 0 {
             i.hit(r, Hit::Page(PageHit::Row(row.id)));
         }
         if hov {
-            i.gfx.round(r, R_MD, th.hover);
+            i.gfx.round(r, i.look.r_md, th.hover);
         }
         let c_text = if row.live { th.text } else { th.faint };
         // A live tab with no process found yet has no figures, not zeros.
         let known = row.live && row.mem > 0.0;
-        let nw = i.gfx.measure(&row.name, BODY).min(name_w - 90.0).max(40.0);
-        i.gfx.text(&row.name, R::new(col.x, y, nw + 2.0, ROW_H), BODY, c_text);
+        let nw = i.gfx.measure(&row.name, i.look.body).min(name_w - 90.0).max(40.0);
+        i.gfx.text(&row.name, R::new(col.x, y, nw + 2.0, ROW_H), i.look.body, c_text);
         if !row.state.is_empty() {
             let c = if row.state == "Active" { th.accent } else { th.faint };
-            i.gfx.text(row.state, R::new(col.x + nw + S3, y, 90.0, ROW_H), SMALL, c);
+            i.gfx.text(row.state, R::new(col.x + nw + i.look.s3, y, 90.0, ROW_H), i.look.small, c);
         }
         if known {
             // Share of everything Lumen uses: a track and a fill, so the heavy rows show.
@@ -2092,7 +2633,7 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
         for (k, (v, right)) in vals.iter().zip([mem_r, cpu_r, net_r]).enumerate() {
             let strong = k == 0 && row.live;
             let c = if !row.live || v == "—" { th.faint } else if k == 0 { th.text } else { th.dim };
-            i.gfx.text(v, R::new(right - 90.0, y, 90.0, ROW_H), Font::ui(13.0, if strong { 550 } else { 400 }).align(Align::Right), c);
+            i.gfx.text(v, R::new(right - 90.0, y, 90.0, ROW_H), i.look.font(13.0, if strong { 550 } else { 400 }).align(Align::Right), c);
         }
         if row.unload {
             row_action(i, col.right(), y + (ROW_H - 28.0) / 2.0, "Unload", PageHit::Unload(row.id));
@@ -2104,15 +2645,15 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     }
     // The sum, set apart: what the whole browser is using.
     i.gfx.line(col.x, y, col.right(), y, th.faint.alpha(0.5), 1.0);
-    i.gfx.text("Total", R::new(col.x, y, 200.0, ROW_H), BODY_STRONG, th.text);
+    i.gfx.text("Total", R::new(col.x, y, 200.0, ROW_H), i.look.body_strong, th.text);
     let totals = [t["mem"].as_f64().map(mem), t["cpu"].as_f64().map(cpu), t["net"].as_f64().map(net)];
     for (v, right) in totals.iter().zip([mem_r, cpu_r, net_r]) {
         let text = v.clone().unwrap_or_else(|| "—".into());
-        i.gfx.text(&text, R::new(right - 90.0, y, 90.0, ROW_H), BODY_STRONG.align(Align::Right), if v.is_some() { th.text } else { th.faint });
+        i.gfx.text(&text, R::new(right - 90.0, y, 90.0, ROW_H), i.look.mono_strong.align(Align::Right), if v.is_some() { th.text } else { th.faint });
     }
-    y += ROW_H + S5 + S2;
+    y += ROW_H + i.look.s5 + i.look.s2;
 
-    i.gfx.text("Limits", R::new(col.x, y, 300.0, 30.0), H2, th.text);
+    i.gfx.text("Limits", R::new(col.x, y, 300.0, 30.0), i.look.h2, th.text);
     y += 40.0;
     let items = limits_schema();
     for (n, it) in items.iter().enumerate() {
@@ -2206,6 +2747,114 @@ pub fn click(i: &mut Inner, p: PageHit) {
                 set(i, "accent", json!(c.hex()));
             }
         }
+        PageHit::Color(k) => {
+            let start = role_color(i, k, &s);
+            if let Some(c) = pick_color(i.hwnd_raw(), start) {
+                set(i, k, json!(c.hex()));
+            }
+        }
+        PageHit::ColorClear(k) => set(i, k, json!("")),
+        PageHit::Text("wallpaper") => {
+            if let Some(path) = pick_image(i.hwnd_raw()) {
+                set(i, "wallpaper", json!(path));
+            }
+        }
+        PageHit::Text(k) => {
+            let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
+            let cur = if k == "greeting" { cur } else { cur };
+            if let Some(a) = super::dialog::ask_fields(i.hwnd_raw(), "Edit", &[("Text", &cur)]) {
+                set(i, k, json!(a[0]));
+            }
+        }
+        PageHit::Fonts(k) => {
+            i.page.font_pick = Some(FontPick { key: k, filter: String::new(), scroll: 0.0, shown: Vec::new() });
+            i.invalidate();
+        }
+        PageHit::FontPin(n) => {
+            let (key, family) = match i.page.font_pick.as_ref() {
+                Some(p) if n == 0 => (p.key, font_default_key(p.key).to_string()),
+                Some(p) => match p.shown.get(n - 1) {
+                    Some(f) => (p.key, f.clone()),
+                    None => return,
+                },
+                None => return,
+            };
+            i.page.font_pick = None;
+            set(i, key, json!(family));
+        }
+        PageHit::FontClose => {
+            i.page.font_pick = None;
+            i.invalidate();
+        }
+        PageHit::ThemeSave => {
+            let name = super::dialog::ask_fields(i.hwnd_raw(), "Save this look", &[("Name", &i.page.theme_name.clone())])
+                .map(|a| a[0].trim().to_string())
+                .filter(|n| !n.is_empty());
+            let Some(name) = name else { return };
+            let mut list = style::saved_themes();
+            let mut file = style::ThemeFile::of(&s.settings);
+            file.name = name.clone();
+            // Saving under a name that is already there replaces it.
+            if let Some(at) = list.iter().position(|t| t.name == name) {
+                list[at] = file;
+            } else {
+                list.push(file);
+            }
+            style::save_themes(&list);
+            i.page.themes = Some(list);
+            i.page.flash = Some((format!("Saved \"{name}\""), std::time::Instant::now()));
+            i.invalidate();
+        }
+        PageHit::ThemeApply(n) => {
+            let list = style::saved_themes();
+            let Some(t) = list.get(n) else { return };
+            let mut next = s.settings.clone();
+            t.apply(&mut next);
+            set(i, "palette", json!(next.palette));
+            // set() sends one key at a time; the rest go with it in one message.
+            send(&i.proxy, json!({"t": "settings", "v": serde_json::to_value(&next).unwrap_or_default()}));
+        }
+        PageHit::ThemeDelete(n) => {
+            let mut list = style::saved_themes();
+            if n < list.len() {
+                let gone = list.remove(n);
+                style::save_themes(&list);
+                i.page.themes = Some(list);
+                i.page.flash = Some((format!("Removed \"{}\"", gone.name), std::time::Instant::now()));
+            }
+            i.invalidate();
+        }
+        PageHit::ThemeExport => {
+            let mut file = style::ThemeFile::of(&s.settings);
+            file.name = i.page.theme_name.clone();
+            let text = file.to_json();
+            if let Some(path) = pick_save(i.hwnd_raw(), &format!("{}.json", if file.name.is_empty() { "lumen-theme" } else { &file.name })) {
+                match std::fs::write(&path, text) {
+                    Ok(()) => i.page.flash = Some((format!("Exported to {}", path.rsplit(['\\', '/']).next().unwrap_or(&path)), std::time::Instant::now())),
+                    Err(_) => i.page.flash = Some(("Could not write that file".into(), std::time::Instant::now())),
+                }
+            }
+            i.invalidate();
+        }
+        PageHit::ThemeImport => {
+            let Some(path) = pick_open(i.hwnd_raw()) else { return };
+            let Some(t) = std::fs::read_to_string(&path).ok().and_then(|t| style::ThemeFile::from_json(&t)) else {
+                i.page.flash = Some(("That file is not a Lumen theme".into(), std::time::Instant::now()));
+                i.invalidate();
+                return;
+            };
+            let mut list = style::saved_themes();
+            if !t.name.is_empty() {
+                list.push(t.clone());
+                style::save_themes(&list);
+                i.page.themes = Some(list);
+            }
+            let mut next = s.settings.clone();
+            t.apply(&mut next);
+            send(&i.proxy, json!({"t": "settings", "v": serde_json::to_value(&next).unwrap_or_default()}));
+            i.page.flash = Some(("Imported".into(), std::time::Instant::now()));
+        }
+        PageHit::ResetGroup(group) => reset_group(i, group),
         PageHit::Engine(n) => set(i, "search", json!(ENGINES[n].1)),
         PageHit::Nav(n) => {
             if let Some(y) = i.page.sections.get(n) {
@@ -2374,8 +3023,63 @@ pub fn wheel(i: &mut Inner, delta: i32) -> bool {
     true
 }
 
-pub fn key(_i: &mut Inner, _vk: u32) -> bool {
-    false
+/// A key while the font list is open: Escape closes, Backspace thins the filter,
+/// Enter takes the first family, the arrows walk the list. Everything else is
+/// swallowed so typing never reaches the browser's shortcuts.
+pub fn key(i: &mut Inner, vk: u32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_RETURN, VK_UP};
+    let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
+    if i.page.font_pick.is_none() || down(VK_CONTROL.0) || down(VK_MENU.0) {
+        return false;
+    }
+    match vk {
+        v if v == VK_ESCAPE.0 as u32 => i.page.font_pick = None,
+        v if v == VK_BACK.0 as u32 => {
+            if let Some(p) = i.page.font_pick.as_mut() {
+                p.filter.pop();
+            }
+        }
+        v if v == VK_RETURN.0 as u32 => {
+            let (key, family) = match i.page.font_pick.as_ref() {
+                Some(p) => (p.key, p.shown.first().cloned()),
+                None => return false,
+            };
+            match family {
+                Some(f) => {
+                    i.page.font_pick = None;
+                    set(i, key, json!(f));
+                }
+                None => i.page.font_pick = None,
+            }
+        }
+        v if v == VK_DOWN.0 as u32 => {
+            if let Some(p) = i.page.font_pick.as_mut() {
+                p.scroll += 26.0;
+            }
+        }
+        v if v == VK_UP.0 as u32 => {
+            if let Some(p) = i.page.font_pick.as_mut() {
+                p.scroll = (p.scroll - 26.0).max(0.0);
+            }
+        }
+        _ => {}
+    }
+    i.invalidate();
+    true
+}
+
+/// A typed character while the font list is open: it goes into the filter.
+pub fn pick_char(i: &mut Inner, ch: u32) -> bool {
+    let Some(p) = i.page.font_pick.as_mut() else { return false };
+    if let Some(c) = char::from_u32(ch)
+        && !c.is_control()
+        && p.filter.chars().count() < 40
+    {
+        p.filter.push(c);
+        p.scroll = 0.0;
+        i.invalidate();
+    }
+    true
 }
 
 /// The Windows color dialog. Blocks while open, which is what a picker should do.

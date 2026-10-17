@@ -45,15 +45,54 @@ pub struct Settings {
     pub backdrop: String,
     /// "dark" | "light" | "system". Also drives prefers-color-scheme in pages.
     pub theme: String,
+    /// Where the chrome lives: "vertical" (the sidebar), "horizontal" (a top strip
+    /// like Chrome), or "hybrid" (a vertical tab sidebar under a top toolbar).
+    pub layout: String,
+    /// Horizontal layout: the bookmarks bar under the toolbar.
+    pub bm_bar: bool,
+    /// Custom color overrides, "#rrggbb". Empty means the palette's own color.
+    /// The background behind the page, the sidebar and toolbar, cards and fields,
+    /// the text and the dim text.
+    pub bg_color: String,
+    pub side_color: String,
+    pub surface_color: String,
+    pub text_color: String,
+    pub dim_color: String,
     /// "left" | "right"
     pub sidebar_side: String,
     pub sidebar_width: u32,
     pub compact: bool,
+    /// Height of one tab row in the sidebar, in px.
+    pub tab_row_h: u32,
+    /// Draw the site's icon in a tab row (off: the letter tile only).
+    pub show_favicons: bool,
+    /// The tab row's close button: "hover" | "always" | "off".
+    pub close_btn: String,
+    /// The footer's downloads, bookmarks and settings buttons.
+    pub footer_btns: bool,
+    /// The workspace switcher row at the top of the sidebar.
+    pub ws_row: bool,
     /// Space around the page, in px.
     pub gap: u32,
     /// Corner radius of the page, in px. 0 = square.
     pub radius: u32,
+    /// "compact" | "comfortable" | "roomy": scales the spacing, not the type.
+    pub density: String,
+    /// A hairline border around the page, so it is not just a hole in the window.
+    pub page_border: bool,
+    /// Old on/off switch. `motion` is the real setting; this stays so files from
+    /// before it still read as off when they said off.
     pub animations: bool,
+    /// "full" | "reduced" | "off". Reduced draws no movement; off is the same,
+    /// and also stops the loading spinner from turning. A file from before the
+    /// setting was split reads as empty here, and the old switch above decides.
+    #[serde(default = "missing")]
+    pub motion: String,
+    /// Motion speed, percent of the default durations. 50..200.
+    pub motion_speed: u32,
+    /// Follow Windows' "Show animations in Windows" (Accessibility). On: a system
+    /// that asks for less motion gets "reduced", whatever the setting says.
+    pub motion_system: bool,
     /// Search URL, `%s` is replaced by the query.
     pub search: String,
     /// Wallpaper image URL for the new tab page. Empty = none.
@@ -114,10 +153,45 @@ pub struct Settings {
     /// where Servo's smaller footprint pays. Empty means everything is WebView2.
     /// Needs a build with the `servo` feature; without it the list does nothing.
     pub servo_sites: Vec<String>,
-    /// Interface font: "segoe" | "instrument" | "figtree" | "atkinson".
+    /// Interface font: one of the bundled keys ("segoe", "instrument", "figtree",
+    /// "atkinson") or any installed Windows family name.
     pub ui_font: String,
-    /// Display font for the clock and page titles: "instrument" | "fraunces" | "newsreader".
+    /// Display font for the clock and page titles: "instrument" | "fraunces" |
+    /// "newsreader", or any installed Windows family name.
     pub display_font: String,
+    /// Monospace font for figures (the Control table, the memory readout):
+    /// "cascadia" for the bundled-ish default, or any installed family name.
+    pub mono_font: String,
+    /// Type scale, percent. 90..130.
+    pub font_scale: u32,
+    /// Weight of the display type: titles, headers, the clock. 300..800.
+    pub title_weight: u32,
+    /// Show the clock on the new tab page.
+    pub clock: bool,
+    /// 24-hour clock (off: 12-hour with am/pm).
+    pub clock_24h: bool,
+    /// Seconds after the minutes.
+    pub clock_seconds: bool,
+    /// "long" (Thursday, 17 October) | "short" (17 Oct) | "iso" (2026-10-17) | "off".
+    pub date_format: String,
+    /// The clock's type: "display" (the display font) | "ui".
+    pub clock_font: String,
+    /// Clock size in px; 0 follows the window's width.
+    pub clock_size: u32,
+    /// A line over the clock, your own words. Empty: none.
+    pub greeting: String,
+    /// New tab page background: "plain" | "wallpaper" (the file in `wallpaper`).
+    pub ntp_bg: String,
+    /// Soften the wallpaper (drawn from a small, upscaled copy).
+    pub wallpaper_blur: bool,
+    /// Dim the wallpaper, percent of black laid over it. 0..80.
+    pub wallpaper_dim: u32,
+    /// Columns of speed-dial tiles; 0 follows the window's width.
+    pub dial_cols: u32,
+    /// A speed-dial tile's size in px.
+    pub dial_tile: u32,
+    /// The search box on the new tab page.
+    pub ntp_search: bool,
     /// Let AI agents browse through the built-in MCP server on localhost.
     pub agent: bool,
     pub agent_port: u32,
@@ -166,12 +240,29 @@ impl Default for Settings {
             accent: String::new(),
             backdrop: "solid".into(),
             theme: "dark".into(),
+            layout: "vertical".into(),
+            bm_bar: false,
+            bg_color: String::new(),
+            side_color: String::new(),
+            surface_color: String::new(),
+            text_color: String::new(),
+            dim_color: String::new(),
             sidebar_side: "left".into(),
             sidebar_width: 240,
             compact: false,
+            tab_row_h: 32,
+            show_favicons: true,
+            close_btn: "hover".into(),
+            footer_btns: true,
+            ws_row: true,
             gap: 8,
             radius: 10,
+            density: "comfortable".into(),
+            page_border: false,
             animations: true,
+            motion: "full".into(),
+            motion_speed: 100,
+            motion_system: true,
             search: "https://duckduckgo.com/?q=%s".into(),
             wallpaper: String::new(),
             sleep_after_min: 5,
@@ -200,6 +291,22 @@ impl Default for Settings {
             servo_sites: Vec::new(),
             ui_font: "segoe".into(),
             display_font: "instrument".into(),
+            mono_font: "cascadia".into(),
+            font_scale: 100,
+            title_weight: 400,
+            clock: true,
+            clock_24h: true,
+            clock_seconds: false,
+            date_format: "long".into(),
+            clock_font: "display".into(),
+            clock_size: 0,
+            greeting: String::new(),
+            ntp_bg: "plain".into(),
+            wallpaper_blur: false,
+            wallpaper_dim: 25,
+            dial_cols: 0,
+            dial_tile: 60,
+            ntp_search: true,
             agent: false,
             agent_port: 47615,
             agent_shared_profile: false,
@@ -231,7 +338,7 @@ impl Default for Settings {
     }
 }
 
-const SETTINGS_VERSION: u32 = 2;
+const SETTINGS_VERSION: u32 = 3;
 /// Where the torrent port may live. High enough to dodge the usual listeners.
 pub(crate) const BT_PORT_MIN: u16 = 20000;
 pub(crate) const BT_PORT_MAX: u16 = 60000;
@@ -288,8 +395,51 @@ pub fn drive_command(template: &str, task: &str) -> Option<(String, Vec<String>)
     Some((program, it.collect()))
 }
 
+/// The looks that may be chosen, so a bad file cannot pick a fifth one.
+pub const LAYOUTS: [(&str, &str); 3] = [("vertical", "Vertical"), ("horizontal", "Horizontal"), ("hybrid", "Hybrid")];
+/// The motion modes. Reduced means no movement; off also stops the spinner.
+pub const MOTIONS: [(&str, &str); 3] = [("full", "Full"), ("reduced", "Reduced"), ("off", "Off")];
+/// The three spacing densities.
+pub const DENSITIES: [(&str, &str); 3] = [("compact", "Compact"), ("comfortable", "Comfortable"), ("roomy", "Roomy")];
+/// The tab row's close button.
+pub const CLOSE_BTNS: [(&str, &str); 3] = [("hover", "On hover"), ("always", "Always"), ("off", "Hidden")];
+/// The date line under the clock.
+pub const DATE_FORMATS: [(&str, &str); 4] = [("long", "Thursday, 17 October"), ("short", "17 Oct"), ("iso", "2026-10-17"), ("off", "Hidden")];
+
+/// A key a file from before this setting did not have: empty, so the reader can
+/// tell "not there" from "chose the default".
+fn missing() -> String {
+    String::new()
+}
+
+/// An option list holds one of its keys, or `default` when the file said
+/// something else.
+fn one_of(v: &mut String, keys: &[(&str, &str)], default: &str) {
+    if !keys.iter().any(|(k, _)| *k == v.as_str()) {
+        *v = default.to_string();
+    }
+}
+
+/// A "#rrggbb" override, or empty. Anything else is treated as no override.
+fn clean_color(v: &mut String) {
+    let s = v.trim().to_ascii_lowercase();
+    let ok = s.is_empty()
+        || (s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit()));
+    *v = if ok { s } else { String::new() };
+}
+
+/// A font name from the settings: a bundled key or an installed family. Trimmed
+/// and bounded; a name is never more than a line. Empty falls back to the default.
+fn clean_font(v: &mut String, default: &str) {
+    *v = v.trim().chars().take(64).collect();
+    if v.is_empty() {
+        *v = default.to_string();
+    }
+}
+
 impl Settings {
     /// Version 2 is the minimal redesign. Old look values were defaults, not choices.
+    /// Version 3 splits the motion switch into full/reduced/off.
     fn migrate(&mut self) {
         if self.version < 2 {
             let d = Settings::default();
@@ -303,6 +453,32 @@ impl Settings {
 
     /// Keep values inside sane bounds. A bad file must not break the browser.
     pub fn clamp(&mut self) {
+        // A file from before the motion setting: the old on/off switch decides.
+        if self.motion.is_empty() {
+            self.motion = if self.animations { "full" } else { "off" }.into();
+        }
+        one_of(&mut self.layout, &LAYOUTS, "vertical");
+        one_of(&mut self.motion, &MOTIONS, "full");
+        one_of(&mut self.density, &DENSITIES, "comfortable");
+        one_of(&mut self.close_btn, &CLOSE_BTNS, "hover");
+        one_of(&mut self.date_format, &DATE_FORMATS, "long");
+        for c in [&mut self.bg_color, &mut self.side_color, &mut self.surface_color, &mut self.text_color, &mut self.dim_color] {
+            clean_color(c);
+        }
+        clean_font(&mut self.ui_font, "segoe");
+        clean_font(&mut self.display_font, "instrument");
+        clean_font(&mut self.mono_font, "cascadia");
+        self.font_scale = self.font_scale.clamp(90, 130);
+        self.title_weight = self.title_weight.clamp(300, 800);
+        self.motion_speed = self.motion_speed.clamp(50, 200);
+        self.clock_size = if self.clock_size == 0 { 0 } else { self.clock_size.clamp(36, 200) };
+        self.wallpaper_dim = self.wallpaper_dim.min(80);
+        self.wallpaper = self.wallpaper.trim().to_string();
+        self.greeting = self.greeting.trim().chars().take(60).collect();
+        self.ntp_bg = if self.ntp_bg.trim().eq_ignore_ascii_case("wallpaper") { "wallpaper".into() } else { "plain".into() };
+        self.dial_cols = if self.dial_cols == 0 { 0 } else { self.dial_cols.clamp(3, 8) };
+        self.dial_tile = self.dial_tile.clamp(44, 96);
+        self.tab_row_h = self.tab_row_h.clamp(28, 48);
         self.sidebar_width = self.sidebar_width.clamp(232, 400);
         self.gap = self.gap.clamp(0, 32);
         self.radius = self.radius.clamp(0, 20);
@@ -573,5 +749,160 @@ mod tests {
         s.clear_on_exit = true;
         s.clamp();
         assert!(s.clear_on_exit);
+    }
+
+    /// A file from before every customization field still loads: the layout is
+    /// vertical, the fonts are the defaults, the clock is on, motion is full.
+    #[test]
+    fn an_old_settings_file_gets_vertical_and_the_default_look() {
+        let old = r#"{"version":2,"palette":"moss","theme":"dark","sidebar_width":300,"gap":4,"radius":0,
+            "ui_font":"figtree","display_font":"fraunces","animations":true,"speed_dial":false}"#;
+        let mut s: Settings = serde_json::from_str(old).expect("old file loads");
+        assert_eq!(s.version, 2);
+        s.migrate();
+        s.clamp();
+        assert_eq!(s.layout, "vertical");
+        assert_eq!(s.motion, "full");
+        assert_eq!(s.font_scale, 100);
+        assert_eq!(s.title_weight, 400);
+        assert!(s.clock && s.clock_24h && !s.clock_seconds);
+        assert_eq!(s.date_format, "long");
+        assert!(s.ntp_search);
+        assert_eq!(s.dial_tile, 60);
+        assert_eq!(s.tab_row_h, 32);
+        assert!(s.show_favicons);
+        assert_eq!(s.close_btn, "hover");
+        assert!(s.footer_btns && s.ws_row);
+        assert_eq!(s.density, "comfortable");
+        assert!(!s.page_border && !s.bm_bar);
+        // The choices that were in the file are still the person's.
+        assert_eq!(s.palette, "moss");
+        assert_eq!(s.sidebar_width, 300);
+        assert_eq!(s.ui_font, "figtree");
+        assert!(!s.speed_dial);
+        // The custom colours are unset, so the palette paints.
+        assert!(s.bg_color.is_empty() && s.side_color.is_empty() && s.surface_color.is_empty());
+        assert!(s.text_color.is_empty() && s.dim_color.is_empty());
+    }
+
+    /// The old animations switch still speaks: a file that said off reads as
+    /// motion off; a file that said on reads as full.
+    #[test]
+    fn the_old_animations_switch_migrates_to_motion() {
+        for (animations, want) in [(false, "off"), (true, "full")] {
+            let old = format!(r#"{{"version":2,"palette":"graphite","animations":{animations}}}"#);
+            let mut s: Settings = serde_json::from_str(&old).expect("old file loads");
+            s.migrate();
+            s.clamp();
+            assert_eq!(s.motion, want, "animations={animations}");
+        }
+        // A file that already has a motion choice keeps it.
+        let old = r#"{"version":2,"animations":false,"motion":"reduced"}"#;
+        let mut s: Settings = serde_json::from_str(old).expect("old file loads");
+        s.migrate();
+        s.clamp();
+        assert_eq!(s.motion, "reduced");
+    }
+
+    /// Every customization survives a save and a load.
+    #[test]
+    fn the_customization_round_trips() {
+        let mut s = Settings::default();
+        s.layout = "hybrid".into();
+        s.bm_bar = true;
+        s.bg_color = "#101820".into();
+        s.side_color = "#181818".into();
+        s.surface_color = "#20242c".into();
+        s.text_color = "#f2f2f2".into();
+        s.dim_color = "#9aa0a6".into();
+        s.ui_font = "Segoe UI Variable Text".into();
+        s.display_font = "Georgia".into();
+        s.mono_font = "Cascadia Mono".into();
+        s.font_scale = 115;
+        s.title_weight = 600;
+        s.clock = false;
+        s.clock_24h = false;
+        s.clock_seconds = true;
+        s.date_format = "iso".into();
+        s.clock_font = "ui".into();
+        s.clock_size = 120;
+        s.greeting = "Hello".into();
+        s.ntp_bg = "wallpaper".into();
+        s.wallpaper_blur = true;
+        s.wallpaper_dim = 40;
+        s.dial_cols = 5;
+        s.dial_tile = 72;
+        s.ntp_search = false;
+        s.tab_row_h = 40;
+        s.show_favicons = false;
+        s.close_btn = "always".into();
+        s.footer_btns = false;
+        s.ws_row = false;
+        s.density = "roomy".into();
+        s.page_border = true;
+        s.motion = "reduced".into();
+        s.motion_speed = 150;
+        s.motion_system = false;
+        s.clamp();
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).expect("to json")).expect("from json");
+        assert_eq!(back.layout, "hybrid");
+        assert!(back.bm_bar);
+        assert_eq!(back.bg_color, "#101820");
+        assert_eq!(back.side_color, "#181818");
+        assert_eq!(back.surface_color, "#20242c");
+        assert_eq!(back.text_color, "#f2f2f2");
+        assert_eq!(back.dim_color, "#9aa0a6");
+        assert_eq!(back.ui_font, "Segoe UI Variable Text");
+        assert_eq!(back.display_font, "Georgia");
+        assert_eq!(back.mono_font, "Cascadia Mono");
+        assert_eq!(back.font_scale, 115);
+        assert_eq!(back.title_weight, 600);
+        assert!(!back.clock && !back.clock_24h && back.clock_seconds);
+        assert_eq!(back.date_format, "iso");
+        assert_eq!(back.clock_font, "ui");
+        assert_eq!(back.clock_size, 120);
+        assert_eq!(back.greeting, "Hello");
+        assert_eq!(back.ntp_bg, "wallpaper");
+        assert!(back.wallpaper_blur);
+        assert_eq!(back.wallpaper_dim, 40);
+        assert_eq!(back.dial_cols, 5);
+        assert_eq!(back.dial_tile, 72);
+        assert!(!back.ntp_search);
+        assert_eq!(back.tab_row_h, 40);
+        assert!(!back.show_favicons);
+        assert_eq!(back.close_btn, "always");
+        assert!(!back.footer_btns && !back.ws_row);
+        assert_eq!(back.density, "roomy");
+        assert!(back.page_border);
+        assert_eq!(back.motion, "reduced");
+        assert_eq!(back.motion_speed, 150);
+        assert!(!back.motion_system);
+    }
+
+    /// Nonsense in the file is clamped, never trusted: a layout that is not one
+    /// of the three becomes vertical, colours that are not colours go away.
+    #[test]
+    fn a_bad_file_is_clamped() {
+        let old = r##"{"layout":"diagonal","motion":"warp","density":"huge","close_btn":"sometimes",
+            "date_format":"yesterday","bg_color":"not a color","text_color":"#GGGGGG",
+            "font_scale":900,"title_weight":90000,"motion_speed":0,"clock_size":5000,
+            "dial_cols":99,"dial_tile":1,"tab_row_h":400,"wallpaper_dim":900,"ntp_bg":"video"}"##;
+        let mut s: Settings = serde_json::from_str(old).expect("file loads");
+        s.clamp();
+        assert_eq!(s.layout, "vertical");
+        assert_eq!(s.motion, "full");
+        assert_eq!(s.density, "comfortable");
+        assert_eq!(s.close_btn, "hover");
+        assert_eq!(s.date_format, "long");
+        assert!(s.bg_color.is_empty() && s.text_color.is_empty());
+        assert_eq!(s.font_scale, 130);
+        assert_eq!(s.title_weight, 800);
+        assert_eq!(s.motion_speed, 50);
+        assert_eq!(s.clock_size, 200);
+        assert_eq!(s.dial_cols, 8);
+        assert_eq!(s.dial_tile, 44);
+        assert_eq!(s.tab_row_h, 48);
+        assert_eq!(s.wallpaper_dim, 80);
+        assert_eq!(s.ntp_bg, "plain");
     }
 }
