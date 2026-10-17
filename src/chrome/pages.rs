@@ -74,6 +74,10 @@ pub enum PageHit {
     BmImport,
     ClearHistory,
     ClearData,
+    /// Settings: write Lumen's browser entries and open Windows' Default apps page.
+    DefaultMake,
+    /// Settings: take Lumen's browser entries out again.
+    DefaultOff,
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +183,7 @@ enum Item {
     KeePass,
     AgentSetup,
     SitePerms,
+    DefaultBrowser,
 }
 
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
@@ -224,6 +229,7 @@ const KEYS: [(&str, &str); 21] = [
 fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
     use Item::*;
     vec![
+        ("General", vec![DefaultBrowser]),
         ("Appearance", vec![
             Colors,
             Themes,
@@ -1038,6 +1044,32 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "Connect an AI agent", hint, if on { 180.0 } else { 0.0 });
             if on {
                 draw_button(i, right, r.y + h / 2.0, "Copy setup command", PageHit::CopyAgent);
+            }
+            h
+        }
+        Item::DefaultBrowser => {
+            use crate::defaultapp::Status;
+            let st = crate::defaultapp::status();
+            let (label, mut hint) = match st {
+                Status::Default => ("Lumen is your default browser", "Links from other apps and web files open here.".to_string()),
+                Status::Listed => ("Not default", "Lumen is in Windows' list of browsers. Pick it there: Windows does not let an app pick itself.".to_string()),
+                Status::Absent => ("Not default", "Adds Lumen to Windows' list of browsers, then opens the page where you pick it.".to_string()),
+            };
+            // A fresh note (what the button just did) takes the hint line while it lasts.
+            if let Some((msg, at)) = &i.page.flash
+                && at.elapsed().as_secs_f32() < 4.0
+            {
+                hint = msg.clone();
+            }
+            let f = i.look.font(13.0, 450).align(Align::Center);
+            let make = "Make Lumen your default browser";
+            let (w_make, w_off) = (i.gfx.measure(make, f) + 26.0, i.gfx.measure("Unregister", f) + 26.0);
+            let both = st != Status::Absent;
+            let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, &hint, w_make + if both { w_off + 8.0 } else { 0.0 });
+            let cy = r.y + h / 2.0;
+            draw_button(i, right, cy, make, PageHit::DefaultMake);
+            if both {
+                draw_button(i, right - w_make - 8.0, cy, "Unregister", PageHit::DefaultOff);
             }
             h
         }
@@ -2644,6 +2676,16 @@ pub fn click(i: &mut Inner, p: PageHit) {
                 };
                 send(&i.proxy, json!({"t": "clearData", "since": since, "more": more}));
             }
+        }
+        PageHit::DefaultMake => {
+            let note = crate::defaultapp::make_default();
+            i.page.flash = Some((note, std::time::Instant::now()));
+            i.invalidate();
+        }
+        PageHit::DefaultOff => {
+            let note = crate::defaultapp::unregister();
+            i.page.flash = Some((note, std::time::Instant::now()));
+            i.invalidate();
         }
         PageHit::PermReset(n) => {
             if let Some((origin, kind, _)) = s.rules.get(n) {

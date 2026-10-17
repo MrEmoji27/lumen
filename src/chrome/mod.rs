@@ -5,7 +5,7 @@
 //! them unchanged. The address bar and new-tab search are real Win32 edit boxes;
 //! everything else is drawn.
 
-mod dialog;
+pub mod dialog;
 mod gfx;
 pub mod layout;
 mod motion;
