@@ -606,6 +606,28 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     if !headless() {
         app.focus_page();
     }
+    // Test hooks for the chrome screenshots (LUMEN_TEST_SHOT, see chrome/shot.rs):
+    // LUMEN_TEST_COMPACT=1 starts with the icon-only sidebar, LUMEN_TEST_PANEL=
+    // downloads|control|history|bookmarks|settings opens that page.
+    if cfg!(debug_assertions) {
+        if std::env::var_os("LUMEN_TEST_COMPACT").is_some() {
+            app.settings.compact = true;
+        }
+        let panel = match std::env::var("LUMEN_TEST_PANEL").as_deref() {
+            Ok("downloads") => Panel::Downloads,
+            Ok("control") => Panel::Control,
+            Ok("history") => Panel::History,
+            Ok("bookmarks") => Panel::Bookmarks,
+            Ok("settings") => Panel::Settings,
+            _ => Panel::None,
+        };
+        if panel != Panel::None || app.settings.compact {
+            app.set_panel(panel);
+        }
+        // LUMEN_TEST_SCRIPT: timed key/click/shot steps, see chrome/shot.rs.
+        #[cfg(debug_assertions)]
+        chrome::test_script(app.ctx.proxy.clone(), app.chrome.hwnd);
+    }
     // Test hook: LUMEN_TEST_PRIVATE=1 opens one normal and one private tab, so a
     // headless run can prove a private tab leaves no trace in session.json. The
     // private tab gets a url of its own: its Nav line in the log is the proof the
@@ -1135,6 +1157,13 @@ impl App {
         self.page_fs || self.user_fs
     }
 
+    /// Fullscreen as the layout sees it: the page fills the window. A panel (Downloads,
+    /// Control...) is drawn by the chrome, which fullscreen hides, so with one open the
+    /// window shows the chrome and its inset stage instead of a blank screen.
+    fn fullscreen_view(&self) -> bool {
+        self.fullscreen() && self.panel == Panel::None
+    }
+
     fn pinned_count(&self) -> usize {
         self.tabs.iter().filter(|t| t.pinned).count()
     }
@@ -1152,7 +1181,7 @@ impl App {
     /// The page rectangle, in window coordinates.
     fn stage(&self) -> (f64, f64, f64, f64) {
         let (w, h) = logical_size(&self.ctx);
-        if self.fullscreen() {
+        if self.fullscreen_view() {
             return (0.0, 0.0, w, h);
         }
         let side = self.sidebar_w();
@@ -1226,7 +1255,7 @@ impl App {
 
     fn layout(&mut self) {
         let (w, h) = logical_size(&self.ctx);
-        let fs = self.fullscreen();
+        let fs = self.fullscreen_view();
         self.chrome.set_visible(!fs);
         if !fs {
             let side = self.sidebar_w();
@@ -2468,8 +2497,9 @@ impl App {
 
     fn sample(&mut self) {
         self.next_sample = Some(Instant::now() + SAMPLE);
-        if let Some(env) = self.ctx.env.borrow().as_ref() {
-            monitor::sample(env, self.ctx.proxy.clone());
+        match self.ctx.env.borrow().as_ref() {
+            Some(env) => monitor::sample(env, self.ctx.proxy.clone()),
+            None => monitor::sample_host(self.ctx.proxy.clone()),
         }
     }
 
@@ -2589,6 +2619,10 @@ impl App {
     fn apply_settings(&mut self, mut new: Settings) {
         new.clamp();
         let old = std::mem::replace(&mut self.settings, new);
+        // Switching compact either way (Ctrl+B, the toggle) is a fresh start for the peek.
+        if old.compact != self.settings.compact {
+            self.peek = false;
+        }
         if old.theme != self.settings.theme {
             self.retheme();
         } else if old.backdrop != self.settings.backdrop {

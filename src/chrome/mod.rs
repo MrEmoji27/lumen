@@ -8,6 +8,11 @@
 mod anim;
 mod gfx;
 mod pages;
+#[cfg(debug_assertions)]
+mod shot;
+mod style;
+#[cfg(debug_assertions)]
+pub use shot::script as test_script;
 pub mod theme;
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
@@ -178,6 +183,8 @@ pub enum Hit {
     TabSnd(u64),
     NewTab,
     Gear,
+    /// The sidebar button: compact on or off, same as Ctrl+B.
+    Sidebar,
     Mem,
     DlFooter,
     AgentStop,
@@ -250,6 +257,8 @@ pub(crate) struct Inner {
     edit_brush: HBRUSH,
     ntp_brush: HBRUSH,
     editing: bool,
+    /// The address bar was opened while compact hid its edit box: focus it once the peek shows it.
+    focus_edit: bool,
     sugg: Vec<Sugg>,
     sel: usize,
     born: Instant,
@@ -277,6 +286,8 @@ const ID_NTP: usize = 102;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
+#[cfg(debug_assertions)]
+const TIMER_SHOT: usize = 4;
 
 fn send(proxy: &EventLoopProxy<Ev>, v: Value) {
     let _ = proxy.send_event(Ev::Ui(v.to_string()));
@@ -421,6 +432,7 @@ impl Chrome {
                 edit_brush: HBRUSH::default(),
                 ntp_brush: HBRUSH::default(),
                 editing: false,
+                focus_edit: false,
                 sugg: Vec::new(),
                 sel: 0,
                 born: Instant::now(),
@@ -436,6 +448,20 @@ impl Chrome {
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
             inner.borrow_mut().make_fonts();
+            // Debug: start with a page already scrolled, the way a visit to a long page leaves it.
+            #[cfg(debug_assertions)]
+            if let Some(px) = std::env::var("LUMEN_TEST_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+                let mut i = inner.borrow_mut();
+                i.page.scroll = px;
+                // As if that page had been open already, so only a shrinking page clamps it.
+                i.page.which = match std::env::var("LUMEN_TEST_PANEL").as_deref() {
+                    Ok("downloads") => "downloads",
+                    Ok("control") => "control",
+                    Ok("history") => "history",
+                    Ok("settings") => "settings",
+                    _ => "",
+                };
+            }
             Chrome { hwnd, inner }
         }
     }
@@ -659,7 +685,9 @@ impl Inner {
         }
     }
 
-    fn apply(&mut self, s: UiState) {
+    fn apply(&mut self, #[cfg_attr(not(debug_assertions), allow(unused_mut))] mut s: UiState) {
+        #[cfg(debug_assertions)]
+        shot::fake(&mut s);
         self.gfx.set_families(&s.settings.ui_font, &s.settings.display_font);
         if self.gfx.ui_family() != self.edit_face && !self.edit.is_invalid() {
             self.make_fonts();
@@ -672,6 +700,10 @@ impl Inner {
             dark_menus(s.dark);
         }
         let was_ntp = self.ntp_visible();
+        // A page opens at its top, also when it is the one that was open before.
+        if self.state.as_ref().map_or("none", |o| o.panel) != s.panel {
+            self.page.scroll = 0.0;
+        }
         self.state = Some(s);
         if !self.editing {
             self.sugg.clear();
@@ -688,6 +720,14 @@ impl Inner {
             }
         }
         self.layout_edits();
+        // Compact hid the edit box when the address bar opened; the peek has shown it now.
+        if self.focus_edit && self.editing && self.state.as_ref().is_some_and(|s| !s.compact()) {
+            self.focus_edit = false;
+            unsafe {
+                let _ = SetFocus(Some(self.edit));
+                SendMessageW(self.edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+            }
+        }
         self.spin();
         // The dim overlay is sized by App::layout; here it only follows the flag.
         let glance = self.state.as_ref().is_some_and(|s| s.glance);
@@ -743,7 +783,7 @@ impl Inner {
         let s = self.state.as_ref().unwrap();
         let ws_h = s.ws_h();
         if s.compact() {
-            R::new(sb.x + (sb.w - 36.0) / 2.0, 104.0 + ws_h, 36.0, 34.0)
+            R::new(sb.x + (sb.w - 36.0) / 2.0, 140.0 + ws_h, 36.0, 34.0)
         } else {
             R::new(sb.x + 8.0, 46.0 + ws_h, sb.w - 16.0, 34.0)
         }
@@ -792,6 +832,7 @@ impl Inner {
             send(&self.proxy, json!({"t": "peek", "on": true}));
         }
         let url = s.active_tab().filter(|t| t.status != "new").map(|t| t.url.clone()).unwrap_or_default();
+        self.focus_edit = s.compact();
         self.editing = true;
         unsafe {
             SetWindowTextW(self.edit, &HSTRING::from(url)).ok();
@@ -806,9 +847,13 @@ impl Inner {
             return;
         }
         self.editing = false;
+        self.focus_edit = false;
         self.renaming = None;
         self.sugg.clear();
-        if self.state.as_ref().is_some_and(|s| s.settings.compact) {
+        // Peek ends with the edit, whatever the compact setting says now: Ctrl+B while the
+        // sidebar was peeking turns compact off, and a peek left on would pin the sidebar open
+        // the next time compact is switched on.
+        if self.state.as_ref().is_some_and(|s| s.settings.compact || s.peek) {
             send(&self.proxy, json!({"t": "peek", "on": false}));
         }
         self.layout_edits();
@@ -882,6 +927,26 @@ impl Inner {
         if !self.gfx.begin(rc.right as u32, rc.bottom as u32, th.bg) {
             return;
         }
+        self.draw_all(&s);
+        self.gfx.end();
+        // The frame timer runs only while something moves.
+        if self.anim.moving != self.animating {
+            self.animating = self.anim.moving;
+            unsafe {
+                if self.animating {
+                    SetTimer(Some(self.hwnd), TIMER_ANIM, 16, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        shot::after_paint(self);
+    }
+
+    /// One whole frame, onto whatever target the gfx has begun. Shared by the window and the debug shot.
+    fn draw_all(&mut self, s: &UiState) {
+        let th = self.theme;
         self.hits.clear();
         self.anim.enabled = s.settings.animations && anim::system_allows();
         self.anim.begin();
@@ -900,20 +965,8 @@ impl Inner {
                 self.draw_ntp(st, &s);
             }
         }
-        self.draw_sidebar(&s);
-        self.gfx.end();
+        self.draw_sidebar(s);
         self.anim.end();
-        // The frame timer runs only while something moves.
-        if self.anim.moving != self.animating {
-            self.animating = self.anim.moving;
-            unsafe {
-                if self.animating {
-                    SetTimer(Some(self.hwnd), TIMER_ANIM, 16, None);
-                } else {
-                    let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
-                }
-            }
-        }
     }
 
     fn hit(&mut self, r: R, h: Hit) {
@@ -959,6 +1012,7 @@ impl Inner {
             self.button(R::new(x, 8.0, 28.0, 28.0), "close", Hit::Close, true);
             self.button(R::new(x, 38.0, 28.0, 28.0), if s.maximized { "restore" } else { "max" }, Hit::Max, true);
             self.button(R::new(x, 68.0, 28.0, 28.0), "min", Hit::Min, true);
+            self.button(R::new(x, 104.0, 28.0, 28.0), "sidebar", Hit::Sidebar, true);
         } else {
             // Navigation on the left, window buttons on the right edge, on either side.
             let (nav_x, win_x) = (sb.x + 8.0, sb.right() - 8.0 - 86.0);
@@ -970,6 +1024,11 @@ impl Inner {
             ];
             for (i, (icon, h, en)) in navs.into_iter().enumerate() {
                 self.button(R::new(nav_x + i as f32 * 29.0, 9.0, 28.0, 28.0), icon, h, en);
+            }
+            // After the three arrows, set apart: it changes the sidebar, not the page.
+            let tog = R::new(nav_x + 3.0 * 29.0 + 6.0, 9.0, 28.0, 28.0);
+            if tog.right() + 6.0 <= win_x {
+                self.button(tog, "sidebar", Hit::Sidebar, true);
             }
             let wins = [("min", Hit::Min), (if s.maximized { "restore" } else { "max" }, Hit::Max), ("close", Hit::Close)];
             for (i, (icon, h)) in wins.into_iter().enumerate() {
@@ -1084,7 +1143,7 @@ impl Inner {
         }
 
         // Tabs.
-        let list_top = (if compact { 148.0 } else if offer { 122.0 } else { 90.0 }) + ws_h;
+        let list_top = (if compact { 184.0 } else if offer { 122.0 } else { 90.0 }) + ws_h;
         let list = R::new(sb.x, list_top, sb.w, sb.h - list_top - 40.0);
         self.gfx.clip(list);
         let mut y = list.y - self.scroll;
@@ -1262,9 +1321,10 @@ impl Inner {
         let busy_n = s.downloads.iter().filter(|d| matches!(d.state, "progress" | "paused" | "seeding")).count();
         if busy_n > 0 {
             let t = if busy_n > 9 { "9+".to_string() } else { busy_n.to_string() };
+            // A small disc on the ring's upper right, clear of the arrow.
             let d = 13.0;
-            let bx = dl.right() - 5.0 - d;
-            let by = dl.y - 3.0;
+            let bx = dl.x + 14.0 + 9.0 - d / 2.0;
+            let by = dl.y + 14.0 - 9.0 - d / 2.0;
             self.gfx.circle(bx + d / 2.0, by + d / 2.0, d / 2.0, th.accent);
             self.gfx.text(&t, R::new(bx, by + 0.5, d, d), Font::ui(9.0, 700).align(Align::Center), th.bg);
         } else if s.dl_unseen {
@@ -1315,7 +1375,9 @@ impl Inner {
             let base = if active { th.press } else { th.raise };
             self.gfx.round(r, 8.0, if active { base } else { base.mix(th.hover, h) });
         } else if !active && h > 0.01 {
-            self.gfx.round(r, 8.0, th.hover.alpha(h));
+            // Held down: one step further than hovering, so a click feels received.
+            let pressed = hov && self.press.as_ref() == Some(&Hit::Tab(t.id));
+            self.gfx.round(r, 8.0, if pressed { th.press } else { th.hover.alpha(h) });
         }
         self.hit(r, Hit::Tab(t.id));
         self.draw_tab_body(t, r, s, pinned, hov || active);
@@ -1604,6 +1666,14 @@ impl Inner {
             Hit::TabX(id) => send(p, json!({"t": "close", "id": id})),
             Hit::TabSnd(id) => send(p, json!({"t": "mute", "id": id})),
             Hit::NewTab => send(p, json!({"t": "newtab"})),
+            Hit::Sidebar => {
+                // The same change Ctrl+B makes: through the settings, so it is saved.
+                if let Some(s) = &self.state {
+                    let mut st = s.settings.clone();
+                    st.compact = !st.compact;
+                    send(p, json!({"t": "settings", "v": st}));
+                }
+            }
             Hit::Gear => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "settings");
                 send(p, json!({"t": "panel", "open": open, "which": "settings"}));
@@ -2076,6 +2146,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if wp.0 == TIMER_SPIN || wp.0 == TIMER_CLOCK || wp.0 == TIMER_ANIM {
                     i.invalidate();
                 }
+                #[cfg(debug_assertions)]
+                if wp.0 == TIMER_SHOT {
+                    shot::capture(&mut i);
+                }
                 LRESULT(0)
             }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
@@ -2120,6 +2194,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let bg = if is_ntp { i.theme.bg } else { i.theme.raise };
                 let _ = SetBkColor(hdc, COLORREF(bg.colorref()));
                 LRESULT(if is_ntp { i.ntp_brush.0 as isize } else { i.edit_brush.0 as isize })
+            }
+            #[cfg(debug_assertions)]
+            shot::WM_HOVER => {
+                i.mouse_move(x, y);
+                LRESULT(0)
+            }
+            #[cfg(debug_assertions)]
+            shot::WM_SHOT => {
+                shot::requested(&i);
+                LRESULT(0)
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             _ => {
