@@ -254,6 +254,8 @@ pub(crate) struct Inner {
     edit_brush: HBRUSH,
     ntp_brush: HBRUSH,
     editing: bool,
+    /// The address bar was opened while compact hid its edit box: focus it once the peek shows it.
+    focus_edit: bool,
     sugg: Vec<Sugg>,
     sel: usize,
     born: Instant,
@@ -427,6 +429,7 @@ impl Chrome {
                 edit_brush: HBRUSH::default(),
                 ntp_brush: HBRUSH::default(),
                 editing: false,
+                focus_edit: false,
                 sugg: Vec::new(),
                 sel: 0,
                 born: Instant::now(),
@@ -445,7 +448,16 @@ impl Chrome {
             // Debug: start with a page already scrolled, the way a visit to a long page leaves it.
             #[cfg(debug_assertions)]
             if let Some(px) = std::env::var("LUMEN_TEST_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
-                inner.borrow_mut().page.scroll = px;
+                let mut i = inner.borrow_mut();
+                i.page.scroll = px;
+                // As if that page had been open already, so only a shrinking page clamps it.
+                i.page.which = match std::env::var("LUMEN_TEST_PANEL").as_deref() {
+                    Ok("downloads") => "downloads",
+                    Ok("control") => "control",
+                    Ok("history") => "history",
+                    Ok("settings") => "settings",
+                    _ => "",
+                };
             }
             Chrome { hwnd, inner }
         }
@@ -701,6 +713,14 @@ impl Inner {
             }
         }
         self.layout_edits();
+        // Compact hid the edit box when the address bar opened; the peek has shown it now.
+        if self.focus_edit && self.editing && self.state.as_ref().is_some_and(|s| !s.compact()) {
+            self.focus_edit = false;
+            unsafe {
+                let _ = SetFocus(Some(self.edit));
+                SendMessageW(self.edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+            }
+        }
         self.spin();
         // The dim overlay is sized by App::layout; here it only follows the flag.
         let glance = self.state.as_ref().is_some_and(|s| s.glance);
@@ -805,6 +825,7 @@ impl Inner {
             send(&self.proxy, json!({"t": "peek", "on": true}));
         }
         let url = s.active_tab().filter(|t| t.status != "new").map(|t| t.url.clone()).unwrap_or_default();
+        self.focus_edit = s.compact();
         self.editing = true;
         unsafe {
             SetWindowTextW(self.edit, &HSTRING::from(url)).ok();
@@ -819,9 +840,13 @@ impl Inner {
             return;
         }
         self.editing = false;
+        self.focus_edit = false;
         self.renaming = None;
         self.sugg.clear();
-        if self.state.as_ref().is_some_and(|s| s.settings.compact) {
+        // Peek ends with the edit, whatever the compact setting says now: Ctrl+B while the
+        // sidebar was peeking turns compact off, and a peek left on would pin the sidebar open
+        // the next time compact is switched on.
+        if self.state.as_ref().is_some_and(|s| s.settings.compact || s.peek) {
             send(&self.proxy, json!({"t": "peek", "on": false}));
         }
         self.layout_edits();

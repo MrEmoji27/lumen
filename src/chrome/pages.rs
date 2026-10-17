@@ -62,6 +62,8 @@ struct Slide {
 #[derive(Default)]
 pub struct Page {
     pub scroll: f32,
+    /// The panel the scroll offset belongs to.
+    pub(super) which: &'static str,
     max: f32,
     pub usage: Option<Value>,
     slide: Option<Slide>,
@@ -321,6 +323,25 @@ fn value_at(scale: Scale, r: f32) -> f32 {
 // -------------------------------------------------------------------- draw
 
 pub fn draw(i: &mut Inner, st: R, s: &UiState) {
+    // Each page starts at its top. The scroll offset used to survive a change of page, so a
+    // long Settings page left Downloads and Control scrolled off the top of a short page: blank.
+    if i.page.which != s.panel {
+        i.page.which = s.panel;
+        i.page.scroll = 0.0;
+    }
+    let first = i.hits.len();
+    draw_page(i, st, s);
+    // The content can shrink under the offset (a finished row cleared, a window made taller).
+    // The height is only known after drawing, so draw once more from the clamped offset.
+    if i.page.scroll > i.page.max {
+        i.page.scroll = i.page.max;
+        i.hits.truncate(first);
+        i.gfx.round(st, s.settings.radius as f32, i.theme.raise);
+        draw_page(i, st, s);
+    }
+}
+
+fn draw_page(i: &mut Inner, st: R, s: &UiState) {
     i.page.sliders.clear();
     i.page.view = st;
     match s.panel {

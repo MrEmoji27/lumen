@@ -2489,8 +2489,9 @@ impl App {
 
     fn sample(&mut self) {
         self.next_sample = Some(Instant::now() + SAMPLE);
-        if let Some(env) = self.ctx.env.borrow().as_ref() {
-            monitor::sample(env, self.ctx.proxy.clone());
+        match self.ctx.env.borrow().as_ref() {
+            Some(env) => monitor::sample(env, self.ctx.proxy.clone()),
+            None => monitor::sample_host(self.ctx.proxy.clone()),
         }
     }
 
@@ -2610,6 +2611,10 @@ impl App {
     fn apply_settings(&mut self, mut new: Settings) {
         new.clamp();
         let old = std::mem::replace(&mut self.settings, new);
+        // Switching compact either way (Ctrl+B, the toggle) is a fresh start for the peek.
+        if old.compact != self.settings.compact {
+            self.peek = false;
+        }
         if old.theme != self.settings.theme {
             self.retheme();
         } else if old.backdrop != self.settings.backdrop {
