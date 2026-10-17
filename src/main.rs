@@ -625,6 +625,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             app.set_panel(panel);
         }
         // LUMEN_TEST_SCRIPT: timed key/click/shot steps, see chrome/shot.rs.
+        #[cfg(debug_assertions)]
         chrome::test_script(app.ctx.proxy.clone(), app.chrome.hwnd);
     }
     // Test hook: LUMEN_TEST_PRIVATE=1 opens one normal and one private tab, so a

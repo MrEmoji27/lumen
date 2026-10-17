@@ -2196,6 +2196,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(if is_ntp { i.ntp_brush.0 as isize } else { i.edit_brush.0 as isize })
             }
             #[cfg(debug_assertions)]
+            shot::WM_HOVER => {
+                i.mouse_move(x, y);
+                LRESULT(0)
+            }
+            #[cfg(debug_assertions)]
             shot::WM_SHOT => {
                 shot::requested(&i);
                 LRESULT(0)

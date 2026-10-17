@@ -1104,7 +1104,7 @@ fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint: &str) -> f
     i.gfx.circle(cx, area.y + 28.0, 28.0, th.bg);
     i.gfx.icon(icon, cx - 12.0, area.y + 16.0, 24.0, th.faint);
     i.gfx.text(title, R::new(area.x, area.y + 70.0, area.w, 26.0), Font::ui(15.0, 550).align(Align::Center), th.text);
-    i.gfx.text_wrap(hint, R::new(cx - 190.0, area.y + 100.0, 380.0, 50.0), SMALL.align(Align::Center), th.faint);
+    i.gfx.text_wrap(hint, R::new(cx - 210.0, area.y + 100.0, 420.0, 50.0), SMALL.align(Align::Center), th.faint);
     area.y + 150.0
 }
 
@@ -1180,7 +1180,7 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
 
     if s.downloads.is_empty() {
         let area = R::new(col.x, y + 56.0, col.w, 200.0);
-        empty_state(i, area, "download", "No downloads yet", "Files you download show up here with their speed and time left. Copy a link or magnet, then press Add link.");
+        empty_state(i, area, "download", "No downloads yet", "Files you download show up here. To start one yourself, copy a link or magnet and press Add link.");
         i.gfx.unclip();
         i.page.max = 0.0;
         close_button(i, st);
@@ -1284,7 +1284,7 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     };
     if rows.is_empty() {
         let (icon, head, hint) = if history {
-            ("clock", "No history yet", "Pages you visit show up here, newest first, so you can find your way back.")
+            ("clock", "No history yet", "Pages you visit show up here, newest first.")
         } else {
             ("star", "No bookmarks yet", "Press Ctrl+D, or the star in the address bar, to keep a page here.")
         };

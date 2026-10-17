@@ -82,6 +82,8 @@ static NEXT_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None)
 
 /// WM_APP + 1: a script step asks the chrome for a shot of what it shows now (after a short wait).
 pub const WM_SHOT: u32 = 0x8001;
+/// WM_APP + 2: a script step puts the pointer at a point and leaves it there.
+pub const WM_HOVER: u32 = 0x8002;
 
 /// A script step wants a shot: remember its name and arm the timer.
 pub fn requested(i: &Inner) {
@@ -145,6 +147,12 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                     "shot" => {
                         *NEXT_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(rest.trim().to_string());
                         let _ = PostMessageW(Some(hwnd), WM_SHOT, WPARAM(0), LPARAM(0));
+                    }
+                    "hover" => {
+                        // A mouse move that stays: the real one asks Windows to say when the
+                        // pointer leaves, and a pointer that is not really there leaves at once.
+                        let (x, y) = xy(&args);
+                        let _ = PostMessageW(Some(hwnd), WM_HOVER, WPARAM(0), LPARAM((y << 16) | (x & 0xffff)));
                     }
                     "move" | "click" | "rclick" => {
                         let (x, y) = xy(&args);
