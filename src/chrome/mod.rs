@@ -2562,10 +2562,13 @@ impl Inner {
                 let fs = lo.font(big * 0.34, 500);
                 let ws = self.gfx.measure(&ss, fs);
                 self.gfx.text(&ss, R::new(cx + 6.0, row.y + row_h * 0.28, ws + 8.0, row_h * 0.5), fs, th.dim.alpha(t1));
-            } else if !lo.clock_24h {
+                cx += ws + 14.0;
+            }
+            if !lo.clock_24h {
+                // am/pm, in either shape: the hour alone does not say.
                 let fs = lo.font(big * 0.28, 500);
                 let wsfx = self.gfx.measure(now.suffix(), fs);
-                self.gfx.text(now.suffix(), R::new(cx + 8.0, row.y + row_h * 0.30, wsfx + 8.0, row_h * 0.5), fs, th.dim.alpha(t1));
+                self.gfx.text(now.suffix(), R::new(cx + 4.0, row.y + row_h * 0.30, wsfx + 8.0, row_h * 0.5), fs, th.dim.alpha(t1));
             }
         }
         let date = now.date(lo.date_fmt);
