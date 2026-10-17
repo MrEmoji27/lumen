@@ -1302,6 +1302,15 @@ pub fn try_suspend(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     }
 }
 
+/// Thaw a page `try_suspend` froze.
+pub fn resume(wv: &WebView) {
+    if let Ok(c3) = wv.webview().cast::<ICoreWebView2_3>() {
+        unsafe {
+            let _ = c3.Resume();
+        }
+    }
+}
+
 pub fn set_muted(wv: &WebView, muted: bool) {
     if let Ok(c8) = wv.webview().cast::<ICoreWebView2_8>() {
         unsafe {

@@ -133,6 +133,60 @@ struct Tab {
     typed: Option<Typed>,
 }
 
+/// What the sleep policy needs to know about a hidden tab.
+#[derive(Clone, Copy)]
+struct SleepState {
+    audio: bool,
+    trimmed: bool,
+    suspended: bool,
+    pinned: bool,
+}
+
+/// One thing the sleep policy does to a hidden tab.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum SleepStep {
+    /// Lower the memory target. The page keeps running.
+    Trim,
+    /// Freeze it.
+    Suspend,
+    /// Drop the page, keep the tab.
+    Discard,
+}
+
+/// The step a hidden tab is owed `idle` after it was hidden, if any. A tab that
+/// is playing audio is trimmed and nothing more: frozen or dropped, the music
+/// would stop. Its clock restarts when the audio does (see `Ev::Audio`).
+fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Duration) -> Option<SleepStep> {
+    if t.audio {
+        return (idle >= TRIM_AFTER && !t.trimmed).then_some(SleepStep::Trim);
+    }
+    if idle >= discard && !t.pinned {
+        Some(SleepStep::Discard)
+    } else if idle >= sleep && !t.suspended {
+        Some(SleepStep::Suspend)
+    } else if idle >= TRIM_AFTER && !t.trimmed {
+        Some(SleepStep::Trim)
+    } else {
+        None
+    }
+}
+
+/// How long after hiding the tab's next step comes, for the loop's next wake.
+fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> Option<Duration> {
+    if !t.trimmed {
+        Some(TRIM_AFTER)
+    } else if t.audio {
+        None
+    } else if !t.suspended {
+        Some(sleep)
+    } else if !t.pinned {
+        Some(discard)
+    } else {
+        // Pinned and frozen: nothing left to do to it.
+        None
+    }
+}
+
 /// A bare host typed in the address bar (`youtube.musik`, not a link, not a
 /// search). If the name does not exist, the person meant words: search for them.
 struct Typed {
@@ -177,6 +231,11 @@ impl Tab {
             visible: false,
             typed: None,
         }
+    }
+
+    /// What the sleep policy looks at.
+    fn sleep_state(&self) -> SleepState {
+        SleepState { audio: self.audio, trimmed: self.trimmed, suspended: self.suspended, pinned: self.pinned }
     }
 
     /// The tab has a live page, of whichever engine. A Servo tab has no WebView2.
@@ -2870,6 +2929,19 @@ impl App {
             Ev::Audio(id, on) => {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].audio = on;
+                    if on {
+                        // Sound from a page that was frozen a moment ago: let it go on.
+                        if self.tabs[i].suspended
+                            && let Some(v) = &self.tabs[i].view
+                        {
+                            engine::resume(v);
+                            self.tabs[i].suspended = false;
+                        }
+                    } else if self.tabs[i].hidden_at.is_some() {
+                        // The music stopped: the sleep timer starts now, not from the
+                        // minute the tab was hidden.
+                        self.tabs[i].hidden_at = Some(Instant::now());
+                    }
                     self.push();
                 }
             }
@@ -4441,27 +4513,14 @@ impl App {
 
     /// The next sleep-policy step of any hidden tab, in the past if one is due:
     /// trim at TRIM_AFTER, freeze at sleep_after_min, discard at discard_after_min.
-    /// A crashed page is already dead and audio plays on: nothing to do to those.
+    /// A crashed page is already dead; a page playing audio is only ever trimmed.
     fn next_tab_wake(&self) -> Option<Instant> {
         let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
         let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
         self.tabs
             .iter()
-            .filter(|t| t.has_page() && !t.audio && !t.crashed && !self.on_stage(t.id))
-            .filter_map(|t| {
-                let at = t.hidden_at?;
-                let step = if !t.trimmed {
-                    TRIM_AFTER
-                } else if !t.suspended {
-                    sleep
-                } else if !t.pinned {
-                    discard
-                } else {
-                    // Pinned and frozen: nothing left to do to it.
-                    return None;
-                };
-                Some(at + step)
-            })
+            .filter(|t| t.has_page() && !t.crashed && !self.on_stage(t.id))
+            .filter_map(|t| Some(t.hidden_at? + next_sleep_step_after(&t.sleep_state(), sleep, discard)?))
             .min()
     }
 
@@ -4520,23 +4579,27 @@ impl App {
                 continue;
             }
             let t = &mut self.tabs[i];
-            if !t.has_page() || t.audio {
+            if !t.has_page() {
                 continue;
             }
             let Some(at) = t.hidden_at else { continue };
-            let idle = now - at;
-            if idle >= discard && !t.pinned {
-                self.discard(i);
-                self.push();
-            } else if idle >= sleep && !t.suspended {
-                if let Some(v) = &t.view {
-                    engine::try_suspend(v, t.id, self.ctx.proxy.clone());
+            match due_sleep_step(&t.sleep_state(), now - at, sleep, discard) {
+                Some(SleepStep::Discard) => {
+                    self.discard(i);
+                    self.push();
                 }
-            } else if idle >= TRIM_AFTER && !t.trimmed {
-                if let Some(v) = &t.view {
-                    let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
+                Some(SleepStep::Suspend) => {
+                    if let Some(v) = &t.view {
+                        engine::try_suspend(v, t.id, self.ctx.proxy.clone());
+                    }
                 }
-                t.trimmed = true;
+                Some(SleepStep::Trim) => {
+                    if let Some(v) = &t.view {
+                        let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
+                    }
+                    t.trimmed = true;
+                }
+                None => {}
             }
         }
 
@@ -4967,7 +5030,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tab, classify_input, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
+    use super::{SleepState, SleepStep, TRIM_AFTER, Tab, classify_input, due_sleep_step, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
     #[test]
@@ -5078,5 +5141,46 @@ mod tests {
         assert_eq!(typed_verdict(true, false, 6), Forget);
         assert!(same_page("https://a.com", "https://A.com/"));
         assert!(!same_page("https://a.com", "https://b.com/"));
+    }
+
+    fn st(audio: bool, trimmed: bool, suspended: bool, pinned: bool) -> SleepState {
+        SleepState { audio, trimmed, suspended, pinned }
+    }
+
+    /// A tab playing audio is trimmed, never frozen and never dropped, however
+    /// long it has been hidden.
+    #[test]
+    fn sleep_policy_never_freezes_or_drops_a_playing_tab() {
+        use std::time::Duration;
+        let (sleep, discard) = (Duration::from_secs(300), Duration::from_secs(1800));
+        let hours = Duration::from_secs(5 * 3600);
+        // Playing and not yet trimmed: trim once, after the usual wait, and not before.
+        assert_eq!(due_sleep_step(&st(true, false, false, false), Duration::from_secs(1), sleep, discard), None);
+        assert_eq!(due_sleep_step(&st(true, false, false, false), TRIM_AFTER, sleep, discard), Some(SleepStep::Trim));
+        // An hour in, trimmed, still playing: nothing, ever.
+        assert_eq!(due_sleep_step(&st(true, true, false, false), hours, sleep, discard), None);
+        // Even straight from untrimmed after a very long hide: trim, not discard.
+        assert_eq!(due_sleep_step(&st(true, false, false, false), hours, sleep, discard), Some(SleepStep::Trim));
+        assert_eq!(next_sleep_step_after(&st(true, true, false, false), sleep, discard), None);
+        assert_eq!(next_sleep_step_after(&st(true, false, false, false), sleep, discard), Some(TRIM_AFTER));
+    }
+
+    /// Silent tabs keep the policy they always had; a tab whose audio just
+    /// stopped is silent, so its steps come back.
+    #[test]
+    fn sleep_policy_for_silent_tabs_is_unchanged() {
+        use std::time::Duration;
+        let (sleep, discard) = (Duration::from_secs(300), Duration::from_secs(1800));
+        let s = |x| Duration::from_secs(x);
+        assert_eq!(due_sleep_step(&st(false, false, false, false), s(10), sleep, discard), None);
+        assert_eq!(due_sleep_step(&st(false, false, false, false), s(31), sleep, discard), Some(SleepStep::Trim));
+        assert_eq!(due_sleep_step(&st(false, true, false, false), s(301), sleep, discard), Some(SleepStep::Suspend));
+        assert_eq!(due_sleep_step(&st(false, true, true, false), s(301), sleep, discard), None);
+        assert_eq!(due_sleep_step(&st(false, true, true, false), s(1801), sleep, discard), Some(SleepStep::Discard));
+        // Pinned tabs freeze but are never dropped.
+        assert_eq!(due_sleep_step(&st(false, true, true, true), s(99999), sleep, discard), None);
+        assert_eq!(next_sleep_step_after(&st(false, true, true, true), sleep, discard), None);
+        assert_eq!(next_sleep_step_after(&st(false, true, false, false), sleep, discard), Some(sleep));
+        assert_eq!(next_sleep_step_after(&st(false, true, true, false), sleep, discard), Some(discard));
     }
 }
