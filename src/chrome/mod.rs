@@ -155,6 +155,26 @@ pub struct UiState {
     pub dl_unseen: bool,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
     pub upnp_port_open: bool,
+    /// The active page's zoom, in percent.
+    pub zoom: u32,
+    /// Sites with a zoom of their own: (host, percent).
+    pub zooms: Vec<(String, u32)>,
+    /// Cookies the active page's site has, once the lock has asked.
+    pub site_cookies: Option<usize>,
+    /// Tabs of the other workspaces, for the tab search. Private tabs never appear here:
+    /// they are not kept when a workspace is put away.
+    pub other_tabs: Vec<UiOther>,
+}
+
+/// A tab in a workspace that is not showing: enough to find it and bring it back.
+#[derive(Clone, Debug)]
+pub struct UiOther {
+    pub ws: usize,
+    /// Its place among that workspace's saved tabs.
+    pub idx: usize,
+    pub ws_name: String,
+    pub title: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug)]
