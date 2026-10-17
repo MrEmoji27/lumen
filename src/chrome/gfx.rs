@@ -100,7 +100,10 @@ pub struct Gfx {
     serif_family: String,
     /// Family names as DirectWrite sees them in the bundle (font files name themselves oddly).
     families: Vec<String>,
-    target: Option<ID2D1HwndRenderTarget>,
+    /// What every draw call goes to: the window's target, or (debug shots) a WIC bitmap's.
+    target: Option<ID2D1RenderTarget>,
+    /// The window's own target, kept for Resize.
+    hwnd_rt: Option<ID2D1HwndRenderTarget>,
     brush: Option<ID2D1SolidColorBrush>,
     round: Option<ID2D1StrokeStyle>,
     formats: RefCell<HashMap<Font, IDWriteTextFormat>>,
@@ -108,6 +111,17 @@ pub struct Gfx {
     /// Decoded favicons, per tab id. Dropped when the target is lost.
     pub bitmaps: HashMap<u64, ID2D1Bitmap>,
     pub dpi: f32,
+    /// Debug shots: the window's target and brush, set aside while a WIC target draws.
+    #[cfg(debug_assertions)]
+    parked: Option<Parked>,
+}
+
+#[cfg(debug_assertions)]
+struct Parked {
+    target: Option<ID2D1RenderTarget>,
+    brush: Option<ID2D1SolidColorBrush>,
+    bitmaps: HashMap<u64, ID2D1Bitmap>,
+    shot: IWICBitmap,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -158,12 +172,15 @@ impl Gfx {
                 ui_family: SYSTEM_UI.into(),
                 serif_family: "Instrument Serif".into(),
                 target: None,
+                hwnd_rt: None,
                 brush: None,
                 round,
                 formats: RefCell::new(HashMap::new()),
                 ellipsis: RefCell::new(HashMap::new()),
                 bitmaps: HashMap::new(),
                 dpi,
+                #[cfg(debug_assertions)]
+                parked: None,
             })
         }
     }
@@ -188,7 +205,8 @@ impl Gfx {
                 t.SetDpi(self.dpi, self.dpi);
                 t.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
                 self.brush = t.CreateSolidColorBrush(&Color(0.0, 0.0, 0.0, 1.0).d2d(), None).ok();
-                self.target = Some(t);
+                self.target = t.cast::<ID2D1RenderTarget>().ok();
+                self.hwnd_rt = Some(t);
                 self.bitmaps.clear();
             }
         }
@@ -197,7 +215,7 @@ impl Gfx {
 
     pub fn resize(&mut self, w: u32, h: u32, dpi: f32) {
         self.dpi = dpi;
-        if let Some(t) = &self.target {
+        if let Some(t) = &self.hwnd_rt {
             unsafe {
                 let _ = t.Resize(&D2D_SIZE_U { width: w.max(1), height: h.max(1) });
                 t.SetDpi(dpi, dpi);
@@ -224,13 +242,14 @@ impl Gfx {
             // Device lost (driver reset, sleep). Rebuild on the next frame.
             if r.is_err() {
                 self.target = None;
+                self.hwnd_rt = None;
                 self.brush = None;
                 self.bitmaps.clear();
             }
         }
     }
 
-    fn t(&self) -> &ID2D1HwndRenderTarget {
+    fn t(&self) -> &ID2D1RenderTarget {
         self.target.as_ref().unwrap()
     }
 
@@ -667,3 +686,82 @@ fn load_woff2(dw: &IDWriteFactory5, files: &[&[u8]]) -> Option<IDWriteFontCollec
     }
 }
 
+
+/// Debug-only screenshots. The window's Direct2D target cannot be read back (PrintWindow
+/// returns an empty frame), so the same drawing code runs once more into a WIC bitmap.
+#[cfg(debug_assertions)]
+impl Gfx {
+    /// Swap a WIC bitmap target in for the window's. Draw as usual, then `end_shot`.
+    pub fn begin_shot(&mut self, w: u32, h: u32) -> bool {
+        if self.parked.is_some() {
+            return false;
+        }
+        let Some(wic) = self.wic.clone() else { return false };
+        unsafe {
+            let Ok(bmp) = wic.CreateBitmap(w.max(1), h.max(1), &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand) else {
+                return false;
+            };
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 0.0,
+                dpiY: 0.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let Ok(t) = self.d2d.CreateWicBitmapRenderTarget(&bmp, &props) else { return false };
+            t.SetDpi(self.dpi, self.dpi);
+            t.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            let brush = t.CreateSolidColorBrush(&Color(0.0, 0.0, 0.0, 1.0).d2d(), None).ok();
+            self.parked = Some(Parked {
+                target: self.target.replace(t),
+                brush: std::mem::replace(&mut self.brush, brush),
+                bitmaps: std::mem::take(&mut self.bitmaps),
+                shot: bmp,
+            });
+        }
+        true
+    }
+
+    /// Put the window's target back and write the shot as a PNG. `crop` is x, y, w, h in pixels.
+    pub fn end_shot(&mut self, path: &std::path::Path, crop: Option<(i32, i32, i32, i32)>) -> bool {
+        let Some(p) = self.parked.take() else { return false };
+        let ok = self.target.as_ref().is_some_and(|t| unsafe { t.EndDraw(None, None) }.is_ok());
+        self.target = p.target;
+        self.brush = p.brush;
+        self.bitmaps = p.bitmaps;
+        ok && self.write_png(&p.shot, path, crop).is_some()
+    }
+
+    fn write_png(&self, bmp: &IWICBitmap, path: &std::path::Path, crop: Option<(i32, i32, i32, i32)>) -> Option<()> {
+        let wic = self.wic.as_ref()?;
+        let name = HSTRING::from(path.to_string_lossy().as_ref());
+        unsafe {
+            let (mut w, mut h) = (0u32, 0u32);
+            bmp.GetSize(&mut w, &mut h).ok()?;
+            let rect = match crop {
+                Some((x, y, cw, ch)) => {
+                    let x = x.clamp(0, w as i32 - 1);
+                    let y = y.clamp(0, h as i32 - 1);
+                    WICRect { X: x, Y: y, Width: cw.clamp(1, w as i32 - x), Height: ch.clamp(1, h as i32 - y) }
+                }
+                None => WICRect { X: 0, Y: 0, Width: w as i32, Height: h as i32 },
+            };
+            let stream = wic.CreateStream().ok()?;
+            stream.InitializeFromFilename(&name, windows::Win32::Foundation::GENERIC_WRITE.0).ok()?;
+            let enc = wic.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null()).ok()?;
+            enc.Initialize(&stream, WICBitmapEncoderNoCache).ok()?;
+            let mut frame = None;
+            enc.CreateNewFrame(&mut frame, std::ptr::null_mut()).ok()?;
+            let frame = frame?;
+            frame.Initialize(None).ok()?;
+            frame.SetSize(rect.Width as u32, rect.Height as u32).ok()?;
+            let mut fmt = GUID_WICPixelFormat24bppBGR;
+            frame.SetPixelFormat(&mut fmt).ok()?;
+            frame.WriteSource(bmp, &rect).ok()?;
+            frame.Commit().ok()?;
+            enc.Commit().ok()?;
+        }
+        Some(())
+    }
+}

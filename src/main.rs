@@ -606,6 +606,27 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     if !headless() {
         app.focus_page();
     }
+    // Test hooks for the chrome screenshots (LUMEN_TEST_SHOT, see chrome/shot.rs):
+    // LUMEN_TEST_COMPACT=1 starts with the icon-only sidebar, LUMEN_TEST_PANEL=
+    // downloads|control|history|bookmarks|settings opens that page.
+    if cfg!(debug_assertions) {
+        if std::env::var_os("LUMEN_TEST_COMPACT").is_some() {
+            app.settings.compact = true;
+        }
+        let panel = match std::env::var("LUMEN_TEST_PANEL").as_deref() {
+            Ok("downloads") => Panel::Downloads,
+            Ok("control") => Panel::Control,
+            Ok("history") => Panel::History,
+            Ok("bookmarks") => Panel::Bookmarks,
+            Ok("settings") => Panel::Settings,
+            _ => Panel::None,
+        };
+        if panel != Panel::None || app.settings.compact {
+            app.set_panel(panel);
+        }
+        // LUMEN_TEST_SCRIPT: timed key/click/shot steps, see chrome/shot.rs.
+        chrome::test_script(app.ctx.proxy.clone(), app.chrome.hwnd);
+    }
     // Test hook: LUMEN_TEST_PRIVATE=1 opens one normal and one private tab, so a
     // headless run can prove a private tab leaves no trace in session.json. The
     // private tab gets a url of its own: its Nav line in the log is the proof the

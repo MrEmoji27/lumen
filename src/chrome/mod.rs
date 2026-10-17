@@ -8,6 +8,10 @@
 mod anim;
 mod gfx;
 mod pages;
+#[cfg(debug_assertions)]
+mod shot;
+#[cfg(debug_assertions)]
+pub use shot::script as test_script;
 pub mod theme;
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
@@ -277,6 +281,8 @@ const ID_NTP: usize = 102;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
+#[cfg(debug_assertions)]
+const TIMER_SHOT: usize = 4;
 
 fn send(proxy: &EventLoopProxy<Ev>, v: Value) {
     let _ = proxy.send_event(Ev::Ui(v.to_string()));
@@ -436,6 +442,11 @@ impl Chrome {
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
             inner.borrow_mut().make_fonts();
+            // Debug: start with a page already scrolled, the way a visit to a long page leaves it.
+            #[cfg(debug_assertions)]
+            if let Some(px) = std::env::var("LUMEN_TEST_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+                inner.borrow_mut().page.scroll = px;
+            }
             Chrome { hwnd, inner }
         }
     }
@@ -659,7 +670,9 @@ impl Inner {
         }
     }
 
-    fn apply(&mut self, s: UiState) {
+    fn apply(&mut self, #[cfg_attr(not(debug_assertions), allow(unused_mut))] mut s: UiState) {
+        #[cfg(debug_assertions)]
+        shot::fake(&mut s);
         self.gfx.set_families(&s.settings.ui_font, &s.settings.display_font);
         if self.gfx.ui_family() != self.edit_face && !self.edit.is_invalid() {
             self.make_fonts();
@@ -882,6 +895,26 @@ impl Inner {
         if !self.gfx.begin(rc.right as u32, rc.bottom as u32, th.bg) {
             return;
         }
+        self.draw_all(&s);
+        self.gfx.end();
+        // The frame timer runs only while something moves.
+        if self.anim.moving != self.animating {
+            self.animating = self.anim.moving;
+            unsafe {
+                if self.animating {
+                    SetTimer(Some(self.hwnd), TIMER_ANIM, 16, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        shot::after_paint(self);
+    }
+
+    /// One whole frame, onto whatever target the gfx has begun. Shared by the window and the debug shot.
+    fn draw_all(&mut self, s: &UiState) {
+        let th = self.theme;
         self.hits.clear();
         self.anim.enabled = s.settings.animations && anim::system_allows();
         self.anim.begin();
@@ -900,20 +933,8 @@ impl Inner {
                 self.draw_ntp(st, &s);
             }
         }
-        self.draw_sidebar(&s);
-        self.gfx.end();
+        self.draw_sidebar(s);
         self.anim.end();
-        // The frame timer runs only while something moves.
-        if self.anim.moving != self.animating {
-            self.animating = self.anim.moving;
-            unsafe {
-                if self.animating {
-                    SetTimer(Some(self.hwnd), TIMER_ANIM, 16, None);
-                } else {
-                    let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
-                }
-            }
-        }
     }
 
     fn hit(&mut self, r: R, h: Hit) {
@@ -2076,6 +2097,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if wp.0 == TIMER_SPIN || wp.0 == TIMER_CLOCK || wp.0 == TIMER_ANIM {
                     i.invalidate();
                 }
+                #[cfg(debug_assertions)]
+                if wp.0 == TIMER_SHOT {
+                    shot::capture(&mut i);
+                }
                 LRESULT(0)
             }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
@@ -2120,6 +2145,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let bg = if is_ntp { i.theme.bg } else { i.theme.raise };
                 let _ = SetBkColor(hdc, COLORREF(bg.colorref()));
                 LRESULT(if is_ntp { i.ntp_brush.0 as isize } else { i.edit_brush.0 as isize })
+            }
+            #[cfg(debug_assertions)]
+            shot::WM_SHOT => {
+                shot::requested(&i);
+                LRESULT(0)
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             _ => {
