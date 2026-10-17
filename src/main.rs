@@ -168,6 +168,8 @@ struct Tab {
     zoom_set: Option<u32>,
     /// Showing the "this site does not use https" page for this http address.
     no_https: Option<String>,
+    /// Showing the danger warning for this address. Same shape as `no_https`.
+    no_danger: Option<String>,
 }
 
 /// What the sleep policy needs to know about a hidden tab.
@@ -272,6 +274,7 @@ impl Tab {
             zoom: 100,
             zoom_set: None,
             no_https: None,
+            no_danger: None,
         }
     }
 
@@ -638,6 +641,7 @@ fn main() {
         dark_ids: Rc::new(RefCell::new(HashMap::new())),
         https: Rc::new(RefCell::new(https_policy(&settings))),
         gpc: Cell::new(settings.gpc),
+        popup_info: Rc::new(RefCell::new(std::collections::VecDeque::new())),
     });
 
     {
@@ -3530,6 +3534,8 @@ impl App {
             Ev::Upgrade(id, secure, plain) => self.upgrade(id, secure, plain),
             Ev::Probed(id, secure, plain, answer) => self.probed(id, secure, plain, answer),
             Ev::HttpChoice(id, choice) => self.http_choice(id, choice),
+            Ev::Danger(id, url) => self.danger(id, url),
+            Ev::DangerChoice(id, choice) => self.danger_choice(id, choice),
             Ev::SiteCookies(id, n) => {
                 self.site_cookies = Some((id, n));
                 self.push();
@@ -5934,6 +5940,57 @@ impl App {
         self.tabs[i].url = url.clone();
         if let Some(v) = &self.tabs[i].view {
             let _ = v.load_url(&url);
+        }
+        self.dirty = true;
+        self.push();
+    }
+
+    /// A navigation hit a host on the malware or phishing lists. Stop, show the
+    /// warning, count it once per shown warning.
+    fn danger(&mut self, id: u64, url: String) {
+        let Some(i) = self.idx(id) else { return };
+        let host = sites::host_of(&url);
+        let t = &mut self.tabs[i];
+        t.no_danger = Some(url.clone());
+        t.url = url.clone();
+        t.title = format!("{host} is a dangerous site");
+        if let Some(v) = &t.view {
+            let _ = v.load_html(&sites::danger_html(&url, self.ctx.dark.get()));
+        }
+        privacy_stats::danger(&host, privacy_stats::Who::new(id, t.private, t.agent));
+        self.dirty = true;
+        self.push();
+    }
+
+    /// A click on the danger page. It only counts while this tab shows that page.
+    fn danger_choice(&mut self, id: u64, choice: sites::DangerChoice) {
+        let Some(i) = self.idx(id) else { return };
+        let Some(shown) = self.tabs[i].no_danger.clone() else { return };
+        match choice {
+            sites::DangerChoice::Back => {
+                self.tabs[i].no_danger = None;
+                if self.tabs[i].back {
+                    if let Some(v) = &self.tabs[i].view {
+                        let _ = v.go_back();
+                    }
+                } else if self.tabs.len() > 1 {
+                    self.close(id);
+                }
+            }
+            sites::DangerChoice::Continue(url) => {
+                if url != shown {
+                    return;
+                }
+                // Agents and private tabs change nothing that outlives them.
+                if !self.tabs[i].agent && !self.tabs[i].private {
+                    blocker::danger_pass(&url);
+                }
+                self.tabs[i].no_danger = None;
+                self.tabs[i].url = url.clone();
+                if let Some(v) = &self.tabs[i].view {
+                    let _ = v.load_url(&url);
+                }
+            }
         }
         self.dirty = true;
         self.push();

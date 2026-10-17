@@ -4,7 +4,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -18,7 +18,8 @@ use webview2_com::{
     StateChangedEventHandler, ZoomFactorChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler,
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, LaunchingExternalUriSchemeEventHandler, Microsoft::Web::WebView2::Win32::*,
-    SourceChangedEventHandler, TrySuspendCompletedHandler, WindowCloseRequestedEventHandler,
+    NewWindowRequestedEventHandler, SourceChangedEventHandler, TrySuspendCompletedHandler, WebMessageReceivedEventHandler,
+    WindowCloseRequestedEventHandler,
 };
 use windows::{
     Win32::{
@@ -92,6 +93,10 @@ pub enum Ev {
     Probed(u64, String, String, crate::sites::Probe),
     /// A click on the "this site does not use https" page: (tab, what was chosen).
     HttpChoice(u64, crate::sites::HttpChoice),
+    /// A top-level navigation hit a known malware or phishing host: (tab, the url).
+    Danger(u64, String),
+    /// A click on the danger page: (tab, what was chosen).
+    DangerChoice(u64, crate::sites::DangerChoice),
     /// How many cookies the page's site has, for the lock's popover: (tab, count).
     SiteCookies(u64, usize),
     /// A site's stored data was cleared: (origin, it worked).
@@ -277,6 +282,9 @@ pub struct Ctx {
     pub https: Rc<RefCell<crate::sites::HttpsPolicy>>,
     /// Send the Global Privacy Control signal to pages (the header lives in the blocker).
     pub gpc: Cell<bool>,
+    /// Popup requests seen since the last one was handled: (was it a click, the page's site).
+    /// A sensor COM handler fills this; wry's own handler reads the front and decides.
+    pub popup_info: Rc<RefCell<VecDeque<(bool, String)>>>,
 }
 
 impl Ctx {
@@ -373,6 +381,8 @@ pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
         // Cost: one heavy tab can slow other tabs of the same site.
         a.push_str(" --process-per-site");
     }
+    // WebRTC must not leak the local address: only the public interface is offered.
+    a.push_str(" --force-webrtc-ip-handling-policy=default_public_interface_only");
     if let Ok(extra) = std::env::var("LUMEN_ARGS") {
         a.push(' ');
         a.push_str(&extra);
@@ -427,6 +437,7 @@ fn build_tab_in(
         // Pages can ask whether the person said no to being sold: navigator.globalPrivacyControl.
         // Decided when the page is built; the header follows the setting at once.
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
+        .with_initialization_script(WEBRTC_JS)
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -434,11 +445,18 @@ fn build_tab_in(
         .with_on_page_load_handler(move |e, _| {
             let _ = p_load.send_event(Ev::Loading(id, matches!(e, PageLoadEvent::Started)));
         })
-        .with_new_window_req_handler(move |_uri, features| {
-            // window.open / target=_blank. Make a real tab and hand it to WebView2,
-            // so window.opener works (OAuth popups need it). A popup of a private
-            // tab is private too: same InPrivate cookie jar, same silence.
+        .with_new_window_req_handler(move |uri, features| {
+            // window.open / target=_blank. The sensor above already saw whether a
+            // click or key asked for this. No gesture, or a popup-host match, is a
+            // popup: block it and count it. A missing queue entry also blocks.
             let ctx = &popup_ctx;
+            let (gesture, site) = ctx.popup_info.borrow_mut().pop_front().unwrap_or((false, String::new()));
+            if !gesture || crate::blocker::popup_rule(&uri) {
+                if !site.is_empty() {
+                    crate::privacy_stats::popup(&site, who);
+                }
+                return NewWindowResponse::Deny;
+            }
             let new_id = ctx.alloc_id();
             let bounds = content_bounds_now(ctx);
             match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), isolated, private, agent) {
@@ -474,6 +492,8 @@ fn build_tab_in(
     hook_crash(&wv, id, ctx.proxy.clone());
     hook_permissions(ctx, &wv, id, isolated);
     hook_external(&wv, id, ctx.proxy.clone(), isolated);
+    hook_popup_sensor(&wv, ctx.popup_info.clone());
+    hook_rtc(&wv, who);
     // Password saving is per profile. The agent's profile never saves passwords,
     // and InPrivate keeps nothing anyway, so private pages get it off too.
     set_passwords(&wv, ctx.passwords.get() && !isolated && !private);
@@ -608,9 +628,25 @@ fn hook_page(
                     }
                     return Ok(());
                 }
+                // A click on the page that blocks a dangerous site. Not a navigation.
+                if u.starts_with("lumen-danger:") {
+                    args.SetCancel(true)?;
+                    if let Some(choice) = crate::sites::parse_danger_choice(&u) {
+                        let _ = p.send_event(Ev::DangerChoice(id, choice));
+                    }
+                    return Ok(());
+                }
+                // A site on the malware or phishing lists: stop and show the warning.
+                // Before the redirect check, so a listed link is never followed.
+                if crate::blocker::danger_host(&u) {
+                    args.SetCancel(true)?;
+                    let _ = p.send_event(Ev::Danger(id, u));
+                    return Ok(());
+                }
                 // Plain http: stop, and see whether the site speaks https. The main loop goes on.
                 if let Some(secure) = crate::sites::https_upgrade(&u, &https.borrow()) {
                     args.SetCancel(true)?;
+                    crate::privacy_stats::https_upgrade(&crate::privacy_stats::host(&u), who);
                     let _ = p.send_event(Ev::Upgrade(id, secure, u));
                     return Ok(());
                 }
@@ -913,6 +949,11 @@ pub fn clear_site(wv: &WebView, origin: &str, done: impl FnOnce(bool) + 'static)
 /// In every page when the signal is on: the property sites read the Global Privacy Control
 /// answer from, and the older Do Not Track one.
 const GPC_JS: &str = "try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:()=>true,configurable:true});Object.defineProperty(Navigator.prototype,'doNotTrack',{get:()=>'1',configurable:true})}catch(e){}";
+
+/// In every page: watch WebRTC so a peer connection that would leak the local
+/// address is counted. The Chromium switch keeps the address off the wire; this
+/// script only reports that a page tried.
+const WEBRTC_JS: &str = "try{const O=window.RTCPeerConnection;if(O){window.RTCPeerConnection=function(c,i){const pc=new O(c,i);let n=false;pc.addEventListener('icecandidate',e=>{if(!n&&e.candidate){n=true;try{window.chrome.webview.postMessage({lumen:'rtc'})}catch(_){}}});return pc};window.RTCPeerConnection.prototype=O.prototype}}catch(e){}";
 
 // ------------------------------------------------------------- crashed pages
 
@@ -1235,6 +1276,68 @@ pub fn answer_permission(ctx: &Ctx, pid: u64, allow: Option<bool>) {
             None => COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
         });
         let _ = deferral.Complete();
+    }
+}
+
+// ------------------------------------------------------------- popup sensor
+
+/// The COM NewWindowRequested handler sees whether a click or key asked for the
+/// new window; wry's own handler does not. This runs first (registered after
+/// build, and wry's callback is dispatched later on the message loop), so the
+/// flag is in the queue when the wry handler asks for it.
+fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String)>>>) {
+    let core = wv.webview();
+    let mut token = 0i64;
+    unsafe {
+        let _ = core.add_NewWindowRequested(
+            &NewWindowRequestedEventHandler::create(Box::new(move |sender, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut user = windows::core::BOOL::default();
+                let _ = args.IsUserInitiated(&mut user);
+                let site = sender
+                    .and_then(|s| {
+                        let mut p = PWSTR::null();
+                        s.Source(&mut p).ok()?;
+                        Some(crate::privacy_stats::host(&take(p)))
+                    })
+                    .unwrap_or_default();
+                let mut q = queue.borrow_mut();
+                // Bound: a page that spams window.open must not grow this forever.
+                if q.len() < 32 {
+                    q.push_back((user.as_bool(), site));
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+// ------------------------------------------------------------------- webrtc
+
+/// The page's WebRTC script reports a peer connection here. The Chromium switch
+/// keeps the local address off the wire; this only counts the attempt.
+fn hook_rtc(wv: &WebView, who: crate::privacy_stats::Who) {
+    let core = wv.webview();
+    let mut token = 0i64;
+    unsafe {
+        let _ = core.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut j = PWSTR::null();
+                if args.WebMessageAsJson(&mut j).is_err() {
+                    return Ok(());
+                }
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(&take(j)) else { return Ok(()) };
+                if msg["lumen"] == "rtc" {
+                    let mut src = PWSTR::null();
+                    let site = args.Source(&mut src).map(|_| crate::privacy_stats::host(&take(src))).unwrap_or_default();
+                    crate::privacy_stats::rtc(&site, who);
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
     }
 }
 
