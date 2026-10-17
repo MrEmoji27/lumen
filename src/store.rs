@@ -140,9 +140,6 @@ pub struct Settings {
     pub perm_defaults: std::collections::BTreeMap<String, String>,
     /// The zoom pages open at, in percent, unless the site has a zoom of its own.
     pub default_zoom: u32,
-    /// Refuse cookies that a page sets for another site than the one in the address bar.
-    /// Applies on restart (it is a browser switch).
-    pub block_third_party_cookies: bool,
     /// Try https first for plain http pages, and warn when a site has none.
     pub https_first: bool,
     /// Hosts the person said may stay on plain http.
@@ -206,7 +203,6 @@ impl Default for Settings {
             net_limit_kbps: 2048,
             perm_defaults: Default::default(),
             default_zoom: 100,
-            block_third_party_cookies: false,
             https_first: true,
             http_ok: Vec::new(),
             gpc: true,

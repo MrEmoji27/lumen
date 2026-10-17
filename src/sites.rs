@@ -84,6 +84,7 @@ pub fn set_rule(rules: &mut Rules, origin: &str, kind: &str, v: Verdict) {
 }
 
 /// The answer a site has for a kind: Some(allowed), or None for "ask".
+#[allow(dead_code)]
 pub fn answer(rules: &Rules, origin: &str, kind: &str) -> Option<bool> {
     rules.get(origin).and_then(|r| r.get(kind)).copied()
 }

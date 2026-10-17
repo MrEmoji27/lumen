@@ -54,6 +54,20 @@ pub enum PageHit {
     BmImport,
     ClearHistory,
     ClearData,
+    /// Site settings: allow, block or ask one kind for one origin.
+    SitePerm(String, String, &'static str),
+    /// Site settings: forget every answer a site has.
+    SiteReset(String),
+    /// Site settings: clear the cookies and stored data of one site.
+    SiteClear(String),
+    /// Site settings: forget the zoom a site is read at.
+    SiteZoom(String),
+    /// Privacy: forget one host's https exception.
+    SiteHttp(String),
+    /// Privacy: what a kind does when the site has no answer: "block" or "ask".
+    PermDefault(&'static str, &'static str),
+    /// A settings button that opens another page ("sites").
+    Panels(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -132,7 +146,7 @@ const ENGINES: [(&str, &str); 5] = [
     ("Bing", "https://www.bing.com/search?q=%s"),
     ("Startpage", "https://www.startpage.com/do/search?q=%s"),
 ];
-const KEYS: [(&str, &str); 21] = [
+const KEYS: [(&str, &str); 30] = [
     ("New tab", "Ctrl+T"),
     ("New private tab", "Ctrl+Shift+N"),
     ("Reopen closed tab", "Ctrl+Shift+T"),
@@ -140,10 +154,15 @@ const KEYS: [(&str, &str); 21] = [
     ("Address bar", "Ctrl+L"),
     ("Next / previous tab", "Ctrl+Tab / Ctrl+Shift+Tab"),
     ("Jump to tab", "Ctrl+1…9"),
+    ("Search open tabs", "Ctrl+Shift+A"),
     ("Back / forward", "Alt+← / Alt+→"),
     ("Reload", "Ctrl+R"),
     ("Compact sidebar", "Ctrl+B"),
     ("Find in page", "Ctrl+F"),
+    ("Print", "Ctrl+P"),
+    ("Save page", "Ctrl+S"),
+    ("Zoom in / out / reset", "Ctrl++ / Ctrl+- / Ctrl+0"),
+    ("Zoom with the wheel", "Ctrl+wheel"),
     ("Fullscreen", "F11"),
     ("Settings", "Ctrl+,"),
     ("Control", "Shift+Esc"),
@@ -152,9 +171,17 @@ const KEYS: [(&str, &str); 21] = [
     ("Downloads", "Ctrl+J"),
     ("Reader view", "F9"),
     ("Read aloud in reader view", "F7"),
+    ("Translate page", "F8"),
     ("Darken this site / keep its colors", "Shift+F9"),
+    ("Split the stage", "Ctrl+\\"),
     ("Developer tools", "F12"),
+    // The page's own keys, listed so nobody has to guess.
+    ("Page: switch workspace", "Ctrl+Alt+1…4"),
+    ("Page: open a link in a card", "Shift+click"),
 ];
+
+/// The zoom sizes Ctrl++ steps through in Chromium, for the default-zoom slider.
+const ZOOM_STOPS: &[u32] = &[25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500];
 
 fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
     use Item::*;
@@ -172,6 +199,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("compact", "Compact sidebar", "Icons only. Ctrl+B toggles it."),
             Range("gap", "Page margin", "", Scale::Linear(0.0, 24.0, 1.0), "px"),
             Range("radius", "Page corners", "", Scale::Linear(0.0, 20.0, 1.0), "px"),
+            Range("default_zoom", "Default zoom", "Pages open at this size unless the site has a zoom of its own. Ctrl++ and Ctrl+- still zoom the page you are on.", Scale::Steps(ZOOM_STOPS), "%"),
         ]),
         ("Search", vec![
             Engine,
@@ -187,7 +215,6 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("accelerate_downloads", "Accelerate downloads", "aria2 splits files into up to 16 connections, resumes, and queues. Falls back to the built-in downloader when a site refuses it."),
             Toggle("keep_seeding", "Share torrents back after they finish", "Until ratio 1.0 or one hour, whichever first. Applies on next start."),
             Range("download_limit_kbps", "Download speed limit", "Caps aria2, the download engine. 0 is no limit.", Scale::Steps(DL_SPEEDS), "kbps"),
-            Seg("tracking", "Tracking prevention", "", &[("off", "Off"), ("basic", "Basic"), ("balanced", "Balanced"), ("strict", "Strict")]),
             Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),
             Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
             Toggle("show_memory", "Memory in sidebar", ""),
@@ -205,6 +232,10 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             AgentSetup,
         ]),
         ("Privacy", vec![
+            Seg("tracking", "Tracking prevention", "WebView2's own tracker blocking. Balanced blocks known trackers; Strict blocks most trackers, including ones a site loads at the top level. Applies to pages as they load.", &[("off", "Off"), ("basic", "Basic"), ("balanced", "Balanced"), ("strict", "Strict")]),
+            Toggle("https_first", "Try https first", "A plain http address is tried over https first. When a site has no https at all, Lumen says so and lets you continue for this once or for good. Never happens for localhost, IP addresses or home-network names."),
+            Toggle("gpc", "Tell sites not to sell or share my data", "Sends the Global Privacy Control signal (Sec-GPC: 1) and Do Not Track with every request, and tells the page itself through navigator.globalPrivacyControl. Sites that honour it must treat you as opted out."),
+            Button("Site settings", "What each site may do, the zoom it is read at, the data it left behind, and the http addresses you let through.", "Open…", PageHit::Panels("sites")),
             Button("Clear browsing data", "Lumen history, page text and WebView2's own browsing history and downloads. Passwords and bookmarks are never touched.", "Clear…", PageHit::ClearData),
             Toggle("clear_on_exit", "Clear history when Lumen closes", "Lumen history, the words of pages and WebView2's own browsing history go when the browser closes. Private tabs leave nothing anyway."),
         ]),
@@ -380,6 +411,7 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
         "downloads" => draw_downloads(i, st, s),
         "history" => draw_library(i, st, s),
         "bookmarks" => draw_bookmarks(i, st, s),
+        "sites" => draw_sites(i, st, s),
         _ => draw_control(i, st, s),
     }
 }
@@ -1605,6 +1637,175 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
+// -------------------------------------------------------------- site settings
+
+/// What a permission row acts on: one site's answer, or the default for a kind.
+#[derive(Clone, Copy)]
+enum PermTarget<'a> {
+    Site(&'a str, &'a str),
+    Default(&'static str),
+}
+
+/// The Allow / Block / Ask chips of one permission row. `cur` is what is remembered (None =
+/// ask). A default row offers Block and Ask only: there is nothing to allow before a site asks.
+fn perm_chips(i: &mut Inner, right: f32, y: f32, target: PermTarget<'_>, cur: Option<bool>) -> f32 {
+    let th = i.theme;
+    let f = SMALL_STRONG.align(Align::Center);
+    let opts: &[(&'static str, Option<bool>)] =
+        if matches!(target, PermTarget::Site(..)) { &[("Allow", Some(true)), ("Block", Some(false)), ("Ask", None)] } else { &[("Block", Some(false)), ("Ask", None)] };
+    let widths: Vec<f32> = opts.iter().map(|(l, _)| i.gfx.measure(l, f) + 2.0 * S3).collect();
+    let total: f32 = widths.iter().sum::<f32>() + S1 * (opts.len() - 1) as f32;
+    let mut x = right - total;
+    for ((label, v), w) in opts.iter().zip(widths) {
+        let r = R::new(x, y, w, 26.0);
+        let h = Hit::Page(match target {
+            PermTarget::Site(origin, kind) => PageHit::SitePerm(origin.to_string(), kind.to_string(), label),
+            PermTarget::Default(kind) => PageHit::PermDefault(kind, if *label == "Block" { "block" } else { "ask" }),
+        });
+        if *v == cur {
+            i.gfx.round(r, R_SM, th.press);
+        } else if i.is_hover(&h) {
+            i.gfx.round(r, R_SM, th.hover);
+        }
+        i.gfx.text(label, r, f, if *v == cur { th.text } else { th.dim });
+        i.hit(r, h);
+        x += w + S1;
+    }
+    right - total
+}
+
+/// A verdict as a chip state.
+fn chip_state(v: crate::sites::Verdict) -> Option<bool> {
+    match v {
+        crate::sites::Verdict::Allow => Some(true),
+        crate::sites::Verdict::Block => Some(false),
+        crate::sites::Verdict::Ask => None,
+    }
+}
+
+/// Site settings: what each site may do, the zoom it is read at, and the data it left behind.
+/// The defaults come first, so the page answers "how do I stop notifications?" without a site.
+fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
+    let th = i.theme;
+    let col = column(st, COL_W);
+    i.gfx.clip(st);
+    let mut y = st.y + S5 + 2.0 - i.page.scroll;
+    let origins: Vec<&str> = {
+        let mut o: Vec<&str> = s.rules.iter().map(|(o, _, _)| o.as_str()).collect();
+        o.dedup();
+        o
+    };
+    let sub = if origins.is_empty() && s.zooms.is_empty() {
+        "How sites behave, and what to do about one in particular.".to_string()
+    } else {
+        format!("{} sites with answers · {} read at their own zoom", origins.len(), s.zooms.len())
+    };
+    y = title_block(i, col, y, "Site settings", &sub);
+
+    // What pages open at, unless a site has a zoom of its own.
+    y = group_label(i, col, y, "Pages open at", 0);
+    let range = Item::Range(
+        "default_zoom",
+        "Default zoom",
+        "Every site follows this unless it has a zoom of its own. Ctrl++ and Ctrl+- set one; the chip in the address bar takes it back to 100%.",
+        Scale::Steps(ZOOM_STOPS),
+        "%",
+    );
+    y += draw_item(i, &range, R::new(col.x, y, col.w, 54.0), s) + S5;
+
+    // The default answer per kind.
+    y = group_label(i, col, y, "When a site has no answer", 0);
+    for kind in crate::sites::KINDS.iter() {
+        if y > st.bottom() || y + 33.0 < st.y {
+            y += 33.0;
+            continue;
+        }
+        let cur = chip_state(crate::sites::default_for(&s.settings.perm_defaults, kind.key));
+        i.gfx.text(kind.label, R::new(col.x, y + 3.0, col.w * 0.5, 28.0), BODY, th.dim);
+        perm_chips(i, col.right(), y + 3.0, PermTarget::Default(kind.key), cur);
+        i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
+        y += 34.0;
+    }
+    y += S5;
+
+    // One block per site: its remembered answers, and what its data is worth.
+    y = group_label(i, col, y, "Answers remembered", origins.len());
+    if origins.is_empty() {
+        i.gfx.text_wrap(
+            "No site has an answer yet. When a site asks for your camera, location or similar, the answer is remembered here and can be changed.",
+            R::new(col.x, y + 4.0, col.w, 40.0),
+            SMALL,
+            th.faint,
+        );
+        y += 46.0;
+    }
+    for origin in origins {
+        let answers: Vec<(&str, bool)> = s
+            .rules
+            .iter()
+            .filter(|(o, _, _)| o == origin)
+            .map(|(_, k, a)| (k.as_str(), *a))
+            .collect();
+        let header = y > st.bottom() - 40.0 || y + 80.0 < st.y;
+        if !header {
+            i.gfx.text(&super::host(origin), R::new(col.x, y + 3.0, col.w * 0.6, 30.0), BODY_STRONG, th.text);
+            let right = row_action(i, col.right(), y + 4.0, "Clear data", PageHit::SiteClear(origin.to_string()));
+            row_action(i, right, y + 4.0, "Reset all", PageHit::SiteReset(origin.to_string()));
+        }
+        y += 34.0;
+        for (kind, allow) in answers {
+            if y > st.bottom() || y + 33.0 < st.y {
+                y += 33.0;
+                continue;
+            }
+            i.gfx.text(&crate::sites::label(kind), R::new(col.x + S3, y + 3.0, col.w * 0.5, 28.0), BODY, th.dim);
+            perm_chips(i, col.right(), y + 3.0, PermTarget::Site(origin, kind), Some(allow));
+            i.gfx.line(col.x + S3, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
+            y += 34.0;
+        }
+        y += S2;
+    }
+    y += S5 - S2;
+
+    // Zoom by site: what the person chose, and the way back to the default.
+    y = group_label(i, col, y, "Zoom by site", s.zooms.len());
+    if s.zooms.is_empty() {
+        i.gfx.text("Every site opens at the default zoom.", R::new(col.x, y + 4.0, col.w, 28.0), SMALL, th.faint);
+        y += 34.0;
+    }
+    for (host, pct) in &s.zooms {
+        if y > st.bottom() || y + 33.0 < st.y {
+            y += 34.0;
+            continue;
+        }
+        i.gfx.text(host, R::new(col.x, y + 3.0, col.w * 0.6, 28.0), BODY, th.text);
+        row_action(i, col.right(), y + 4.0, "Reset", PageHit::SiteZoom(host.clone()));
+        i.gfx.text(&format!("{pct}%"), R::new(col.right() - 130.0, y + 3.0, 60.0, 28.0), SMALL.align(Align::Right), th.dim);
+        i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
+        y += 34.0;
+    }
+    y += S5;
+
+    // The hosts that may stay on plain http.
+    if !s.settings.http_ok.is_empty() {
+        y = group_label(i, col, y, "May stay on plain http", s.settings.http_ok.len());
+        for host in &s.settings.http_ok {
+            if y > st.bottom() || y + 33.0 < st.y {
+                y += 34.0;
+                continue;
+            }
+            i.gfx.text(host, R::new(col.x, y + 3.0, col.w * 0.6, 28.0), BODY, th.text);
+            row_action(i, col.right(), y + 4.0, "Reset", PageHit::SiteHttp(host.clone()));
+            i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
+            y += 34.0;
+        }
+    }
+
+    i.gfx.unclip();
+    i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+    close_button(i, st);
+}
+
 fn mem(b: f64) -> String {
     let mb = b / 1048576.0;
     if mb >= 1024.0 {
@@ -2002,6 +2203,13 @@ pub fn click(i: &mut Inner, p: PageHit) {
                 send(&i.proxy, json!({"t": "permReset", "origin": origin, "kind": kind}));
             }
         }
+        PageHit::SitePerm(origin, kind, v) => send(&i.proxy, json!({"t": "permSet", "origin": origin, "kind": kind, "v": v})),
+        PageHit::SiteReset(origin) => send(&i.proxy, json!({"t": "permResetSite", "origin": origin})),
+        PageHit::SiteClear(origin) => send(&i.proxy, json!({"t": "siteClear", "origin": origin})),
+        PageHit::SiteZoom(host) => send(&i.proxy, json!({"t": "zoomForget", "host": host})),
+        PageHit::SiteHttp(host) => send(&i.proxy, json!({"t": "httpForget", "host": host})),
+        PageHit::PermDefault(kind, v) => send(&i.proxy, json!({"t": "permDefault", "kind": kind, "v": v})),
+        PageHit::Panels(which) => send(&i.proxy, json!({"t": "panel", "open": true, "which": which})),
     }
 }
 

@@ -230,6 +230,8 @@ pub enum Action {
     Split,
     /// F8: the page's text in the target language, or the original text back.
     TranslatePage,
+    /// Ctrl+Shift+A: find an open tab, of any workspace.
+    TabSearch,
 }
 
 pub struct Ctx {
@@ -1027,6 +1029,8 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, false, false, v) if v == k('D') => Bookmark,
         (true, false, false, v) if v == k('H') => History,
         (true, true, false, v) if v == k('O') => Bookmarks,
+        // Not the page's own Ctrl+A: that is a text selection.
+        (true, true, false, v) if v == k('A') => TabSearch,
         (true, true, false, v) if v == k('I') => DevTools,
         (true, false, true, v) if (k('1')..=k('4')).contains(&v) => Workspace((v - k('1')) as usize),
         _ => return None,

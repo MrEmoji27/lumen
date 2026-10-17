@@ -3951,6 +3951,8 @@ impl App {
             }
             Action::Split => self.toggle_split(),
             Action::TranslatePage => self.toggle_translate(i),
+            // The switcher lives in the chrome: it owns the list box and the typing.
+            Action::TabSearch => self.chrome.open_tab_search(),
         }
     }
 
@@ -4580,8 +4582,11 @@ impl App {
                     Some("block") => sites::Verdict::Block,
                     _ => sites::Verdict::Ask,
                 };
+                // An answer given on a private or agent page, from the lock, is for this visit:
+                // writing it down would record a site the person kept off the record.
+                let keep = !(m["lock"].as_bool().unwrap_or(false) && self.active_tab().is_some_and(|t| self.off_record(t)));
                 // Only kinds Lumen knows, on origins that are sites.
-                if sites::KINDS.iter().any(|k| k.key == kind) && origin.starts_with("http") {
+                if keep && sites::KINDS.iter().any(|k| k.key == kind) && origin.starts_with("http") {
                     sites::set_rule(&mut self.rules, origin, kind, v);
                     store::save_rules(&self.rules);
                     self.sync_perms();
@@ -4616,7 +4621,44 @@ impl App {
             "siteOpen" => self.ask_site_cookies(),
             "siteClear" => {
                 let origin = m["origin"].as_str().unwrap_or("").to_string();
-                self.clear_site(&origin);
+                // From the lock over a private or agent page, clearing would reach into the
+                // person's own store for a site they never opened there. Those stores go away
+                // with their last page anyway.
+                if m["lock"].as_bool().unwrap_or(false) && self.active_tab().is_some_and(|t| self.off_record(t)) {
+                    self.chrome.flash("Private tabs forget everything when they close".into());
+                } else {
+                    self.clear_site(&origin);
+                }
+            }
+            // The tab search picked a row: a tab here, or one in a workspace that is put away.
+            "switchTab" => {
+                if m["other"].as_bool().unwrap_or(false) {
+                    let ws = m["ws"].as_u64().unwrap_or(0) as usize;
+                    let idx = m["idx"].as_u64().unwrap_or(0) as usize;
+                    if ws < self.workspaces.len() && ws != self.active_workspace {
+                        self.switch_workspace(ws);
+                    }
+                    // Pinned tabs sort to the front on load, so the index holds.
+                    if let Some(t) = self.tabs.get(idx) {
+                        let id = t.id;
+                        self.activate(id);
+                    }
+                } else {
+                    let id = m["id"].as_u64().unwrap_or(0);
+                    if self.idx(id).is_some() {
+                        self.activate(id);
+                    }
+                }
+            }
+            // Privacy: this host may stay on plain http no more.
+            "httpForget" => {
+                let host = m["host"].as_str().unwrap_or("").to_string();
+                if self.settings.http_ok.iter().any(|h| *h == host) {
+                    let mut st = self.settings.clone();
+                    st.http_ok.retain(|h| *h != host);
+                    self.apply_settings(st);
+                }
+                self.push();
             }
             // Per-kind default: ask, or block without asking.
             "permDefault" => {
