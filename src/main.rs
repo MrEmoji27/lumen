@@ -13,10 +13,13 @@ mod aloud;
 mod blocker;
 mod bookmarks;
 mod chrome;
+mod defaultapp;
 mod engine;
+mod extlink;
 mod glance;
 mod journal;
 mod kdbx;
+mod launch;
 mod library;
 mod monitor;
 mod pacing;
@@ -450,6 +453,8 @@ struct App {
     /// Remembered permission answers, and requests waiting for the user.
     rules: store::Rules,
     prompts: Vec<(u64, u64, String, &'static str)>,
+    /// Which "open this app?" questions are on screen or were just refused.
+    ext_gate: extlink::Gate,
     /// History and bookmarks.
     library: library::Library,
     /// aria2 and its jobs: gid -> download id in the list.
@@ -547,7 +552,9 @@ static HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// One Lumen per profile. The first one owns a named event; a later start sets it and
 /// leaves, and the first one comes to the front. Returns the event if we are the first.
-fn claim_instance() -> Option<windows::Win32::Foundation::HANDLE> {
+/// A later start that was given addresses leaves them in a note first (see `launch.rs`), and
+/// the first one opens them when it wakes. A headless later start never brings a window up.
+fn claim_instance(opens: &[launch::Open]) -> Option<windows::Win32::Foundation::HANDLE> {
     use windows::Win32::{
         Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
         System::Threading::{CreateEventW, SetEvent},
@@ -561,13 +568,40 @@ fn claim_instance() -> Option<windows::Win32::Foundation::HANDLE> {
         let ev = CreateEventW(None, false, false, &name).ok()?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
             // A headless start (an agent asking) has nothing to show; a normal one does.
-            if !headless() {
-                let _ = AllowSetForegroundWindow(ASFW_ANY);
+            // Addresses always travel, and only a normal start asks for the window.
+            let sent = !opens.is_empty() && launch::forward(opens, !headless());
+            if !headless() || sent {
+                if !headless() {
+                    let _ = AllowSetForegroundWindow(ASFW_ANY);
+                }
                 let _ = SetEvent(ev);
             }
             return None;
         }
         Some(ev)
+    }
+}
+
+/// `lumen.exe --register`: write the entries, tell the person what is left to do.
+fn register_from_cli() -> String {
+    let Some(reg) = defaultapp::Reg::current() else { return "Could not find the Lumen exe.".into() };
+    match reg.ensure() {
+        Ok(_) => "Lumen is registered as a browser. To finish, pick it in Settings > Apps > Default apps: Windows only lets you do that part.".into(),
+        Err(e) => e,
+    }
+}
+
+/// A windowless program has no stdout. Borrow the console of whoever started it, if any.
+fn say_on_console(msg: &str) {
+    use std::io::Write;
+    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            return;
+        }
+    }
+    if let Ok(mut out) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+        let _ = writeln!(out, "{msg}");
     }
 }
 
@@ -592,7 +626,16 @@ fn main() {
         std::env::var_os("LUMEN_HEADLESS").is_some_and(|v| v != "0") || std::env::args().any(|a| a == "--headless"),
         std::sync::atomic::Ordering::Relaxed,
     );
-    let Some(instance) = claim_instance() else { return };
+    let cli = launch::from_process();
+    // `lumen.exe --register` / `--unregister`: the default-browser entries, then done. No window.
+    if cli.register || cli.unregister {
+        let said = if cli.unregister { defaultapp::unregister() } else { register_from_cli() };
+        say_on_console(&said);
+        return;
+    }
+    let Some(instance) = claim_instance(&cli.opens) else { return };
+    launch::sweep();
+    defaultapp::startup_check();
     install_panic_hook();
     // Before WebView2 starts: its processes must be born inside the job.
     let job = monitor::Job::adopt_self();
@@ -749,6 +792,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         mods: ModifiersState::empty(),
         rules: store::load_rules(),
         prompts: Vec::new(),
+        ext_gate: Default::default(),
         library: library::Library::load(&store::data_dir()),
         aria: aria::Aria::start(&store::data_dir(), &store::download_dir(), keep_seeding, dl_limit, bt_port),
         aria_ids: HashMap::new(),
@@ -816,6 +860,10 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     app.refresh_dark();
     app.load_downloads();
     app.restore(session);
+    // Addresses on the command line open on top of the restored tabs.
+    for o in &cli.opens {
+        app.open_launched(o);
+    }
     app.flush();
     app.shown = true;
     show_window(&app.ctx.window);
@@ -845,6 +893,16 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         // LUMEN_TEST_SCRIPT: timed key/click/shot steps, see chrome/shot.rs.
         #[cfg(debug_assertions)]
         chrome::test_script(app.ctx.proxy.clone(), app.chrome.hwnd);
+    }
+    // Test hook: LUMEN_TEST_EXT="spotify:track:1|spotify:track:2" makes the active page try to
+    // open those apps, as if clicked, from LUMEN_TEST_EXT_ORIGIN (default open.spotify.com).
+    if cfg!(debug_assertions)
+        && let Ok(list) = std::env::var("LUMEN_TEST_EXT")
+    {
+        let origin = std::env::var("LUMEN_TEST_EXT_ORIGIN").unwrap_or_else(|_| "https://open.spotify.com".into());
+        for uri in list.split('|') {
+            let _ = app.ctx.proxy.send_event(Ev::ExternalUri { tab: app.active, origin: origin.clone(), uri: uri.to_string(), user: true });
+        }
     }
     // Test hook: LUMEN_TEST_PRIVATE=1 opens one normal and one private tab, so a
     // headless run can prove a private tab leaves no trace in session.json. The
@@ -926,7 +984,13 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                     app.layout();
                 }
                 // Alt+Tab lands focus on the bare window. Hand it on, or keys go nowhere.
-                WindowEvent::Focused(true) => app.focus_page(),
+                WindowEvent::Focused(true) => {
+                    app.focus_page();
+                    // Back from Windows' Default apps page: the Settings page re-reads the pick.
+                    if app.panel == Panel::Settings {
+                        app.push();
+                    }
+                }
                 WindowEvent::ThemeChanged(_) if app.settings.theme == "system" => {
                     app.retheme();
                     app.push();
@@ -2345,6 +2409,102 @@ impl App {
         self.layout();
         self.dirty = true;
         self.push();
+    }
+
+    /// A tab for an address that came from outside: the command line, or a second start.
+    fn open_launched(&mut self, o: &launch::Open) {
+        let id = self.ctx.alloc_id();
+        let mut t = Tab::new(id, o.url.clone());
+        t.private = o.private;
+        t.workspace = self.active_workspace;
+        self.tabs.push(t);
+        if cfg!(debug_assertions) {
+            eprintln!("lumen: launch open {} private={}", o.url, o.private);
+        }
+        if o.private {
+            journal::feature("private_tab", false);
+        }
+        self.activate(id);
+    }
+
+    /// A page tried to open an app (mailto:, spotify:...). Open it, ask, or let it go: see
+    /// `extlink::decide`. Never for an agent's tab, never for a page nobody clicked on unless
+    /// the person said "always" for that site.
+    fn on_external(&mut self, tab: u64, origin: String, uri: String, user: bool) {
+        let Some(scheme) = extlink::scheme_of(&uri) else { return };
+        let Some(i) = self.idx(tab) else { return };
+        let (agent, private) = (self.tabs[i].agent, self.tabs[i].private);
+        match extlink::decide(&self.rules, &origin, &scheme, user, agent) {
+            extlink::Decision::Drop => {}
+            extlink::Decision::Open => self.open_external(&uri),
+            extlink::Decision::Ask => {
+                if !self.ext_gate.begin(&origin, &scheme, Instant::now()) {
+                    return;
+                }
+                // A private tab, or a page with no real origin, can be let through once but
+                // never remembered: a rule is a trace on disk.
+                let remember = !private && origin.contains("://") && !origin.starts_with("file:");
+                // Test hook (debug builds): answer without a box, and say what was asked.
+                if cfg!(debug_assertions)
+                    && let Ok(a) = std::env::var("LUMEN_TEST_EXT_ANSWER")
+                {
+                    eprintln!("lumen: ext asked {origin} {scheme} remember={remember} answer={a}");
+                    let answer = match a.as_str() {
+                        "always" if remember => extlink::Answer::Always,
+                        "once" | "always" => extlink::Answer::Once,
+                        _ => extlink::Answer::Cancel,
+                    };
+                    self.on_external_answer(origin, uri, answer);
+                    return;
+                }
+                // Nobody is there to answer a headless Lumen.
+                if headless() {
+                    self.ext_gate.finish(&origin, &scheme, extlink::Answer::Cancel, Instant::now());
+                    return;
+                }
+                let (title, text) = extlink::prompt_words(&origin, &scheme);
+                let (near, proxy) = (self.ctx.window.hwnd() as isize, self.ctx.proxy.clone());
+                // The box has a message loop of its own, so it lives on its own thread.
+                std::thread::Builder::new()
+                    .name("lumen-ext-ask".into())
+                    .spawn(move || {
+                        let buttons: &[&str] = if remember { &["Open", "Always for this site", "Cancel"] } else { &["Open", "Cancel"] };
+                        let answer = match chrome::dialog::choose(&title, &text, buttons, near) {
+                            Some(0) => extlink::Answer::Once,
+                            Some(1) if remember => extlink::Answer::Always,
+                            _ => extlink::Answer::Cancel,
+                        };
+                        let _ = proxy.send_event(Ev::ExternalAnswer { origin, uri, answer });
+                    })
+                    .ok();
+            }
+        }
+    }
+
+    fn on_external_answer(&mut self, origin: String, uri: String, answer: extlink::Answer) {
+        let Some(scheme) = extlink::scheme_of(&uri) else { return };
+        self.ext_gate.finish(&origin, &scheme, answer, Instant::now());
+        match answer {
+            extlink::Answer::Cancel => {}
+            extlink::Answer::Once => self.open_external(&uri),
+            extlink::Answer::Always => {
+                self.rules.entry(origin).or_default().insert(extlink::rule_kind(&scheme), true);
+                store::save_rules(&self.rules);
+                self.open_external(&uri);
+                self.push();
+            }
+        }
+    }
+
+    /// Hand an address to Windows. (A debug run with the test answer set only says it would.)
+    fn open_external(&mut self, uri: &str) {
+        if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_EXT_ANSWER").is_some() {
+            eprintln!("lumen: ext open {}", extlink::scheme_of(uri).unwrap_or_default());
+            return;
+        }
+        if !extlink::launch(uri) {
+            journal::error("external", "Windows had no app for a link");
+        }
     }
 
     /// Someone started lumen.exe while this one runs. Headless becomes a normal window:
@@ -3835,7 +3995,19 @@ impl App {
                 }
             },
             Ev::Video(id, up) => self.on_video(id, up),
-            Ev::ShowMe => self.show_me(),
+            Ev::ShowMe => {
+                // A second start: addresses it left open as tabs; with none, or when it wants
+                // the window, the window comes forward.
+                let q = launch::drain();
+                for o in &q.opens {
+                    self.open_launched(o);
+                }
+                if q.opens.is_empty() || q.show {
+                    self.show_me();
+                }
+            }
+            Ev::ExternalUri { tab, origin, uri, user } => self.on_external(tab, origin, uri, user),
+            Ev::ExternalAnswer { origin, uri, answer } => self.on_external_answer(origin, uri, answer),
             Ev::Glance(id, url) => {
                 if id == self.active {
                     self.open_glance(&url);

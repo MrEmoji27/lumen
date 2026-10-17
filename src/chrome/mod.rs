@@ -6,7 +6,7 @@
 //! everything else is drawn.
 
 mod anim;
-mod dialog;
+pub mod dialog;
 mod gfx;
 mod pages;
 #[cfg(debug_assertions)]
