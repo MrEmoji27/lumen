@@ -20,7 +20,7 @@ its own.
 
 ## Spec
 
-| | |
+| Part | Detail |
 |---|---|
 | Language | Rust 1.98, edition 2024 |
 | Runs on | Windows 10 and 11, x64 |
