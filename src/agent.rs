@@ -805,7 +805,7 @@ pub fn tools() -> Value {
     let r#ref = json!({"type": "string", "description": "Element ref from the last snapshot, e.g. \"e5\""});
     let t = |name: &str, desc: &str, props: Value, req: &[&str]| json!({"name": name, "description": desc, "inputSchema": {"type": "object", "properties": props, "required": req}});
     json!([
-        t("browser_open", "Open a URL (or search words) in a new tab of yours. Waits for the page. Returns the tab id and a snapshot.",
+        t("browser_open", "Open a URL (or search words) in a new tab of yours. Waits for the page. Returns the tab id and a snapshot of the controls in view; browser_snapshot for the whole page.",
           json!({"url": {"type": "string"}, "background": {"type": "boolean", "description": "Do not bring the tab to the front"}}), &["url"]),
         t("browser_navigate", "Load a URL (or search words) in your tab and wait for it. Returns a snapshot.",
           json!({"tab": tab, "url": {"type": "string"}}), &["tab", "url"]),
@@ -1670,7 +1670,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             wait_load(p, who, tab);
             wait_network_idle(p, who, tab, IDLE_WAIT_MS);
             let status = call(p, who, Op::NavInfo { tab }).ok().and_then(|v| nav_status_line(&v));
-            let snap = snapshot(sh, who, tab, &json!({}))?;
+            let snap = snapshot(sh, who, tab, &json!({"viewport": true, "max_lines": 60}))?;
             let mut out = format!("tab {tab}");
             if let Some(s) = status { out.push('\n'); out.push_str(&s); }
             out.push('\n');
@@ -1683,7 +1683,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             call(p, who, Op::Navigate { tab, url })?;
             wait_load(p, who, tab);
             let status = call(p, who, Op::NavInfo { tab }).ok().and_then(|v| nav_status_line(&v));
-            let snap = snapshot(sh, who, tab, &json!({}))?;
+            let snap = snapshot(sh, who, tab, &json!({"viewport": true, "max_lines": 60}))?;
             let mut out = String::new();
             if let Some(s) = status { out.push_str(&s); out.push('\n'); }
             out.push_str(&snap);
@@ -2307,6 +2307,7 @@ fn snapshot_full(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value, images: bo
         "scope": args["scope"].as_str().unwrap_or(""),
         "interactive": args["interactive"].as_bool().unwrap_or(false),
         "max": args["max_lines"].as_u64().unwrap_or(300).clamp(20, 2000),
+        "viewport": args["viewport"].as_bool().unwrap_or(false),
     });
     let v = eval(&sh.proxy, who, tab, &SNAPSHOT_JS.replace("__OPT__", &opt.to_string()))?;
     if let Some(e) = v["error"].as_str() {
@@ -2314,6 +2315,7 @@ fn snapshot_full(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value, images: bo
     }
     let mut out = format!("Title: {}\nURL: {}\n", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or(""));
     let mut more = v["more"].as_u64().unwrap_or(0);
+    let mut outside = v["outside"].as_u64().unwrap_or(0);
     let mut lines: Vec<String> = v["lines"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
     let mut controls: Vec<(String, String)> = v["controls"]
         .as_array()
@@ -2335,6 +2337,7 @@ fn snapshot_full(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value, images: bo
                 continue;
             }
             more += fv["more"].as_u64().unwrap_or(0);
+            outside += fv["outside"].as_u64().unwrap_or(0);
             lines.push(String::new());
             lines.push(format!("Frame {n}: {}", clip(&f.url, 120)));
             lines.extend(flines.iter().map(|l| bump_frame_refs(l, n)));
@@ -2351,7 +2354,9 @@ fn snapshot_full(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value, images: bo
         out.push('\n');
         out.push_str(&lines.join("\n"));
     }
-    if more > 0 {
+    if args["viewport"].as_bool().unwrap_or(false) && outside > 0 {
+        out.push_str(&format!("\n… {outside} more outside the view: browser_snapshot for all"));
+    } else if more > 0 {
         out.push_str(&format!("\n… {more} more elements; use scope or max_lines"));
     }
     if !wanted && v["frames"].as_u64().is_some_and(|f| f > 0) {
@@ -2415,7 +2420,7 @@ fn element_shot(sh: &Arc<Shared>, who: &Who, tab: u64, r: &str) -> Result<String
 const SNAPSHOT_JS: &str = r#"(()=>{const O=__OPT__;
 document.querySelectorAll('[data-lumen-ref]').forEach(e=>e.removeAttribute('data-lumen-ref'));
 if(!window.__lumenGen)window.__lumenGen=0;window.__lumenGen++;
-const refs=new Map();window.__lumenRefs=refs;let n=0,more=0,frames=0;const vis=e=>{const b=e.getBoundingClientRect();if(b.width<1&&b.height<1)return false;const s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0'};
+const refs=new Map();window.__lumenRefs=refs;let n=0,more=0,frames=0,outside=0;const vis=e=>{const b=e.getBoundingClientRect();if(b.width<1&&b.height<1)return false;const s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0'};
 const tx=s=>(s||'').replace(/\s+/g,' ').trim();
 const name=e=>{const a=e.getAttribute('aria-label');if(a)return tx(a);
  const lb=e.getAttribute('aria-labelledby');if(lb){const t=lb.split(/\s+/).map(i=>document.getElementById(i)).filter(Boolean).map(x=>x.innerText).join(' ');if(tx(t))return tx(t)}
@@ -2436,8 +2441,9 @@ const lines=[];const controls=[];
 const root=O.scope?document.querySelector(O.scope):document.body;if(!root)return {error:O.scope?'nothing matches '+O.scope:'the page has no body yet'};
 const walk=(p,d)=>{for(const e of p.children){
  if(lines.length>=O.max){more++;continue}
- const r=role(e);let deeper=d;
- if(r&&(ACT.has(r)||(!O.interactive&&(r==='heading'||(r==='img'&&d<3))))&&vis(e)){
+  const r=role(e);let deeper=d;
+  if(O.viewport){const b=e.getBoundingClientRect();const vh=window.innerHeight||document.documentElement.clientHeight;const vw=window.innerWidth||document.documentElement.clientWidth;if(b.bottom<0||b.top>vh||b.right<0||b.left>vw){if(r)outside++;continue}}
+  if(r&&(ACT.has(r)||(!O.interactive&&(r==='heading'||(r==='img'&&d<3))))&&vis(e)){
   const act=ACT.has(r);let s='  '.repeat(Math.min(d,8))+'- '+r;const nm=name(e).slice(0,100).replace(/"/g,"'");if(nm)s+=' "'+nm+'"';
   if(r==='heading')s+=' [h'+e.tagName[1]+']';
   if(act){n++;const id='e'+n;refs.set(id,e);e.setAttribute('data-lumen-ref',id);e.setAttribute('data-lumen-gen',String(window.__lumenGen||0));if(!window.__lumenRefInfo)window.__lumenRefInfo={};window.__lumenRefInfo[id]={role:r,name:nm};s+=' [ref='+id+']';if(nm)controls.push([id,nm])}
@@ -2457,7 +2463,7 @@ const walk=(p,d)=>{for(const e of p.children){
 }};
 walk(root,0);
 document.querySelectorAll('[data-lumen-ref]').forEach(e=>e.setAttribute('data-lumen-gen',String(window.__lumenGen)));
-return {title:document.title,url:location.href,lines,more,frames,controls,gen:window.__lumenGen};})()"#;
+return {title:document.title,url:location.href,lines,more,frames,outside,controls,gen:window.__lumenGen};})()"#;
 
 const FOCUS_JS: &str = r#"e.scrollIntoView({block:'center'});e.focus();
 if(document.activeElement!==e&&!e.contains(document.activeElement))return {error:R+' cannot take typing (not a field?)'};
