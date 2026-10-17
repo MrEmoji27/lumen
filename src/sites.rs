@@ -299,6 +299,51 @@ pub fn parse_http_choice(link: &str) -> Option<HttpChoice> {
     }
 }
 
+/// The page shown when a top-level navigation hits a host on the malware or
+/// phishing lists. Plain words, two ways forward. The links use a scheme of
+/// Lumen's own, which the navigation hook picks up.
+pub fn danger_html(url: &str, dark: bool) -> String {
+    let host = esc(&host_of(url));
+    let url = esc(url);
+    let (bg, fg, dim, line, accent) = if dark { ("#161413", "#ece8e3", "#a29c94", "#2c2927", "#e0b070") } else { ("#f7f4f0", "#1d1a17", "#6e675f", "#ddd7cf", "#9a5b13") };
+    format!(
+        "<!doctype html><meta charset=utf-8><title>{host} is a dangerous site</title>\
+<style>body{{margin:0;background:{bg};color:{fg};font:15px/1.55 'Segoe UI',system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}}\
+main{{max-width:520px;padding:32px}}h1{{font:600 24px 'Segoe UI',system-ui,sans-serif;margin:0 0 10px}}p{{color:{dim};margin:0 0 22px}}\
+code{{color:{fg}}}a{{display:inline-block;margin:0 10px 10px 0;padding:8px 16px;border:1px solid {line};border-radius:8px;color:{fg};text-decoration:none}}\
+a.go{{background:{accent};border-color:{accent};color:{bg};font-weight:600}}a:hover{{border-color:{fg}}}</style>\
+<main><h1>Lumen blocked a dangerous site</h1>\
+<p><code>{host}</code> is on a malware and phishing blocklist. Opening it could put this computer or your accounts at risk. \
+If you did not mean to go here, go back.</p>\
+<a href=\"lumen-danger:back\">Go back</a>\
+<a class=go href=\"lumen-danger:continue:{url}\">Continue anyway</a></main>"
+    )
+}
+
+/// What a click on the page above means.
+#[derive(Debug, PartialEq)]
+pub enum DangerChoice {
+    Back,
+    Continue(String),
+}
+
+/// Read one of the page's links, if it is one. Only http(s) may be continued:
+/// a page cannot smuggle a file or script through the link.
+pub fn parse_danger_choice(link: &str) -> Option<DangerChoice> {
+    let rest = link.strip_prefix("lumen-danger:")?;
+    if rest == "back" {
+        return Some(DangerChoice::Back);
+    }
+    let (kind, url) = rest.split_once(':')?;
+    if kind != "continue" {
+        return None;
+    }
+    if !url.to_ascii_lowercase().starts_with("http") {
+        return None;
+    }
+    Some(DangerChoice::Continue(url.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +522,20 @@ mod tests {
         assert_eq!(parse_http_choice("lumen-http:once:file:///c:/secret"), None);
         assert_eq!(parse_http_choice("lumen-http:once:javascript:alert(1)"), None);
         assert_eq!(parse_http_choice("https://example.com/"), None);
+    }
+
+    #[test]
+    fn the_danger_page_links_come_back_as_choices() {
+        let html = danger_html("https://evil.example.com/steal?x=1&y=2", true);
+        assert!(html.contains("evil.example.com"));
+        assert!(html.contains("lumen-danger:continue:https://evil.example.com/steal?x=1&amp;y=2"));
+        assert_eq!(parse_danger_choice("lumen-danger:back"), Some(DangerChoice::Back));
+        assert_eq!(parse_danger_choice("lumen-danger:continue:https://evil.example.com/steal?x=1&y=2"), Some(DangerChoice::Continue("https://evil.example.com/steal?x=1&y=2".into())));
+        assert_eq!(parse_danger_choice("lumen-danger:continue:http://evil.example.com/"), Some(DangerChoice::Continue("http://evil.example.com/".into())));
+        // A page cannot smuggle a file or script through the link.
+        assert_eq!(parse_danger_choice("lumen-danger:continue:file:///c:/secret"), None);
+        assert_eq!(parse_danger_choice("lumen-danger:continue:javascript:alert(1)"), None);
+        assert_eq!(parse_danger_choice("lumen-danger:allow:https://x.example/"), None);
+        assert_eq!(parse_danger_choice("https://example.com/"), None);
     }
 }

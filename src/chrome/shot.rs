@@ -328,4 +328,44 @@ pub fn fake(s: &mut UiState) {
             v("https://example.org/", "", "Yesterday", "09:00"),
         ]);
     }
+    if fake_has("report") {
+        use crate::privacy_stats::{Bar, Counts, SiteRow, Snapshot};
+        let day = |n: u64, blocked: u64, bytes: u64| Bar { day: format!("2026-10-{n:02}"), blocked, bytes };
+        let c = Counts {
+            ads: 412,
+            trackers: 268,
+            other: 54,
+            cosmetic: 190,
+            cookies: 23,
+            removeparam: 41,
+            scriptlets: 18,
+            sponsor: 6,
+            popups: 14,
+            webrtc: 9,
+            signals: 22,
+            wrong_password: 2,
+            malicious: 3,
+            danger: 1,
+            https_up: 27,
+            bytes: 48_200_000,
+            ms: 96_000,
+        };
+        let prev = Counts { ads: 350, trackers: 240, other: 40, popups: 6, webrtc: 5, signals: 15, wrong_password: 0, malicious: 1, danger: 0, https_up: 12, bytes: 39_100_000, ms: 78_000, ..Default::default() };
+        let row = |host: &str, share: f32, counts: Counts| SiteRow { host: host.into(), counts, share, last: "2026-10-18".into() };
+        s.report = Some(Snapshot {
+            all: c,
+            range: "7".into(),
+            totals: c,
+            prev,
+            bars: vec![day(12, 80, 4_000_000), day(13, 120, 6_000_000), day(14, 95, 5_200_000), day(15, 140, 7_100_000), day(16, 110, 5_800_000), day(17, 160, 8_400_000), day(18, 213, 11_700_000)],
+            sites: vec![
+                row("news.ycombinator.com", 0.32, Counts { ads: 90, trackers: 70, other: 20, ..c }),
+                row("doc.rust-lang.org", 0.21, Counts { ads: 50, trackers: 55, other: 15, popups: 2, ..c }),
+                row("example.com", 0.14, Counts { ads: 40, trackers: 30, other: 10, ..c }),
+            ],
+            domains: vec![("doubleclick.net".into(), 220), ("google-analytics.com".into(), 180), ("facebook.com".into(), 95), ("amazon-adsystem.com".into(), 60)],
+            site: None,
+            ..Default::default()
+        });
+    }
 }

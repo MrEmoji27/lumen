@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use keepass::{Database, DatabaseKey};
+use keepass::{Database, DatabaseKey, error::DatabaseOpenError};
 
 /// One login. Holds the password only while the vault is open.
 pub struct Entry {
@@ -29,7 +29,14 @@ impl std::fmt::Debug for Vault {
 impl Vault {
     pub fn open(path: &Path, password: &str) -> Result<Vault, String> {
         let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        let db = Database::open(&mut file, DatabaseKey::new().with_password(password)).map_err(|e| e.to_string())?;
+        let db = Database::open(&mut file, DatabaseKey::new().with_password(password)).map_err(|e| {
+            // A wrong password is counted; anything else (missing file, not a
+            // .kdbx, a corrupt body) is not a guess and is not counted.
+            if matches!(e, DatabaseOpenError::Key(keepass::error::DatabaseKeyError::IncorrectKey)) {
+                crate::privacy_stats::wrong_password();
+            }
+            e.to_string()
+        })?;
         let entries = db
             .iter_all_entries()
             .map(|e| Entry {
