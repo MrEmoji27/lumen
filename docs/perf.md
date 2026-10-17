@@ -195,3 +195,61 @@ Reproduce: set `LUMEN_DATA` to a fresh folder under `%TEMP%` with
 `https://en.wikipedia.org/wiki/Lighthouse` through `lumen-agent`, wait two
 minutes, and read ws_private and CPU the `windows\measure.ps1` way. The
 script this pass used lived in the session scratchpad and was not checked in.
+
+## The wake storm (2026-10-17)
+
+The journal said: median 12 wakes a minute, worst minute 33,527, cpu near zero.
+
+Cause. Not a timer. `next_wake` never hands the loop a deadline in the past.
+tao registers for raw mouse and keyboard input while the window has focus. It
+sends the loop one wake per mouse sample, 125 to 1000 a second, for events
+Lumen never reads. The storms follow the pointer: settings and downloads
+panels, github, youtube, chatgpt. The minutes with the most wakes have the
+least cpu, because each wake does almost nothing.
+
+Fixes, in `main.rs`, `engine.rs`, `pacing.rs`:
+
+- `DeviceEventFilter::Always`. No raw input, no wakes.
+- `pacing::clamp_wake`: the loop never waits for less than 50 ms. A deadline
+  already past can cost 20 wakes a second, never a spin.
+- Page titles reach the loop at most 4 a second, newest wins, same title twice
+  is nothing (`engine::title_pacer`).
+
+Measured, headless, debug build, one tab:
+
+| page | wakes |
+|---|---|
+| title rewritten every 10 ms, before | 8,531 in 100 s |
+| title rewritten every 10 ms, after | 254 in 60 s |
+| about:blank, idle (headless ticks every 3 s) | 94 in 60 s |
+| aria2 download running (polled every 700 ms) | 165 in 60 s |
+
+Not measured live: the raw input fix itself. A headless window has no focus
+and no mouse. Check the journal after a day of use: `wake` should sit near
+the median everywhere.
+
+## Video, in-process GPU against a separate GPU process (2026-10-17)
+
+One YouTube video (Big Buck Bunny 60fps, pinned to 720p, muted), headless,
+debug build, 62 s of playback after 28 s of warm up. `tools\measure-video.ps1`.
+Frames are `getVideoPlaybackQuality()`. CPU is the whole process tree.
+
+| run | gpu | frames | dropped | cpu (one core) | working set | private | processes |
+|---|---|---|---|---|---|---|---|
+| v1 | in-process | 3765 | 294 (7.8%) | 118% | 915 MB | 639 MB | 8 |
+| v3 | in-process | 3736 | 218 (5.8%) | 127% | 922 MB | 639 MB | 8 |
+| v2 | separate | 3728 | 0 | 80% | 1011 MB | 720 MB | 10 |
+| v4 | separate | 3718 | 0 | 70% | 1023 MB | 733 MB | 10 |
+
+Separate GPU process: no dropped frames, about 40% less cpu. It costs about
+100 MB of working set and 80 to 95 MB private. That is past the 30 MB line, so
+the default stays in-process. The switch is there: Settings, "Graphics in
+browser process". Turn it off if tearing and lag bother you more than 100 MB.
+
+Hardware decode: not confirmed. YouTube sent AV1 (`av01.0.08M.08`). The GPU's
+VideoDecode engine read 0% in every run, in both modes. H.264 reports
+`powerEfficient: true`, so the machine can do it. AV1 here was probably
+decoded in software. Hardware acceleration was not touched.
+
+The headless window is off-screen, so these numbers say nothing about
+presentation. Tearing on a real window is not measured here.
