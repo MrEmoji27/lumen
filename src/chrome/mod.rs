@@ -56,6 +56,8 @@ pub struct UiTab {
     pub back: bool,
     pub fwd: bool,
     pub pinned: bool,
+    /// A pin that is not on the page it was pinned on: the menu offers the way back.
+    pub pin_away: bool,
     pub audio: bool,
     pub muted: bool,
     pub status: &'static str,
@@ -1373,7 +1375,9 @@ impl Inner {
         let h = self.anim.get(&format!("tab:{}", t.id), if hov { 1.0 } else { 0.0 }, 0.05);
         if pinned {
             let base = if active { th.press } else { th.raise };
-            self.gfx.round(r, 8.0, if active { base } else { base.mix(th.hover, h) });
+            let lit = if active { base } else { base.mix(th.hover, h) };
+            // A pin with no page loaded stays in the row, but quieter: it is a place, not a page.
+            self.gfx.round(r, 8.0, if t.status == "off" && !active { lit.alpha(0.45 + 0.55 * h) } else { lit });
         } else if !active && h > 0.01 {
             // Held down: one step further than hovering, so a click feels received.
             let pressed = hov && self.press.as_ref() == Some(&Hit::Tab(t.id));
@@ -1747,6 +1751,9 @@ impl Inner {
             Hit::Tab(id) | Hit::TabX(id) | Hit::TabSnd(id) => {
                 let Some(t) = s.tabs.iter().find(|t| t.id == id) else { return };
                 let mut items: Vec<(u32, String)> = vec![(1, if t.pinned { "Unpin".into() } else { "Pin".into() })];
+                if t.pin_away {
+                    items.push((16, "Back to pinned page".into()));
+                }
                 // Never offer to copy a private URL anywhere it would be written down.
                 if !t.url.is_empty() && !t.private {
                     items.push((2, "Duplicate".into()));
@@ -1786,13 +1793,14 @@ impl Inner {
                 if t.audio || t.muted {
                     items.push((3, if t.muted { "Unmute".into() } else { "Mute".into() }));
                 }
-                if t.id != s.active && (t.status == "live" || t.status == "asleep") {
+                // A pin's Close is already an unload, so it gets no second item for it.
+                if !t.pinned && t.id != s.active && (t.status == "live" || t.status == "asleep") {
                     items.push((4, "Unload now".into()));
                 }
                 items.push((11, "New private tab\tCtrl+Shift+N".into()));
                 items.push((0, String::new()));
                 items.push((5, "Close other tabs".into()));
-                items.push((6, "Close\tCtrl+W".into()));
+                items.push((6, if t.pinned { "Unload, keep the pin\tCtrl+W".into() } else { "Close\tCtrl+W".into() }));
                 let cmd = self.popup(&items, x, y);
                 let msg = match cmd {
                     1 => "pin",
@@ -1808,6 +1816,7 @@ impl Inner {
                     12 => "split",
                     13 => "translate",
                     14 => "webview2",
+                    16 => "pinBack",
                     15 => {
                         send(&self.proxy, json!({"t": "workspaceAdd"}));
                         return;

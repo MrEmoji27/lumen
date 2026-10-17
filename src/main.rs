@@ -19,6 +19,7 @@ mod library;
 mod monitor;
 mod pacing;
 mod pagekit;
+mod pins;
 mod recall;
 #[cfg(feature = "servo")]
 mod servo_engine;
@@ -98,6 +99,9 @@ struct Tab {
     back: bool,
     fwd: bool,
     pinned: bool,
+    /// The page a pin was pinned on. Closing the tab unloads it back to this; the current
+    /// `url` may have wandered. Empty when not pinned.
+    pin_url: String,
     audio: bool,
     muted: bool,
     suspended: bool,
@@ -210,6 +214,7 @@ impl Tab {
             back: false,
             fwd: false,
             pinned: false,
+            pin_url: String::new(),
             audio: false,
             muted: false,
             suspended: false,
@@ -231,6 +236,11 @@ impl Tab {
             visible: false,
             typed: None,
         }
+    }
+
+    /// The session's record of this tab.
+    fn saved(&self) -> SavedTab {
+        SavedTab { url: self.url.clone(), title: self.title.clone(), favicon: self.favicon.clone(), pinned: self.pinned, pin_url: self.pin_url.clone() }
     }
 
     /// What the sleep policy looks at.
@@ -1486,6 +1496,7 @@ impl App {
                         back: t.back,
                         fwd: t.fwd,
                         pinned: t.pinned,
+                        pin_away: pins::offers_back(t.pinned, &t.pin_url, &t.url),
                         audio: t.audio,
                         muted: t.muted,
                         status: t.status(),
@@ -1614,6 +1625,7 @@ impl App {
             t.title = saved.title;
             t.favicon = saved.favicon;
             t.pinned = saved.pinned;
+            t.pin_url = pins::restored_pin_url(saved.pinned, &saved.pin_url, &t.url);
             t.workspace = self.active_workspace;
             if i == ws_active {
                 active = Some(t.id);
@@ -1858,7 +1870,53 @@ impl App {
         self.tabs.iter().filter(|t| !self.off_record(t)).find_map(|t| t.view.as_ref())
     }
 
+    /// Closing a pinned tab unloads it instead: the page and its memory go, the pin stays
+    /// in the row and loads its pinned URL when clicked. False: not a pin to keep.
+    fn unload_pin(&mut self, id: u64) -> bool {
+        let Some(i) = self.idx(id) else { return false };
+        let t = &self.tabs[i];
+        if pins::closing(t.pinned, self.off_record(t), &t.pin_url, &t.url) != pins::Closing::Unload {
+            return false;
+        }
+        if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
+            self.listen_stop();
+        }
+        if id == self.active || self.split == Some(id) {
+            self.unsplit();
+        }
+        if id == self.active {
+            let slots: Vec<pins::Slot> = self.tabs.iter().map(|t| pins::Slot { pinned: t.pinned, loaded: t.has_page() }).collect();
+            match pins::next_after_close(&slots, i) {
+                Some(n) => {
+                    let next = self.tabs[n].id;
+                    self.activate(next);
+                }
+                None => {
+                    self.new_tab(None, None);
+                }
+            }
+        }
+        let Some(i) = self.idx(id) else { return true };
+        self.discard(i);
+        // A pin comes back where it was pinned, with a clean slate: no history to walk, no reader.
+        let t = &mut self.tabs[i];
+        t.url = pins::target(&t.pin_url, &t.url);
+        t.pin_url = t.url.clone();
+        t.back = false;
+        t.fwd = false;
+        t.crashed = false;
+        t.typed = None;
+        t.translated = None;
+        t.translating = false;
+        self.dirty = true;
+        self.push();
+        true
+    }
+
     fn close(&mut self, id: u64) {
+        if self.unload_pin(id) {
+            return;
+        }
         let Some(i) = self.idx(id) else { return };
         if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
             self.listen_stop();
@@ -1889,7 +1947,7 @@ impl App {
             monitor::unwatch(None, w, true);
         }
         if !t.url.is_empty() && !t.private {
-            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned });
+            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned, pin_url: t.pin_url });
             if self.closed.len() > MAX_CLOSED {
                 self.closed.remove(0);
             }
@@ -1941,7 +1999,7 @@ impl App {
         let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
         let saved: Vec<SavedTab> = keep
             .iter()
-            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+            .map(|t| t.saved())
             .collect();
         let active_idx = keep.iter().position(|t| t.id == self.active).unwrap_or(0);
         let ids: Vec<u64> = keep.iter().map(|t| t.id).collect();
@@ -1989,6 +2047,7 @@ impl App {
             t.title = saved.title.clone();
             t.favicon = saved.favicon.clone();
             t.pinned = saved.pinned;
+            t.pin_url = pins::restored_pin_url(saved.pinned, &saved.pin_url, &t.url);
             t.workspace = to;
             if i == ws.active {
                 active = Some(t.id);
@@ -3763,11 +3822,28 @@ impl App {
                 if let Some(i) = self.idx(id) {
                     let mut t = self.tabs.remove(i);
                     t.pinned = !t.pinned;
+                    // The pin remembers the page it was made on; unpinning forgets it.
+                    t.pin_url = if t.pinned { t.url.clone() } else { String::new() };
                     // Pinned: end of the pinned block. Unpinned: first after it.
                     let at = self.pinned_count();
                     self.tabs.insert(at, t);
                     self.dirty = true;
                     self.push();
+                }
+            }
+            "pinBack" => {
+                // A pin that wandered goes back to the page it was pinned on.
+                if let Some(i) = self.idx(id) {
+                    let t = &mut self.tabs[i];
+                    let url = t.pin_url.clone();
+                    if t.pinned && !url.is_empty() {
+                        t.url = url.clone();
+                        if let Some(v) = &t.view {
+                            let _ = v.load_url(&url);
+                        }
+                        self.dirty = true;
+                        self.push();
+                    }
                 }
             }
             "reader" => {
@@ -3931,7 +4007,7 @@ impl App {
                     let saved = if i == self.active_workspace {
                         keepable(&self.tabs, self.active)
                             .iter()
-                            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+                            .map(|t| t.saved())
                             .collect()
                     } else {
                         ws.saved.clone()
@@ -3988,7 +4064,7 @@ impl App {
                         self.pane_right = false;
                     }
                     let t = self.tabs.remove(i);
-                    let saved = SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned };
+                    let saved = t.saved();
                     self.agent_logs.borrow_mut().remove(&t.id);
                     self.prompts.retain(|p| p.1 != t.id);
                     if let Some(w) = self.watches.remove(&t.id) {
@@ -5041,7 +5117,7 @@ impl App {
         let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
         let saved: Vec<SavedTab> = keep
             .iter()
-            .map(|t| SavedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), pinned: t.pinned })
+            .map(|t| t.saved())
             .collect();
         let active_tab_idx = keep.iter().position(|t| t.id == self.active).unwrap_or(0);
         // to_session stamps the live tabs into the active workspace's slot.

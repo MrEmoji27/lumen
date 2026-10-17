@@ -200,6 +200,7 @@ pub fn fake(s: &mut UiState) {
             back: false,
             fwd: false,
             pinned: false,
+            pin_away: false,
             audio: false,
             muted: false,
             status: "live",
@@ -214,7 +215,8 @@ pub fn fake(s: &mut UiState) {
         let mut v = vec![
             UiTab { pinned: true, ..t(9001, "Mail", "https://mail.example.com/") },
             UiTab { pinned: true, audio: true, ..t(9002, "Music", "https://music.example.com/") },
-            UiTab { pinned: true, ..t(9003, "Calendar", "https://calendar.example.com/") },
+            UiTab { pinned: true, status: "off", ..t(9003, "Calendar", "https://calendar.example.com/") },
+            UiTab { pinned: true, status: "off", ..t(9011, "Docs", "https://docs.example.com/") },
             t(9004, "The Rust Programming Language - a very long page title that cannot fit in the sidebar", "https://doc.rust-lang.org/book/"),
             UiTab { loading: true, ..t(9005, "Loading something", "https://slow.example.com/") },
             UiTab { audio: true, ..t(9006, "Lo-fi beats to study to", "https://video.example.com/watch") },

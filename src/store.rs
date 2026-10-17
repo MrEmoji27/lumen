@@ -260,6 +260,8 @@ pub struct SavedTab {
     pub title: String,
     pub favicon: String,
     pub pinned: bool,
+    /// The page a pin was pinned on. Empty in files from before pins remembered it.
+    pub pin_url: String,
 }
 
 /// A named set of tabs. Saved in session.json so workspaces survive a restart.
@@ -378,6 +380,33 @@ mod tests {
     #[test]
     fn clear_on_exit_is_off_by_default() {
         assert!(!Settings::default().clear_on_exit);
+    }
+
+    /// A session.json from before pins remembered their page still loads: the pin
+    /// is there, with no pinned URL yet (the restore fills it in).
+    #[test]
+    fn an_old_session_with_pins_loads() {
+        let old = r#"{"tabs":[{"url":"https://music.youtube.com/","title":"Music","favicon":"","pinned":true},
+            {"url":"https://a.test/","title":"A","favicon":"","pinned":false}],"active":1,"width":900.0,"height":700.0,"maximized":false}"#;
+        let s: Session = serde_json::from_str(old).expect("old session loads");
+        assert_eq!(s.tabs.len(), 2);
+        assert!(s.tabs[0].pinned);
+        assert_eq!(s.tabs[0].pin_url, "");
+        assert_eq!(crate::pins::restored_pin_url(s.tabs[0].pinned, &s.tabs[0].pin_url, &s.tabs[0].url), "https://music.youtube.com/");
+    }
+
+    /// The pinned page rides through a save and a load, apart from the page the tab is on.
+    #[test]
+    fn the_pinned_page_survives_the_session_file() {
+        let tab = SavedTab {
+            url: "https://www.youtube.com/watch?v=1".into(),
+            pinned: true,
+            pin_url: "https://music.youtube.com/".into(),
+            ..Default::default()
+        };
+        let back: SavedTab = serde_json::from_str(&serde_json::to_string(&tab).expect("to json")).expect("from json");
+        assert_eq!(back.pin_url, "https://music.youtube.com/");
+        assert_eq!(back.url, "https://www.youtube.com/watch?v=1");
     }
 
     /// A settings.json written before the field existed still loads, and reads as off.
