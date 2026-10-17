@@ -4,6 +4,7 @@
 //! One window. A slim UI page for the sidebar. Pages beside it.
 //! Rust decides who lives, who sleeps, and when the UI hears about it.
 
+mod address;
 mod aria;
 mod agent;
 mod agentkit;
@@ -16,6 +17,7 @@ mod journal;
 mod kdbx;
 mod library;
 mod monitor;
+mod pacing;
 mod pagekit;
 mod recall;
 #[cfg(feature = "servo")]
@@ -41,7 +43,7 @@ use tao::{
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, Event, StartCause, WindowEvent},
     keyboard::{KeyCode, ModifiersState},
-    event_loop::{ControlFlow, EventLoopBuilder},
+    event_loop::{ControlFlow, DeviceEventFilter, EventLoopBuilder},
     platform::windows::{IconExtWindows, WindowBuilderExtWindows, WindowExtWindows},
     window::{Fullscreen, Icon, ResizeDirection, Theme as WinTheme, WindowBuilder},
 };
@@ -127,6 +129,20 @@ struct Tab {
     hidden_at: Option<Instant>,
     /// Its page window is on screen right now.
     visible: bool,
+    /// Typed in the address bar as a bare host and not yet answered. See `Typed`.
+    typed: Option<Typed>,
+}
+
+/// A bare host typed in the address bar (`youtube.musik`, not a link, not a
+/// search). If the name does not exist, the person meant words: search for them.
+struct Typed {
+    /// What was typed, for the search.
+    raw: String,
+    /// The URL it was turned into.
+    url: String,
+    /// The page load for that URL has started. Anything else loading first
+    /// (a link, a script) means the typed page was never the answer.
+    started: bool,
 }
 
 impl Tab {
@@ -159,6 +175,7 @@ impl Tab {
             servo: None,
             hidden_at: None,
             visible: false,
+            typed: None,
         }
     }
 
@@ -410,6 +427,11 @@ fn main() {
     journal::start(&settings, restored_tabs(&session));
 
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
+    // Lumen never reads a raw device event. By default tao registers for raw mouse
+    // and keyboard input while the window has focus, and wakes the loop once per
+    // mouse sample (125 to 1000 a second) for events nobody looks at. This is what
+    // the journal's `wake` storms were: wakes follow the pointer, not the page.
+    event_loop.set_device_event_filter(DeviceEventFilter::Always);
     let (w, h) = if session.width >= 720.0 && session.height >= 480.0 {
         (session.width, session.height)
     } else {
@@ -730,7 +752,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             journal::stop(true, app.born.elapsed());
             *cf = ControlFlow::Exit;
         } else {
-            *cf = ControlFlow::WaitUntil(app.next_wake(Instant::now()));
+            let now = Instant::now();
+            // A deadline that is already past must not turn into a spin.
+            *cf = ControlFlow::WaitUntil(pacing::clamp_wake(now, app.next_wake(now)));
         }
     });
 }
@@ -859,34 +883,62 @@ fn bang(s: &str) -> Option<String> {
 
 /// Omnibox text in, URL out. A bang: that site. Looks like an address: go there. Else: search.
 fn resolve_input(raw: &str, search: &str) -> Option<String> {
+    classify_input(raw, search).map(|(url, _)| url)
+}
+
+/// Like `resolve_input`, and says whether the text was a bare host (`github.com`,
+/// `localhost:3000`): the one kind of typing that may turn out to be a typo, and
+/// so the one that gets a search if the name does not exist.
+fn classify_input(raw: &str, search: &str) -> Option<(String, bool)> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
     }
     if let Some(u) = bang(s) {
-        return Some(u);
+        return Some((u, false));
     }
     let lower = s.to_ascii_lowercase();
     const SCHEMES: [&str; 8] = ["http://", "https://", "file:", "about:", "data:", "view-source:", "edge://", "magnet:"];
     if SCHEMES.iter().any(|p| lower.starts_with(p)) {
-        return Some(s.to_string());
+        return Some((s.to_string(), false));
     }
-    if !s.contains(char::is_whitespace) {
+    if !s.contains(char::is_whitespace) && address::looks_like_host(s) {
         let host = lower.split(['/', '?', '#']).next().unwrap_or("");
-        let host_only = host.rsplit_once(':').map_or(host, |(h, port)| {
-            if port.chars().all(|c| c.is_ascii_digit()) { h } else { host }
-        });
-        if host_only == "localhost" || host_only.parse::<std::net::Ipv4Addr>().is_ok() {
-            return Some(format!("http://{s}"));
-        }
-        if let Some((_, tld)) = host_only.rsplit_once('.')
-            && tld.len() >= 2
-            && tld.chars().all(|c| c.is_ascii_alphabetic())
-        {
-            return Some(format!("https://{s}"));
-        }
+        let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+        let plain = host.rsplit_once(':').map_or(host, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host });
+        // Local and numeric hosts have no certificate to speak of: plain http.
+        let local = plain == "localhost" || plain.parse::<std::net::Ipv4Addr>().is_ok() || plain.starts_with('[');
+        return Some((format!("{}://{s}", if local { "http" } else { "https" }), true));
     }
-    Some(search.replace("%s", &url_encode(s)))
+    Some((search.replace("%s", &url_encode(s)), false))
+}
+
+/// The same page, give or take case and a trailing slash.
+fn same_page(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/').eq_ignore_ascii_case(b.trim_end_matches('/'))
+}
+
+/// What a typed host's answer means.
+#[derive(Debug, PartialEq)]
+enum TypedVerdict {
+    /// Not the answer to this typing (or not yet): keep waiting.
+    Wait,
+    /// It loaded, or failed some way a search would not mend: let go.
+    Forget,
+    /// The name does not exist: search for the words.
+    Search,
+}
+
+/// WebView2's web error status for a name that did not resolve.
+const ERR_NAME_NOT_RESOLVED: i32 = 13;
+/// ... and for a load another load cut short.
+const ERR_CANCELED: i32 = 14;
+
+fn typed_verdict(started: bool, ok: bool, err: i32) -> TypedVerdict {
+    if !started || (!ok && err == ERR_CANCELED) {
+        return TypedVerdict::Wait;
+    }
+    if !ok && err == ERR_NAME_NOT_RESOLVED { TypedVerdict::Search } else { TypedVerdict::Forget }
 }
 
 fn url_encode(s: &str) -> String {
@@ -2374,7 +2426,7 @@ impl App {
     }
 
     fn navigate(&mut self, raw: &str) {
-        let Some(url) = resolve_input(raw, &self.settings.search) else { return };
+        let Some((url, bare)) = classify_input(raw, &self.settings.search) else { return };
         // A magnet link is not a page: hand it to aria2 instead of loading it.
         // The person typed it, so it runs at once.
         if url.starts_with("magnet:") {
@@ -2383,6 +2435,9 @@ impl App {
         }
         let i = self.active_idx();
         self.leave_panel();
+        // A bare host is remembered until the page answers: if the name turns out
+        // not to exist, the person gets a search for what they typed.
+        self.tabs[i].typed = bare.then(|| Typed { raw: raw.trim().to_string(), url: url.clone(), started: false });
         // The other engine: a host from the "Servo sites" list is a Servo page, and
         // one that left the list goes back to WebView2.
         #[cfg(feature = "servo")]
@@ -2647,12 +2702,10 @@ impl App {
             Ev::Key(a) => self.on_key(a),
             Ev::Title(id, t) => {
                 if let Some(i) = self.idx(id) {
-                    if !self.off_record(&self.tabs[i]) {
-                        self.library.set_title(&self.tabs[i].url, &t);
+                    // The page paces its own titles (engine.rs); one that is already shown is nothing.
+                    if self.tabs[i].title != t {
+                        self.show_title(i, t);
                     }
-                    self.tabs[i].title = t;
-                    self.dirty = true;
-                    self.push();
                 }
             }
             Ev::Url(id, u) => {
@@ -2793,10 +2846,27 @@ impl App {
             }
             // The journal's timing of a page. A private tab is not in it.
             Ev::NavStart(id, url) => {
+                if let Some(i) = self.idx(id) {
+                    // The page the person typed is the one now loading, or it never will be.
+                    match self.tabs[i].typed.as_mut() {
+                        Some(t) if same_page(&t.url, &url) => t.started = true,
+                        Some(_) => self.tabs[i].typed = None,
+                        None => {}
+                    }
+                }
                 let (agent, private) = self.idx(id).map_or((false, true), |i| (self.tabs[i].agent, self.tabs[i].private));
                 journal::nav_started(id, &url, agent, private, self.blocked_count());
             }
-            Ev::NavDone(id, ok, err, http) => journal::nav_done(id, ok, err, http, self.blocked_count()),
+            Ev::NavDone(id, ok, err, http) => {
+                journal::nav_done(id, ok, err, http, self.blocked_count());
+                self.typed_done(id, ok, err);
+            }
+            // The server sent the typed page somewhere else: that is not a typo.
+            Ev::NavRedirected(id) => {
+                if let Some(i) = self.idx(id) {
+                    self.tabs[i].typed = None;
+                }
+            }
             Ev::Audio(id, on) => {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].audio = on;
@@ -4395,6 +4465,38 @@ impl App {
             .min()
     }
 
+    /// The page a typed host led to has answered. A name that does not exist
+    /// becomes a search for the words; anything else lets the typing go.
+    fn typed_done(&mut self, id: u64, ok: bool, err: i32) {
+        let Some(i) = self.idx(id) else { return };
+        let Some(t) = &self.tabs[i].typed else { return };
+        match typed_verdict(t.started, ok, err) {
+            TypedVerdict::Wait => {}
+            TypedVerdict::Forget => self.tabs[i].typed = None,
+            TypedVerdict::Search => {
+                let Some(t) = self.tabs[i].typed.take() else { return };
+                let url = self.settings.search.replace("%s", &url_encode(&t.raw));
+                journal::feature("typed_name_search", self.tabs[i].private);
+                if let Some(v) = &self.tabs[i].view {
+                    let _ = v.load_url(&url);
+                }
+                self.tabs[i].url = url;
+                self.dirty = true;
+                self.push();
+            }
+        }
+    }
+
+    /// A title reaches the chrome, the history and the session.
+    fn show_title(&mut self, i: usize, t: String) {
+        if !self.off_record(&self.tabs[i]) {
+            self.library.set_title(&self.tabs[i].url, &t);
+        }
+        self.tabs[i].title = t;
+        self.dirty = true;
+        self.push();
+    }
+
     /// Trim, freeze and discard hidden tabs, enforce the RAM cap, save what changed.
     fn tick(&mut self) {
         let now = Instant::now();
@@ -4865,7 +4967,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tab, keepable, magnet_hold, magnet_name, resolve_input, should_auto_resume};
+    use super::{Tab, classify_input, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
     #[test]
@@ -4937,5 +5039,44 @@ mod tests {
         assert_eq!(resolve_input(m, "https://duckduckgo.com/?q=%s").as_deref(), Some(m));
         // And an ordinary https URL is still just itself.
         assert_eq!(resolve_input("https://a.test/", "x").as_deref(), Some("https://a.test/"));
+    }
+
+    const DDG: &str = "https://duckduckgo.com/?q=%s";
+
+    /// What the address bar does with a word: go there, or search for it.
+    #[test]
+    fn address_bar_classifies_typing() {
+        let url = |s: &str| classify_input(s, DDG).unwrap();
+        // Not a real TLD: a search, not a dead page.
+        assert_eq!(url("youtube.music"), ("https://duckduckgo.com/?q=youtube.music".into(), false));
+        assert_eq!(url("index.html").0, "https://duckduckgo.com/?q=index.html");
+        assert_eq!(url("rust lang"), ("https://duckduckgo.com/?q=rust+lang".into(), false));
+        // Places.
+        assert_eq!(url("music.youtube.com"), ("https://music.youtube.com".into(), true));
+        assert_eq!(url("localhost:3000"), ("http://localhost:3000".into(), true));
+        assert_eq!(url("192.168.1.1"), ("http://192.168.1.1".into(), true));
+        assert_eq!(url("example.co.uk"), ("https://example.co.uk".into(), true));
+        assert_eq!(url("github.com/rust-lang/rust").0, "https://github.com/rust-lang/rust");
+        // A scheme says it all, even for a name that is not a TLD.
+        assert_eq!(url("https://youtube.music"), ("https://youtube.music".into(), false));
+        assert_eq!(classify_input("  ", DDG), None);
+    }
+
+    /// A typed host that does not exist becomes a search, once, and only if it
+    /// was the page that was loading.
+    #[test]
+    fn typed_host_falls_back_to_search_only_for_missing_names() {
+        use crate::TypedVerdict::*;
+        assert_eq!(typed_verdict(true, false, 13), Search);
+        // Not started: an older page's ending is not the answer.
+        assert_eq!(typed_verdict(false, false, 13), Wait);
+        // Cut short by another load: keep waiting for the real one.
+        assert_eq!(typed_verdict(true, false, 14), Wait);
+        // Loaded, or failed in a way a search would not mend.
+        assert_eq!(typed_verdict(true, true, 0), Forget);
+        assert_eq!(typed_verdict(true, false, 9), Forget);
+        assert_eq!(typed_verdict(true, false, 6), Forget);
+        assert!(same_page("https://a.com", "https://A.com/"));
+        assert!(!same_page("https://a.com", "https://b.com/"));
     }
 }
