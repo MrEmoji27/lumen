@@ -83,6 +83,7 @@ enum Panel {
     Downloads,
     History,
     Bookmarks,
+    Report,
 }
 
 impl Panel {
@@ -94,6 +95,7 @@ impl Panel {
             Panel::Downloads => "downloads",
             Panel::History => "history",
             Panel::Bookmarks => "bookmarks",
+            Panel::Report => "report",
         }
     }
 }
@@ -305,6 +307,10 @@ struct App {
     closed: Vec<SavedTab>,
     settings: Settings,
     panel: Panel,
+    /// The report page's range tile: "today" | "7" | "30" | "all".
+    report_range: String,
+    /// The site whose row was clicked on the report page.
+    report_site: Option<String>,
     peek: bool,
     page_fs: bool,
     user_fs: bool,
@@ -654,6 +660,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         closed: Vec::new(),
         settings,
         panel: Panel::None,
+        report_range: "today".into(),
+        report_site: None,
         peek: false,
         page_fs: false,
         user_fs: false,
@@ -770,7 +778,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     }
     // Test hooks for the chrome screenshots (LUMEN_TEST_SHOT, see chrome/shot.rs):
     // LUMEN_TEST_COMPACT=1 starts with the icon-only sidebar, LUMEN_TEST_PANEL=
-    // downloads|control|history|bookmarks|settings opens that page.
+    // downloads|control|history|bookmarks|settings|report opens that page.
     if cfg!(debug_assertions) {
         if std::env::var_os("LUMEN_TEST_COMPACT").is_some() {
             app.settings.compact = true;
@@ -781,6 +789,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             Ok("history") => Panel::History,
             Ok("bookmarks") => Panel::Bookmarks,
             Ok("settings") => Panel::Settings,
+            Ok("report") => Panel::Report,
             _ => Panel::None,
         };
         if panel != Panel::None || app.settings.compact {
@@ -1616,7 +1625,7 @@ impl App {
                 full: self.ui_full(),
                 stage: ((sx - off) as f32, sy as f32, sw as f32, sh as f32),
                 mem: self.mem,
-                blocked: self.blocker.blocked(),
+                blocked: privacy_stats::tab_blocked(self.active),
                 cpu_cap: self.job.is_some(),
                 downloads: self
                     .downloads
@@ -1675,6 +1684,12 @@ impl App {
                     self.library.bookmarks().into_iter().map(ui_mark).collect()
                 } else {
                     Vec::new()
+                },
+                // Filled only while the report page is open.
+                report: if self.panel == Panel::Report {
+                    Some(privacy_stats::snapshot(&self.report_range, self.report_site.as_deref()))
+                } else {
+                    None
                 },
                 suggestions: self.speed_dial_suggestions(),
                 mark: self.active_tab().filter(|t| !t.url.is_empty()).and_then(|t| self.library.mark_for_url(&t.url)).map(ui_mark),
@@ -4014,6 +4029,10 @@ impl App {
                 let p = if self.panel == Panel::Control { Panel::None } else { Panel::Control };
                 self.set_panel(p);
             }
+            Action::Report => {
+                let p = if self.panel == Panel::Report { Panel::None } else { Panel::Report };
+                self.set_panel(p);
+            }
             Action::DevTools => match &self.tabs[i].view {
                 Some(v) => v.open_devtools(),
                 None => {}
@@ -4218,9 +4237,27 @@ impl App {
                     (true, Some("downloads")) => Panel::Downloads,
                     (true, Some("history")) => Panel::History,
                     (true, Some("bookmarks")) => Panel::Bookmarks,
+                    (true, Some("report")) => Panel::Report,
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);
+            }
+            "report" => {
+                // The report page picked a range tile or a site row.
+                if let Some(r) = m["range"].as_str()
+                    && matches!(r, "today" | "7" | "30" | "all")
+                {
+                    self.report_range = r.to_string();
+                }
+                if let Some(host) = m["site"].as_str() {
+                    self.report_site = (!host.is_empty()).then(|| host.to_string());
+                }
+                self.push();
+            }
+            "reportReset" => {
+                privacy_stats::reset();
+                self.report_site = None;
+                self.push();
             }
             "workspaceSwitch" => {
                 if let Some(n) = m["to"].as_u64() {

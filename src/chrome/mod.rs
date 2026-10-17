@@ -9,6 +9,7 @@ mod anim;
 pub mod dialog;
 mod gfx;
 mod pages;
+mod report;
 #[cfg(debug_assertions)]
 mod shot;
 mod style;
@@ -151,6 +152,8 @@ pub struct UiState {
     pub history: Vec<UiVisit>,
     /// Filled only while the Bookmarks page is open.
     pub bookmarks: Vec<UiMark>,
+    /// Filled only while the report page is open.
+    pub report: Option<crate::privacy_stats::Snapshot>,
     /// A download ended while the page was closed: a small dot on the footer button.
     pub dl_unseen: bool,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
@@ -231,6 +234,10 @@ pub enum Hit {
     NtpSearch,
     /// Page widgets (settings and Control live in pages.rs).
     Page(pages::PageHit),
+    /// A widget of the report page (report.rs).
+    Report(report::Click),
+    /// The shield in the footer: the report page.
+    ReportFooter,
     /// Clicked a workspace name in the switcher.
     Workspace(usize),
     /// "Open as tab" button on the glance card.
@@ -1449,9 +1456,9 @@ impl Inner {
         let dl = if compact { R::new(sb.x + 2.0, fy + 3.0, 26.0, 26.0) } else { R::new(gear.x - 30.0, gear.y, 28.0, 28.0) };
         // Downloads in flight: an arrow with a progress ring. Nothing running: the plain arrow.
         let live: Vec<&UiDl> = s.downloads.iter().filter(|d| d.state == "progress").collect();
-        // Bookmarks, left of downloads. The icon-only sidebar has no room for a third button:
-        // Ctrl+Shift+O and the address bar's star still reach the page there.
-        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 30.0 };
+        // Bookmarks and the privacy report, left of downloads. The icon-only sidebar has no
+        // room for more buttons: Ctrl+Shift+O and the address bar's star still reach the page.
+        let mem_room = sb.w - 56.0 - 30.0 - if compact { 0.0 } else { 60.0 };
         if !compact {
             let bm = R::new(dl.x - 30.0, dl.y, 28.0, 28.0);
             let on = s.panel == "bookmarks";
@@ -1461,6 +1468,14 @@ impl Inner {
             }
             self.gfx.icon("star", bm.x + 6.0, bm.y + 6.0, 16.0, if on { th.accent } else if hov { th.text } else { th.dim });
             self.hit(bm, Hit::BookmarksFooter);
+            let pv = R::new(bm.x - 30.0, bm.y, 28.0, 28.0);
+            let on = s.panel == "report";
+            let hov = self.is_hover(&Hit::ReportFooter);
+            if hov {
+                self.gfx.round(pv, 7.0, th.hover);
+            }
+            self.gfx.icon("shield", pv.x + 6.0, pv.y + 6.0, 16.0, if on { th.accent } else if hov { th.text } else { th.dim });
+            self.hit(pv, Hit::ReportFooter);
         }
         if self.is_hover(&Hit::DlFooter) {
             self.gfx.round(dl, 7.0, th.hover);

@@ -72,6 +72,8 @@ pub struct Settings {
     pub cosmetic: bool,
     /// Count what the blocker stops, per day and per site, for the report.
     pub privacy_stats: bool,
+    /// The running "N blocked" note at the bottom of the sidebar.
+    pub page_chip: bool,
     pub show_memory: bool,
     /// The speed dial: tiles under the new tab page's search box.
     pub shortcuts: Vec<Shortcut>,
@@ -173,6 +175,7 @@ impl Default for Settings {
             torrent_note: true,
             cosmetic: true,
             privacy_stats: true,
+            page_chip: true,
             dark_pages: false,
             remember_text: true,
             clear_on_exit: false,

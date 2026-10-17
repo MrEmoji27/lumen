@@ -213,6 +213,8 @@ pub enum Action {
     Bookmark,
     History,
     Bookmarks,
+    /// Ctrl+Shift+R: what Lumen stopped, by day and by site.
+    Report,
     DevTools,
     Reader,
     Listen,
@@ -827,6 +829,7 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, false, false, v) if v == k('D') => Bookmark,
         (true, false, false, v) if v == k('H') => History,
         (true, true, false, v) if v == k('O') => Bookmarks,
+        (true, true, false, v) if v == k('R') => Report,
         (true, true, false, v) if v == k('I') => DevTools,
         (true, false, true, v) if (k('1')..=k('4')).contains(&v) => Workspace((v - k('1')) as usize),
         _ => return None,
