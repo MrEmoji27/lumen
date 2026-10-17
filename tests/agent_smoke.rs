@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{Child, Command},
     thread,
     time::{Duration, Instant},
 };
@@ -20,6 +20,17 @@ fn tmp(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// The headless Lumen this test started. A panic anywhere in the test still kills
+/// it: a leftover headless Lumen would hold the console open and hang the run.
+struct KillLumen(Child);
+
+impl Drop for KillLumen {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn run_agent(data: &PathBuf, session: &str, tool: &str, args: &[&str]) -> (i32, String) {
@@ -111,6 +122,7 @@ fn ref_of(snapshot: &str, role: &str, name: &str) -> String {
 #[test]
 #[ignore = "starts a headless Lumen"]
 fn smoke() {
+    let run_started = Instant::now();
     let page_port = serve_site();
     let base = format!("http://127.0.0.1:{}/", page_port);
     let dir = tmp("main");
@@ -121,7 +133,7 @@ fn smoke() {
 
     let mut cmd = Command::new(LUMEN);
     cmd.arg("--headless").env("LUMEN_HEADLESS","1").env("LUMEN_DATA",&dir).env("LUMEN_DOWNLOADS",&downloads);
-    let mut child = cmd.spawn().unwrap();
+    let lumen = KillLumen(cmd.spawn().unwrap());
     // wait token
     let mut token = String::new();
     let start = Instant::now();
@@ -161,26 +173,107 @@ fn smoke() {
     assert_eq!(code, 0);
     assert!(out.contains("now holds \"Smoke\""), "got: {}", out);
 
-    // click radio medium
+    // click radio medium — the stage occlusion spike, background_click_stays_back:
+    // the view sits on the off-screen stage, out of sight but visible to Chromium.
+    let t0 = Instant::now();
     let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", radio_ref)]);
     eprintln!("CLICK RADIO: {}", out);
     assert_eq!(code, 0);
-    assert!(out.contains("checked") || out.contains("it is now"), "got: {}", out);
+    assert!(out.contains("it is now checked"), "got: {}", out);
+    let (code, tabs_out) = run_agent(&dir, "smoke", "browser_tabs", &[]);
+    eprintln!("TABS: {}", tabs_out);
+    assert_eq!(code, 0);
+    assert!(tabs_out.contains("\"front\": false"), "background tab came to the front: {tabs_out}");
+    let (code, vis) = run_agent(&dir, "smoke", "browser_eval", &[&format!("tab={}", tab), "script=return document.visibilityState"]);
+    eprintln!("VISIBILITY: {}", vis);
+    assert_eq!(code, 0);
+    assert!(vis.contains("visible"), "stage view is hidden from Chromium: {vis}");
+    eprintln!("TIME background_click_stays_back: {:.1}s", t0.elapsed().as_secs_f64());
 
     // select pick Banana
     let (code, out) = run_agent(&dir, "smoke", "browser_select", &[&format!("tab={}", tab), &format!("ref={}", pick_ref), "option=Banana"]);
     eprintln!("SELECT: {}", out);
     assert_eq!(code, 0);
 
+    // two_agents_on_the_stage: a second session's tab, side by side on the stage.
+    let t0 = Instant::now();
+    let (code, out2) = run_agent(&dir, "smoke2", "browser_open", &[&format!("url={}", page("/form")), "background=true"]);
+    eprintln!("OPEN 2: {}", out2);
+    assert_eq!(code, 0);
+    assert!(out2.starts_with("tab "), "got: {}", out2);
+    let tab2: u64 = out2.lines().next().unwrap().trim_start_matches("tab ").trim().parse().unwrap();
+    let (code, snap2) = run_agent(&dir, "smoke2", "browser_snapshot", &[&format!("tab={}", tab2)]);
+    assert_eq!(code, 0);
+    let radio2 = ref_of(&snap2, "radio", "large");
+    let (code, out) = run_agent(&dir, "smoke2", "browser_click", &[&format!("tab={}", tab2), &format!("ref={}", radio2)]);
+    eprintln!("CLICK 2: {}", out);
+    assert_eq!(code, 0);
+    assert!(out.contains("it is now checked"), "second agent's click did not land: {out}");
+    for (s, t) in [("smoke", tab), ("smoke2", tab2)] {
+        let (code, vis) = run_agent(&dir, s, "browser_eval", &[&format!("tab={}", t), "script=return document.visibilityState"]);
+        assert_eq!(code, 0);
+        assert!(vis.contains("visible"), "{s} tab {t} hidden on the stage: {vis}");
+    }
+    eprintln!("TIME two_agents_on_the_stage: {:.1}s", t0.elapsed().as_secs_f64());
+    let _ = run_agent(&dir, "smoke2", "browser_close", &[&format!("tab={}", tab2)]);
+
+    // watch_mid_task (Task 10): the person activates the agent tab; the same view
+    // moves into the main window, the agent's calls keep landing, nothing reloads.
+    let t0 = Instant::now();
+    let bacon_ref = ref_of(&snap, "checkbox", "bacon");
+    let large_ref = ref_of(&snap, "radio", "large");
+    let (code, status_out) = run_agent(&dir, "smoke", "browser_status", &[]);
+    assert_eq!(code, 0);
+    let status: Value = serde_json::from_str(&status_out).expect("status json");
+    let person_tab = status["tabs"]
+        .as_array()
+        .expect("tabs")
+        .iter()
+        .find(|t| t["agent"] == false)
+        .expect("the person's first tab")["tab"]
+        .as_u64()
+        .expect("tab id");
+    let (code, out) = run_agent(&dir, "smoke", "browser_test_activate", &[&format!("tab={}", tab)]);
+    eprintln!("ACTIVATE: {code} {out}");
+    assert_eq!(code, 0);
+    let (code, out) = run_agent(&dir, "smoke", "browser_type", &[&format!("tab={}", tab), &format!("ref={}", name_ref), "text=Watching"]);
+    eprintln!("TYPE WATCHED: {}", out);
+    assert_eq!(code, 0);
+    assert!(out.contains("now holds \"Watching\""), "typed while watched did not land: {out}");
+    let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", bacon_ref)]);
+    eprintln!("CLICK WATCHED: {}", out);
+    assert_eq!(code, 0);
+    assert!(out.contains("it is now checked"), "clicked while watched did not land: {out}");
+    let (code, nav) = run_agent(&dir, "smoke", "browser_eval", &[&format!("tab={}", tab), "script=return performance.getEntriesByType(\"navigation\").length"]);
+    eprintln!("NAV ENTRIES: {}", nav);
+    assert_eq!(code, 0);
+    assert!(nav.trim().contains('1'), "watching reloaded the page: {nav}");
+    // The person goes back to their own tab; the agent tab returns to the stage.
+    let (code, out) = run_agent(&dir, "smoke", "browser_test_activate", &[&format!("tab={}", person_tab)]);
+    eprintln!("ACTIVATE PERSON: {code} {out}");
+    assert_eq!(code, 0);
+    let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", large_ref)]);
+    eprintln!("CLICK AFTER WATCH: {}", out);
+    assert_eq!(code, 0);
+    assert!(out.contains("it is now checked"), "click after returning to the stage did not land: {out}");
+    let (code, vis) = run_agent(&dir, "smoke", "browser_eval", &[&format!("tab={}", tab), "script=return document.visibilityState"]);
+    eprintln!("VISIBILITY AFTER WATCH: {}", vis);
+    assert_eq!(code, 0);
+    assert!(vis.contains("visible"), "back on the stage but hidden: {vis}");
+    eprintln!("TIME watch_mid_task: {:.1}s", t0.elapsed().as_secs_f64());
+
     // click submit
+    let t0 = Instant::now();
     let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", submit_ref)]);
     eprintln!("SUBMIT: {}", out);
     assert_eq!(code, 0);
+    eprintln!("TIME submit: {:.1}s", t0.elapsed().as_secs_f64());
 
     // close tabs
     let _ = run_agent(&dir, "smoke", "browser_close", &[&format!("tab={}", tab)]);
 
-    let _ = child.kill();
-    let _ = child.wait();
+    eprintln!("TIME whole smoke run: {:.1}s", run_started.elapsed().as_secs_f64());
+    assert!(run_started.elapsed() < Duration::from_secs(60), "the smoke run must stay under 60 s");
+    drop(lumen);
     let _ = std::fs::remove_dir_all(&dir);
 }

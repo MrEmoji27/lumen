@@ -61,6 +61,22 @@ fn tmp(name: &str) -> PathBuf {
     dir
 }
 
+/// This build's stamp, exactly as the bridge sends it at `initialize`. A raw client
+/// that sends anything else (including nothing) gets the "reconnect the MCP server"
+/// note on every reply, which is the handshake working — so send the right one.
+/// (`lumen.exe --version` borrows the parent console and misses a pipe; the bridge
+/// prints to stdout.)
+fn bridge_stamp() -> String {
+    static S: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        let dir = tmp("stamp");
+        let out = Command::new(LUMEN_AGENT).arg("--version").env("LUMEN_DATA", &dir).output().expect("lumen-agent --version");
+        let _ = std::fs::remove_dir_all(&dir);
+        String::from_utf8_lossy(&out.stdout).trim().trim_start_matches("lumen-agent ").to_string()
+    })
+    .clone()
+}
+
 struct Resp {
     code: u16,
     headers: HashMap<String, String>,
@@ -139,7 +155,12 @@ impl Door {
 
     /// initialize, with a label, and the session id Lumen answers with.
     fn init(&self, label: &str) -> String {
-        let r = self.rpc(None, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": "1"}}));
+        let r = self.rpc(
+            None,
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": "1"},
+                   "_meta": {"lumen": {"bridge": bridge_stamp()}}}),
+        );
         assert_eq!(r.code, 200, "initialize: {}", r.body);
         r.headers.get("mcp-session-id").cloned().expect("initialize gave no Mcp-Session-Id")
     }

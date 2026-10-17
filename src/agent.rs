@@ -149,6 +149,9 @@ pub enum Op {
     /// Test hook, debug builds only: decline the waiting consent.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     TestConsentDecline,
+    /// Test hook, debug builds only: make an agent tab active in the main window.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    TestActivate { tab: u64 },
 }
 
 /// One recorded tool call: what browser_replay runs again. `tab` is the tab id the call
@@ -230,6 +233,7 @@ impl std::fmt::Debug for Call {
             Op::TestDecline => "test decline".to_string(),
             Op::TestConsentApprove => "test consent approve".to_string(),
             Op::TestConsentDecline => "test consent decline".to_string(),
+            Op::TestActivate { tab } => format!("test activate {tab}"),
         };
         write!(f, "Call({name} by {})", self.who.name)
     }
@@ -1641,6 +1645,11 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
         "browser_test_grant" => Ok(text(call(p, who, Op::TestGrant { tab: tab_arg(args)? })?.to_string())),
         #[cfg(debug_assertions)]
         "browser_test_profile" => Ok(text(call(p, who, Op::TestProfile { tab: tab_arg(args)? })?.to_string())),
+        #[cfg(debug_assertions)]
+        "browser_test_activate" => {
+            call(p, who, Op::TestActivate { tab: tab_arg(args)? })?;
+            Ok(text("activated".into()))
+        }
         #[cfg(debug_assertions)]
         "browser_test_pause" => Ok(text(
             call(p, who, Op::TestPause { paused: args["paused"].as_bool().unwrap_or(true) })?.to_string(),

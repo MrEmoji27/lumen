@@ -1682,6 +1682,11 @@ impl App {
         let active = self.active;
         for i in 0..self.tabs.len() {
             let t = &mut self.tabs[i];
+            // An agent tab that is not being watched lives on the off-screen stage,
+            // visible to Chromium. The idle clock in `tick` hides it, not this.
+            if t.agent && t.id != active && split != Some(t.id) {
+                continue;
+            }
             let want = on && (t.id == active || split == Some(t.id)) && t.has_page();
             if want == t.visible {
                 continue;
@@ -2180,6 +2185,12 @@ impl App {
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
         self.leave_panel();
+        // Watching: an agent tab moves from the stage into the main window.
+        if self.tabs[i].agent && self.tabs[i].view.is_some() {
+            if let Some(v) = self.tabs[i].view.as_ref() {
+                let _ = v.reparent(self.ctx.window.hwnd() as isize);
+            }
+        }
         self.ensure_view(i);
         // Show the new page first, then hide the old. No flash of empty stage between.
         self.wake(i);
@@ -2192,8 +2203,23 @@ impl App {
                 let _ = v.load_url(&self.tabs[i].url);
             }
         }
-        if let Some(p) = prev {
-            let p = &mut self.tabs[p];
+        if let Some(pidx) = prev {
+            let pid = self.tabs[pidx].id;
+            let was_agent = self.tabs[pidx].agent;
+            if was_agent {
+                // Send it back to the stage.
+                if let Some(v) = self.tabs[pidx].view.as_ref() {
+                    let page = self.stage();
+                    if let Some(stage) = self.stage.as_mut() {
+                        let (sx, sy, sw, sh) = stage.slot(pid, (page.2, page.3));
+                        let hwnd = stage.hwnd();
+                        let _ = v.reparent(hwnd);
+                        let _ = v.set_bounds(logical_rect(sx, sy, sw, sh));
+                        let _ = v.set_visible(true);
+                    }
+                }
+            }
+            let p = &mut self.tabs[pidx];
             // It stops being the page being read unless it is the split's other half.
             if self.split != Some(p.id) {
                 p.hidden_at = Some(Instant::now());
@@ -2392,6 +2418,11 @@ impl App {
             self.pane_right = false;
         }
         let t = self.tabs.remove(i);
+        if t.agent
+            && let Some(stage) = self.stage.as_mut()
+        {
+            stage.release(t.id);
+        }
         self.agent_logs.borrow_mut().remove(&id);
         if self.handoff.as_ref().is_some_and(|h| h.0 == id) {
             if let Some((_, _, _, r)) = self.handoff.take() {
@@ -5668,6 +5699,8 @@ impl App {
         };
         for i in 0..self.tabs.len() {
             if !self.tabs[i].agent { continue; }
+            // A tab on screen in the main window (being watched) keeps painting.
+            if self.on_stage(self.tabs[i].id) { continue; }
             let owner = self.tabs[i].owner.clone();
             let last = self.agent.session_last(&owner).unwrap_or(now);
             if now.duration_since(last) >= stage_idle {
@@ -5965,6 +5998,14 @@ impl App {
                     }
                     let _ = reply.send(Ok(Value::Null));
                     self.push();
+                } else {
+                    let _ = reply.send(Err("no such thing".into()));
+                }
+            }
+            Op::TestActivate { tab } => {
+                if cfg!(debug_assertions) {
+                    self.activate(tab);
+                    let _ = reply.send(Ok(Value::Null));
                 } else {
                     let _ = reply.send(Err("no such thing".into()));
                 }
