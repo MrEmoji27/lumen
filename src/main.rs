@@ -241,6 +241,8 @@ struct Tab {
     #[cfg(feature = "servo")]
     servo: Option<servo_engine::Page>,
     hidden_at: Option<Instant>,
+    /// Last navigation result: (ok, WebView2 error code, HTTP status).
+    last_nav: Option<(bool, i32, i32)>,
     /// Its page window is on screen right now.
     visible: bool,
     /// Typed in the address bar as a bare host and not yet answered. See `Typed`.
@@ -353,6 +355,7 @@ impl Tab {
             #[cfg(feature = "servo")]
             servo: None,
             hidden_at: None,
+            last_nav: None,
             visible: false,
             typed: None,
             zoom: 100,
@@ -3603,6 +3606,9 @@ impl App {
             Ev::NavDone(id, ok, err, http) => {
                 journal::nav_done(id, ok, err, http, self.blocked_count());
                 self.typed_done(id, ok, err);
+                if let Some(i) = self.idx(id) {
+                    self.tabs[i].last_nav = Some((ok, err, http));
+                }
             }
             // The server sent the typed page somewhere else: that is not a typo.
             Ev::NavRedirected(id) => {
@@ -5948,6 +5954,21 @@ impl App {
                     self.ensure_view(i);
                 }
                 let _ = reply.send(Ok(json!({"tab": id})));
+            }
+            Op::NavInfo { tab } => {
+                if let Some(i) = mine(self, tab) {
+                    let v = self.tabs[i].last_nav;
+                    let (ok, err, http) = v.unwrap_or((true, 0, 0));
+                    // unknown when no nav yet: return nulls
+                    let resp = if v.is_none() {
+                        json!({"ok": Value::Null, "err": Value::Null, "http": Value::Null})
+                    } else {
+                        json!({"ok": ok, "err": err, "http": http})
+                    };
+                    let _ = reply.send(Ok(resp));
+                } else {
+                    let _ = reply.send(no_tab(tab));
+                }
             }
             Op::Navigate { tab, url } => match (mine(self, tab), resolve_input(&url, &self.settings.search)) {
                 (Some(i), Some(url)) => {

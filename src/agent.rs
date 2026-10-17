@@ -62,6 +62,7 @@ pub enum Op {
     Back { tab: u64 },
     Forward { tab: u64 },
     Reload { tab: u64 },
+    NavInfo { tab: u64 },
     Eval { tab: u64, js: String },
     /// One DevTools Protocol method on the tab's page.
     Cdp { tab: u64, method: String, params: Value },
@@ -173,6 +174,7 @@ impl std::fmt::Debug for Call {
             Op::Back { tab } => format!("back {tab}"),
             Op::Forward { tab } => format!("forward {tab}"),
             Op::Reload { tab } => format!("reload {tab}"),
+            Op::NavInfo { tab } => format!("navinfo {tab}"),
             Op::Eval { tab, .. } => format!("eval {tab}"),
             Op::Cdp { tab, method, .. } => format!("cdp {tab} {method}"),
             Op::Log { tab, network, .. } => format!("log {tab} net={network}"),
@@ -1606,14 +1608,25 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             let tab = call(p, who, Op::Open { url, activate })?["tab"].as_u64().ok_or("no tab")?;
             wait_load(p, who, tab);
             wait_network_idle(p, who, tab, IDLE_WAIT_MS);
-            Ok(text(format!("tab {tab}\n{}", snapshot(sh, who, tab, &json!({}))?)))
+            let status = call(p, who, Op::NavInfo { tab }).ok().and_then(|v| nav_status_line(&v));
+            let snap = snapshot(sh, who, tab, &json!({}))?;
+            let mut out = format!("tab {tab}");
+            if let Some(s) = status { out.push('\n'); out.push_str(&s); }
+            out.push('\n');
+            out.push_str(&snap);
+            Ok(text(out))
         }
         "browser_navigate" => {
             let tab = tab_arg(args)?;
             let url = args["url"].as_str().ok_or("missing url")?.to_string();
             call(p, who, Op::Navigate { tab, url })?;
             wait_load(p, who, tab);
-            Ok(text(snapshot(sh, who, tab, &json!({}))?))
+            let status = call(p, who, Op::NavInfo { tab }).ok().and_then(|v| nav_status_line(&v));
+            let snap = snapshot(sh, who, tab, &json!({}))?;
+            let mut out = String::new();
+            if let Some(s) = status { out.push_str(&s); out.push('\n'); }
+            out.push_str(&snap);
+            Ok(text(out))
         }
         "browser_back" | "browser_forward" | "browser_reload" => {
             let tab = tab_arg(args)?;
@@ -1624,7 +1637,12 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             };
             call(p, who, op)?;
             wait_load(p, who, tab);
-            Ok(text(snapshot(sh, who, tab, &json!({}))?))
+            let status = call(p, who, Op::NavInfo { tab }).ok().and_then(|v| nav_status_line(&v));
+            let snap = snapshot(sh, who, tab, &json!({}))?;
+            let mut out = String::new();
+            if let Some(s) = status { out.push_str(&s); out.push('\n'); }
+            out.push_str(&snap);
+            Ok(text(out))
         }
         "browser_snapshot" => Ok(text(snapshot(sh, who, tab_arg(args)?, args)?)),
         "browser_read" => {
@@ -2411,9 +2429,59 @@ if(!a||!a.content)return {title:document.title,url:location.href,fallback:true,t
 const d=new DOMParser().parseFromString(a.content,'text/html');
 return {title:a.title||document.title,url:location.href,byline:a.byline||'',text:clean(md(d.body))};"#;
 
+pub fn nav_status_line(v: &Value) -> Option<String> {
+    let ok = v.get("ok").and_then(|x| x.as_bool());
+    let err = v.get("err").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+    let http = v.get("http").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+    if ok.is_none() {
+        if (v.get("http").is_none() || v["http"].is_null()) && (v.get("err").is_none() || v["err"].is_null()) {
+            return None;
+        }
+    }
+    let ok = ok.unwrap_or(true);
+    if ok { return None; }
+    if http != 0 && !(200..400).contains(&http) {
+        let phrase = match http {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            408 => "Request Timeout",
+            410 => "Gone",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            502 => "Bad Gateway",
+            503 => "Service Unavailable",
+            504 => "Gateway Timeout",
+            _ => "",
+        };
+        if phrase.is_empty() {
+            return Some(format!("HTTP {http}"));
+        } else {
+            return Some(format!("HTTP {http} {phrase}"));
+        }
+    }
+    if err != 0 {
+        return Some(format!("Load failed (WebView2 error {err})"));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nav_status_names_bad_pages() {
+        use serde_json::json;
+        assert_eq!(nav_status_line(&json!({"ok": true, "err": 0, "http": 200})), None);
+        assert_eq!(nav_status_line(&json!({"ok": true, "err": 0, "http": 304})), None);
+        assert_eq!(nav_status_line(&json!({"ok": false, "err": 0, "http": 429})).as_deref(), Some("HTTP 429 Too Many Requests"));
+        assert_eq!(nav_status_line(&json!({"ok": false, "err": 0, "http": 404})).as_deref(), Some("HTTP 404 Not Found"));
+        assert_eq!(nav_status_line(&json!({"ok": false, "err": 0, "http": 599})).as_deref(), Some("HTTP 599"));
+        assert_eq!(nav_status_line(&json!({"ok": false, "err": 12, "http": 0})).as_deref(), Some("Load failed (WebView2 error 12)"));
+        assert_eq!(nav_status_line(&json!({})), None);
+    }
 
     /// Braces and parens of a script, outside its strings and regexes. A script that
     /// does not parse fails every action that uses it, and only a live browser shows it.
