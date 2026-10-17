@@ -322,6 +322,9 @@ impl Agent {
     pub fn session(&self, id: &str) -> Option<Who> {
         self.sessions.find(id)
     }
+    pub fn session_last(&self, id: &str) -> Option<Instant> {
+        self.sessions.last(id)
+    }
 
     /// A Drive run paused and taken over: from now on the agent may only ask the person
     /// to hand the tab back. Pausing again resumes.
@@ -518,6 +521,9 @@ impl Sessions {
     /// The session with this id, as it stands now.
     pub fn find(&self, id: &str) -> Option<Who> {
         self.lock().get(id).map(|s| s.who(id))
+    }
+    pub fn last(&self, id: &str) -> Option<Instant> {
+        self.lock().get(id).map(|s| s.last)
     }
 
     /// The session whose client label is this (the Drive panel looks its run up by name).
@@ -1246,8 +1252,7 @@ fn native_drag(sh: &Arc<Shared>, who: &Who, tab: u64, a: &Ref, b: &Ref, rr: bool
     let _ = call(p, who, Op::DragData { tab, take: true });
     cdp(p, who, tab, "Input.setInterceptDrags", json!({"enabled": true}))?;
     let moved = |f: f64| json!({"type": "mouseMoved", "x": x1 + (x2 - x1) * f, "y": y1 + (y2 - y1) * f, "buttons": 1, "button": "left"});
-    show_for_mouse(p, who, tab);
-    mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
+        mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
     mouse(p, who, tab, "mousePressed", x1, y1, "left", 1)?;
     cdp(p, who, tab, "Input.dispatchMouseEvent", moved(0.15))?;
     thread::sleep(Duration::from_millis(80));
@@ -1322,14 +1327,6 @@ fn mouse(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64, kind: &str, x: f64, y:
         p["clickCount"] = json!(clicks);
     }
     cdp(proxy, who, tab, "Input.dispatchMouseEvent", p)
-}
-
-/// A mouse event only reaches a page that renders: Chromium drops input to an invisible
-/// view. A hidden agent tab comes to the front before it is clicked, hovered or dragged,
-/// the way the person's own tab would be. Typing needs no such thing: it is not a mouse
-/// event and reaches a hidden page.
-fn show_for_mouse(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) {
-    let _ = call(proxy, who, Op::Show { tab });
 }
 
 /// A key name or chord as DevTools key events: (key, code, virtual key, text, modifiers).
@@ -1801,8 +1798,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             };
             let mark_before = page_mark(sh, who, tab, clicked_ref.as_ref(), tabs_before.len(), true);
             // A mouse event needs a page that renders: the tab comes to the front.
-            show_for_mouse(p, who, tab);
-            mouse(p, who, tab, "mouseMoved", x, y, button, 0)?;
+                        mouse(p, who, tab, "mouseMoved", x, y, button, 0)?;
             for c in 1..=clicks {
                 mouse(p, who, tab, "mousePressed", x, y, button, c)?;
                 mouse(p, who, tab, "mouseReleased", x, y, button, c)?;
@@ -1821,8 +1817,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             wait_actionable(sh, who, tab, &r, ACTION_WAIT_MS, rr)?;
             let (x, y, _) = point_at(sh, who, tab, &r, rr)?;
             let (x, y) = frame_point(sh, who, tab, &r, x, y)?;
-            show_for_mouse(p, who, tab);
-            mouse(p, who, tab, "mouseMoved", x, y, "none", 0)?;
+                        mouse(p, who, tab, "mouseMoved", x, y, "none", 0)?;
             thread::sleep(Duration::from_millis(300));
             Ok(text(format!("hovering {}\n\n{}", ref_text(&r), snapshot(sh, who, tab, &json!({"interactive": true}))?)))
         }
@@ -1920,8 +1915,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             let (x2, y2, _) = point_at(sh, who, tab, &b, rr)?;
             let (x1, y1) = frame_point(sh, who, tab, &a, x1, y1)?;
             let (x2, y2) = frame_point(sh, who, tab, &b, x2, y2)?;
-            show_for_mouse(p, who, tab);
-            mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
+                        mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
             mouse(p, who, tab, "mousePressed", x1, y1, "left", 1)?;
             for s in 1..=8 {
                 let f = s as f64 / 8.0;
@@ -2849,4 +2843,5 @@ mod tests {
         assert_eq!(sorted.len(), names.len(), "no duplicate tool names");
     }
 }
+
 

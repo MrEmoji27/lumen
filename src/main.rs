@@ -33,6 +33,7 @@ mod recall;
 #[cfg(feature = "servo")]
 mod servo_engine;
 mod split;
+mod stage;
 mod translate;
 mod upnp;
 mod video;
@@ -72,6 +73,7 @@ use engine::{Action, Ctx, Ev};
 use store::{SavedTab, Session, Settings};
 
 const TICK: Duration = Duration::from_secs(3);
+const STAGE_IDLE: Duration = Duration::from_secs(30);
 /// A hidden tab keeps its caches this long, so flipping back is instant.
 const TRIM_AFTER: Duration = Duration::from_secs(30);
 /// Nothing waits: the loop sleeps this long instead of waking every TICK forever.
@@ -482,6 +484,8 @@ struct App {
     /// Last time any agent asked for anything. A Lumen started headless for agents
     /// leaves when they have been quiet a while.
     agent_last: Instant,
+    /// Off-screen stage window hosting agent tabs' views.
+    stage: Option<stage::Stage>,
     /// Modifier keys as the main window last saw them.
     mods: ModifiersState,
     /// Remembered permission answers, and requests waiting for the user.
@@ -790,6 +794,7 @@ fn main() {
     let chrome = chrome::Chrome::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
     // The split divider: a strip of its own between the two panes.
     let divider = split::Divider::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
+    let stage = stage::Stage::new(&event_loop);
 
 let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     // Read before the struct literal moves `settings` into the app.
@@ -851,6 +856,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         agent: agent::Agent::new(&store::data_dir()),
         agent_seen: None,
         agent_last: Instant::now(),
+        stage: Some(stage),
         mods: ModifiersState::empty(),
         rules: store::load_rules(),
         zooms: store::load_zooms(),
@@ -2091,6 +2097,14 @@ impl App {
                 // WebView2's own downloads of this agent land in its own folder too.
                 engine::set_profile_download_dir(&v, &agent_policy::agent_downloads_dir_for(&t.downloads));
                 let _ = v.load_url(&t.url);
+                // Move the view onto the off-screen stage so it stays visible to Chromium.
+                if let Some(stage) = self.stage.as_mut() {
+                    let (sx, sy, sw, sh) = stage.slot(t.id, (w, h));
+                    let hwnd = stage.hwnd();
+                    let _ = v.reparent(hwnd);
+                    let _ = v.set_bounds(logical_rect(sx, sy, sw, sh));
+                    let _ = v.set_visible(true);
+                }
             }
             t.view = Some(v);
             t.suspended = false;
@@ -5646,6 +5660,22 @@ impl App {
             privacy_stats::flush();
             std::process::exit(0);
         }
+        // Idle agent tabs stop painting after STAGE_IDLE.
+        let stage_idle = if cfg!(debug_assertions) {
+            std::env::var("LUMEN_STAGE_IDLE_MS").ok().and_then(|v| v.parse::<u64>().ok()).map(Duration::from_millis).unwrap_or(STAGE_IDLE)
+        } else {
+            STAGE_IDLE
+        };
+        for i in 0..self.tabs.len() {
+            if !self.tabs[i].agent { continue; }
+            let owner = self.tabs[i].owner.clone();
+            let last = self.agent.session_last(&owner).unwrap_or(now);
+            if now.duration_since(last) >= stage_idle {
+                if let Some(v) = self.tabs[i].view.as_ref() {
+                    let _ = v.set_visible(false);
+                }
+            }
+        }
         self.next_tick = now + TICK;
 
         let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
@@ -5817,6 +5847,28 @@ impl App {
         // A strictly isolated browser made since the last call: its waiting tabs get
         // their page now, so the call below finds the tab it asked for.
         self.poll_own_envs();
+        // Wake an idle stage view before acting.
+        let wake_tab = match &call.op {
+            agent::Op::Navigate { tab, .. } | agent::Op::Back { tab } | agent::Op::Forward { tab } | agent::Op::Reload { tab } |
+            agent::Op::Cdp { tab, .. } | agent::Op::Log { tab, .. } | agent::Op::NetIdle { tab } |
+            agent::Op::Contexts { tab } | agent::Op::CdpForSession { tab, .. } | agent::Op::DragData { tab, .. } |
+            agent::Op::Dialogs { tab, .. } | agent::Op::Show { tab } | agent::Op::Handoff { tab, .. } |
+            agent::Op::Consent { tab, .. } | agent::Op::Close { tab } => Some(*tab),
+            _ => None,
+        };
+        if let Some(tab) = wake_tab {
+            if let Some(i) = self.idx(tab) {
+                if self.tabs[i].agent {
+                    if let Some(stage) = self.stage.as_mut() {
+                        stage.set_visible(true);
+                    }
+                    if let Some(v) = self.tabs[i].view.as_ref() {
+                        let _ = v.set_visible(true);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
         self.push();
         let (reply, who) = (call.reply, call.who);
         // One line per session, not per call. No tab, no page, no content.
