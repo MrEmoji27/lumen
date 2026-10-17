@@ -166,7 +166,12 @@ pub const RULES: &[Rule] = &[
 
 /// Hooks for the integration tests. Debug builds only; a release build has no such tools.
 #[cfg(debug_assertions)]
-const TEST_RULES: &[Rule] = &[rule("browser_test_crash", Scope::OwnTab, Gate::Nothing), rule("browser_test_done", Scope::Free, Gate::Nothing)];
+const TEST_RULES: &[Rule] = &[
+    rule("browser_test_crash", Scope::OwnTab, Gate::Nothing),
+    rule("browser_test_done", Scope::Free, Gate::Nothing),
+    rule("browser_test_state", Scope::Free, Gate::Nothing),
+    rule("browser_test_grant", Scope::Free, Gate::Nothing),
+];
 #[cfg(not(debug_assertions))]
 const TEST_RULES: &[Rule] = &[];
 

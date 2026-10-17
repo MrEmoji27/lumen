@@ -69,6 +69,10 @@ pub enum Op {
     Policy,
     /// Test hook, debug builds only: press Done on the waiting handoff.
     TestDone,
+    /// Test hook, debug builds only: every tab, whoever's it is.
+    TestState,
+    /// Test hook, debug builds only: the right-click "Let agents use this tab", on a tab by id.
+    TestGrant { tab: u64 },
 }
 
 /// One primitive for the UI thread, and where to send the answer.
@@ -99,6 +103,8 @@ impl std::fmt::Debug for Call {
             Op::Downloads => "downloads".to_string(),
             Op::Policy => "policy".to_string(),
             Op::TestDone => "test done".to_string(),
+            Op::TestState => "test state".to_string(),
+            Op::TestGrant { tab } => format!("test grant {tab}"),
         };
         write!(f, "Call({name} by {})", self.who.name)
     }
@@ -563,8 +569,11 @@ fn wait_load(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) {
     for _ in 0..60 {
         // A fresh tab is about:blank and already "complete"; wait for the real page.
         let js = "document.readyState==='complete'&&location.href!=='about:blank'";
-        if eval(proxy, who, tab, js).ok().and_then(|v| v.as_bool()) == Some(true) {
-            break;
+        match eval(proxy, who, tab, js) {
+            Ok(v) if v.as_bool() == Some(true) => break,
+            // The tab is no longer ours to use (a shared tab left its site): nothing to wait for.
+            Err(e) if e.contains("you may use") => break,
+            _ => {}
         }
         thread::sleep(Duration::from_millis(200));
     }
@@ -742,6 +751,10 @@ fn run_tool(proxy: &EventLoopProxy<Ev>, who: &Who, name: &str, args: &Value, app
             call(p, who, Op::TestDone)?;
             Ok(text("done pressed".into()))
         }
+        #[cfg(debug_assertions)]
+        "browser_test_state" => Ok(text(call(p, who, Op::TestState)?.to_string())),
+        #[cfg(debug_assertions)]
+        "browser_test_grant" => Ok(text(call(p, who, Op::TestGrant { tab: tab_arg(args)? })?.to_string())),
         "browser_open" => {
             let url = args["url"].as_str().ok_or("missing url")?.to_string();
             let activate = !args["background"].as_bool().unwrap_or(false);

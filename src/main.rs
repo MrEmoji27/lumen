@@ -599,6 +599,11 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             .ok();
     }
     app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
+    // Test hook: LUMEN_TEST_AGENT_OFF=1 opens the door and shuts it again, the state of a Lumen
+    // whose switch was turned off while it ran: it listens and answers 503 to everything.
+    if cfg!(debug_assertions) && app.settings.agent && std::env::var_os("LUMEN_TEST_AGENT_OFF").is_some() {
+        app.agent.set(false, app.settings.agent_port, &app.ctx.proxy);
+    }
     // The last run closed with "clear history on exit" and could not finish wiping
     // WebView2's own history. It happens as soon as there is a page to ask.
     app.clear_pending = store::clear_history_pending();
@@ -3610,11 +3615,7 @@ impl App {
             "agentGrant" => {
                 // Right-click > Let agents use this tab. Again: stop letting them. Only a tab
                 // of the person's, only with a real page, and only for the site it is on now.
-                if let Some(i) = self.idx(id) {
-                    let t = &mut self.tabs[i];
-                    t.agent_ok = if t.agent_ok.is_some() || t.agent || t.private || !t.url.starts_with("http") { None } else { Some(engine::origin_of(&t.url)) };
-                    self.push();
-                }
+                self.toggle_agent_grant(id);
             }
             "pin" => {
                 if let Some(i) = self.idx(id) {
@@ -4590,6 +4591,15 @@ impl App {
         !t.agent && t.agent_ok.as_deref().is_some_and(|site| site == engine::origin_of(&t.url))
     }
 
+    /// "Let agents use this tab", or take it back. Only a tab of the person's with a real page,
+    /// never a private one, and only for the site it is on now.
+    fn toggle_agent_grant(&mut self, id: u64) {
+        let Some(i) = self.idx(id) else { return };
+        let t = &mut self.tabs[i];
+        t.agent_ok = if t.agent_ok.is_some() || t.agent || t.private || !t.url.starts_with("http") { None } else { Some(engine::origin_of(&t.url)) };
+        self.push();
+    }
+
     /// One primitive for an agent. An agent may use the tabs its session opened, and a tab of
     /// the person's only while they have granted that tab. Never another agent's. The tool-level
     /// rules (what may run where) are `agent_policy::authorize`, applied before this is reached.
@@ -4619,6 +4629,24 @@ impl App {
                 let tabs = self.tabs.iter().map(|t| agent_policy::TabInfo { id: t.id, agent: t.agent, owner: t.owner.clone(), granted: self.agent_granted(t) }).collect();
                 let s = &self.settings;
                 let _ = reply.send(Ok(agent_policy::ctx_value(tabs, s.agent_shared_profile, s.agent_upload, &s.agent_upload_dir)));
+            }
+            Op::TestState => {
+                let all: Vec<Value> = self
+                    .tabs
+                    .iter()
+                    .map(|t| json!({"id": t.id, "agent": t.agent, "owner": t.owner_name, "granted": self.agent_granted(t), "crashed": t.crashed, "url": t.url}))
+                    .collect();
+                let _ = reply.send(if cfg!(debug_assertions) { Ok(Value::Array(all)) } else { Err("no such thing".into()) });
+            }
+            Op::TestGrant { tab } => {
+                let r = match self.idx(tab) {
+                    Some(i) if cfg!(debug_assertions) => {
+                        self.toggle_agent_grant(tab);
+                        Ok(json!({"url": self.tabs[i].url, "granted": self.agent_granted(&self.tabs[i])}))
+                    }
+                    _ => Err(format!("no tab {tab}")),
+                };
+                let _ = reply.send(r);
             }
             Op::TestDone => {
                 // Debug builds only: stands in for the person pressing Done.
