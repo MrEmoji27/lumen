@@ -262,8 +262,8 @@ In order. Each step ships as its own version, with a line in [the changelog](cha
 4. **Talking to an agent.** A text field to steer an agent now, queue its next task, or start a
    new one. *Done in 0.5.0.*
 5. **Speed for agents.** Fewer calls and smaller replies: batches of steps, Luau scripts, and
-   higher-level tools for forms and tables. *Done in 0.4.0.* Snapshots that send only what
-   changed are still to do.
+   higher-level tools for forms and tables. *Done in 0.4.0.* Snapshots send only what changed
+   (`diff`), and a ref keeps working while its element is in the page.
 6. **Headless trims.** Measure first, then cut what an off-screen Lumen still does for nobody.
 7. **The comparison.** Lumen against other Chromium-based programs on the same pages and the same
    machine, published with the method.

@@ -55,6 +55,17 @@ for(let i=0;i<50;i++)h+='<tr><td>Kettle '+i+'</td><td>'+(20+i)+'.99</td><td>'+(i
 document.getElementById('t').innerHTML=h+'</tbody></table>'},300)</script>"#
             .into(),
         "/search" => r#"<title>Search</title><h1>Search the shop</h1><form action="/results"><input name="q" aria-label="Search"><button>Search</button></form>"#.into(),
+        "/steps" => {
+            // Forty links and a button that changes its own name: one interaction, one line.
+            let mut b = String::from(
+                "<title>Steps</title><h1>Steps</h1>\
+                 <button data-n=\"0\" onclick=\"this.dataset.n=+this.dataset.n+1;this.textContent='Step '+this.dataset.n\">Step 0</button><ul>",
+            );
+            for i in 0..40 {
+                b += &format!("<li><a href='/item/{i}'>Row {i}</a></li>");
+            }
+            b + "</ul>"
+        }
         "/results" => {
             let mut b = String::from("<title>Results</title><h1>Results</h1><ol>");
             for i in 0..10 {
@@ -245,6 +256,36 @@ fn t_two_tabs(d: &mut Door, base: &str) {
     d.close(b);
 }
 
+/// Five interactions on one page, each followed by a whole snapshot.
+fn t_five_full(d: &mut Door, base: &str) {
+    five_steps(d, base, false);
+}
+
+/// The same five, with `diff: true`: only the line a click changed comes back.
+fn t_five_diff(d: &mut Door, base: &str) {
+    five_steps(d, base, true);
+}
+
+fn five_steps(d: &mut Door, base: &str, diff: bool) {
+    let tab = d.open(&format!("{base}/steps"));
+    let snap = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true, "diff": diff}));
+    if diff {
+        // The first look at a tab is the whole page, and says so.
+        assert!(snap.contains("first snapshot"), "{snap}");
+    }
+    let button = find_ref(&snap, &["button \"Step 0\""]);
+    for i in 0..5 {
+        d.tool("browser_click", json!({"tab": tab, "ref": button}));
+        let snap = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true, "diff": diff}));
+        if diff {
+            assert!(snap.contains("1 removed, 1 added"), "click {}: {snap}", i + 1);
+        } else {
+            assert!(snap.contains(&format!("Step {}", i + 1)), "click {}: {snap}", i + 1);
+        }
+    }
+    d.close(tab);
+}
+
 // ------------------------------------------------- the same tasks, with the newer tools
 
 fn t_form_fill(d: &mut Door, base: &str) {
@@ -384,6 +425,8 @@ fn bench() {
         ("table built by JS", t_table),
         ("ten-step workflow", t_workflow),
         ("two tabs, two reads", t_two_tabs),
+        ("five steps, full snapshots", t_five_full),
+        ("five steps, diff snapshots", t_five_diff),
         ("form, browser_fill", t_form_fill),
         ("links, browser_links", t_links_tool),
         ("table, browser_table", t_table_tool),

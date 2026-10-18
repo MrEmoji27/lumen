@@ -402,6 +402,16 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
             ("text/html", b"<title>State page</title><script>localStorage.setItem('who','agent')</script>".to_vec())
         }
         "/upload" => ("text/html", b"<title>Upload page</title><input type=file id=f name=f aria-label=Pick><div id=out></div>".to_vec()),
+        // One button that changes its own name, one that adds a button, and a link that
+        // stays: a page for the snapshot-diff checks.
+        "/steps" => (
+            "text/html",
+            b"<title>Steps</title><h1>Steps</h1>\
+              <button data-n=\"0\" onclick=\"this.dataset.n=+this.dataset.n+1;this.textContent='Step '+this.dataset.n\">Step 0</button>\
+              <button onclick=\"const b=document.createElement('button');b.textContent='Extra';document.body.append(b)\">Add</button>\
+              <a href=\"/plain\">Away</a>"
+                .to_vec(),
+        ),
         "/file.bin" => {
             extra += "Content-Disposition: attachment; filename=\"file.bin\"\r\n";
             ("application/octet-stream", vec![7u8; 4096])
@@ -410,7 +420,7 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
     };
     let code = if matches!(
         path,
-        "/page" | "/probe" | "/plain" | "/upload" | "/file.bin" | "/frames" | "/inner" | "/popup" | "/fetch" | "/api" | "/state"
+        "/page" | "/probe" | "/plain" | "/upload" | "/file.bin" | "/frames" | "/inner" | "/popup" | "/fetch" | "/api" | "/state" | "/steps"
     ) {
         "200 OK"
     } else {
@@ -859,6 +869,41 @@ fn the_agent_door() {
         assert!(d.tool(&pz, "browser_snapshot", json!({"tab": pt})).is_ok());
         say("a paused run got drive_paused on everything but browser_handoff, and went on after Done");
         d.tool(&pz, "browser_close", json!({"tab": pt})).unwrap();
+    }
+
+    head("7d. snapshots: a diff says what a click changed, and a ref outlives its snapshot");
+    {
+        let tab = d.open(&a, &page(p1, "/steps"));
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true})).expect("snapshot");
+        let ref_of = |snap: &str, words: &[&str]| -> String {
+            let line = snap.lines().find(|l| words.iter().all(|w| l.contains(w)) && l.contains("[ref=")).unwrap_or_else(|| panic!("no {words:?} in:\n{snap}"));
+            line.split("[ref=").nth(1).unwrap().trim_end_matches(']').to_string()
+        };
+        let step = ref_of(&snap, &["button \"Step 0\""]);
+        let add = ref_of(&snap, &["button \"Add\""]);
+        d.tool(&a, "browser_click", json!({"tab": tab, "ref": step})).expect("click");
+        let diff = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true, "diff": true})).expect("diff");
+        assert!(diff.contains("1 removed, 1 added"), "{diff}");
+        assert!(diff.contains(&format!("- button \"Step 0\" [ref={step}]")), "{diff}");
+        assert!(diff.contains(&format!("+ button \"Step 1\" [ref={step}]")), "the change keeps the same ref: {diff}");
+        assert!(diff.contains("lines unchanged") && !diff.contains("Title:"), "only the change comes back: {diff}");
+        say(&format!("one click, one line: {diff:?}"));
+        // The ref from the snapshot before the click still clicks: it is the same button.
+        d.tool(&a, "browser_click", json!({"tab": tab, "ref": step})).expect("the same ref again");
+        let diff = d.tool(&a, "browser_snapshot", json!({"tab": tab, "diff": true})).expect("diff again");
+        assert!(diff.contains("+ button \"Step 2\""), "{diff}");
+        // A new element gets a number of its own: never the one an older snapshot used.
+        d.tool(&a, "browser_click", json!({"tab": tab, "ref": add})).expect("add a button");
+        let added = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true, "diff": true})).expect("diff after adding");
+        assert!(added.contains("0 removed, 1 added") && added.contains("+ button \"Extra\""), "{added}");
+        assert!(!added.contains(&format!("button \"Extra\" [ref={step}]")), "a new element took an old ref: {added}");
+        say("an added button got a number no snapshot had used");
+        // A page that went somewhere is not a diff: the whole page comes, and says so.
+        d.tool(&a, "browser_navigate", json!({"tab": tab, "url": page(p1, "/plain")})).expect("navigate");
+        let moved = d.tool(&a, "browser_snapshot", json!({"tab": tab, "diff": true})).expect("diff after a navigation");
+        assert!(moved.contains("full snapshot") && moved.contains("Plain page"), "{moved}");
+        say("the page navigated; the diff came back as the whole page and said so");
+        d.tool(&a, "browser_close", json!({"tab": tab})).unwrap();
     }
 
     head("8. the person's tab: nothing until granted, then steering but never scripting");

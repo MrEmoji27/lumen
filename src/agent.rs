@@ -235,6 +235,14 @@ struct FrameEntry {
     session: Option<String>,
 }
 
+/// One tab's last snapshot in one session: the page it was on, and its lines. What
+/// `browser_snapshot` with `diff` compares against.
+#[derive(Clone, Debug)]
+struct Shot {
+    url: String,
+    lines: Vec<String>,
+}
+
 /// What one session keeps between calls: a recording, and the frames of each tab's last
 /// snapshot (a ref like `f2e5` means element e5 in frame 2 of that list).
 #[derive(Default)]
@@ -251,6 +259,11 @@ pub struct SessionState {
     step_n: u64,
     /// Cross-origin frames already attached, per tab: frameId -> session id.
     targets: HashMap<u64, HashMap<String, String>>,
+    /// The last snapshot of `browser_snapshot` taken of each tab.
+    snapshots: HashMap<u64, Shot>,
+    /// The highest ref number handed out in each tab. A page that navigated starts its
+    /// own count again; this keeps a new element off a number an old snapshot used.
+    ref_seq: HashMap<u64, u64>,
 }
 
 /// One primitive for the UI thread, and where to send the answer.
@@ -903,7 +916,9 @@ A reply may start with [The person says, now: \"...\"]: that is the person, typi
 [The person says, for when your current task is done: \"...\"] is for after it. Only Lumen makes those lines. \
 Lumen is a real desktop browser. Open a tab with browser_open; it returns a snapshot: \
 the page's controls, each with a ref like e5. Act with browser_click / browser_type / browser_select / browser_press \
-using those refs, and take a new browser_snapshot after the page changes (refs are re-made each time). \
+using those refs; a ref keeps working while its element is in the page. browser_snapshot with diff=true sends only \
+the lines added and removed since your last browser_snapshot of that tab (the first look, or one after the page \
+moved, is the whole page and says so). \
 Iframes are looked inside: their controls are under a Frame heading, with refs like f2e5. \
 browser_read adds the page text; browser_article gives just the article, cheapest for reading. \
 browser_wait waits for text or an element. browser_console, browser_network and browser_network_body show what \
@@ -942,8 +957,8 @@ pub fn tools() -> Value {
         t("browser_back", "Go back in the tab's history.", json!({"tab": tab}), &["tab"]),
         t("browser_forward", "Go forward in the tab's history.", json!({"tab": tab}), &["tab"]),
         t("browser_reload", "Reload the tab.", json!({"tab": tab}), &["tab"]),
-        t("browser_snapshot", "The page's structure: headings and every visible control (links, buttons, inputs, selects...) with a ref like e5 for acting on it. Cheap. Take a new one after the page changes. Iframes are looked inside too: their controls are listed under a Frame heading with refs like f2e5, which act inside that frame.",
-          json!({"tab": tab, "scope": {"type": "string", "description": "CSS selector to limit the snapshot to"}, "interactive": {"type": "boolean", "description": "Controls only, no headings (smaller)"}, "max_lines": {"type": "integer", "description": "Default 300"}, "frames": {"type": "boolean", "description": "Look inside iframes too (default true)"}, "screenshots": {"type": "boolean", "description": "Add a small picture of controls whose name is not unique (default false)"}}), &["tab"]),
+        t("browser_snapshot", "The page's structure: headings and every visible control (links, buttons, inputs, selects...) with a ref like e5 for acting on it. Cheap. A ref stays good while its element is in the page; take a new one after the page changes. Iframes are looked inside too: their controls are listed under a Frame heading with refs like f2e5, which act inside that frame.",
+          json!({"tab": tab, "scope": {"type": "string", "description": "CSS selector to limit the snapshot to"}, "interactive": {"type": "boolean", "description": "Controls only, no headings (smaller)"}, "max_lines": {"type": "integer", "description": "Default 300"}, "frames": {"type": "boolean", "description": "Look inside iframes too (default true)"}, "screenshots": {"type": "boolean", "description": "Add a small picture of controls whose name is not unique (default false)"}, "diff": {"type": "boolean", "description": "Only the lines added and removed since your last snapshot of this tab (default false); the first look, or one after the page moved, is the whole page and says so"}}), &["tab"]),
         t("browser_read", "A snapshot plus the visible text of the page.",
           json!({"tab": tab, "max_chars": {"type": "integer", "description": "Text budget, default 6000"}}), &["tab"]),
         t("browser_article", "Just the main article as clean text (Mozilla Readability). Best for reading news, docs, posts. Falls back to page text.",
@@ -1024,7 +1039,7 @@ Use browser_help with topic=<tool name> for details and examples.";
     match topic {
         "browser_click" => "browser_click: tab, ref or x/y, button?, double?, screenshot?, timeout_ms?, re_resolve?. Clicks with a real mouse event via DevTools. Waits for navigation. Example: {\"tab\":3,\"ref\":\"e5\"}".into(),
         "browser_type" => "browser_type: tab, ref, text, append?, submit?, screenshot?, re_resolve?. Types real keyboard text. Example: {\"tab\":3,\"ref\":\"e2\",\"text\":\"hello\",\"submit\":true}".into(),
-        "browser_snapshot" => "browser_snapshot: tab, scope?, interactive?, max_lines?. Fresh refs. Example: {\"tab\":3}".into(),
+        "browser_snapshot" => "browser_snapshot: tab, scope?, interactive?, max_lines?, diff?. A ref stays good while its element is in the page. Example: {\"tab\":3,\"diff\":true}".into(),
         "browser_read" => "browser_read: tab, max_chars?. Snapshot plus visible text. Example: {\"tab\":3,\"max_chars\":4000}".into(),
         "browser_wait" => "browser_wait: tab, text?/text_gone?/selector?/url?, timeout_ms?. Example: {\"tab\":3,\"text\":\"Done\",\"timeout_ms\":5000}".into(),
         "browser_batch" => "browser_batch: steps (up to 20 of {tool, args}), stop_on_error?, result? (last|all). \"tab\": \"$1\" is the tab step 1 opened. Example: {\"steps\":[{\"tool\":\"browser_open\",\"args\":{\"url\":\"example.com\"}},{\"tool\":\"browser_article\",\"args\":{\"tab\":\"$1\"}}]}".into(),
@@ -1111,8 +1126,9 @@ fn text(s: String) -> Vec<Value> {
 }
 
 /// The page script that finds a ref, first. Refs live in a Map (shadow DOM included) and
-/// as data-lumen-ref attributes (survive a script that replaced the Map).
-const EL_JS: &str = r#"const __el=(r,rr)=>{const m=window.__lumenRefs;let e=m&&m.get(r);if(!e||!e.isConnected)e=document.querySelector('[data-lumen-ref="'+r+'"]');if(e&&e.getAttribute('data-lumen-gen')!==String(window.__lumenGen||0)){if(!rr)return null;e=null}if(!e&&rr){const info=(window.__lumenRefInfo||{})[r];if(info){for(const el of document.querySelectorAll('*')){if(!el.isConnected)continue;const rr2=el.getAttribute('role')||el.tagName.toLowerCase();const nm=(el.getAttribute('aria-label')||el.innerText||el.value||el.placeholder||'').replace(/\s+/g,' ').trim();if(rr2===info.role&&nm===info.name){e=el;break}}}}return e};"#;
+/// as `data-lumen-ref` attributes, which the snapshot leaves in place: a ref keeps
+/// working while its element is in the page, snapshot or no snapshot.
+const EL_JS: &str = r#"const __el=(r,rr)=>{const m=window.__lumenRefs;let e=m&&m.get(r);if(!e||!e.isConnected){try{e=document.querySelector('[data-lumen-ref="'+r+'"]')}catch(x){e=null}}if(e&&!e.isConnected)e=null;if(!e&&rr){const info=(window.__lumenRefInfo||{})[r];if(info){for(const el of document.querySelectorAll('*')){if(!el.isConnected)continue;const rr2=el.getAttribute('role')||el.tagName.toLowerCase();const nm=(el.getAttribute('aria-label')||el.innerText||el.value||el.placeholder||'').replace(/\s+/g,' ').trim();if(rr2===info.role&&nm===info.name){e=el;break}}}}return e};"#;
 
 fn with_el(r: &str, body: &str, rr: bool) -> String {
     format!("(()=>{{{EL_JS}const R={};const e=__el(R,{rr});if(!e)return {{error:'stale_ref: no element '+R+' on this page now; take a new browser_snapshot'}};{body}}})()", json!(r), rr=if rr {"true"} else {"false"})
@@ -2103,7 +2119,16 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             out.push_str(&snap);
             Ok(text(out))
         }
-        "browser_snapshot" => Ok(text(snapshot(sh, who, tab_arg(args)?, args)?)),
+        "browser_snapshot" => {
+            let tab = tab_arg(args)?;
+            if args["diff"].as_bool().unwrap_or(false) {
+                Ok(text(diff_snapshot(sh, who, tab, args)?))
+            } else {
+                let full = snapshot(sh, who, tab, args)?;
+                remember_shot(sh, who, tab, &full);
+                Ok(text(full))
+            }
+        }
         "browser_read" => {
             let tab = tab_arg(args)?;
             let max = args["max_chars"].as_u64().unwrap_or(6000).clamp(200, 50_000);
@@ -2736,6 +2761,100 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
     }
 }
 
+/// The note a snapshot carries when the page moved since the last look: not part of the
+/// page, so a diff never counts it.
+const PAGE_CHANGED: &str = "[page changed since last snapshot]";
+
+/// The lines of one snapshot, as a diff compares them.
+fn snapshot_lines(full: &str) -> Vec<String> {
+    full.lines().filter(|l| *l != PAGE_CHANGED).map(String::from).collect()
+}
+
+/// The URL line of a snapshot.
+fn snapshot_url(lines: &[String]) -> String {
+    lines.iter().find_map(|l| l.strip_prefix("URL: ").map(String::from)).unwrap_or_default()
+}
+
+/// How much of the middle a diff walks. A change bigger than this is a new page, not a
+/// page that moved a little; the whole page is named instead of building a table.
+const DIFF_MAX: usize = 800;
+
+/// What the two snapshots changed, as `- ` and `+ ` lines in page order, and how many
+/// lines they had in common. The head and the tail are almost always the whole page; a
+/// longest common subsequence walks what is left.
+fn diff_lines(old: &[String], new: &[String]) -> (Vec<String>, usize) {
+    let mut head = 0;
+    while head < old.len() && head < new.len() && old[head] == new[head] {
+        head += 1;
+    }
+    let mut tail = 0;
+    while tail < old.len() - head && tail < new.len() - head && old[old.len() - 1 - tail] == new[new.len() - 1 - tail] {
+        tail += 1;
+    }
+    let (a, b) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
+    let mut out = Vec::new();
+    if a.len() > DIFF_MAX || b.len() > DIFF_MAX {
+        out.extend(a.iter().map(|l| format!("- {l}")));
+        out.extend(b.iter().map(|l| format!("+ {l}")));
+        return (out, head + tail);
+    }
+    let mut dp = vec![vec![0u32; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            dp[i][j] = if a[i] == b[j] { dp[i + 1][j + 1] + 1 } else { dp[i + 1][j].max(dp[i][j + 1]) };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut keep = 0;
+    while i < a.len() || j < b.len() {
+        if i < a.len() && j < b.len() && a[i] == b[j] {
+            keep += 1;
+            i += 1;
+            j += 1;
+        } else if j >= b.len() || (i < a.len() && dp[i + 1][j] >= dp[i][j + 1]) {
+            out.push(format!("- {}", a[i]));
+            i += 1;
+        } else {
+            out.push(format!("+ {}", b[j]));
+            j += 1;
+        }
+    }
+    (out, head + keep + tail)
+}
+
+/// Remember the snapshot `browser_snapshot` just gave: the next `diff` compares against it.
+fn remember_shot(sh: &Arc<Shared>, who: &Who, tab: u64, full: &str) {
+    let lines = snapshot_lines(full);
+    let url = snapshot_url(&lines);
+    sh.with_state(&who.session, |st| {
+        st.snapshots.insert(tab, Shot { url, lines });
+    });
+}
+
+/// `browser_snapshot` with `diff: true`: the lines added and removed since this session's
+/// last `browser_snapshot` of the tab, and how much stood still. The first look at a tab,
+/// and a page that navigated under it, answer with the whole snapshot and say so.
+fn diff_snapshot(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value) -> Result<String, String> {
+    let prev = sh.with_state(&who.session, |st| st.snapshots.get(&tab).cloned());
+    let full = snapshot(sh, who, tab, args)?;
+    remember_shot(sh, who, tab, &full);
+    let lines = snapshot_lines(&full);
+    let url = snapshot_url(&lines);
+    let Some(prev) = prev else {
+        return Ok(format!("{full}\n(first snapshot of this tab: the whole page)"));
+    };
+    if prev.url != url {
+        return Ok(format!("{full}\n(full snapshot: the page was on {} and is now on {url})", prev.url));
+    }
+    let (changed, unchanged) = diff_lines(&prev.lines, &lines);
+    if changed.is_empty() {
+        return Ok(format!("nothing changed; {unchanged} lines unchanged"));
+    }
+    let removed = changed.iter().filter(|l| l.starts_with("- ")).count();
+    let added = changed.len() - removed;
+    Ok(format!("{removed} removed, {added} added; {unchanged} lines unchanged:\n{}", changed.join("\n")))
+}
+
 /// The page as an agent needs it: title, URL, then one line per heading and control.
 fn snapshot(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value) -> Result<String, String> {
     snapshot_full(sh, who, tab, args, false).map(|(text, _)| text)
@@ -2745,16 +2864,21 @@ fn snapshot(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value) -> Result<Strin
 /// small picture of each of those: three buttons all called "Edit" are told apart by
 /// their look, not by a round of guessing. Returns the text and the extra image items.
 fn snapshot_full(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value, images: bool) -> Result<(String, Vec<Value>), String> {
+    // The highest ref number this tab has handed out before, so a page that navigated
+    // starts above it: no number is ever used twice in one tab.
+    let base = sh.with_state(&who.session, |st| st.ref_seq.get(&tab).copied().unwrap_or(0));
     let opt = json!({
         "scope": args["scope"].as_str().unwrap_or(""),
         "interactive": args["interactive"].as_bool().unwrap_or(false),
         "max": args["max_lines"].as_u64().unwrap_or(300).clamp(20, 2000),
         "viewport": args["viewport"].as_bool().unwrap_or(false),
+        "base": base,
     });
     let v = eval(&sh.proxy, who, tab, &SNAPSHOT_JS.replace("__OPT__", &opt.to_string()))?;
     if let Some(e) = v["error"].as_str() {
         return Err(e.to_string());
     }
+    let mut high = v["n"].as_u64().unwrap_or(base);
     let mut out = format!("Title: {}\nURL: {}\n", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or(""));
     let mut more = v["more"].as_u64().unwrap_or(0);
     let mut outside = v["outside"].as_u64().unwrap_or(0);
@@ -2780,6 +2904,7 @@ fn snapshot_full(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value, images: bo
             }
             more += fv["more"].as_u64().unwrap_or(0);
             outside += fv["outside"].as_u64().unwrap_or(0);
+            high = high.max(fv["n"].as_u64().unwrap_or(base));
             lines.push(String::new());
             lines.push(format!("Frame {n}: {}", clip(&f.url, 120)));
             lines.extend(flines.iter().map(|l| bump_frame_refs(l, n)));
@@ -2810,8 +2935,13 @@ fn snapshot_full(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value, images: bo
     let changed = map.get(&tab).is_some_and(|prev| prev != &sig);
     map.insert(tab, sig);
     if changed {
-        out.push_str("\n[page changed since last snapshot]");
+        out.push_str(&format!("\n{PAGE_CHANGED}"));
     }
+    // How high the refs in this tab have gone, for the next look here.
+    sh.with_state(&who.session, |st| {
+        let seq = st.ref_seq.entry(tab).or_insert(base);
+        *seq = (*seq).max(high);
+    });
     let mut extra = Vec::new();
     if images {
         // Only controls whose name is shared: the ones an agent cannot tell apart.
@@ -2860,9 +2990,10 @@ fn element_shot(sh: &Arc<Shared>, who: &Who, tab: u64, r: &str) -> Result<String
 }
 
 const SNAPSHOT_JS: &str = r#"(()=>{const O=__OPT__;
-document.querySelectorAll('[data-lumen-ref]').forEach(e=>e.removeAttribute('data-lumen-ref'));
-if(!window.__lumenGen)window.__lumenGen=0;window.__lumenGen++;
-const refs=new Map();window.__lumenRefs=refs;let n=0,more=0,frames=0,outside=0;const vis=e=>{const b=e.getBoundingClientRect();if(b.width<1&&b.height<1)return false;const s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0'};
+window.__lumenRefN=Math.max(window.__lumenRefN||0,O.base||0);
+if(!window.__lumenRefs)window.__lumenRefs=new Map();
+const refs=window.__lumenRefs;for(const [k,v] of refs)if(!v.isConnected)refs.delete(k);
+let more=0,frames=0,outside=0;const vis=e=>{const b=e.getBoundingClientRect();if(b.width<1&&b.height<1)return false;const s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0'};
 const tx=s=>(s||'').replace(/\s+/g,' ').trim();
 const name=e=>{const a=e.getAttribute('aria-label');if(a)return tx(a);
  const lb=e.getAttribute('aria-labelledby');if(lb){const t=lb.split(/\s+/).map(i=>document.getElementById(i)).filter(Boolean).map(x=>x.innerText).join(' ');if(tx(t))return tx(t)}
@@ -2888,7 +3019,7 @@ const walk=(p,d)=>{for(const e of p.children){
   if(r&&(ACT.has(r)||(!O.interactive&&(r==='heading'||(r==='img'&&d<3))))&&vis(e)){
   const act=ACT.has(r);let s='  '.repeat(Math.min(d,8))+'- '+r;const nm=name(e).slice(0,100).replace(/"/g,"'");if(nm)s+=' "'+nm+'"';
   if(r==='heading')s+=' [h'+e.tagName[1]+']';
-  if(act){n++;const id='e'+n;refs.set(id,e);e.setAttribute('data-lumen-ref',id);e.setAttribute('data-lumen-gen',String(window.__lumenGen||0));if(!window.__lumenRefInfo)window.__lumenRefInfo={};window.__lumenRefInfo[id]={role:r,name:nm};s+=' [ref='+id+']';if(nm)controls.push([id,nm])}
+  if(act){let id=e.getAttribute('data-lumen-ref');if(!id||!/^e\d+$/.test(id)){window.__lumenRefN++;id='e'+window.__lumenRefN;e.setAttribute('data-lumen-ref',id)}else{const k=+id.slice(1);if(k>window.__lumenRefN)window.__lumenRefN=k}refs.set(id,e);if(!window.__lumenRefInfo)window.__lumenRefInfo={};window.__lumenRefInfo[id]={role:r,name:nm};s+=' [ref='+id+']';if(nm)controls.push([id,nm])}
   if(['checkbox','radio','switch','menuitemcheckbox'].includes(r)&&(e.checked||e.getAttribute('aria-checked')==='true'))s+=' checked';
   if(e.getAttribute('aria-expanded'))s+=' expanded='+e.getAttribute('aria-expanded');
   if(e.getAttribute('aria-selected')==='true')s+=' selected';
@@ -2904,8 +3035,7 @@ const walk=(p,d)=>{for(const e of p.children){
  walk(e,deeper);
 }};
 walk(root,0);
-document.querySelectorAll('[data-lumen-ref]').forEach(e=>e.setAttribute('data-lumen-gen',String(window.__lumenGen)));
-return {title:document.title,url:location.href,lines,more,frames,outside,controls,gen:window.__lumenGen};})()"#;
+return {title:document.title,url:location.href,lines,more,frames,outside,controls,n:window.__lumenRefN};})()"#;
 
 /// A table as columns (th of thead, or of the first row) and rows of cells: the names once,
 /// not once a row. `pick()` finds the table; it is defined by the caller.
@@ -3098,6 +3228,42 @@ mod tests {
         assert_eq!(click_outcome(&base, &PageMark { tabs: 2, ..base.clone() }), "a new tab opened");
         assert_eq!(click_outcome(&base, &PageMark { mutations: 24, ..base.clone() }), "14 changes on the page");
         assert_eq!(click_outcome(&base, &base), "nothing on the page changed; try another way or take a new browser_snapshot");
+    }
+
+    #[test]
+    fn a_diff_is_the_lines_that_came_and_went() {
+        let l = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (out, unchanged) = diff_lines(&l(&["a", "b", "c"]), &l(&["a", "c"]));
+        assert_eq!(out, vec!["- b"]);
+        assert_eq!(unchanged, 2);
+        let (out, unchanged) = diff_lines(&l(&["a", "c"]), &l(&["a", "b", "c"]));
+        assert_eq!(out, vec!["+ b"]);
+        assert_eq!(unchanged, 2);
+        let (out, unchanged) = diff_lines(&l(&["a", "b"]), &l(&["a", "b"]));
+        assert!(out.is_empty());
+        assert_eq!(unchanged, 2);
+        let (out, unchanged) = diff_lines(&l(&["x", "a", "y"]), &l(&["a", "y", "z"]));
+        assert_eq!(out, vec!["- x", "+ z"]);
+        assert_eq!(unchanged, 2);
+        // One line in the middle: the head and the tail are not walked.
+        let (out, unchanged) = diff_lines(&l(&["a", "b", "c", "d"]), &l(&["a", "x", "c", "d"]));
+        assert_eq!(out, vec!["- b", "+ x"]);
+        assert_eq!(unchanged, 3);
+        // A line that only moved is a removal and an addition.
+        let (out, _) = diff_lines(&l(&["a", "b"]), &l(&["b", "a"]));
+        assert_eq!(out, vec!["- a", "+ a"]);
+        // A page that is new whole: no table for it, every line on both sides.
+        let old: Vec<String> = (0..900).map(|i| format!("old {i}")).collect();
+        let new: Vec<String> = (0..900).map(|i| format!("new {i}")).collect();
+        let (out, unchanged) = diff_lines(&old, &new);
+        assert_eq!(unchanged, 0);
+        assert_eq!(out.len(), 1800);
+        assert!(out[0].starts_with("- old 0") && out[900].starts_with("+ new 0"), "{:?}", &out[899..901]);
+        // The "page changed" note is not part of the page.
+        let lines = snapshot_lines("Title: Steps\nURL: http://a/steps\n[page changed since last snapshot]");
+        assert_eq!(lines, l(&["Title: Steps", "URL: http://a/steps"]));
+        assert_eq!(snapshot_url(&lines), "http://a/steps");
+        assert_eq!(snapshot_url(&l(&["Title: x"])), "", "no URL line: nothing to compare against");
     }
 
     #[test]

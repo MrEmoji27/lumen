@@ -56,7 +56,16 @@ URL: http://127.0.0.1:8765/agent.html
 - button "Go" [ref=e5]
 ```
 
-Act by ref. Take a new snapshot after the page changes; refs are made fresh each time.
+Act by ref. A ref keeps working while its element is in the page, snapshot or no snapshot:
+the snapshot marks each element it lists with its ref, and reuses that mark next time. New
+elements get numbers nothing has used in that tab, so one ref never means two things.
+
+### Diffs
+
+`browser_snapshot` takes `diff: true`: the reply is the lines added and removed since your
+last `browser_snapshot` of that tab (`- ` and `+ ` prefixes), and "N lines unchanged". The
+first look at a tab, and one after the page went somewhere, is the whole page and says so.
+An action's own reply still carries the controls in view, whole.
 
 ### Frames
 
@@ -199,7 +208,7 @@ results you name, put one in the cart). Copy them into the scripts folder to use
 
 | Read | Act | Watch | Other |
 |---|---|---|---|
-| snapshot (iframes too) | click (left, right, double, x/y) | console (logs, errors, dialogs) | open, navigate, back, forward, reload |
+| snapshot (diffs, iframes too) | click (left, right, double, x/y) | console (logs, errors, dialogs) | open, navigate, back, forward, reload |
 | read (snapshot + text) | type (real keyboard text) | network (method, status, URL, #number) | tabs, show, close |
 | article (Readability) | press (Enter, Control+A...) | network_body (one response body) | screenshot (viewport, full, element) |
 | find | select, scroll, hover | wait (text, gone, selector, URL) | pdf, download, downloads |
