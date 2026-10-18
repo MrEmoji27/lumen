@@ -108,8 +108,14 @@ const OLD_FILES: &[&str] = &["engine.dat", "engine2.dat", "engine3.dat", "engine
 /// The cookie lists' hiding rules, one per line, for counting banner hides
 /// apart from ad hides. The engine knows the rules; this file is only a tally.
 const COOKIE_FILE: &str = "cookie_selectors.txt";
-/// Four days. Older than that and the list is a rumour.
+/// Four days, for a list that does not say how long it keeps. Older than that and the list
+/// is a rumour.
 const MAX_AGE: Duration = Duration::from_secs(4 * 24 * 60 * 60);
+/// The shortest a list's own `! Expires:` is taken at. uBlock's quick fixes say 8 hours:
+/// YouTube changes its player under the ad rules every few days, and that list follows.
+const MIN_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+/// How often a running Lumen looks whether a list has gone stale.
+const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const NET_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A matcher, and the tracker hosts that say what a block it makes was.
@@ -135,6 +141,8 @@ pub struct Blocker {
     /// Cookie banners' selectors, loaded when first needed and dropped when
     /// the matcher is replaced.
     cookies: RefCell<Option<Rc<HashSet<String>>>>,
+    /// When the lists are next looked at while Lumen runs. Lists age while it stays open.
+    next_check: Cell<std::time::Instant>,
 }
 
 #[allow(dead_code)]
@@ -153,7 +161,27 @@ impl Blocker {
             rx: RefCell::new(rx),
             trackers: RefCell::new(Vec::new()),
             cookies: RefCell::new(None),
+            next_check: Cell::new(std::time::Instant::now() + CHECK_EVERY),
         })
+    }
+
+    /// Once an hour: a list past its own expiry is fetched again and the matcher rebuilt
+    /// behind the one in use, which keeps blocking until the new one lands. Lumen left open
+    /// for days used to keep the lists it started with, and YouTube broke under them.
+    pub fn refresh_if_due(&self, now: std::time::Instant) {
+        if now < self.next_check.get() {
+            return;
+        }
+        self.next_check.set(now + CHECK_EVERY);
+        let dir = self.dir.join("filters");
+        if stale_lists(&dir, SystemTime::now()).is_empty() {
+            return;
+        }
+        let (tx, rx) = channel();
+        let data = self.dir.clone();
+        if thread::Builder::new().name("lumen-blocker".into()).spawn(move || build_engine_with(&data, tx, false, false)).is_ok() {
+            *self.rx.borrow_mut() = rx;
+        }
     }
 
     /// Turn blocking on/off at runtime.
@@ -784,6 +812,12 @@ fn scriptlet_resources() -> Vec<adblock::resources::Resource> {
 }
 
 fn build_engine(data_dir: &Path, tx: Sender<Built>, force: bool) {
+    build_engine_with(data_dir, tx, force, true)
+}
+
+/// `send_cached`: hand over the matcher already on disk first, so a start blocks at once.
+/// A refresh while running has a matcher in use and skips that.
+fn build_engine_with(data_dir: &Path, tx: Sender<Built>, force: bool, send_cached: bool) {
     let dir = data_dir.join("filters");
     if fs::create_dir_all(&dir).is_err() {
         eprintln!("lumen: blocker: no filter dir at {}", dir.display());
@@ -796,9 +830,10 @@ fn build_engine(data_dir: &Path, tx: Sender<Built>, force: bool) {
     // toggle: dangerous is dangerous whether or not ads are blocked.
     ensure_malicious(&dir);
     load_popup_hosts(&dir);
-    let fresh = !force && is_fresh(&dir);
+    let stale = stale_lists(&dir, SystemTime::now());
+    let fresh = !force && stale.is_empty();
     // Fast start: young lists and a matcher already built. Milliseconds.
-    if let Ok(bytes) = fs::read(dir.join(ENGINE_FILE)) && !bytes.is_empty() && !force {
+    if send_cached && let Ok(bytes) = fs::read(dir.join(ENGINE_FILE)) && !bytes.is_empty() && !force {
         // Whoever built it wrote the tracker table beside it; without it the
         // matcher still blocks, the report just cannot say ad or tracker.
         let trackers = read_trackers(&dir.join(TRACKERS_FILE));
@@ -808,10 +843,14 @@ fn build_engine(data_dir: &Path, tx: Sender<Built>, force: bool) {
         }
         // Stale: block with the old matcher now, refresh below, swap in later.
     }
+    if fresh && !send_cached {
+        return;
+    }
+    // Only the lists that are past their own expiry are fetched again.
     for (name, url) in LISTS {
         let path = dir.join(name);
         let cached = fs::read_to_string(&path).unwrap_or_default();
-        if fresh && !cached.is_empty() {
+        if !force && !cached.is_empty() && !stale.contains(name) {
             continue;
         }
         if !fetch_to(url, &path) {
@@ -871,12 +910,31 @@ fn cache_is_fresh(stamps: &[Option<SystemTime>], now: SystemTime, max_age: Durat
     })
 }
 
-fn is_fresh(dir: &Path) -> bool {
-    let stamps: Vec<Option<SystemTime>> = LISTS
+/// How long a list says it keeps: its `! Expires: 8 hours` / `4 days` line, in its first
+/// lines, held between MIN_AGE and MAX_AGE. A list that says nothing keeps MAX_AGE.
+fn list_max_age(text: &str) -> Duration {
+    let said = text.lines().take(40).find_map(|l| {
+        let rest = l.trim_start_matches(['!', '#', ' ']).strip_prefix("Expires:")?.trim();
+        let mut words = rest.split_whitespace();
+        let n: u64 = words.next()?.parse().ok()?;
+        let unit = words.next().unwrap_or("days").to_ascii_lowercase();
+        Some(if unit.starts_with("hour") { n * 3600 } else if unit.starts_with("day") { n * 86_400 } else { return None })
+    });
+    said.map(Duration::from_secs).unwrap_or(MAX_AGE).clamp(MIN_AGE, MAX_AGE)
+}
+
+/// The lists whose file is missing or older than the list's own expiry.
+fn stale_lists(dir: &Path, now: SystemTime) -> Vec<&'static str> {
+    LISTS
         .iter()
-        .map(|(name, _)| fs::metadata(dir.join(name)).and_then(|m| m.modified()).ok())
-        .collect();
-    cache_is_fresh(&stamps, SystemTime::now(), MAX_AGE)
+        .filter(|(name, _)| {
+            let path = dir.join(name);
+            let stamp = fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let head: String = fs::read_to_string(&path).map(|t| t.chars().take(4000).collect()).unwrap_or_default();
+            !cache_is_fresh(&[stamp], now, list_max_age(&head))
+        })
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 // ------------------------------------------------------- popups and dangerous
@@ -1129,6 +1187,15 @@ mod tests {
     }
 
     #[test]
+    fn a_list_keeps_as_long_as_it_says_within_bounds() {
+        assert_eq!(list_max_age("! Title: x\n! Expires: 8 hours\n"), Duration::from_secs(8 * 3600));
+        assert_eq!(list_max_age("! Expires: 5 days\n"), MAX_AGE, "never longer than four days");
+        assert_eq!(list_max_age("! Expires: 4 days (update frequency)\n"), MAX_AGE);
+        assert_eq!(list_max_age("! Expires: 1 hours\n"), MIN_AGE, "never shorter than six hours");
+        assert_eq!(list_max_age("[Adblock Plus 2.0]\n! nothing said\n"), MAX_AGE);
+    }
+
+    #[test]
     fn stale_lists_say_so() {
         let now = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let stamps = [Some(now)];
@@ -1199,6 +1266,7 @@ mod tests {
             trackers: RefCell::new(trackers),
             cookies: RefCell::new(None),
             gpc: Cell::new(false),
+            next_check: Cell::new(std::time::Instant::now()),
         };
         assert_eq!(b.check("https://ads.example.com/x.js", "https://site.com", "script"), Some(Cat::Ads));
         assert_eq!(b.check("https://track.example.org/p", "https://site.com", "image"), Some(Cat::Trackers));

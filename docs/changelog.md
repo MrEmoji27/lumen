@@ -7,6 +7,15 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.5 — 2026-10-18
+
+- YouTube videos failed with "An error occurred" and "Something went wrong" because the ad
+  lists had gone stale. uBlock's quick-fixes list follows YouTube's player changes and says it
+  keeps for 8 hours; Lumen refreshed every list every four days, and only when it started. Now
+  each list keeps as long as its own `Expires:` line says (between 6 hours and 4 days), only the
+  stale ones are fetched again, and a Lumen left running looks once an hour and rebuilds the
+  matcher behind the one in use.
+
 ## 0.6.4 — 2026-10-18
 
 Reports reach zemo.

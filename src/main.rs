@@ -6003,6 +6003,8 @@ impl App {
         let now = Instant::now();
         // Strictly isolated agents whose browser came back since the last look.
         self.poll_own_envs();
+        // Filter lists past their own expiry are fetched again, in the background, hourly.
+        self.blocker.refresh_if_due(now);
         // A Drive run's output, session and end.
         if self.drive.is_some() && now >= self.next_drive {
             self.drive_poll();
