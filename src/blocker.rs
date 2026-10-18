@@ -131,6 +131,37 @@ struct Built {
     trackers: Vec<u64>,
 }
 
+/// The site a host names, for the per-site lists: lowercased, no user or port,
+/// no trailing dot, no `www.`. Keying twice gives the same host, so a list saved
+/// and loaded again still compares against the page's host the same way.
+pub fn site_key(host: &str) -> String {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let h = h.rsplit('@').next().unwrap_or(&h);
+    let h = if let Some(in_brackets) = h.strip_prefix('[') {
+        in_brackets.split(']').next().unwrap_or(in_brackets)
+    } else if h.matches(':').count() == 1 {
+        h.split(':').next().unwrap_or(h)
+    } else {
+        h
+    };
+    h.strip_prefix("www.").unwrap_or(h).to_string()
+}
+
+/// Whether the list says blocking is off for `host`. The list holds `site_key`s.
+/// `www.` and subdomains count as the site in both directions: `example.com`
+/// covers a page on `a.b.example.com`, and a listed `mail.example.com` counts a
+/// page on `example.com`.
+pub fn site_off(list: &[String], host: &str) -> bool {
+    let h = site_key(host);
+    !h.is_empty() && list.iter().any(|e| under(&h, e) || under(e, &h))
+}
+
+/// `host` is `site` itself or a name hanging under it, at a dot boundary:
+/// `a.example.com` is under `example.com`, `notexample.com` is not.
+fn under(host: &str, site: &str) -> bool {
+    host == site || (host.len() > site.len() && host.ends_with(site) && host.as_bytes()[host.len() - site.len() - 1] == b'.')
+}
+
 pub struct Blocker {
     dir: PathBuf,
     on: Cell<bool>,
@@ -138,6 +169,8 @@ pub struct Blocker {
     cosmetic: Cell<bool>,
     /// Add the Global Privacy Control and Do Not Track headers to every request.
     gpc: Cell<bool>,
+    /// Sites where the person turned blocking off: keyed hosts (site_key).
+    off: RefCell<Vec<String>>,
     blocked: Cell<u64>,
     /// `adblock::Engine` refuses to cross threads, so it is born here, on the
     /// UI thread, from bytes baked by the background thread.
@@ -165,6 +198,7 @@ impl Blocker {
             on: Cell::new(true),
             cosmetic: Cell::new(true),
             gpc: Cell::new(false),
+            off: RefCell::new(Vec::new()),
             blocked: Cell::new(0),
             engine: RefCell::new(None),
             rx: RefCell::new(rx),
@@ -209,6 +243,22 @@ impl Blocker {
         self.gpc.set(on);
     }
 
+    /// The sites where the person turned blocking off, each keyed the way the page's
+    /// host is keyed, so the two compare as plain words.
+    pub fn set_off_sites(&self, sites: &[String]) {
+        let mut keyed: Vec<String> = sites.iter().map(|h| site_key(h)).filter(|h| !h.is_empty()).collect();
+        keyed.sort();
+        keyed.dedup();
+        *self.off.borrow_mut() = keyed;
+    }
+
+    /// Whether blocking is off for the page at `url`. Its host, not the request's:
+    /// a page's own switch speaks for its subframes too.
+    fn off_site(&self, url: &str) -> bool {
+        let off = self.off.borrow();
+        !off.is_empty() && site_off(&off, &privacy_stats::host(url))
+    }
+
     /// The URL with tracking parameters removed by `$removeparam` rules, if any were.
     pub fn rewrite(&self, url: &str, who: Who) -> Option<String> {
         if !self.on.get() || !url.starts_with("http") || !url.contains('?') {
@@ -226,7 +276,7 @@ impl Blocker {
 
     /// The scriptlets this page gets (`+js(...)` rules), ready to run, or empty.
     pub fn scriptlets(&self, url: &str) -> String {
-        if !self.on.get() || !url.starts_with("http") {
+        if !self.on.get() || !url.starts_with("http") || self.off_site(url) {
             return String::new();
         }
         self.pump();
@@ -259,7 +309,7 @@ impl Blocker {
     /// generic rules that match the class names and ids the page reported. One
     /// rule per selector, so a selector the browser cannot parse only loses itself.
     fn cosmetic_css(&self, url: &str, st: &mut PageCos, first: bool, classes: &[String], ids: &[String]) -> (String, u64, u64) {
-        if !self.on.get() || !self.cosmetic.get() || !url.starts_with("http") {
+        if !self.on.get() || !self.cosmetic.get() || !url.starts_with("http") || self.off_site(url) {
             return (String::new(), 0, 0);
         }
         self.pump();
@@ -559,7 +609,8 @@ impl Blocker {
     /// The whole hot path. Runs for every request of every page. The door's
     /// answer: the list that stopped it, or None to let it through.
     fn check(&self, url: &str, source: &str, kind: &str) -> Option<Cat> {
-        if !self.on.get() || url.is_empty() || source.is_empty() {
+        // The site's own switch speaks for its subframes: the source is the top page.
+        if !self.on.get() || url.is_empty() || source.is_empty() || self.off_site(source) {
             return None;
         }
         self.pump();
@@ -1336,6 +1387,7 @@ mod tests {
             dir: PathBuf::from("."),
             on: Cell::new(true),
             cosmetic: Cell::new(true),
+            off: RefCell::new(Vec::new()),
             blocked: Cell::new(0),
             engine: RefCell::new(Some(e)),
             rx: RefCell::new(rx),
@@ -1348,10 +1400,45 @@ mod tests {
         assert_eq!(b.check("https://ads.example.com/x.js", "https://site.com", "script"), Some(Cat::Ads));
         assert_eq!(b.check("https://track.example.org/p", "https://site.com", "image"), Some(Cat::Trackers));
         assert_eq!(b.check("https://site.com/app.js", "https://site.com", "script"), None, "the page is let through");
+        b.set_off_sites(&["site.com".to_string()]);
+        assert_eq!(b.check("https://ads.example.com/x.js", "https://site.com", "script"), None, "the site's own switch stops it");
+        assert_eq!(b.check("https://ads.example.com/x.js", "https://www.site.com/sub", "script"), None, "its www host too");
+        assert_eq!(b.check("https://ads.example.com/x.js", "https://other.com", "script"), Some(Cat::Ads), "other sites still block");
+        b.set_off_sites(&[]);
+        assert_eq!(b.check("https://ads.example.com/x.js", "https://site.com", "script"), Some(Cat::Ads), "switch off again, blocking is back");
         drop(tx);
         // No table at all is not a crash: the count just says "other".
         *b.trackers.borrow_mut() = Vec::new();
         assert_eq!(b.check("https://track.example.org/p", "https://site.com", "image"), Some(Cat::Other));
+    }
+
+    /// The per-site switch's host rule: `www.` and subdomains are the site, and
+    /// names that merely end the same way are not.
+    #[test]
+    fn a_site_off_covers_the_site_and_its_subdomains() {
+        let off = vec!["example.com".to_string()];
+        assert!(site_off(&off, "example.com"));
+        assert!(site_off(&off, "www.example.com"));
+        assert!(site_off(&off, "a.b.example.com"));
+        assert!(!site_off(&off, "notexample.com"), "no dot boundary, so not the site");
+        assert!(!site_off(&off, "example.org"));
+        let none: Vec<String> = Vec::new();
+        assert!(!site_off(&none, "example.com"), "an empty list leaves blocking on");
+        // A listed subdomain counts its parent: one switch, one site.
+        let one = vec!["mail.example.com".to_string()];
+        assert!(site_off(&one, "example.com"));
+        assert!(site_off(&one, "www.example.com"));
+        assert!(!site_off(&one, "other.example.com"));
+    }
+
+    #[test]
+    fn a_site_key_strips_www_case_and_port_once() {
+        assert_eq!(site_key("www.Example.COM"), "example.com");
+        assert_eq!(site_key("example.com."), "example.com");
+        assert_eq!(site_key("example.com:8080"), "example.com");
+        assert_eq!(site_key("host:8080"), "host", "the port is not part of the site");
+        assert_eq!(site_key("[::1]:8080"), "::1");
+        assert_eq!(site_key("::1"), "::1", "keying an already-keyed host changes nothing");
     }
 
     #[test]

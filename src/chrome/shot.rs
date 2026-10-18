@@ -138,6 +138,7 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             "newtab" => Action::NewTab,
                             "fullscreen" => Action::Fullscreen,
                             "tabsearch" => Action::TabSearch,
+                            "palette" => Action::Palette,
                             _ => continue,
                         };
                         let _ = proxy.send_event(Ev::Key(a));
@@ -321,6 +322,8 @@ pub fn fake(s: &mut UiState) {
             UiTab { split: true, translated: true, ..t(9022, "Split right page", "https://split.example.com/right") },
         ];
         s.tabs.append(&mut v);
+        // The Lo-fi tab has sound: the footer's now-playing card follows it.
+        s.media = Some(9006);
     }
     if fake_has("page") {
         // The active tab is a secure, bookmarked page: lock, star and the offer chips show.

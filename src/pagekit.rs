@@ -138,6 +138,58 @@ table{{border-collapse:collapse;font-size:16px}}td,th{{padding:6px 10px;border-b
     )
 }
 
+// --------------------------------------------------------------- media and PiP
+
+/// Runs at document creation, top frame only. When the page registers Media Session
+/// action handlers (play, next, previous) the shim keeps a reference, so Lumen can
+/// press them later; the page's own registration is passed through untouched.
+pub const MEDIA_SHIM: &str = r#"(()=>{if(window!==window.top)return;try{
+const h=Object.create(null);const ms=navigator.mediaSession;
+if(ms&&typeof ms.setActionHandler==='function'){
+const orig=ms.setActionHandler.bind(ms);
+ms.setActionHandler=(a,f)=>{if(f)h[a]=f;try{orig(a,f)}catch(e){}};}
+window.__lumenMS={
+toggle:()=>{const el=pick();if(!el){const f=h.pause||h.play;if(f){try{f({})}catch(e){}}return;}
+if(el.paused){const p=el.play();if(p&&p.catch)p.catch(()=>{});}else el.pause();},
+next:()=>{const f=h.nexttrack;if(f){try{f({})}catch(e){}}},
+prev:()=>{const f=h.previoustrack;if(f){try{f({})}catch(e){}}},
+pip:()=>{const vs=[...document.querySelectorAll('video')].filter(v=>!v.ended&&v.videoWidth)
+.sort((a,b)=>b.videoWidth*b.videoHeight-a.videoWidth*a.videoHeight);const v=vs[0];
+if(v&&v.requestPictureInPicture){const p=v.requestPictureInPicture();if(p&&p.catch)p.catch(()=>{});}}};
+function pick(){let best=null,bs=-1;for(const e of document.querySelectorAll('video,audio')){
+if(e.ended)continue;const s=(e.paused?0:1e9)+(e.videoWidth||0)*(e.videoHeight||0)+(e.duration||0);
+if(s>bs){best=e;bs=s;}}return best;}
+}catch(e){}})();"#;
+
+/// Picture-in-picture: the biggest video playing, else the biggest one there is.
+pub const PIP_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m){m.pip();return;}
+const vs=[...document.querySelectorAll('video')].filter(v=>!v.ended&&v.videoWidth)
+.sort((a,b)=>b.videoWidth*b.videoHeight-a.videoWidth*a.videoHeight);const v=vs[0];
+if(v&&v.requestPictureInPicture){const p=v.requestPictureInPicture();if(p&&p.catch)p.catch(()=>{});}}catch(e){}})()"#;
+
+/// Play/pause: the shim's handlers when the page has any, the biggest media element
+/// when it does not. Pages that play through Media Session handlers never see a
+/// stray element.play(): those handlers are the page's own buttons, pressed for it.
+const TOGGLE_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m){m.toggle();return;}
+let best=null,bs=-1;for(const e of document.querySelectorAll('video,audio')){
+if(e.ended)continue;const s=(e.paused?0:1e9)+(e.videoWidth||0)*(e.videoHeight||0)+(e.duration||0);
+if(s>bs){best=e;bs=s;}}if(!best)return;
+if(best.paused){const p=best.play();if(p&&p.catch)p.catch(()=>{});}else best.pause();}catch(e){}})()"#;
+
+/// Next and previous have no page API at all: only the handlers the page registered
+/// (kept by the shim) can do them. A page without them gets nothing, quietly.
+const NEXT_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m)m.next();}catch(e){}})()"#;
+const PREV_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m)m.prev();}catch(e){}})()"#;
+
+/// What the footer card and the media keys send into the tab that has sound.
+pub fn media_js(cmd: &str) -> &'static str {
+    match cmd {
+        "next" => NEXT_JS,
+        "prev" => PREV_JS,
+        _ => TOGGLE_JS,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

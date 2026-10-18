@@ -466,6 +466,10 @@ struct App {
     /// The site whose row was clicked on the report page.
     report_site: Option<String>,
     peek: bool,
+    /// The command palette is open: its rows need the history and bookmark lists.
+    pal_open: bool,
+    /// The last tab that played sound: the media keys and the footer card act on it.
+    media_tab: Option<u64>,
     page_fs: bool,
     user_fs: bool,
     ui_ready: bool,
@@ -841,6 +845,7 @@ fn main() {
     let blocker = blocker::Blocker::start(store::data_dir());
     blocker.set_enabled(settings.adblock);
     blocker.set_cosmetic(settings.cosmetic);
+    blocker.set_off_sites(&settings.adblock_off_sites);
     privacy_stats::set_enabled(settings.privacy_stats);
     blocker.set_gpc(settings.gpc);
     {
@@ -881,6 +886,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         report_range: "today".into(),
         report_site: None,
         peek: false,
+        pal_open: false,
+        media_tab: None,
         page_fs: false,
         user_fs: false,
         ui_ready: true,
@@ -2032,6 +2039,7 @@ impl App {
                 full: self.ui_full(),
                 stage: ((sx - off) as f32, sy as f32, sw as f32, sh as f32),
                 mem: self.mem,
+                media: self.media_tab.and_then(|id| self.tabs.iter().find(|t| t.id == id && t.audio).map(|t| t.id)),
                 blocked: privacy_stats::tab_blocked(self.active),
                 cpu_cap: self.job.is_some(),
                 downloads: self
@@ -2076,7 +2084,7 @@ impl App {
                     _ => Vec::new(),
                 },
                 vault: self.vault.as_ref().map_or(0, |v| v.len()),
-                history: if self.panel == Panel::History {
+                history: if self.panel == Panel::History || self.pal_open {
                     self.library
                         .recent("", 0, 400)
                         .into_iter()
@@ -2088,7 +2096,7 @@ impl App {
                 } else {
                     Vec::new()
                 },
-                bookmarks: if self.panel == Panel::Bookmarks || bar_bookmarks {
+                bookmarks: if self.panel == Panel::Bookmarks || bar_bookmarks || self.pal_open {
                     self.library.bookmarks().into_iter().map(ui_mark).collect()
                 } else {
                     Vec::new()
@@ -3617,6 +3625,9 @@ impl App {
             // reload of one of those tabs asks for.
             self.ctx.userscripts.set(self.settings.userscripts);
         }
+        if old.adblock_off_sites != self.settings.adblock_off_sites {
+            self.blocker.set_off_sites(&self.settings.adblock_off_sites);
+        }
         if old.perm_defaults != self.settings.perm_defaults {
         }
         if old.default_zoom != self.settings.default_zoom {
@@ -3914,6 +3925,9 @@ impl App {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].audio = on;
                     if on {
+                        // The media keys and the footer card follow the last tab
+                        // that made a sound.
+                        self.media_tab = Some(id);
                         // Sound from a page that was frozen a moment ago: let it go on.
                         if self.tabs[i].suspended
                             && let Some(v) = &self.tabs[i].view
@@ -4754,6 +4768,7 @@ impl App {
             Action::TranslatePage => self.toggle_translate(i),
             // The switcher lives in the chrome: it owns the list box and the typing.
             Action::TabSearch => self.chrome.open_tab_search(),
+            Action::Palette => self.chrome.open_palette(),
         }
     }
 
@@ -4993,6 +5008,30 @@ impl App {
             "settings" => {
                 if let Ok(s) = serde_json::from_value::<Settings>(m["v"].clone()) {
                     self.apply_settings(s);
+                }
+            }
+            "palOpen" => {
+                // The palette's rows list history and bookmarks while it is open.
+                self.pal_open = m["open"].as_bool().unwrap_or(false);
+                self.push();
+            }
+            "pip" => {
+                // The PiP button on a tab's row: the biggest playing video, asked
+                // for its own picture-in-picture window.
+                if let Some(i) = self.idx(id)
+                    && let Some(v) = &self.tabs[i].view
+                {
+                    let _ = v.evaluate_script(crate::pagekit::PIP_JS);
+                }
+            }
+            "media" => {
+                // The footer card and the media keys: play/pause, next, previous,
+                // on the tab that last made a sound.
+                if let Some(mid) = self.media_tab
+                    && let Some(i) = self.idx(mid)
+                    && let Some(v) = &self.tabs[i].view
+                {
+                    let _ = v.evaluate_script(crate::pagekit::media_js(m["cmd"].as_str().unwrap_or("toggle")));
                 }
             }
             "dashboard" => {

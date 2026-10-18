@@ -92,6 +92,8 @@ pub static TABLE: &[Entry] = &[
     lucide!("wind", "wind"),
     lucide!("play", "play", filled),
     lucide!("pause", "pause", filled),
+    lucide!("pip", "picture-in-picture"),
+    lucide!("next", "skip-forward"),
     lucide!("sidebar", "panel-left"),
     lucide!("split", "columns-2"),
     // The Drive panel: a task handed to an agent.

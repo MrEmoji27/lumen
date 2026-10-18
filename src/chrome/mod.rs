@@ -29,7 +29,7 @@ pub use layout::{Kind, Metrics};
 /// The chrome's easing, for the things main.rs moves itself (the sidebar width).
 pub use motion::ease_out;
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Mutex, time::Instant};
 
 use serde_json::{Value, json};
 use tao::event_loop::EventLoopProxy;
@@ -138,6 +138,8 @@ pub struct UiState {
     /// Page rectangle in chrome coordinates (DIPs).
     pub stage: (f32, f32, f32, f32),
     pub mem: Option<(u64, u32)>,
+    /// The tab whose sound the footer's now-playing card follows.
+    pub media: Option<u64>,
     pub blocked: u64,
     pub cpu_cap: bool,
     pub downloads: Vec<UiDl>,
@@ -320,6 +322,12 @@ pub enum Hit {
     Tab(u64),
     TabX(u64),
     TabSnd(u64),
+    /// Picture-in-picture for the tab's biggest playing video.
+    TabPip(u64),
+    /// The footer's now-playing card: pause, next, and the title that switches to the tab.
+    MediaPlay,
+    MediaNext,
+    MediaTitle(u64),
     NewTab,
     Gear,
     /// The sidebar button: compact on or off, same as Ctrl+B.
@@ -374,12 +382,18 @@ pub enum Hit {
     SiteClear,
     /// "Site settings…" in the site popover: open the Sites page.
     SiteSettings,
+    /// The ad-block switch in the site popover: this site is in or out of the off list.
+    SiteAdblock,
     /// The zoom chip in the address bar: click takes the page back to 100%.
     ZoomChip,
     /// A row of the tab search card.
     TabSearch(usize),
     /// The tab search card itself: clicks on it are not clicks outside it.
     SearchCard,
+    /// A row of the command palette.
+    Pal(usize),
+    /// The command palette card itself: clicks on it are not clicks outside it.
+    PaletteCard,
     /// The message card itself, its kinds, Send and its close button.
     SayCard,
     SayMode(usize),
@@ -700,6 +714,16 @@ pub(crate) struct Inner {
     /// 1 queue, 2 new task). Its text box is a real edit window.
     say: Option<Say>,
     say_edit: HWND,
+    /// The command palette (Ctrl+K) is open.
+    pal_open: bool,
+    /// The filter box of the command palette; a real edit window.
+    palette_edit: HWND,
+    /// The row the command palette has picked.
+    pal_sel: usize,
+    /// What the last palette frame listed, so a click knows what it lands on.
+    pal_rows: Vec<PalRow>,
+    /// Words the palette left for the Settings page's own search box.
+    pal_jump: Option<String>,
     /// The Settings page's search box.
     set_edit: HWND,
     /// The report page's "what happened" box.
@@ -808,6 +832,7 @@ const ID_FORM2: usize = 112;
 const ID_FORMPW: usize = 113;
 const ID_FILEPATH: usize = 114;
 const ID_FILENAME: usize = 115;
+const ID_PAL: usize = 116;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -816,6 +841,62 @@ const TIMER_SHOT: usize = 4;
 
 fn send(proxy: &EventLoopProxy<Ev>, v: Value) {
     let _ = proxy.send_event(Ev::Ui(v.to_string()));
+}
+
+// ------------------------------------------------------------- media keys
+//
+// Play/pause, next and previous from the keyboard or the earbuds arrive as
+// WM_APPCOMMAND on the window with focus. When a page has focus Chromium answers
+// them itself, through its own Media Session: those never come here. These are the
+// presses that land while Lumen's own chrome has focus, and they go to the tab
+// that last played. The subclass chains onto whatever window proc is already on
+// the top-level window (tao's), so nothing else changes hands.
+
+/// The old window procedure, and where a press is sent. One window, one subclass.
+static MEDIA_KEYS: Mutex<Option<(usize, EventLoopProxy<Ev>)>> = Mutex::new(None);
+
+unsafe extern "system" fn media_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_APPCOMMAND {
+            // The command sits in the low word of the high word of lParam.
+            let cmd = ((lp.0 >> 16) & 0xffff) as u32 & 0x7fff;
+            let which = match cmd {
+                11 => "next",
+                12 => "prev",
+                14 => "toggle",
+                _ => "",
+            };
+            if !which.is_empty() {
+                if let Ok(g) = MEDIA_KEYS.lock()
+                    && let Some((_, px)) = g.as_ref()
+                {
+                    let _ = px.send_event(Ev::Ui(format!(r#"{{"t":"media","cmd":"{which}"}}"#)));
+                }
+                return LRESULT(0);
+            }
+        }
+        let old: WNDPROC = match MEDIA_KEYS.lock() {
+            Ok(g) => g.as_ref().map(|(o, _)| std::mem::transmute(*o)),
+            Err(_) => None,
+        };
+        match old {
+            Some(old) => CallWindowProcW(Some(old), hwnd, msg, wp, lp),
+            None => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+/// Subclass the top-level window once, for the media keys. `parent` is that window.
+fn install_media_keys(parent: HWND, proxy: EventLoopProxy<Ev>) {
+    unsafe {
+        let root = GetAncestor(parent, GA_ROOT);
+        let old = SetWindowLongPtrW(root, GWLP_WNDPROC, media_wndproc as *const () as isize);
+        if old != 0
+            && let Ok(mut g) = MEDIA_KEYS.lock()
+        {
+            *g = Some((old as usize, proxy));
+        }
+    }
 }
 
 /// What a permission prompt says a site wants, in words.
@@ -895,6 +976,163 @@ fn rank_rows(all: &[SwitchRow], q: &str) -> Vec<SwitchRow> {
 /// The tab search card's rectangle: at the top of the cards' area.
 fn search_card(area: R, right: bool, rows: usize, more: bool) -> R {
     let h = 52.0 + rows as f32 * 32.0 + if rows == 0 { 34.0 } else { 8.0 } + if more { 20.0 } else { 0.0 };
+    let (x, w) = float_col(area, right);
+    R::new(x, area.y + 8.0, w, h.min(area.h - 16.0))
+}
+
+/// How many rows of the command palette show before the card says how many are left.
+const PAL_ROWS: usize = 12;
+
+/// One line of the command palette: which group it heads, what it says, and what Enter does.
+#[derive(Clone)]
+struct PalRow {
+    /// Some(name) on a group's first row, so the label draws once.
+    group: Option<&'static str>,
+    label: String,
+    detail: String,
+    run: PalRun,
+}
+
+/// What a palette row does when it is picked.
+#[derive(Clone)]
+enum PalRun {
+    /// Anything the main loop already knows how to do.
+    Msg(Value),
+    /// Open Settings with the page's own search box holding these words.
+    Set(String),
+    /// Bring a tab back, the way the tab search does.
+    Switch { id: u64, other: Option<(usize, usize)> },
+    /// Open an address in a new tab.
+    Open(String),
+}
+
+/// Every word typed is in the row's label and detail.
+fn pal_words(row: &PalRow, q: &str) -> bool {
+    let hay = format!("{} {}", row.label, row.detail).to_lowercase();
+    q.split_whitespace().all(|w| hay.contains(w))
+}
+
+/// The palette's rows for `q`: the groups in order, each cut to what fits the card.
+/// With no words typed it is the actions and the open tabs; settings, bookmarks and
+/// history appear once the person starts narrowing.
+fn pal_rows(s: &UiState, q: &str) -> Vec<PalRow> {
+    let mut out: Vec<PalRow> = Vec::new();
+    let mut add = |group: &'static str, mut rows: Vec<PalRow>| {
+        rows.truncate(if q.is_empty() {
+            match group {
+                "ACTIONS" => 7,
+                "TABS" => 5,
+                _ => 0,
+            }
+        } else {
+            match group {
+                "ACTIONS" => 3,
+                "SETTINGS" => 6,
+                "TABS" => 4,
+                _ => 3,
+            }
+        });
+        for (n, r) in rows.into_iter().enumerate() {
+            out.push(PalRow { group: if n == 0 { Some(group) } else { None }, ..r });
+        }
+    };
+    // ACTIONS: the things a person does, and the pages they open.
+    let active = s.active;
+    let mut next = s.settings.clone();
+    next.compact = !next.compact;
+    let which = |w: &'static str| json!({"t": "panel", "open": true, "which": w});
+    let actions = [
+        ("New tab", PalRun::Msg(json!({"t": "newtab"}))),
+        ("New private tab", PalRun::Msg(json!({"t": "newPrivate"}))),
+        ("Close tab", PalRun::Msg(json!({"t": "close", "id": active}))),
+        ("Reload", PalRun::Msg(json!({"t": "reload"}))),
+        ("Settings", PalRun::Msg(json!({"t": "panel", "open": true}))),
+        ("Settings: Look", PalRun::Set("look".into())),
+        ("Toggle compact", PalRun::Msg(json!({"t": "settings", "v": next}))),
+        ("History", PalRun::Msg(which("history"))),
+        ("Bookmarks", PalRun::Msg(which("bookmarks"))),
+        ("Downloads", PalRun::Msg(which("downloads"))),
+        ("Control", PalRun::Msg(which("control"))),
+        ("Privacy report", PalRun::Msg(which("report"))),
+        ("Dashboard", PalRun::Msg(which("dashboard"))),
+    ];
+    let rows: Vec<PalRow> = actions
+        .into_iter()
+        .map(|(label, run)| PalRow { group: None, label: label.into(), detail: String::new(), run })
+        .filter(|r| q.is_empty() || pal_words(r, q))
+        .collect();
+    add("ACTIONS", rows);
+    // SETTINGS: only once the person is narrowing, and never every row at once.
+    if !q.is_empty() {
+        let mut rows = Vec::new();
+        for (section, items) in pages::settings_schema() {
+            for it in &items {
+                if pages::item_matches(q, section, it) {
+                    rows.push(PalRow { group: None, label: pages::pal_label(it), detail: section.into(), run: PalRun::Set(pages::pal_label(it)) });
+                }
+            }
+        }
+        add("SETTINGS", rows);
+    }
+    // TABS: the tab search's own list, filtered and ranked the same way.
+    let rows: Vec<PalRow> = switch_rows(s, q)
+        .into_iter()
+        .map(|row| {
+            let tag = if row.private {
+                "Private".to_string()
+            } else if row.other.is_some() {
+                row.ws_name.clone()
+            } else {
+                String::new()
+            };
+            PalRow { group: None, label: row.label(), detail: tag, run: PalRun::Switch { id: row.id, other: row.other } }
+        })
+        .collect();
+    add("TABS", rows);
+    // BOOKMARKS and HISTORY: open the address in a new tab.
+    if !q.is_empty() {
+        let rows: Vec<PalRow> = s
+            .bookmarks
+            .iter()
+            .map(|m| PalRow {
+                group: None,
+                label: if m.title.is_empty() { m.url.clone() } else { m.title.clone() },
+                detail: m.folder.clone(),
+                run: PalRun::Open(m.url.clone()),
+            })
+            .filter(|r| pal_words(r, q))
+            .collect();
+        add("BOOKMARKS", rows);
+        let rows: Vec<PalRow> = s
+            .history
+            .iter()
+            .map(|v| PalRow {
+                group: None,
+                label: if v.title.is_empty() { v.url.clone() } else { v.title.clone() },
+                detail: host(&v.url),
+                run: PalRun::Open(v.url.clone()),
+            })
+            .filter(|r| pal_words(r, q))
+            .collect();
+        add("HISTORY", rows);
+    }
+    out
+}
+
+/// The rows that show, the groups those head, and how many the filter found in all.
+fn pal_view(s: &UiState, q: &str) -> (Vec<PalRow>, usize, usize) {
+    let all = pal_rows(s, q);
+    let total = all.len();
+    let mut rows = all;
+    rows.truncate(PAL_ROWS);
+    let groups = rows.iter().filter(|r| r.group.is_some()).count();
+    (rows, groups, total)
+}
+
+/// The command palette card's rectangle: at the top of the cards' area, where the
+/// tab search sits, so the two read as one machine.
+fn pal_card(area: R, right: bool, rows: usize, groups: usize, more: bool) -> R {
+    let h = 56.0 + groups as f32 * 18.0 + rows as f32 * 30.0 + if rows == 0 { 34.0 } else { 0.0 } + if more { 20.0 } else { 0.0 };
     let (x, w) = float_col(area, right);
     R::new(x, area.y + 8.0, w, h.min(area.h - 16.0))
 }
@@ -1240,7 +1478,22 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit, color_edit, form_secret_edit, file_path_edit, file_name_edit]
+            let palette_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_PAL as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit, color_edit, form_secret_edit, file_path_edit, file_name_edit, palette_edit]
                 .into_iter()
                 .chain(form_edits)
             {
@@ -1254,6 +1507,9 @@ impl Chrome {
             let dpi = GetDpiForWindow(hwnd) as f32;
             let gfx = Gfx::new(hwnd, dpi).expect("direct2d");
             let fonts = Rc::new(gfx.installed_families().to_vec());
+            // The media keys (play/pause, next, previous) while Lumen's own chrome
+            // has focus: one subclass on the top-level window.
+            install_media_keys(parent, proxy.clone());
             let inner = Rc::new(RefCell::new(Inner {
                 hwnd,
                 proxy,
@@ -1313,6 +1569,11 @@ impl Chrome {
                 search_rows: Vec::new(),
                 say: None,
                 say_edit,
+                pal_open: false,
+                palette_edit,
+                pal_sel: 0,
+                pal_rows: Vec::new(),
+                pal_jump: None,
                 set_edit,
                 bug_edit,
                 color_edit,
@@ -1509,6 +1770,7 @@ impl Chrome {
     pub fn focus_omnibox(&self) {
         let edit = {
             let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+            i.close_palette();
             i.begin_edit();
             i.edit
         };
@@ -1550,6 +1812,7 @@ impl Chrome {
             i.close_search();
             return;
         }
+        i.close_palette();
         // The card lives in the sidebar; in the icon-only sidebar show the full one.
         if i.state.as_ref().is_some_and(|s| s.settings.compact) {
             send(&i.proxy, json!({"t": "peek", "on": true}));
@@ -1564,6 +1827,35 @@ impl Chrome {
             let _ = SetFocus(Some(i.search_edit));
         }
         // The rows are rebuilt by the paint this asks for.
+        i.invalidate();
+    }
+
+    /// Ctrl+K: the command palette over the sidebar. A second press closes it.
+    pub fn open_palette(&self) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        if i.pal_open {
+            i.close_palette();
+            return;
+        }
+        i.close_search();
+        i.close_say();
+        i.site_open = false;
+        // The card lives in the sidebar; in the icon-only sidebar show the full one.
+        if i.state.as_ref().is_some_and(|s| s.settings.compact) {
+            send(&i.proxy, json!({"t": "peek", "on": true}));
+        }
+        i.pal_open = true;
+        i.pal_sel = 0;
+        unsafe {
+            SetWindowTextW(i.palette_edit, &HSTRING::from("")).ok();
+        }
+        // The rows are rebuilt by the paint this asks for, and the pages that a row
+        // opens need their lists ready: the main loop fills them while this is open.
+        send(&i.proxy, json!({"t": "palOpen", "open": true}));
+        i.layout_edits();
+        unsafe {
+            let _ = SetFocus(Some(i.palette_edit));
+        }
         i.invalidate();
     }
 }
@@ -1734,6 +2026,17 @@ impl Inner {
             }
             self.page.font_pick = None;
             self.page.theme_name.clear();
+        }
+        // The palette's Settings row: its words land in the page's own search box,
+        // right after the clear above emptied it.
+        if s.panel == "settings" {
+            if let Some(words) = self.pal_jump.take() {
+                unsafe {
+                    SetWindowTextW(self.set_edit, &HSTRING::from(words)).ok();
+                }
+            }
+        } else if page_changed {
+            self.pal_jump = None;
         }
         // A run started from a message has a task the box never saw: the box shows it, so the
         // page says what is being done. Never over what the person is typing.
@@ -2167,6 +2470,14 @@ impl Inner {
             let n = switch_rows(s, &q).len();
             let card = search_card(sb, right, n.min(SEARCH_ROWS), n > SEARCH_ROWS);
             place(self.search_edit, R::new(card.x + 38.0, card.y + 13.0, card.w - 52.0, 22.0), self.search_open);
+            // The palette's filter, inside its own card over the sidebar.
+            if self.pal_open {
+                let (rows, groups, total) = pal_view(s, &wide_text(self.palette_edit).trim().to_lowercase());
+                let card = pal_card(sb, right, rows.len(), groups, total > rows.len());
+                place(self.palette_edit, R::new(card.x + 38.0, card.y + 13.0, card.w - 52.0, 22.0), true);
+            } else {
+                place(self.palette_edit, R::default(), false);
+            }
             let card = say_card(sb, right);
             place(self.say_edit, R::new(card.x + 22.0, card.y + 50.0, card.w - 44.0, 22.0), self.say.is_some());
         } else {
@@ -2186,6 +2497,7 @@ impl Inner {
     /// Open the message card for this agent, the text box empty and focused.
     fn open_say(&mut self, session: String, name: String) {
         self.close_search();
+        self.close_palette();
         if self.state.as_ref().is_some_and(|s| s.settings.compact) {
             send(&self.proxy, json!({"t": "peek", "on": true}));
         }
@@ -2244,6 +2556,55 @@ impl Inner {
         self.layout_edits();
         send(&self.proxy, json!({"t": "focusPage"}));
         self.invalidate();
+    }
+
+    /// Close the command palette: filter box hidden, focus back on the page.
+    fn close_palette(&mut self) {
+        if !self.pal_open {
+            return;
+        }
+        self.pal_open = false;
+        self.pal_rows.clear();
+        self.pal_sel = 0;
+        if self.state.as_ref().is_some_and(|s| s.settings.compact || s.peek) {
+            send(&self.proxy, json!({"t": "peek", "on": false}));
+        }
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        send(&self.proxy, json!({"t": "palOpen", "open": false}));
+        self.layout_edits();
+        send(&self.proxy, json!({"t": "focusPage"}));
+        self.invalidate();
+    }
+
+    /// Enter in the command palette: run the picked row, then close.
+    fn run_palette(&mut self, n: usize) {
+        let Some(row) = self.pal_rows.get(n).cloned() else { return };
+        match row.run {
+            PalRun::Msg(v) => send(&self.proxy, v),
+            PalRun::Set(words) => {
+                // The Settings page has its own search box; the words land there, so
+                // the page opens on the setting the row named.
+                if self.state.as_ref().is_some_and(|s| s.panel == "settings") {
+                    unsafe {
+                        SetWindowTextW(self.set_edit, &HSTRING::from(words)).ok();
+                    }
+                } else {
+                    self.pal_jump = Some(words);
+                    send(&self.proxy, json!({"t": "panel", "open": true}));
+                }
+            }
+            PalRun::Switch { id, other } => {
+                let msg = match other {
+                    Some((ws, idx)) => json!({"t": "switchTab", "ws": ws, "idx": idx, "other": true}),
+                    None => json!({"t": "switchTab", "id": id}),
+                };
+                send(&self.proxy, msg);
+            }
+            PalRun::Open(url) => send(&self.proxy, json!({"t": "openTab", "url": url})),
+        }
+        self.close_palette();
     }
 
     /// Enter in the tab search: switch to the picked row, workspace and all.
@@ -2521,6 +2882,9 @@ impl Inner {
             Hit::Sidebar => "sidebar",
             Hit::Gear => "gear",
             Hit::Mem => "mem",
+            Hit::MediaPlay => "mediaplay",
+            Hit::MediaNext => "medianext",
+            Hit::MediaTitle(_) => "mediatitle",
             Hit::DlFooter => "dl",
             Hit::DashFooter => "dash",
             Hit::SiteInfo => "siteinfo",
@@ -3066,22 +3430,24 @@ impl Inner {
             }
         }
         let room = (sb.right() - 8.0 - right_edge - 6.0).max(0.0);
+        // What lives at the right end of the footer steps leftward: the agent chip or
+        // the memory number first, then the now-playing card before them.
+        let mut right = sb.right() - 8.0;
         if agent {
             // The long label when it fits, then just the verb, then only the dot: the
             // chip is the way to stop every agent, so it never leaves the footer.
             let f = lo.font(11.5, 500);
             let t = ["Agent working · Stop", "Stop"].into_iter().find(|t| self.gfx.measure(t, f) + 28.0 <= room).unwrap_or("");
             let tw = if t.is_empty() { 20.0 } else { self.gfx.measure(t, f) + 28.0 };
-            let r = R::new(sb.right() - 8.0 - tw, fy + 5.0, tw, 24.0);
+            let r = R::new(right - tw, fy + 5.0, tw, 24.0);
             let h = Hit::AgentStop;
             let a = self.motion.hover(Self::button_id(&h), if self.is_hover(&h) { 1.0 } else { 0.0 });
             self.gfx.round(r, 12.0, th.accent.alpha(0.14 + 0.16 * a.min(1.0)));
             self.gfx.circle(r.x + 10.0, r.y + 12.0, 3.0, th.accent);
             self.gfx.text(t, R::new(r.x + 18.0, r.y, r.w - 18.0, r.h), f, th.text);
             self.hit(r, h);
-            return self.draw_footer_overlays(s);
-        }
-        if !compact && lo.show_memory
+            right = r.x - 6.0;
+        } else if !compact && lo.show_memory
             && let Some((bytes, _)) = s.mem
         {
             let mb = bytes as f64 / 1048576.0;
@@ -3092,7 +3458,7 @@ impl Inner {
             // A number cut short reads wrong, so it shows whole or not at all. The
             // dashboard shows it too.
             if tw <= room {
-                let r = R::new(sb.right() - 8.0 - tw, fy + 6.0, tw, 22.0);
+                let r = R::new(right - tw, fy + 6.0, tw, 22.0);
                 let h = Hit::Mem;
                 let hov = self.is_hover(&h);
                 let a = self.motion.hover(Self::button_id(&h), if hov { 1.0 } else { 0.0 });
@@ -3101,9 +3467,59 @@ impl Inner {
                 }
                 self.gfx.text(&t, R::new(r.x + 5.0, r.y, r.w - 5.0, r.h), f, if hov { th.text } else { th.faint });
                 self.hit(r, h);
+                right = r.x - 6.0;
             }
         }
+        // Now playing: the tab that has sound, with pause and next on the card.
+        if !compact
+            && let Some(id) = s.media
+            && let Some(t) = s.tabs.iter().find(|t| t.id == id)
+        {
+            let _ = self.draw_now_playing(t, right_edge + 6.0, right, fy);
+        }
         self.draw_footer_overlays(s);
+    }
+
+    /// The footer's now-playing card: the tab's title (a click switches to it), pause,
+    /// next. Right-aligned ending at `right`, never past `left` (the footer's buttons end
+    /// there); left out when not even a short title fits. Returns where the next thing may go.
+    fn draw_now_playing(&mut self, t: &UiTab, left: f32, right: f32, fy: f32) -> f32 {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let f = lo.font(11.5, 500);
+        let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
+        // The buttons take their room first; the title takes what is left, to a cap
+        // so one long title never shoves the card off the footer.
+        let btn = 20.0;
+        let fixed = 6.0 + btn + 6.0 + 6.0 + btn + 6.0;
+        let tw = self.gfx.measure(&title, f).min(170.0).min(right - left - fixed);
+        if tw < 28.0 {
+            return right;
+        }
+        let w = fixed + tw;
+        let r = R::new(right - w, fy + 5.0, w, 24.0);
+        self.gfx.round(r, 12.0, th.bg);
+        self.gfx.round_stroke(r, 12.0, th.line, 1.0);
+        // The card is only here while the tab has sound, so what it offers is pause.
+        let pb = R::new(r.x + 4.0, r.y + 2.0, btn, btn);
+        let ph = Hit::MediaPlay;
+        if self.is_hover(&ph) {
+            self.gfx.round(pb, 10.0, th.hover);
+        }
+        self.gfx.icon("pause", pb.x + 3.0, pb.y + 3.0, 14.0, th.dim);
+        self.hit(pb, ph);
+        let tr = R::new(pb.right() + 6.0, r.y, tw, r.h);
+        let thh = Hit::MediaTitle(t.id);
+        self.gfx.text(&title, tr, f, if self.is_hover(&thh) { th.text } else { th.dim });
+        self.hit(tr, thh);
+        let nb = R::new(tr.right() + 6.0, r.y + 2.0, btn, btn);
+        let nh = Hit::MediaNext;
+        if self.is_hover(&nh) {
+            self.gfx.round(nb, 10.0, th.hover);
+        }
+        self.gfx.icon("next", nb.x + 3.0, nb.y + 3.0, 14.0, th.dim);
+        self.hit(nb, nh);
+        r.x - 6.0
     }
 
     /// The quick switcher sits over everything else in the sidebar; so does the lock's card.
@@ -3114,6 +3530,8 @@ impl Inner {
             self.draw_search(s);
         } else if self.site_open {
             self.draw_site_menu(s);
+        } else if self.pal_open {
+            self.draw_palette(s);
         }
     }
 
@@ -3136,7 +3554,7 @@ impl Inner {
             }
         }
         let lo = self.look.clone();
-        let h = 150.0 + kinds.len() as f32 * 56.0;
+        let h = 196.0 + kinds.len() as f32 * 56.0;
         let card = if self.look.kind.top_toolbar() {
             let o = self.omni_rect();
             R::new(o.x, o.bottom() + 6.0, o.w.min(320.0), h)
@@ -3158,6 +3576,18 @@ impl Inner {
         let mut y = card.y + 60.0;
         self.gfx.line(card.x + 1.0, y, card.right() - 1.0, y, th.line, 1.0);
         y += 12.0;
+        // The site's own switch: out of the list means ads and trackers are blocked here.
+        // The words are long for a card this wide, so they wrap beside the switch.
+        let row = R::new(card.x + 12.0, y, card.w - 24.0, 40.0);
+        self.gfx.text_wrap(
+            "Block ads and trackers on this site",
+            R::new(row.x + 4.0, row.y + 3.0, row.w - 54.0, 34.0),
+            lo.font(12.5, 450),
+            th.faint,
+        );
+        let on = !crate::blocker::site_off(&s.settings.adblock_off_sites, &site);
+        self.switch(R::new(row.right() - 38.0, row.y + (row.h - 22.0) / 2.0, 38.0, 22.0), on, "siteadblock", 1.0, Some(Hit::SiteAdblock));
+        y += 46.0;
         for kind in &kinds {
             self.label(&crate::sites::label(kind), R::new(card.x + 16.0, y, card.w - 32.0, 16.0), th.faint);
             y += 20.0;
@@ -3268,6 +3698,79 @@ impl Inner {
         if self.search_rows.len() > shown {
             self.gfx.text(
                 &format!("{} more — type to narrow", self.search_rows.len() - shown),
+                R::new(card.x, y, card.w, 18.0),
+                lo.font(11.0, 400).align(Align::Center),
+                th.faint,
+            );
+        }
+    }
+
+    /// The command palette over the sidebar: one field to type into, the rows in groups
+    /// under it. The field itself is a real edit window, placed over the drawn box.
+    fn draw_palette(&mut self, s: &UiState) {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let Some(sb) = self.float_area() else { return };
+        let q = wide_text(self.palette_edit).trim().to_lowercase();
+        let (rows, groups, total) = pal_view(s, &q);
+        // The rows the frame lists, so a click knows what it lands on.
+        self.pal_rows = rows;
+        let shown = self.pal_rows.len();
+        let card = pal_card(sb, self.cards_right(), shown, groups, total > shown);
+        self.pal_sel = self.pal_sel.min(shown.saturating_sub(1));
+        self.float_card(card, 1.0);
+        // The card is not "outside itself"; rows registered after win over it.
+        self.hit(card, Hit::PaletteCard);
+        // The filter field (a real edit window is placed over this).
+        let field = R::new(card.x + 8.0, card.y + 8.0, card.w - 16.0, 32.0);
+        self.gfx.round(field, lo.round(field.h), th.bg);
+        self.gfx.round_stroke(field, lo.round(field.h), th.line, 1.0);
+        self.gfx.icon("palette", field.x + 11.0, field.y + 9.0, 14.0, th.faint);
+        if q.is_empty() {
+            self.gfx.text("Type a command", R::new(field.x + 30.0, field.y, field.w - 40.0, field.h), lo.font(12.5, 400), th.faint);
+        }
+        // Hits.
+        let mut y = card.y + 48.0;
+        if shown == 0 {
+            self.gfx.text("Nothing matches", R::new(card.x, y + 8.0, card.w, 26.0), lo.font(12.5, 400).align(Align::Center), th.faint);
+        }
+        for n in 0..shown {
+            // Right: the group it belongs to. Left: its icon and what it says.
+            let (group, label, detail, is_set, tab_url) = {
+                let row = &self.pal_rows[n];
+                let is_set = matches!(row.run, PalRun::Set(_));
+                let tab_url = match &row.run {
+                    PalRun::Switch { id, other } if other.is_none() => s.tabs.iter().find(|t| t.id == *id).map_or(String::new(), |t| t.url.clone()),
+                    _ => String::new(),
+                };
+                (row.group, row.label.clone(), row.detail.clone(), is_set, tab_url)
+            };
+            if let Some(g) = group {
+                self.label(g, R::new(card.x + 12.0, y, card.w - 24.0, 16.0), th.faint);
+                y += 18.0;
+            }
+            let r = R::new(card.x + 6.0, y, card.w - 12.0, 30.0);
+            let h = Hit::Pal(n);
+            if n == self.pal_sel {
+                self.gfx.round(r, lo.round(r.h), th.hover);
+            } else if self.is_hover(&h) {
+                self.gfx.round(r, lo.round(r.h), th.hover.alpha(0.6));
+            }
+            let tx = if detail.is_empty() { r.right() - 8.0 } else { self.tag(&detail, r.right() - 8.0, r.y + r.h / 2.0, th.faint) - 6.0 };
+            if is_set {
+                // A setting row: its section's icon, the one the Settings menu shows.
+                self.gfx.icon(pages::section_icon(&detail), r.x + 11.0, r.y + 8.0, 14.0, th.faint);
+            } else if !tab_url.is_empty() {
+                // A tab row: the same site icon the tab search gives its rows.
+                pages::site_icon(self, R::new(r.x + 10.0, r.y + 7.0, 16.0, 16.0), &host(&tab_url));
+            }
+            self.gfx.text(&label, R::new(r.x + 34.0, r.y, tx - r.x - 34.0, r.h), lo.font(12.5, 450), th.text);
+            self.hit(r, h);
+            y += 30.0;
+        }
+        if total > shown {
+            self.gfx.text(
+                &format!("{} more — type to narrow", total - shown),
                 R::new(card.x, y, card.w, 18.0),
                 lo.font(11.0, 400).align(Align::Center),
                 th.faint,
@@ -3572,6 +4075,18 @@ impl Inner {
             self.hit(b, Hit::TabSnd(t.id));
             right = b.x - 2.0;
         }
+        if t.audio && !t.muted {
+            // A tab playing video gets its own way out: the biggest video, in a
+            // picture-in-picture window, asked for the same way the page would.
+            let b = R::new(right - 22.0, r.y + (r.h - 22.0) / 2.0, 22.0, 22.0);
+            if self.is_hover(&Hit::TabPip(t.id)) {
+                self.gfx.round(b, lo.r_sm, th.press.alpha(alpha));
+            }
+            let ink = if active { th.pill_ink.alpha(0.75) } else { th.faint };
+            self.gfx.icon("pip", b.x + 4.0, b.y + 4.0, 14.0, ink.alpha(alpha));
+            self.hit(b, Hit::TabPip(t.id));
+            right = b.x - 2.0;
+        }
         let badge_y = r.y + (r.h - 16.0) / 2.0;
         // A tag: small spaced capitals in a hairline pill, quiet on any row.
         let tag_ink = if active { th.pill_ink.alpha(0.7) } else { th.faint };
@@ -3797,6 +4312,15 @@ impl Inner {
             }
             self.gfx.icon(sound_icon(t), b.x + 3.0, b.y + 3.0, 14.0, ink(th.dim));
             self.hit(b, Hit::TabSnd(t.id));
+            right = b.x - 2.0;
+        }
+        if t.audio && !t.muted {
+            let b = R::new(right - 20.0, r.y + (r.h - 20.0) / 2.0, 20.0, 20.0);
+            if self.is_hover(&Hit::TabPip(t.id)) {
+                self.gfx.round(b, lo.round(20.0), if on_pill { th.pill_ink.alpha(0.18) } else { th.press });
+            }
+            self.gfx.icon("pip", b.x + 3.0, b.y + 3.0, 14.0, ink(th.dim));
+            self.hit(b, Hit::TabPip(t.id));
             right = b.x - 2.0;
         }
         if t.split {
@@ -4110,6 +4634,20 @@ impl Inner {
         // Opaque even where cards are glass: what floats must hide what is under it.
         self.gfx.round(r, lo.r_card, th.solid(th.raise).alpha(a));
         self.gfx.round_stroke(r, lo.r_card, th.line.alpha(a), 1.0);
+    }
+
+    /// A switch: a track and a knob that glides to the side `on` says. `a` dims it when
+    /// it cannot be pressed; no hit makes it dead.
+    fn switch(&mut self, r: R, on: bool, key: &'static str, a: f32, hit: Option<Hit>) {
+        let th = self.theme;
+        let t = self.motion.tween(Id::Chip(key), Prop::Progress, if on { 1.0 } else { 0.0 }, 160, Ease::OutCubic);
+        let on_fill = if self.look.style == theme::Style::Signal { th.pill } else { th.accent };
+        self.gfx.round(r, 11.0, th.line.mix(on_fill, t).alpha(a));
+        let kx = r.x + 3.0 + 16.0 * t;
+        self.gfx.circle(kx + 8.0, r.y + 11.0, 8.0, th.raise.mix(th.pill_ink, t).alpha(a));
+        if let Some(h) = hit {
+            self.hit(r.inset(-4.0, -4.0), h);
+        }
     }
 
     /// A pill button. Primary is the look's ink (Signal) or its accent; quiet sits on the card
@@ -4495,7 +5033,7 @@ impl Inner {
             self.close_say();
         }
         // The same for the lock's card, which acts through its own hits.
-        if self.site_open && !matches!(h, Some(Hit::SiteInfo | Hit::SitePerm(..) | Hit::SiteClear | Hit::SiteSettings)) {
+        if self.site_open && !matches!(h, Some(Hit::SiteInfo | Hit::SitePerm(..) | Hit::SiteClear | Hit::SiteSettings | Hit::SiteAdblock)) {
             self.site_open = false;
         }
         // And for the colour picker: a click outside it keeps the colour it shows.
@@ -4510,6 +5048,10 @@ impl Inner {
         confirm::clicked_outside(self, &h);
         menu::clicked_outside(self, &h);
         files::clicked_outside(self, &h);
+        // The same for the command palette (the row still acts).
+        if self.pal_open && !matches!(h, Some(Hit::Pal(_)) | Some(Hit::PaletteCard)) {
+            self.close_palette();
+        }
         let p = &self.proxy;
         match h.unwrap() {
             Hit::Back => send(p, json!({"t": "back"})),
@@ -4530,6 +5072,10 @@ impl Inner {
             }
             Hit::TabX(id) => send(p, json!({"t": "close", "id": id})),
             Hit::TabSnd(id) => send(p, json!({"t": "mute", "id": id})),
+            Hit::TabPip(id) => send(p, json!({"t": "pip", "id": id})),
+            Hit::MediaPlay => send(p, json!({"t": "media", "cmd": "toggle"})),
+            Hit::MediaNext => send(p, json!({"t": "media", "cmd": "next"})),
+            Hit::MediaTitle(id) => send(p, json!({"t": "activate", "id": id})),
             Hit::NewTab => send(p, json!({"t": "newtab"})),
             Hit::Sidebar => {
                 // The same change Ctrl+B makes: through the settings, so it is saved.
@@ -4705,8 +5251,32 @@ impl Inner {
                 self.site_open = false;
                 send(p, json!({"t": "panel", "open": true, "which": "sites"}));
             }
+            Hit::SiteAdblock => {
+                // The switch: take this site out of the list or put it back, then reload
+                // so the page settles the way the switch now says.
+                if let Some(s) = &self.state
+                    && let Some(tab) = s.active_tab()
+                {
+                    let key = crate::blocker::site_key(&host(&tab.url));
+                    let mut st = s.settings.clone();
+                    if st.adblock_off_sites.contains(&key) {
+                        st.adblock_off_sites.retain(|h| *h != key);
+                    } else {
+                        st.adblock_off_sites.push(key);
+                    }
+                    send(p, json!({"t": "settings", "v": st}));
+                    send(p, json!({"t": "reload"}));
+                }
+            }
             Hit::ZoomChip => send(p, json!({"t": "zoomSet", "pct": 100})),
             Hit::TabSearch(n) => self.switch_to(n),
+            Hit::Pal(n) => self.run_palette(n),
+            Hit::PaletteCard => {
+                // A click on the card itself keeps the typing going.
+                unsafe {
+                    let _ = SetFocus(Some(self.palette_edit));
+                }
+            }
             _ => {}
         }
         self.invalidate();
@@ -4788,6 +5358,10 @@ impl Inner {
                 if t.audio || t.muted || t.call {
                     items.push((3, if t.muted { "Unmute".into() } else { "Mute".into() }));
                 }
+                // The row's PiP button, for a pinned tile too small to carry one.
+                if t.audio && !t.muted {
+                    items.push((18, "Picture in picture".into()));
+                }
                 // Agents stay out of this tab unless the person says so, one tab at a time.
                 if s.settings.agent && !t.agent && !t.private && t.url.starts_with("http") {
                     items.push((16, if t.agent_ok { "Stop letting agents use this tab".into() } else { "Let agents use this tab".into() }));
@@ -4819,6 +5393,7 @@ impl Inner {
                         14 => "webview2",
                         16 => "agentGrant",
                         17 => "pinBack",
+                        18 => "pip",
                         15 => {
                             send(&i.proxy, json!({"t": "workspaceAdd"}));
                             return;
@@ -5031,9 +5606,10 @@ impl Inner {
             self.close_say();
             return true;
         }
-        if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) && (self.search_open || self.site_open) {
+        if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) && (self.search_open || self.site_open || self.pal_open) {
             self.close_search();
             self.site_open = false;
+            self.close_palette();
             self.invalidate();
             return true;
         }
@@ -5386,6 +5962,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 } else if (ID_FORM0..=ID_FILENAME).contains(&id) && code == EN_CHANGE {
                     // The value a form or the file card draws under its edit child.
                     i.invalidate();
+                } else if id == ID_PAL && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    // Typing filters the palette; the pick starts over at the top row.
+                    if code == EN_CHANGE {
+                        i.pal_sel = 0;
+                    }
+                    i.invalidate();
                 }
                 LRESULT(0)
             }
@@ -5652,6 +6234,27 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     }
                 } else if id == ID_NTP && (vk == VK_BACK.0 || vk == VK_DELETE.0) {
                     i.ntp_typed.no_fill = true;
+                } else if id == ID_PAL {
+                    match vk {
+                        v if v == VK_RETURN.0 => {
+                            let sel = i.pal_sel;
+                            i.run_palette(sel);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_ESCAPE.0 => {
+                            i.close_palette();
+                            return LRESULT(0);
+                        }
+                        v if v == VK_DOWN.0 || v == VK_UP.0 => {
+                            let n = i.pal_rows.len();
+                            if n > 0 {
+                                i.pal_sel = if v == VK_DOWN.0 { (i.pal_sel + 1) % n } else { (i.pal_sel + n - 1) % n };
+                                i.invalidate();
+                            }
+                            return LRESULT(0);
+                        }
+                        _ => {}
+                    }
                 } else if id == ID_NTP && vk == VK_RETURN.0 {
                     let q = wide_text(hwnd).trim().to_string();
                     if !q.is_empty() {

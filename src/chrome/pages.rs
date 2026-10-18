@@ -87,6 +87,8 @@ pub enum PageHit {
     SiteZoom(String),
     /// Privacy: forget one host's https exception.
     SiteHttp(String),
+    /// Sites: put a host back under ad blocking.
+    SiteAdblock(String),
     /// Privacy: what a kind does when the site has no answer: "block" or "ask".
     PermDefault(&'static str, &'static str),
     /// A settings button that opens another page ("sites").
@@ -107,7 +109,7 @@ pub enum PageHit {
 pub const PORTFOLIO: &str = "https://portfolio.mremoji47.workers.dev/";
 
 #[derive(Clone, Copy)]
-enum Scale {
+pub(super) enum Scale {
     Linear(f32, f32, f32),
     Steps(&'static [u32]),
 }
@@ -186,7 +188,7 @@ struct DropRow {
 
 // ------------------------------------------------------------------ schema
 
-enum Item {
+pub(super) enum Item {
     /// Palette presets and the custom colours: the whole Colours group.
     Colors,
     /// The saved looks: save, apply, export, import.
@@ -230,7 +232,7 @@ const ENGINES: [(&str, &str); 5] = [
     ("Bing", "https://www.bing.com/search?q=%s"),
     ("Startpage", "https://www.startpage.com/do/search?q=%s"),
 ];
-const KEYS: [(&str, &str); 30] = [
+const KEYS: [(&str, &str); 31] = [
     ("New tab", "Ctrl+T"),
     ("New private tab", "Ctrl+Shift+N"),
     ("Reopen closed tab", "Ctrl+Shift+T"),
@@ -239,6 +241,7 @@ const KEYS: [(&str, &str); 30] = [
     ("Next / previous tab", "Ctrl+Tab / Ctrl+Shift+Tab"),
     ("Jump to tab", "Ctrl+1…9"),
     ("Search open tabs", "Ctrl+Shift+A"),
+    ("Command palette", "Ctrl+K"),
     ("Back / forward", "Alt+← / Alt+→"),
     ("Reload", "Ctrl+R"),
     ("Compact sidebar", "Ctrl+B"),
@@ -267,7 +270,7 @@ const KEYS: [(&str, &str); 30] = [
 /// The zoom sizes Ctrl++ steps through in Chromium, for the default-zoom slider.
 const ZOOM_STOPS: &[u32] = &[25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500];
 
-fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
+pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
     use Item::*;
     vec![
         ("General", vec![DefaultBrowser]),
@@ -804,17 +807,9 @@ fn draw_seg(i: &mut Inner, right: f32, cy: f32, key: &'static str, opts: &'stati
 }
 
 fn draw_toggle(i: &mut Inner, right: f32, cy: f32, key: &'static str, on: bool, enabled: bool) {
-    let th = i.theme;
     let r = R::new(right - 38.0, cy - 11.0, 38.0, 22.0);
-    let a = if enabled { 1.0 } else { 0.35 };
-    let t = i.motion.tween(super::motion::Id::Chip(key), super::motion::Prop::Progress, if on { 1.0 } else { 0.0 }, 160, super::motion::Ease::OutCubic);
-    let on_fill = if i.look.style == super::theme::Style::Signal { th.pill } else { th.accent };
-    i.gfx.round(r, 11.0, th.line.mix(on_fill, t).alpha(a));
-    let kx = r.x + 3.0 + 16.0 * t;
-    i.gfx.circle(kx + 8.0, r.y + 11.0, 8.0, th.raise.mix(th.pill_ink, t).alpha(a));
-    if enabled {
-        i.hit(r.inset(-4.0, -4.0), Hit::Page(PageHit::Toggle(key)));
-    }
+    let hit = enabled.then(|| Hit::Page(PageHit::Toggle(key)));
+    i.switch(r, on, key, if enabled { 1.0 } else { 0.35 }, hit);
 }
 
 fn draw_slider(i: &mut Inner, right: f32, cy: f32, key: &'static str, scale: Scale, unit: &str, v: f32, dim: bool) {
@@ -2401,7 +2396,7 @@ fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
 }
 
 /// A Settings section's icon in the menu.
-fn section_icon(name: &str) -> &'static str {
+pub(super) fn section_icon(name: &str) -> &'static str {
     match name {
         "General" => "globe",
         "Appearance" => "palette",
@@ -2455,9 +2450,29 @@ fn item_words(it: &Item) -> String {
 }
 
 /// Every word typed is in the section's name or the setting's words.
-fn item_matches(q: &str, section: &str, it: &Item) -> bool {
+pub(super) fn item_matches(q: &str, section: &str, it: &Item) -> bool {
     let hay = format!("{section} {}", item_words(it)).to_lowercase();
     q.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+}
+
+/// The name a setting shows in the command palette: the words its row is called by,
+/// for the rows that are a whole widget.
+pub(super) fn pal_label(it: &Item) -> String {
+    use Item::*;
+    match it {
+        Seg(_, l, _, _) | Pick(_, l, _, _) | Toggle(_, l, _) | Range(_, l, _, _, _) | Fonts(_, l, _) | Text(_, l, _) => l.to_string(),
+        Button(l, _, _, _) | Reset(_, l) => l.to_string(),
+        Colors => "Look".into(),
+        Themes => "Saved themes".into(),
+        Wallpaper => "Wallpaper".into(),
+        Layout => "Layout".into(),
+        Engine => "Search engine".into(),
+        Keys => "Keyboard shortcuts".into(),
+        KeePass => "KeePass".into(),
+        AgentSetup => "Agent setup".into(),
+        SitePerms => "Site permissions".into(),
+        DefaultBrowser => "Default browser".into(),
+    }
 }
 
 fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
@@ -2748,6 +2763,22 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
             }
             i.gfx.text(host, R::new(r.x + 18.0, r.y, r.w * 0.6, ROW), lo.body, th.text);
             row_action(i, r.right() - 12.0, r.y + (ROW - 28.0) / 2.0, "Reset", PageHit::SiteHttp(host.clone()));
+        }
+        y = card.bottom() + lo.s5;
+    }
+
+    // The hosts where the person turned ad blocking off, and the way back.
+    if !s.settings.adblock_off_sites.is_empty() {
+        y = group_label(i, col, y, "Ads allowed on", s.settings.adblock_off_sites.len());
+        let card = rows_card(i, col, y, s.settings.adblock_off_sites.len(), ROW);
+        for (n, host) in s.settings.adblock_off_sites.iter().enumerate() {
+            let r = R::new(card.x, y + n as f32 * ROW, card.w, ROW);
+            if r.y > st.bottom() || r.bottom() < st.y {
+                continue;
+            }
+            site_icon(i, R::new(r.x + 18.0, r.y + (ROW - 18.0) / 2.0, 18.0, 18.0), host);
+            i.gfx.text(host, R::new(r.x + 48.0, r.y, r.w * 0.6, ROW), lo.body, th.text);
+            row_action(i, r.right() - 12.0, r.y + (ROW - 28.0) / 2.0, "Reset", PageHit::SiteAdblock(host.clone()));
         }
         y = card.bottom() + lo.s5;
     }
@@ -3236,6 +3267,12 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::SiteClear(origin) => send(&i.proxy, json!({"t": "siteClear", "origin": origin})),
         PageHit::SiteZoom(host) => send(&i.proxy, json!({"t": "zoomForget", "host": host})),
         PageHit::SiteHttp(host) => send(&i.proxy, json!({"t": "httpForget", "host": host})),
+        PageHit::SiteAdblock(host) => {
+            // Back under blocking: the list goes through set(), which saves and tells main.
+            let mut list = s.settings.adblock_off_sites.clone();
+            list.retain(|h| *h != host);
+            set(i, "adblock_off_sites", json!(list));
+        }
         PageHit::PermDefault(kind, v) => send(&i.proxy, json!({"t": "permDefault", "kind": kind, "v": v})),
         PageHit::Panels(which) => {
             // Opening the changelog is reading it: the start page's note goes.
