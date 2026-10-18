@@ -79,14 +79,6 @@ impl Font {
     pub const fn ui(size: f32, weight: u32) -> Font {
         Font { face: Face::Ui, size10: (size * 10.0) as u32, weight, italic: false, align: Align::Left }
     }
-    /// The display face at a chosen weight (the "title weight" setting).
-    pub const fn serif_w(size: f32, weight: u32) -> Font {
-        Font { face: Face::Serif, size10: (size * 10.0) as u32, weight, italic: false, align: Align::Left }
-    }
-    pub const fn italic(mut self) -> Font {
-        self.italic = true;
-        self
-    }
     pub const fn align(mut self, a: Align) -> Font {
         self.align = a;
         self

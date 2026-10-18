@@ -7,6 +7,24 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.1 — 2026-10-18
+
+The rest of the redraw.
+
+- Drive, as drawn: the task in a card with Run, Stop and "Pause and take over" by the title,
+  the steps numbered in plain words ("going to amazon.com", "typing ...") with how long each
+  took, the one going now marked NOW, and what the agent says in a card beside them.
+- Settings has a search box. Sections keep only what matches; the menu dims the rest.
+- Bookmarks and Site settings: cards, site icons, spaced labels, and Allow / Block / Ask as one
+  segmented control.
+- The floating cards (tab search, the site card under the lock, address suggestions, "needs
+  you", a site asking for the camera, the message card) are one kind of card: soft shadow, pill
+  fields and buttons, ink for the main button. Opaque in Glass, so nothing shows through.
+- Start page tiles show the site's real icon. A site with none is asked for its own icon once
+  per run, straight from the site; no icon service sees the address.
+- Gone: Title weight, Tile size and Display font did nothing since 0.6.0; the looks own them.
+  Clock face now does what it says: the look's clock, or the interface font at its size.
+
 ## 0.6.0 — 2026-10-18
 
 Lumen, redrawn, to docs/design/lumen-ui.html.

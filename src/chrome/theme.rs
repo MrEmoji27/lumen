@@ -58,9 +58,6 @@ pub fn oklch(l: f32, c: f32, h: f32) -> Color {
     Color(gamma(r), gamma(g), gamma(bl), 1.0)
 }
 
-pub const PALETTES: [(&str, &str); 5] =
-    [("graphite", "Graphite"), ("sand", "Sand"), ("slate", "Slate"), ("moss", "Moss"), ("rose", "Rose")];
-
 /// (hue, neutral chroma, accent l, accent c, accent h)
 fn palette(name: &str) -> (f32, f32, f32, f32, f32) {
     match name {
@@ -117,13 +114,6 @@ impl Style {
             _ => Style::Signal,
         }
     }
-    pub fn key(self) -> &'static str {
-        match self {
-            Style::Signal => "signal",
-            Style::Glass => "glass",
-            Style::Precise => "precise",
-        }
-    }
     /// Glass and Precise are dark looks; only Signal has a light twin.
     pub fn dark(self, wanted: bool) -> bool {
         self != Style::Signal || wanted
@@ -141,8 +131,6 @@ fn wh(a: f32) -> Color {
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub dark: bool,
-    /// Which of the three looks this is.
-    pub style: Style,
     /// The active tab and the chosen segment: a solid pill, and what is written on it.
     pub pill: Color,
     pub pill_ink: Color,
@@ -182,7 +170,6 @@ impl Theme {
         let accent = Color::from_hex(accent_hex).unwrap_or(accent);
         let mut th = Theme {
             dark,
-            style,
             pill,
             pill_ink,
             side: bg,
@@ -246,7 +233,6 @@ impl Theme {
         if c.is_empty() {
             return Theme {
                 dark,
-                style: Style::Signal,
                 pill: text,
                 pill_ink: bg,
                 side: bg,
@@ -285,7 +271,6 @@ impl Theme {
         let dim = c.dim.unwrap_or(dim);
         Theme {
             dark,
-            style: Style::Signal,
             pill: text,
             pill_ink: bg,
             side,
@@ -302,12 +287,6 @@ impl Theme {
             shade: Color(0.0, 0.0, 0.0, if dark { 0.45 } else { 0.14 }),
             danger: oklch(0.58, 0.2, 27.0),
         }
-    }
-
-    /// The swatch for a palette: its tile color and accent dot.
-    pub fn swatch(name: &str) -> (Color, Color) {
-        let (h, c, al, ac, ah) = palette(name);
-        (oklch(0.3, c * 3.0, h), oklch(al, ac, ah))
     }
 }
 

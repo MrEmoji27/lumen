@@ -77,7 +77,6 @@ pub struct Look {
 
     // Type, scaled by the size setting.
     pub scale: f32,
-    pub title_weight: u32,
     pub title: Font,
     pub h2: Font,
     pub big_num: Font,
@@ -86,8 +85,6 @@ pub struct Look {
     pub small: Font,
     pub small_strong: Font,
     pub caption: Font,
-    /// The monospace face, for figures.
-    pub mono: Font,
     pub mono_strong: Font,
 
     // Sidebar.
@@ -111,7 +108,6 @@ pub struct Look {
     pub wallpaper_blur: bool,
     pub wallpaper_dim: u32,
     pub dial_cols: u32,
-    pub dial_tile: f32,
     pub ntp_search: bool,
 
     // Motion.
@@ -178,7 +174,6 @@ impl Look {
             label_track: if style == Style::Glass { 0.6 } else { 1.3 },
             clock_font,
             scale,
-            title_weight: s.title_weight,
             title: sf(30.0),
             h2: sf(22.0),
             big_num: mono(34.0, 700),
@@ -187,7 +182,6 @@ impl Look {
             small: f(12.0, 400),
             small_strong: f(12.0, 500),
             caption: f(11.0, 600),
-            mono: Font { face: Face::Mono, ..f(12.5, 450) },
             mono_strong: Font { face: Face::Mono, ..f(13.0, 550) },
             tab_row_h: s.tab_row_h as f32,
             show_favicons: s.show_favicons,
@@ -215,7 +209,6 @@ impl Look {
             wallpaper_blur: s.wallpaper_blur,
             wallpaper_dim: s.wallpaper_dim,
             dial_cols: s.dial_cols,
-            dial_tile: s.dial_tile as f32,
             ntp_search: s.ntp_search,
             motion: m,
         }
@@ -242,19 +235,6 @@ impl Look {
         Font::ui(size * self.scale, weight)
     }
 
-    /// The display face at `size`, scaled and at the chosen title weight.
-    pub fn serif(&self, size: f32) -> Font {
-        Font::serif_w(size * self.scale, self.title_weight)
-    }
-
-    /// The clock's size: the setting, or a share of the stage.
-    pub fn clock_px(&self, stage_w: f32) -> f32 {
-        if self.clock_size > 0 {
-            self.clock_size as f32
-        } else {
-            (stage_w * 0.09).clamp(64.0, 104.0) * self.scale
-        }
-    }
 }
 
 /// Which look the settings ask for. Debug builds can force one with LUMEN_LOOK for shots.
@@ -434,7 +414,7 @@ mod tests {
         assert_eq!(lo.title.weight, 700);
         assert_eq!(lo.big_num.face, Face::Mono);
         assert_eq!(lo.label.face, Face::Mono);
-        assert_eq!(lo.mono.face, Face::Mono);
+        assert_eq!(lo.mono_strong.face, Face::Mono);
         // The other defaults, as they were.
         assert_eq!(lo.kind, Kind::Vertical);
         assert_eq!(lo.tab_row_h, 32.0);
@@ -513,22 +493,14 @@ mod tests {
         assert!(!lo.clock && !lo.clock_24h && lo.clock_seconds);
         assert_eq!(lo.date_fmt, DateFmt::Iso);
         assert!(!lo.clock_display_face);
-        assert_eq!(lo.clock_px(1000.0), 96.0);
+        assert_eq!(lo.clock_size, 96);
         assert_eq!(lo.greeting, "Hello");
         assert_eq!(lo.ntp_bg, NtpBg::Wallpaper);
         assert!(lo.wallpaper_blur);
         assert_eq!(lo.wallpaper_dim, 50);
         assert_eq!(lo.dial_cols, 6);
-        assert_eq!(lo.dial_tile, 80.0);
         assert!(!lo.ntp_search);
         assert!(!lo.motion.enabled, "reduced motion must not move");
-        // The clock's automatic size follows the window, and the type scale.
-        assert_eq!(lo.clock_px(1000.0), 96.0);
-        let mut s2 = s.clone();
-        s2.clock_size = 0;
-        s2.font_scale = 100;
-        let lo = Look::of(&s2, true, true);
-        assert_eq!(lo.clock_px(1000.0), 90.0);
     }
 
     #[test]

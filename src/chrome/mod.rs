@@ -699,7 +699,11 @@ struct SwitchRow {
 
 impl SwitchRow {
     fn label(&self) -> String {
-        if self.title.is_empty() { host(&self.url) } else { self.title.clone() }
+        match (self.title.is_empty(), host(&self.url)) {
+            (false, _) => self.title.clone(),
+            (true, h) if h.is_empty() => "New tab".into(),
+            (true, h) => h,
+        }
     }
 }
 
@@ -802,8 +806,8 @@ fn rank_rows(all: &[SwitchRow], q: &str) -> Vec<SwitchRow> {
 }
 
 /// The tab search card's rectangle: over the sidebar, starting at its top.
-fn search_card(sb: R, rows: usize) -> R {
-    let h = 46.0 + rows as f32 * 30.0 + if rows == 0 { 34.0 } else { 6.0 };
+fn search_card(sb: R, rows: usize, more: bool) -> R {
+    let h = 52.0 + rows as f32 * 32.0 + if rows == 0 { 34.0 } else { 8.0 } + if more { 20.0 } else { 0.0 };
     R::new(sb.x + 8.0, 8.0, (sb.w - 16.0).max(180.0), h.min(sb.h - 16.0))
 }
 
@@ -1425,6 +1429,16 @@ impl Inner {
             self.page.font_pick = None;
             self.page.theme_name.clear();
         }
+        // A run started from a message has a task the box never saw: the box shows it, so the
+        // page says what is being done. Never over what the person is typing.
+        if let Some(d) = s.drive.as_ref().filter(|d| !d.task.is_empty())
+            && wide_text(self.drive_edit).is_empty()
+            && unsafe { GetFocus() } != self.drive_edit
+        {
+            unsafe {
+                SetWindowTextW(self.drive_edit, &HSTRING::from(d.task.as_str())).ok();
+            }
+        }
         // Debug: LUMEN_TEST_SCROLL starts a run's page scrolled, so a screenshot
         // can show what is further down without a wheel script.
         #[cfg(debug_assertions)]
@@ -1628,6 +1642,9 @@ impl Inner {
     fn ntp_clock_font(&self, stage_w: f32) -> Font {
         let lo = &self.look;
         let mut f = lo.clock_font;
+        if !lo.clock_display_face {
+            f = Font { face: gfx::Face::Ui, ..f };
+        }
         if lo.clock_size > 0 {
             f.size10 = lo.clock_size * 10;
         } else if stage_w < 760.0 {
@@ -1677,8 +1694,9 @@ impl Inner {
         // The tab search's filter, inside the card over the sidebar.
         if let Some(sb) = self.sidebar() {
             let q = wide_text(self.search_edit).trim().to_lowercase();
-            let card = search_card(sb, switch_rows(s, &q).len().min(SEARCH_ROWS));
-            place(self.search_edit, R::new(card.x + 40.0, card.y + 10.0, card.w - 52.0, 22.0), self.search_open);
+            let n = switch_rows(s, &q).len();
+            let card = search_card(sb, n.min(SEARCH_ROWS), n > SEARCH_ROWS);
+            place(self.search_edit, R::new(card.x + 38.0, card.y + 13.0, card.w - 52.0, 22.0), self.search_open);
             let card = say_card(sb);
             place(self.say_edit, R::new(card.x + 22.0, card.y + 50.0, card.w - 44.0, 22.0), self.say.is_some());
         } else {
@@ -2307,7 +2325,7 @@ impl Inner {
             if a > 0.02 {
                 self.gfx.round(r, lo.r_sm, th.hover.alpha(a.min(1.0)));
             }
-            self.gfx.icon(if s.bookmarked { "star-on" } else { "star" }, r.x + 4.0, r.y + 4.0, 16.0, if s.bookmarked { th.accent } else { th.faint });
+            self.gfx.icon(if s.bookmarked { "star-on" } else { "star" }, r.x + 4.0, r.y + 4.0, 16.0, if s.bookmarked { th.text } else { th.faint });
             self.hit(r, h);
         }
     }
@@ -2608,64 +2626,35 @@ impl Inner {
             }
         }
         let lo = self.look.clone();
-        let card = R::new(sb.x + 8.0, 86.0 + self.ws_h(s), sb.w - 16.0, 134.0 + kinds.len() as f32 * 54.0);
-        self.gfx.round(R::new(card.x, card.y + 4.0, card.w, card.h), lo.r_lg + 2.0, th.shade.alpha(0.65));
-        self.gfx.round(card, lo.r_lg + 2.0, th.raise);
-        self.gfx.round_stroke(card, lo.r_lg + 2.0, th.line, 1.0);
-        let mut y = card.y + 12.0;
-        self.gfx.text(&host(&tab.url), R::new(card.x + 12.0, y, card.w - 24.0, 20.0), lo.font(13.0, 600), th.text);
-        y += 20.0;
+        let card = R::new(sb.x + 8.0, 86.0 + self.ws_h(s), sb.w - 16.0, 150.0 + kinds.len() as f32 * 56.0);
+        self.float_card(card, 1.0);
+        // Who: the site's icon and name, and what it keeps.
+        let site = host(&tab.url);
+        pages::site_icon(self, R::new(card.x + 14.0, card.y + 16.0, 18.0, 18.0), &site);
+        self.gfx.text(&site, R::new(card.x + 42.0, card.y + 12.0, card.w - 56.0, 20.0), lo.font(13.0, 600), th.text);
         let note = match s.site_cookies {
             Some(1) => "1 cookie stored".to_string(),
             Some(n) => format!("{n} cookies stored"),
             None => "Checking what it stores…".to_string(),
         };
-        self.gfx.text(&note, R::new(card.x + 12.0, y, card.w - 24.0, 18.0), lo.font(11.5, 400), th.faint);
-        y += 24.0;
-        self.gfx.line(card.x + 8.0, y, card.right() - 8.0, y, th.line, 1.0);
-        y += 10.0;
+        self.gfx.text(&note, R::new(card.x + 42.0, card.y + 32.0, card.w - 56.0, 18.0), lo.font(11.5, 400), th.faint);
+        let mut y = card.y + 60.0;
+        self.gfx.line(card.x + 1.0, y, card.right() - 1.0, y, th.line, 1.0);
+        y += 12.0;
         for kind in &kinds {
-            let label = crate::sites::label(kind);
-            self.gfx.text(&label, R::new(card.x + 12.0, y, card.w - 24.0, 18.0), lo.font(12.0, 500), th.dim);
+            self.label(&crate::sites::label(kind), R::new(card.x + 16.0, y, card.w - 32.0, 16.0), th.faint);
             y += 20.0;
-            self.site_chips(card.x + 12.0, card.right() - 12.0, y, kind, answered(kind));
-            y += 34.0;
+            let cur = answered(kind);
+            let cells: Vec<(&str, Hit)> = [("Allow", Some(true)), ("Block", Some(false)), ("Ask", None)].iter().map(|(l, _)| (*l, Hit::SitePerm(kind.to_string(), l))).collect();
+            let at = [Some(true), Some(false), None].iter().position(|v| *v == cur);
+            self.seg_cells(R::new(card.x + 12.0, y, card.w - 24.0, 30.0), &cells, at);
+            y += 36.0;
         }
         // The two ways out of the permissions grid, stacked: the card is sidebar-wide.
-        for hit in [Hit::SiteClear, Hit::SiteSettings] {
-            let label = match hit {
-                Hit::SiteClear => "Clear data for this site",
-                _ => "Site settings…",
-            };
-            let r = R::new(card.x + 12.0, y, card.w - 24.0, 28.0);
-            let hov = self.is_hover(&hit);
-            self.gfx.round(r, lo.r_sm + 1.0, if hov { th.press } else { th.bg });
-            self.gfx.text(label, r, lo.font(12.0, 500).align(Align::Center), if hov { th.text } else { th.dim });
-            self.hit(r, hit);
-            y += 32.0;
-        }
-    }
-
-    /// The Allow / Block / Ask chips of one kind in the site popover: three equal cells from
-    /// `x` to `right`.
-    fn site_chips(&mut self, x: f32, right: f32, y: f32, kind: &str, cur: Option<bool>) {
-        let lo = self.look.clone();
-        let th = lo.theme;
-        let f = lo.font(11.5, 500).align(Align::Center);
-        let opts: [(&'static str, Option<bool>); 3] = [("Allow", Some(true)), ("Block", Some(false)), ("Ask", None)];
-        let w = (right - x - 2.0 * 4.0) / 3.0;
-        let mut cx = x;
-        for (label, v) in opts {
-            let r = R::new(cx, y, w, 26.0);
-            let h = Hit::SitePerm(kind.to_string(), label);
-            if v == cur {
-                self.gfx.round(r, lo.r_sm, th.press);
-            } else if self.is_hover(&h) {
-                self.gfx.round(r, lo.r_sm, th.hover);
-            }
-            self.gfx.text(label, r, f, if v == cur { th.text } else { th.dim });
-            self.hit(r, h);
-            cx += w + 4.0;
+        y += 4.0;
+        for (hit, label) in [(Hit::SiteClear, "Clear data for this site"), (Hit::SiteSettings, "Site settings…")] {
+            self.pill_button(R::new(card.x + 12.0, y, card.w - 24.0, 30.0), label, hit, false, 1.0);
+            y += 36.0;
         }
     }
 
@@ -2676,7 +2665,6 @@ impl Inner {
         t.url.starts_with("http").then(|| crate::engine::origin_of(&t.url))
     }
 
-    /// The tab search card: a filter box on top, then the matching tabs of every workspace.
     /// The message card: who it is for, the text, the kind (steer now, queue, new task), what
     /// that kind means, and Send.
     fn draw_say(&mut self) {
@@ -2685,53 +2673,35 @@ impl Inner {
         let Some(sb) = self.sidebar() else { return };
         let Some((session, name, mode)) = self.say.as_ref().map(|s| (s.session.clone(), s.name.clone(), s.mode)) else { return };
         let card = say_card(sb);
-        self.gfx.round(R::new(card.x, card.y + 4.0, card.w, card.h), lo.r_lg + 2.0, th.shade.alpha(0.65));
-        self.gfx.round(card, lo.r_lg + 2.0, th.raise);
-        self.gfx.round_stroke(card, lo.r_lg + 2.0, th.line, 1.0);
+        self.float_card(card, 1.0);
         self.hit(card, Hit::SayCard);
         // Who it is for.
         self.gfx.circle(card.x + 18.0, card.y + 22.0, 4.0, agent_color(&session));
         self.gfx.text(&format!("Message to {name}"), R::new(card.x + 30.0, card.y + 10.0, card.w - 66.0, 24.0), lo.font(12.5, 600), th.text);
-        let x = R::new(card.right() - 32.0, card.y + 8.0, 24.0, 24.0);
+        let x = R::new(card.right() - 34.0, card.y + 8.0, 26.0, 26.0);
         if self.is_hover(&Hit::SayClose) {
-            self.gfx.round(x, lo.r_sm, th.hover);
+            self.gfx.round(x, lo.round(x.h), th.hover);
         }
-        self.gfx.icon("close", x.x + 6.0, x.y + 6.0, 12.0, th.dim);
+        self.gfx.icon("close", x.x + 7.0, x.y + 7.0, 12.0, th.dim);
         self.hit(x, Hit::SayClose);
-        // The text (a real edit window sits over this).
+        // The text (a real edit window sits over this), in a field that says it has the keys.
         let field = R::new(card.x + 12.0, card.y + 42.0, card.w - 24.0, 38.0);
-        self.gfx.round(field, lo.r_md, th.bg);
-        self.gfx.round_stroke(field, lo.r_md, th.accent.alpha(0.55), 1.0);
+        self.gfx.round(field, lo.r_md + 2.0, th.bg);
+        self.gfx.round_stroke(field, lo.r_md + 2.0, th.text.alpha(0.85), 1.5);
         if wide_text(self.say_edit).is_empty() {
             self.gfx.text("Tell it what to do", R::new(field.x + 10.0, field.y, field.w - 20.0, field.h), lo.font(12.5, 400), th.faint);
         }
         // The kind, as one segmented control.
-        let seg = R::new(card.x + 12.0, card.y + 90.0, card.w - 24.0, 28.0);
-        self.gfx.round(seg, lo.r_md, th.bg);
-        let w = seg.w / 3.0;
-        for (n, (label, _, _)) in SAY_MODES.iter().enumerate() {
-            let r = R::new(seg.x + n as f32 * w + 2.0, seg.y + 2.0, w - 4.0, seg.h - 4.0);
-            let h = Hit::SayMode(n);
-            if n == mode {
-                self.gfx.round(r, lo.r_sm, th.raise);
-                self.gfx.round_stroke(r, lo.r_sm, th.line, 1.0);
-            } else if self.is_hover(&h) {
-                self.gfx.round(r, lo.r_sm, th.hover);
-            }
-            self.gfx.text(label, r, lo.font(12.0, if n == mode { 600 } else { 500 }).align(Align::Center), if n == mode { th.text } else { th.dim });
-            self.hit(r, h);
-        }
+        let cells: Vec<(&str, Hit)> = SAY_MODES.iter().enumerate().map(|(n, (label, _, _))| (*label, Hit::SayMode(n))).collect();
+        self.seg_cells(R::new(card.x + 12.0, card.y + 88.0, card.w - 24.0, 30.0), &cells, Some(mode));
         // What that kind does, and Send.
         let send_w = 64.0;
         let hint = R::new(card.x + 14.0, card.y + 126.0, card.w - 28.0 - send_w - 8.0, 32.0);
         self.gfx.text_wrap(SAY_MODES[mode.min(2)].2, hint, lo.font(11.0, 400), th.faint);
-        let b = R::new(card.right() - 12.0 - send_w, card.y + 128.0, send_w, 28.0);
-        let hot = self.is_hover(&Hit::SaySend);
-        self.gfx.round(b, lo.r_md, if hot { th.accent } else { th.accent.alpha(0.88) });
-        self.gfx.text("Send", b, lo.font(12.0, 600).align(Align::Center), th.bg);
-        self.hit(b, Hit::SaySend);
+        self.pill_button(R::new(card.right() - 12.0 - send_w, card.y + 128.0, send_w, 28.0), "Send", Hit::SaySend, true, 1.0);
     }
 
+    /// The tab search card: a filter box on top, then the matching tabs of every workspace.
     fn draw_search(&mut self, s: &UiState) {
         let lo = self.look.clone();
         let th = lo.theme;
@@ -2739,56 +2709,49 @@ impl Inner {
         let q = wide_text(self.search_edit).trim().to_lowercase();
         self.search_rows = switch_rows(s, &q);
         let shown = self.search_rows.len().min(SEARCH_ROWS);
-        let card = search_card(sb, shown);
+        let card = search_card(sb, shown, self.search_rows.len() > shown);
         self.search_sel = self.search_sel.min(self.search_rows.len().saturating_sub(1));
-        self.gfx.round(R::new(card.x, card.y + 4.0, card.w, card.h), lo.r_lg + 2.0, th.shade.alpha(0.65));
-        self.gfx.round(card, lo.r_lg + 2.0, th.raise);
-        self.gfx.round_stroke(card, lo.r_lg + 2.0, th.line, 1.0);
+        self.float_card(card, 1.0);
         // The card is not "outside itself"; rows registered after win over it.
         self.hit(card, Hit::SearchCard);
         // The filter field (a real edit window is placed over this).
-        let field = R::new(card.x + 8.0, card.y + 8.0, card.w - 16.0, 26.0);
-        self.gfx.round(field, lo.r_md, th.bg);
-        self.gfx.icon("search", field.x + 9.0, field.y + 5.0, 16.0, th.faint);
+        let field = R::new(card.x + 8.0, card.y + 8.0, card.w - 16.0, 32.0);
+        self.gfx.round(field, lo.round(field.h), th.bg);
+        self.gfx.round_stroke(field, lo.round(field.h), th.line, 1.0);
+        self.gfx.icon("search", field.x + 11.0, field.y + 9.0, 14.0, th.faint);
         if q.is_empty() {
-            self.gfx.text("Search open tabs", R::new(field.x + 33.0, field.y, field.w - 40.0, field.h), lo.font(12.5, 400), th.faint);
+            self.gfx.text("Search open tabs", R::new(field.x + 30.0, field.y, field.w - 40.0, field.h), lo.font(12.5, 400), th.faint);
         }
         // Hits.
-        let mut y = card.y + 42.0;
+        let mut y = card.y + 48.0;
         if self.search_rows.is_empty() {
-            self.gfx.text("No open tab matches", R::new(card.x, y + 12.0, card.w, 26.0), lo.font(12.5, 400).align(Align::Center), th.faint);
+            self.gfx.text("No open tab matches", R::new(card.x, y + 8.0, card.w, 26.0), lo.font(12.5, 400).align(Align::Center), th.faint);
         }
         for n in 0..shown {
-            // Right: where the tab lives, or that it is private. Left: what it says.
-            let (label, tag, tc) = {
+            // Right: where the tab lives, or that it is private. Left: its icon and what it says.
+            let (label, tag, url) = {
                 let row = &self.search_rows[n];
-                if row.private {
-                    (row.label(), "Private".to_string(), th.accent)
-                } else if row.other.is_some() {
-                    (row.label(), row.ws_name.clone(), th.faint)
-                } else {
-                    (row.label(), String::new(), th.faint)
-                }
+                let tag = if row.private { "Private".to_string() } else if row.other.is_some() { row.ws_name.clone() } else { String::new() };
+                (row.label(), tag, row.url.clone())
             };
-            let r = R::new(card.x + 6.0, y, card.w - 12.0, 30.0);
+            let r = R::new(card.x + 6.0, y, card.w - 12.0, 32.0);
             let h = Hit::TabSearch(n);
             if n == self.search_sel {
-                self.gfx.round(r, lo.r_sm + 1.0, th.hover);
+                self.gfx.round(r, lo.round(r.h), th.hover);
             } else if self.is_hover(&h) {
-                self.gfx.round(r, lo.r_sm + 1.0, th.hover.alpha(0.6));
+                self.gfx.round(r, lo.round(r.h), th.hover.alpha(0.6));
             }
-            let tw = if tag.is_empty() { 0.0 } else { self.gfx.measure(&tag, lo.font(11.0, 500)) + 16.0 };
-            self.gfx.text(&label, R::new(r.x + 10.0, r.y, r.w - 20.0 - tw, r.h), lo.font(12.5, 450), th.text);
-            if !tag.is_empty() {
-                self.gfx.text(&tag, R::new(r.right() - tw - 4.0, r.y, tw, r.h), lo.font(11.0, 500).align(Align::Right), tc);
-            }
+            let site = host(&url);
+            pages::site_icon(self, R::new(r.x + 10.0, r.y + 8.0, 16.0, 16.0), &site);
+            let tx = if tag.is_empty() { r.right() - 8.0 } else { self.tag(&tag, r.right() - 8.0, r.y + r.h / 2.0, th.faint) - 6.0 };
+            self.gfx.text(&label, R::new(r.x + 34.0, r.y, tx - r.x - 34.0, r.h), lo.font(12.5, 450), th.text);
             self.hit(r, h);
-            y += 30.0;
+            y += 32.0;
         }
         if self.search_rows.len() > shown {
             self.gfx.text(
                 &format!("{} more — type to narrow", self.search_rows.len() - shown),
-                R::new(card.x, y + 2.0, card.w, 16.0),
+                R::new(card.x, y, card.w, 18.0),
                 lo.font(11.0, 400).align(Align::Center),
                 th.faint,
             );
@@ -2890,46 +2853,37 @@ impl Inner {
     fn draw_cards(&mut self, s: &UiState, sb: R, compact: bool) {
         let lo = self.look.clone();
         let th = lo.theme;
-        // An agent asking the person to take over: accent card, one button.
+        // An agent asking the person to take over: the live dot, what it needs, one button.
         if let Some((who, msg)) = s.handoff.as_ref().filter(|_| s.prompt.is_none()) {
-            let card = if compact { R::new(sb.x + 4.0, sb.bottom() - 166.0, sb.w - 8.0, 122.0) } else { R::new(sb.x + 8.0, sb.bottom() - 166.0, sb.w - 16.0, 122.0) };
+            // As tall as what it says, up to five lines.
+            let w = sb.w - if compact { 8.0 } else { 16.0 };
+            let lines = pages::wrap_lines(self, msg, lo.font(12.5, 400), w - 28.0).len().clamp(1, 5) as f32;
+            let ch = 92.0 + 18.0 * lines;
+            let card = R::new(sb.x + if compact { 4.0 } else { 8.0 }, sb.bottom() - 44.0 - ch, w, ch);
             let o = self.motion.enter(Id::Chip("handoff"), Prop::Opacity, 0.0, 1.0, 160, Ease::OutCubic);
             let card = R::new(card.x, card.y + (1.0 - o) * 9.0, card.w, card.h);
-            self.gfx.round(R::new(card.x, card.y + 3.0, card.w, card.h), lo.r_lg, th.shade.alpha(0.5 * o));
-            self.gfx.round(card, lo.r_lg, th.raise.alpha(o));
-            self.gfx.round_stroke(card, lo.r_lg, th.accent.alpha(o), 1.0);
-            self.gfx.text(&format!("{who} needs you"), R::new(card.x + 12.0, card.y + 8.0, card.w - 24.0, 20.0), lo.font(12.5, 600), th.accent.alpha(o));
-            self.gfx.text_wrap(msg, R::new(card.x + 12.0, card.y + 30.0, card.w - 24.0, 46.0), lo.font(12.5, 400), th.text.alpha(o));
-            let done = R::new(card.x + 10.0, card.bottom() - 40.0, card.w - 20.0, 30.0);
-            let h = Hit::HandoffDone;
-            let hov = self.is_hover(&h);
-            let hb = self.motion.hover(Self::button_id(&h), if hov { 1.0 } else { 0.0 });
-            self.gfx.round(done, lo.r_md, th.accent.alpha(o * (0.85 + 0.15 * hb.min(1.0))));
-            self.gfx.text("Done, hand it back", done, lo.font(12.5, 600).align(Align::Center), th.bg.alpha(o));
-            self.hit(done, h);
+            self.float_card(card, o);
+            self.gfx.circle(card.x + 18.0, card.y + 21.0, 3.5, th.accent.alpha(o));
+            self.gfx.text(&format!("{who} needs you"), R::new(card.x + 30.0, card.y + 10.0, card.w - 42.0, 22.0), lo.font(12.5, 600), th.text.alpha(o));
+            self.gfx.text_wrap(msg, R::new(card.x + 14.0, card.y + 36.0, card.w - 28.0, 18.0 * lines + 4.0), lo.font(12.5, 400), th.dim.alpha(o));
+            let done = R::new(card.x + 12.0, card.bottom() - 42.0, card.w - 24.0, 30.0);
+            self.pill_button(done, "Done, hand it back", Hit::HandoffDone, true, o);
         }
         // A site asking for something: a card above the footer.
         if let Some((pid, origin, kind)) = &s.prompt {
-            let card = if compact { R::new(sb.x + 4.0, sb.bottom() - 150.0, sb.w - 8.0, 106.0) } else { R::new(sb.x + 8.0, sb.bottom() - 150.0, sb.w - 16.0, 106.0) };
+            let card = if compact { R::new(sb.x + 4.0, sb.bottom() - 156.0, sb.w - 8.0, 112.0) } else { R::new(sb.x + 8.0, sb.bottom() - 156.0, sb.w - 16.0, 112.0) };
             let o = self.motion.enter(Id::Chip("prompt"), Prop::Opacity, 0.0, 1.0, 160, Ease::OutCubic);
             let card = R::new(card.x, card.y + (1.0 - o) * 9.0, card.w, card.h);
-            self.gfx.round(R::new(card.x, card.y + 3.0, card.w, card.h), lo.r_lg, th.shade.alpha(0.5 * o));
-            self.gfx.round(card, lo.r_lg, th.raise.alpha(o));
-            self.gfx.round_stroke(card, lo.r_lg, th.accent.alpha(0.5 * o), 1.0);
+            self.float_card(card, o);
             let site = host(origin);
-            self.gfx.text(&site, R::new(card.x + 12.0, card.y + 8.0, card.w - 24.0, 20.0), lo.font(12.5, 600), th.text.alpha(o));
-            self.gfx.text(&ask_text(kind), R::new(card.x + 12.0, card.y + 28.0, card.w - 24.0, 20.0), lo.font(12.5, 400), th.dim.alpha(o));
-            let bw = (card.w - 30.0) / 2.0;
-            let block = R::new(card.x + 10.0, card.bottom() - 40.0, bw, 30.0);
-            let allow = R::new(block.right() + 10.0, block.y, bw, 30.0);
-            let hb = self.is_hover(&Hit::PermBlock(*pid));
-            let ha = self.is_hover(&Hit::PermAllow(*pid));
-            self.gfx.round(block, lo.r_md, th.bg.alpha(o * if hb { 1.0 } else { 0.9 }));
-            self.gfx.text("Block", block, lo.font(12.5, 500).align(Align::Center), th.text.alpha(o));
-            self.gfx.round(allow, lo.r_md, th.accent.alpha(o * if ha { 1.0 } else { 0.85 }));
-            self.gfx.text("Allow", allow, lo.font(12.5, 600).align(Align::Center), th.bg.alpha(o));
-            self.hit(block, Hit::PermBlock(*pid));
-            self.hit(allow, Hit::PermAllow(*pid));
+            pages::site_icon(self, R::new(card.x + 14.0, card.y + 14.0, 18.0, 18.0), &site);
+            self.gfx.text(&site, R::new(card.x + 40.0, card.y + 12.0, card.w - 52.0, 22.0), lo.font(12.5, 600), th.text.alpha(o));
+            self.gfx.text(&ask_text(kind), R::new(card.x + 14.0, card.y + 38.0, card.w - 28.0, 20.0), lo.font(12.5, 400), th.dim.alpha(o));
+            let bw = (card.w - 32.0) / 2.0;
+            let block = R::new(card.x + 12.0, card.bottom() - 42.0, bw, 30.0);
+            let allow = R::new(block.right() + 8.0, block.y, bw, 30.0);
+            self.pill_button(block, "Block", Hit::PermBlock(*pid), false, o);
+            self.pill_button(allow, "Allow", Hit::PermAllow(*pid), true, o);
         }
     }
 
@@ -2945,35 +2899,35 @@ impl Inner {
         let o = self.omni_rect();
         let a = self.motion.enter(Id::Named("sugg"), Prop::Opacity, 0.0, 1.0, 150, Ease::OutCubic);
         let rise = self.motion.enter(Id::Named("sugg"), Prop::Y, -6.0, 0.0, 150, Ease::OutCubic);
-        let row_h = |sg: &Sugg| if sg.detail.is_empty() { 31.0 } else { 47.0 };
-        let h = self.sugg.iter().map(row_h).sum::<f32>() + 8.0;
+        let row_h = |sg: &Sugg| if sg.detail.is_empty() { 34.0 } else { 50.0 };
+        let h = self.sugg.iter().map(row_h).sum::<f32>() + 12.0;
         let box_ = R::new(o.x, o.bottom() + 6.0 - rise, o.w, h);
-        self.gfx.round(R::new(box_.x, box_.y + 4.0, box_.w, box_.h), lo.r_lg, th.shade.alpha(0.6 * a));
-        self.gfx.round(box_, lo.r_lg, th.raise.alpha(a));
-        self.gfx.round_stroke(box_, lo.r_lg, th.line.alpha(a), 1.0);
-        let mut y = box_.y + 4.0;
+        self.float_card(box_, a);
+        let mut y = box_.y + 6.0;
         for i in 0..self.sugg.len() {
             let rh = row_h(&self.sugg[i]);
-            let r = R::new(box_.x + 4.0, y, box_.w - 8.0, rh - 1.0);
+            let r = R::new(box_.x + 6.0, y, box_.w - 12.0, rh);
             y += rh;
             if i == self.sel {
-                self.gfx.round(r, lo.r_sm + 1.0, th.hover.alpha(a));
+                self.gfx.round(r, lo.round(34.0).min(r.h / 2.0), th.hover.alpha(a));
             }
             let sg = self.sugg[i].clone();
             let (icon, hint) = match sg.kind {
                 SuggKind::Go(_) => ("globe", "Open"),
                 SuggKind::Search(_) => ("search", "Search"),
-                SuggKind::Tab(_) | SuggKind::TabOther(..) => ("tab", "Switch to tab"),
+                SuggKind::Tab(_) | SuggKind::TabOther(..) => ("tab", "Tab"),
                 SuggKind::Url(_, true) => ("star", "Bookmark"),
                 SuggKind::Url(_, false) if !sg.detail.is_empty() => ("clock", "In page"),
                 SuggKind::Url(_, false) => ("clock", "History"),
             };
-            self.gfx.icon(icon, r.x + 8.0, r.y + 7.0, 16.0, th.faint.alpha(a));
-            let hw = self.gfx.measure(hint, lo.font(11.5, 400)) + 10.0;
-            self.gfx.text(&sg.label, R::new(r.x + 33.0, r.y, r.w - 33.0 - hw, 30.0), lo.font(13.0, 400), th.text.alpha(a));
-            self.gfx.text(hint, R::new(r.right() - hw, r.y, hw - 8.0, 30.0), lo.font(11.5, 400).align(Align::Right), th.faint.alpha(a));
+            self.gfx.icon(icon, r.x + 10.0, r.y + 9.0, 16.0, th.faint.alpha(a));
+            // What kind of hit, in the quiet spaced capitals every label uses.
+            let ht = hint.to_uppercase();
+            let hw = self.gfx.measure_tracked(&ht, lo.label, lo.label_track) + 12.0;
+            self.gfx.text(&sg.label, R::new(r.x + 36.0, r.y, r.w - 36.0 - hw - 8.0, 34.0), lo.font(13.0, 400), th.text.alpha(a));
+            self.gfx.text_tracked(&ht, R::new(r.right() - hw, r.y + 10.0, hw - 6.0, 16.0), lo.label, th.faint.alpha(a), lo.label_track);
             if !sg.detail.is_empty() {
-                self.gfx.text(&sg.detail, R::new(r.x + 33.0, r.y + 24.0, r.w - 41.0, 18.0), lo.font(11.5, 400), th.dim.alpha(a));
+                self.gfx.text(&sg.detail, R::new(r.x + 36.0, r.y + 27.0, r.w - 44.0, 18.0), lo.font(11.5, 400), th.dim.alpha(a));
             }
             self.hit(r, Hit::Sugg(i));
         }
@@ -3588,6 +3542,70 @@ impl Inner {
     }
 
     /// A card: the look's raised surface, a hairline, and in Glass a frosted pane.
+    /// A card that floats over the chrome: a soft shadow under it, then the card.
+    fn float_card(&self, r: R, a: f32) {
+        let lo = &self.look;
+        let th = lo.theme;
+        self.gfx.round(R::new(r.x, r.y + 6.0, r.w, r.h), lo.r_card, th.shade.alpha(0.55 * a));
+        // Opaque even where cards are glass: what floats must hide what is under it.
+        self.gfx.round(r, lo.r_card, th.solid(th.raise).alpha(a));
+        self.gfx.round_stroke(r, lo.r_card, th.line.alpha(a), 1.0);
+    }
+
+    /// A pill button. Primary is the look's ink (Signal) or its accent; quiet sits on the card
+    /// with a hairline.
+    fn pill_button(&mut self, r: R, label: &str, hit: Hit, primary: bool, a: f32) {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let hov = self.is_hover(&hit);
+        let hb = self.motion.hover(Self::button_id(&hit), if hov { 1.0 } else { 0.0 }).min(1.0);
+        let rad = lo.round(r.h);
+        let f = lo.font(12.5, if primary { 600 } else { 500 }).align(Align::Center);
+        if primary {
+            let (fill, ink) = if lo.style == theme::Style::Signal { (th.pill, th.pill_ink) } else { (th.accent, th.bg) };
+            self.gfx.round(r, rad, fill.alpha(a * (0.9 + 0.1 * hb)));
+            self.gfx.text(label, r, f, ink.alpha(a));
+        } else {
+            self.gfx.round(r, rad, th.raise.mix(th.hover, hb).alpha(a));
+            self.gfx.round_stroke(r, rad, th.line.alpha(a), 1.0);
+            self.gfx.text(label, r, f, th.text.alpha(a));
+        }
+        self.hit(r, hit);
+    }
+
+    /// Cells side by side over a sunken pill, the chosen one in ink: the segmented control of
+    /// the floating cards. `cur` is the chosen cell, if any.
+    fn seg_cells(&mut self, r: R, cells: &[(&str, Hit)], cur: Option<usize>) {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        self.gfx.round(r, lo.round(r.h), th.bg);
+        self.gfx.round_stroke(r, lo.round(r.h), th.line, 1.0);
+        let w = (r.w - 4.0) / cells.len() as f32;
+        for (n, (label, h)) in cells.iter().enumerate() {
+            let c = R::new(r.x + 2.0 + n as f32 * w, r.y + 2.0, w, r.h - 4.0);
+            let on = cur == Some(n);
+            if on {
+                self.gfx.round(c, lo.round(c.h), th.pill);
+            } else if self.is_hover(h) {
+                self.gfx.round(c, lo.round(c.h), th.hover);
+            }
+            self.gfx.text(label, c, lo.font(12.0, if on { 600 } else { 500 }).align(Align::Center), if on { th.pill_ink } else { th.dim });
+            self.hit(c, h.clone());
+        }
+    }
+
+    /// A quiet tag: spaced capitals in a hairline pill, at its right edge `right`. Returns its
+    /// left edge.
+    fn tag(&self, text: &str, right: f32, cy: f32, c: theme::Color) -> f32 {
+        let lo = &self.look;
+        let t = text.to_uppercase();
+        let w = self.gfx.measure_tracked(&t, lo.label, lo.label_track) + 14.0;
+        let r = R::new(right - w, cy - 9.0, w, 18.0);
+        self.gfx.round_stroke(r, lo.round(r.h), lo.theme.line, 1.0);
+        self.gfx.text_tracked(&t, R::new(r.x + 7.0, r.y + 1.0, w - 7.0, r.h), lo.label, c, lo.label_track);
+        r.x
+    }
+
     fn card(&self, r: R, a: f32) {
         let lo = &self.look;
         let th = lo.theme;

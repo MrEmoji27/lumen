@@ -14,7 +14,7 @@ use super::{
     Hit, Inner, UiDl, UiState, send,
     gfx::{Align, R},
     style::{self, COL_MARGIN, COL_W, ROW_H, Look},
-    theme::{Color, PALETTES, Theme},
+    theme::Color,
 };
 use crate::store::{CLOSE_BTNS, DATE_FORMATS, DENSITIES, LAYOUTS, MOTIONS, Settings};
 
@@ -25,7 +25,6 @@ pub enum PageHit {
     FirstRunDone,
     Toggle(&'static str),
     Slider(&'static str),
-    Swatch(&'static str),
     Accent,
     AccentReset,
     /// A custom colour, by its setting key.
@@ -211,8 +210,6 @@ const NET: &[u32] = &[32, 64, 128, 256, 512, 1024, 2048, 5120, 10240, 25600, 512
 const DL_SPEEDS: &[u32] = &[0, 1024, 5120, 10240];
 /// The clock's size, in px. 0 follows the window.
 const CLOCK_SIZES: &[u32] = &[0, 48, 64, 80, 96, 112, 128, 152, 176];
-/// The speed-dial tile, in px.
-const TILES: &[u32] = &[44, 52, 60, 68, 76, 84, 92];
 /// The speed-dial columns. 0 follows the width.
 const DIAL_COLS: &[u32] = &[0, 3, 4, 5, 6, 7, 8];
 const ENGINES: [(&str, &str); 5] = [
@@ -272,10 +269,8 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ]),
         ("Fonts", vec![
             Fonts("ui_font", "Interface font", "Everything you act on: the sidebar, the pages, the settings."),
-            Fonts("display_font", "Display font", "Titles, headers and the clock."),
-            Fonts("mono_font", "Monospace font", "Figures: the Control table and the memory readout."),
+            Fonts("mono_font", "Monospace font", "The labels, the figures and the clock, in Signal and Precise."),
             Range("font_scale", "Type size", "Every size on every screen, together.", Scale::Linear(90.0, 130.0, 5.0), "%"),
-            Range("title_weight", "Title weight", "How heavy the titles and the clock are set.", Scale::Linear(300.0, 800.0, 50.0), ""),
             Reset("fonts", "Reset the fonts"),
         ]),
         ("Layout", vec![
@@ -291,7 +286,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("clock_24h", "24-hour clock", "Off: 12-hour with am/pm."),
             Toggle("clock_seconds", "Seconds", "A small, quiet readout beside the minutes."),
             Seg("date_format", "Date", "", &DATE_FORMATS),
-            Seg("clock_font", "Clock face", "", &[("display", "Display font"), ("ui", "Interface font")]),
+            Seg("clock_font", "Clock face", "The look's own, or the interface font at the same size.", &[("display", "The look's"), ("ui", "Interface font")]),
             Range("clock_size", "Clock size", "0 follows the window's width. px", Scale::Steps(CLOCK_SIZES), "px"),
             Text("greeting", "Greeting", "A line above the clock, in your own words. Empty: none."),
             Seg("ntp_bg", "Background", "Plain, or the wallpaper image below.", &[("plain", "Plain"), ("wallpaper", "Wallpaper")]),
@@ -300,7 +295,6 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Range("wallpaper_dim", "Dim the wallpaper", "", Scale::Linear(0.0, 80.0, 5.0), "%"),
             Toggle("speed_dial", "Speed dial", "Sites you keep as tiles under the search box."),
             Range("dial_cols", "Tiles per row", "0 follows the window's width.", Scale::Steps(DIAL_COLS), ""),
-            Range("dial_tile", "Tile size", "", Scale::Steps(TILES), "px"),
             Toggle("ntp_search", "Search box", ""),
             Reset("ntp", "Reset the clock and new tab page"),
         ]),
@@ -572,7 +566,7 @@ pub fn drive_task_rect(st: R, s5: f32) -> R {
 
 /// Text broken into lines no wider than `w`, at spaces; a word longer than a line is cut
 /// by the drawing, not here.
-fn wrap_lines(i: &Inner, text: &str, f: super::gfx::Font, w: f32) -> Vec<String> {
+pub(super) fn wrap_lines(i: &Inner, text: &str, f: super::gfx::Font, w: f32) -> Vec<String> {
     let mut out = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
@@ -2219,7 +2213,6 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
 /// History, grouped by day: one quiet list, click to open, x to remove.
 fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
-    let history = true;
     let col = column(st, COL_W);
     i.gfx.clip(st);
     let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
@@ -3117,7 +3110,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
             let on = get(&s.settings, k).as_bool().unwrap_or(false);
             set(i, k, json!(!on));
         }
-        PageHit::Swatch(k) => set(i, "palette", json!(k)),
         PageHit::AccentReset => set(i, "accent", json!("")),
         PageHit::Accent => {
             if let Some(c) = pick_color(i.hwnd_raw(), i.theme.accent) {

@@ -201,6 +201,15 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(rest.trim()));
                         }
                     }
+                    "etext" => {
+                        // Words into any edit box by its ID, as typing there would: "etext 101 rust".
+                        let (id, words) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+                        if let Some(id) = id.parse::<i32>().ok()
+                            && let Ok(edit) = GetDlgItem(Some(hwnd), id)
+                        {
+                            let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(words));
+                        }
+                    }
                     "setq" => {
                         // Words into the Settings search box (ID 107).
                         if let Ok(edit) = GetDlgItem(Some(hwnd), 107) {
@@ -316,6 +325,12 @@ pub fn fake(s: &mut UiState) {
             ],
             exit: None,
         });
+    }
+    if fake_has("handoff") {
+        s.handoff = Some(("claude-code".into(), "Log in to the shop with your account, then press Done and I carry on.".into()));
+    }
+    if fake_has("prompt") {
+        s.prompt = Some((1, "https://meet.example.com".into(), "camera"));
     }
     if fake_has("sites") && s.panel == "sites" {
         s.rules = vec![
