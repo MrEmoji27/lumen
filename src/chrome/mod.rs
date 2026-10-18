@@ -77,6 +77,8 @@ pub struct UiTab {
     pub pin_away: bool,
     pub audio: bool,
     pub muted: bool,
+    /// In a call; drawn as a microphone where the sound mark goes.
+    pub call: bool,
     pub status: &'static str,
     pub agent: bool,
     /// The person's tab, which they let agents use (right-click). Marked in the sidebar.
@@ -909,6 +911,17 @@ fn edit_sel(hwnd: HWND) -> (usize, usize) {
         SendMessageW(hwnd, EM_GETSEL, Some(WPARAM(&mut start as *mut u32 as usize)), Some(LPARAM(&mut end as *mut u32 as isize)));
     }
     (start as usize, end as usize)
+}
+
+/// The mark beside a tab that makes sound: muted, in a call, or playing.
+fn sound_icon(t: &UiTab) -> &'static str {
+    if t.muted {
+        "muted"
+    } else if t.call && !t.audio {
+        "mic"
+    } else {
+        "sound"
+    }
 }
 
 fn wide_text(hwnd: HWND) -> String {
@@ -3235,10 +3248,10 @@ impl Inner {
             // A dot, like the AI one, in a colour of its own.
             self.gfx.circle(r.right() - 5.0, r.y + 5.0, 3.0, style::private_mark(th.dark).alpha(alpha));
         }
-        if (t.audio || t.muted) && pinned {
+        if (t.audio || t.muted || t.call) && pinned {
             let b = R::new(r.right() - 15.0, r.y + 1.0, 14.0, 14.0);
             self.gfx.round(b, 4.0, th.bg);
-            self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 2.0, b.y + 2.0, 10.0, th.dim);
+            self.gfx.icon(sound_icon(t), b.x + 2.0, b.y + 2.0, 10.0, th.dim);
             self.hit(b, Hit::TabSnd(t.id));
         }
         if pinned || compact {
@@ -3256,13 +3269,13 @@ impl Inner {
             self.hit(x, Hit::TabX(t.id));
             right = x.x - 2.0;
         }
-        if t.audio || t.muted {
+        if t.audio || t.muted || t.call {
             let b = R::new(right - 22.0, r.y + (r.h - 22.0) / 2.0, 22.0, 22.0);
             if self.is_hover(&Hit::TabSnd(t.id)) {
                 self.gfx.round(b, lo.r_sm, th.press.alpha(alpha));
             }
             let ink = if active { th.pill_ink.alpha(0.75) } else { th.faint };
-            self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 4.0, b.y + 4.0, 14.0, ink.alpha(alpha));
+            self.gfx.icon(sound_icon(t), b.x + 4.0, b.y + 4.0, 14.0, ink.alpha(alpha));
             self.hit(b, Hit::TabSnd(t.id));
             right = b.x - 2.0;
         }
@@ -3459,10 +3472,10 @@ impl Inner {
             self.gfx.circle(r.right() - 5.0, r.y + 5.0, 3.0, style::private_mark(th.dark));
         }
         if pinned {
-            if t.audio || t.muted {
+            if t.audio || t.muted || t.call {
                 let b = R::new(r.right() - 13.0, r.y + 1.0, 12.0, 12.0);
                 self.gfx.round(b, 4.0, th.side);
-                self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 1.0, b.y + 1.0, 10.0, th.dim);
+                self.gfx.icon(sound_icon(t), b.x + 1.0, b.y + 1.0, 10.0, th.dim);
                 self.hit(b, Hit::TabSnd(t.id));
             }
             return;
@@ -3484,12 +3497,12 @@ impl Inner {
             self.hit(x, Hit::TabX(t.id));
             right = x.x - 2.0;
         }
-        if t.audio || t.muted {
+        if t.audio || t.muted || t.call {
             let b = R::new(right - 20.0, r.y + (r.h - 20.0) / 2.0, 20.0, 20.0);
             if self.is_hover(&Hit::TabSnd(t.id)) {
                 self.gfx.round(b, lo.round(20.0), if on_pill { th.pill_ink.alpha(0.18) } else { th.press });
             }
-            self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 3.0, b.y + 3.0, 14.0, ink(th.dim));
+            self.gfx.icon(sound_icon(t), b.x + 3.0, b.y + 3.0, 14.0, ink(th.dim));
             self.hit(b, Hit::TabSnd(t.id));
             right = b.x - 2.0;
         }
@@ -4415,7 +4428,7 @@ impl Inner {
                         items.push((9, "Darken this site\tShift+F9".into()));
                     }
                 }
-                if t.audio || t.muted {
+                if t.audio || t.muted || t.call {
                     items.push((3, if t.muted { "Unmute".into() } else { "Mute".into() }));
                 }
                 // Agents stay out of this tab unless the person says so, one tab at a time.
@@ -5277,6 +5290,7 @@ mod tests {
             pin_away: false,
             audio: false,
             muted: false,
+            call: false,
             status: "live",
             agent: false,
             agent_ok: false,

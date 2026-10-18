@@ -74,6 +74,9 @@ pub enum Ev {
     /// A server redirect began: the page is not the one that was asked for.
     NavRedirected(u64),
     Audio(u64, bool),
+    /// The page is in a call (a live microphone, camera or screen capture, or a connected
+    /// peer connection), or no longer.
+    Call(u64, bool),
     FullScreen(u64, bool),
     CloseMe(u64),
     /// New popup tab, and the tab that opened it.
@@ -525,6 +528,7 @@ fn build_tab_in(
         // Decided when the page is built; the header follows the setting at once.
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
         .with_initialization_script(WEBRTC_JS)
+        .with_initialization_script(CALL_JS)
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -586,6 +590,7 @@ fn build_tab_in(
     hook_external(&wv, id, ctx.proxy.clone(), agent_page);
     hook_popup_sensor(&wv, ctx.popup_info.clone());
     hook_rtc(&wv, who);
+    hook_call(&wv, id, ctx.proxy.clone());
     // Password saving is per profile. An agent's profile never saves passwords,
     // and InPrivate keeps nothing anyway, so private pages get it off too.
     set_passwords(&wv, ctx.passwords.get() && !agent_page && !private);
@@ -1297,6 +1302,26 @@ const GPC_JS: &str = "try{Object.defineProperty(Navigator.prototype,'globalPriva
 /// script only reports that a page tried.
 const WEBRTC_JS: &str = "try{const O=window.RTCPeerConnection;if(O){window.RTCPeerConnection=function(c,i){const pc=new O(c,i);let n=false;pc.addEventListener('icecandidate',e=>{if(!n&&e.candidate){n=true;try{window.chrome.webview.postMessage({lumen:'rtc'})}catch(_){}}});return pc};window.RTCPeerConnection.prototype=O.prototype}}catch(e){}";
 
+/// In every page: is it in a call? A live microphone, camera or screen capture, or a peer
+/// connection that is up. A call where nobody talks is silent, so `IsDocumentPlayingAudio`
+/// says no, and a hidden Discord call got frozen five minutes in. The page says yes or no
+/// when it changes; Lumen keeps such a tab awake. Top frame only.
+const CALL_JS: &str = r#"try{(()=>{if(window!==window.top)return;const W=window.chrome&&window.chrome.webview;if(!W)return;
+const live=new Set(),pcs=new Set();let last=false,tick=0;
+const up=s=>s==='connected'||s==='connecting'||s==='checking'||s==='completed'||s==='new';
+const say=()=>{let on=false;for(const t of live){if(t.readyState==='live'){on=true}else live.delete(t)}
+ for(const p of pcs){const s=p.connectionState||p.iceConnectionState;if(s==='closed'||s==='failed'){pcs.delete(p)}else if(up(s)&&p.remoteDescription){on=true}}
+ if(on!==last){last=on;try{W.postMessage({lumen:'call',on})}catch(_){}}
+ if((live.size||pcs.size)&&!tick)tick=setInterval(say,15000);if(!live.size&&!pcs.size&&tick){clearInterval(tick);tick=0}};
+const keep=st=>{try{for(const t of st.getTracks()){live.add(t);t.addEventListener('ended',say)}}catch(_){}say();return st};
+const md=navigator.mediaDevices;
+if(md)for(const k of['getUserMedia','getDisplayMedia']){const f=md[k];if(f)md[k]=function(...a){return f.apply(this,a).then(keep)}}
+const T=window.MediaStreamTrack&&MediaStreamTrack.prototype;if(T&&T.stop){const f=T.stop;T.stop=function(){f.apply(this);say()}}
+const P=window.RTCPeerConnection&&RTCPeerConnection.prototype;
+if(P&&P.setRemoteDescription){const f=P.setRemoteDescription;P.setRemoteDescription=function(...a){if(!pcs.has(this)){pcs.add(this);this.addEventListener('connectionstatechange',say);this.addEventListener('iceconnectionstatechange',say)}const r=f.apply(this,a);Promise.resolve(r).then(say,say);return r}}
+if(P&&P.close){const f=P.close;P.close=function(){f.apply(this);say()}}
+})()}catch(e){}"#;
+
 // ------------------------------------------------------------- crashed pages
 
 /// A page that dies leaves a white rectangle that looks like a slow page.
@@ -1675,6 +1700,29 @@ fn hook_rtc(wv: &WebView, who: crate::privacy_stats::Who) {
                     let mut src = PWSTR::null();
                     let site = args.Source(&mut src).map(|_| crate::privacy_stats::host(&take(src))).unwrap_or_default();
                     crate::privacy_stats::rtc(&site, who);
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+/// The page's call script says when it is in a call, and when it is not any more.
+fn hook_call(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
+    let core = wv.webview();
+    let mut token = 0i64;
+    unsafe {
+        let _ = core.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut j = PWSTR::null();
+                if args.WebMessageAsJson(&mut j).is_err() {
+                    return Ok(());
+                }
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(&take(j)) else { return Ok(()) };
+                if msg["lumen"] == "call" {
+                    let _ = proxy.send_event(Ev::Call(id, msg["on"].as_bool().unwrap_or(false)));
                 }
                 Ok(())
             })),

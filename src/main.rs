@@ -218,6 +218,9 @@ struct Tab {
     pin_url: String,
     audio: bool,
     muted: bool,
+    /// In a call: a live microphone, camera or screen capture, or a connected peer. Never
+    /// frozen, unloaded or trimmed, sound or no sound.
+    call: bool,
     suspended: bool,
     trimmed: bool,
     /// Opened by an AI agent. Marked in the sidebar, never saved in the session.
@@ -283,6 +286,7 @@ struct Tab {
 #[derive(Clone, Copy)]
 struct SleepState {
     audio: bool,
+    call: bool,
     trimmed: bool,
     suspended: bool,
     pinned: bool,
@@ -301,8 +305,12 @@ enum SleepStep {
 
 /// The step a hidden tab is owed `idle` after it was hidden, if any. A tab that
 /// is playing audio is trimmed and nothing more: frozen or dropped, the music
-/// would stop. Its clock restarts when the audio does (see `Ev::Audio`).
+/// would stop. Its clock restarts when the audio does (see `Ev::Audio`). A tab in
+/// a call is left alone entirely: a call is quiet whenever nobody talks.
 fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Duration) -> Option<SleepStep> {
+    if t.call {
+        return None;
+    }
     if t.audio {
         return (idle >= TRIM_AFTER && !t.trimmed).then_some(SleepStep::Trim);
     }
@@ -319,7 +327,9 @@ fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Dura
 
 /// How long after hiding the tab's next step comes, for the loop's next wake.
 fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> Option<Duration> {
-    if !t.trimmed {
+    if t.call {
+        None
+    } else if !t.trimmed {
         Some(TRIM_AFTER)
     } else if t.audio {
         None
@@ -358,6 +368,7 @@ impl Tab {
             pinned: false,
             pin_url: String::new(),
             audio: false,
+            call: false,
             muted: false,
             suspended: false,
             trimmed: false,
@@ -399,7 +410,7 @@ impl Tab {
 
     /// What the sleep policy looks at.
     fn sleep_state(&self) -> SleepState {
-        SleepState { audio: self.audio, trimmed: self.trimmed, suspended: self.suspended, pinned: self.pinned }
+        SleepState { audio: self.audio, call: self.call, trimmed: self.trimmed, suspended: self.suspended, pinned: self.pinned }
     }
 
     /// The tab has a live page, of whichever engine. A Servo tab has no WebView2.
@@ -1121,9 +1132,10 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 WindowEvent::Moved(_) => app.sync_watch(),
                 WindowEvent::Resized(size) => {
                     if size.width == 0 || size.height == 0 {
-                        // Minimized. Nobody is looking. Trim the active page too.
+                        // Minimized. Nobody is looking. Trim the active page too, unless
+                        // it is a call: somebody is still listening.
                         app.minimized = true;
-                        if let Some(v) = app.active_tab().and_then(|t| t.view.as_ref()) {
+                        if let Some(v) = app.active_tab().filter(|t| !t.call).and_then(|t| t.view.as_ref()) {
                             let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
                         }
                     } else {
@@ -1790,8 +1802,9 @@ impl App {
             if let Some(v) = &t.view {
                 let _ = v.set_visible(want);
                 // Off screen: a low memory target at once, not 30 s later at the trim.
-                // On screen again: normal before the return's first paint.
-                let level = if want { MemoryUsageLevel::Normal } else { MemoryUsageLevel::Low };
+                // On screen again: normal before the return's first paint. A call keeps
+                // its full target: it is still being listened to.
+                let level = if want || t.call { MemoryUsageLevel::Normal } else { MemoryUsageLevel::Low };
                 let _ = v.set_memory_usage_level(level);
                 t.visible = want;
             } else {
@@ -1994,6 +2007,7 @@ impl App {
                         pin_away: pins::offers_back(t.pinned, &t.pin_url, &t.url),
                         audio: t.audio,
                         muted: t.muted,
+                        call: t.call,
                         status: t.status(),
                         agent: t.agent,
                         agent_ok: self.agent_granted(t),
@@ -2652,6 +2666,7 @@ impl App {
         t.trimmed = false;
         t.loading = false;
         t.audio = false;
+        t.call = false;
         t.visible = false;
     }
 
@@ -3884,6 +3899,27 @@ impl App {
             Ev::NavRedirected(id) => {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].typed = None;
+                }
+            }
+            Ev::Call(id, on) => {
+                if let Some(i) = self.idx(id) {
+                    self.tabs[i].call = on;
+                    if on {
+                        // A call in a tab that was frozen or trimmed: back to full life.
+                        let t = &mut self.tabs[i];
+                        if let Some(v) = &t.view {
+                            if t.suspended {
+                                engine::resume(v);
+                            }
+                            let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
+                        }
+                        t.suspended = false;
+                        t.trimmed = false;
+                    } else if self.tabs[i].hidden_at.is_some() {
+                        // The call ended: the sleep timer starts now.
+                        self.tabs[i].hidden_at = Some(Instant::now());
+                    }
+                    self.push();
                 }
             }
             Ev::Audio(id, on) => {
@@ -7256,7 +7292,7 @@ impl App {
             .tabs
             .iter()
             .enumerate()
-            .filter(|(_, t)| !self.on_stage(t.id) && t.has_page() && !t.pinned && !t.audio)
+            .filter(|(_, t)| !self.on_stage(t.id) && t.has_page() && !t.pinned && !t.audio && !t.call)
             .min_by_key(|(_, t)| t.hidden_at.unwrap_or(now))
             .map(|(i, _)| i);
         if let Some(i) = victim {
@@ -7447,7 +7483,23 @@ mod tests {
     }
 
     fn st(audio: bool, trimmed: bool, suspended: bool, pinned: bool) -> SleepState {
-        SleepState { audio, trimmed, suspended, pinned }
+        SleepState { audio, call: false, trimmed, suspended, pinned }
+    }
+
+    /// A tab in a call is never trimmed, frozen or dropped, however long it is hidden and
+    /// whether or not anyone is talking. Discord froze five minutes into a quiet call.
+    #[test]
+    fn sleep_policy_leaves_a_call_alone() {
+        use std::time::Duration;
+        let (sleep, discard) = (Duration::from_secs(300), Duration::from_secs(1800));
+        let call = |audio, trimmed| SleepState { call: true, ..st(audio, trimmed, false, false) };
+        for idle in [TRIM_AFTER, sleep, discard, Duration::from_secs(5 * 3600)] {
+            assert_eq!(due_sleep_step(&call(false, false), idle, sleep, discard), None, "silent call at {idle:?}");
+            assert_eq!(due_sleep_step(&call(true, false), idle, sleep, discard), None, "talking call at {idle:?}");
+        }
+        assert_eq!(next_sleep_step_after(&call(false, false), sleep, discard), None);
+        // The call over, it is a silent tab again.
+        assert_eq!(due_sleep_step(&st(false, true, false, false), sleep, sleep, discard), Some(SleepStep::Suspend));
     }
 
     /// A tab playing audio is trimmed, never frozen and never dropped, however
