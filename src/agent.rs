@@ -3077,7 +3077,7 @@ fn element_shot(sh: &Arc<Shared>, who: &Who, tab: u64, r: &str) -> Result<String
 const SNAPSHOT_JS: &str = r#"(()=>{const O=__OPT__;
 window.__lumenRefN=Math.max(window.__lumenRefN||0,O.base||0);
 if(!window.__lumenRefs)window.__lumenRefs=new Map();
-const refs=window.__lumenRefs;for(const [k,v] of refs)if(!v.isConnected)refs.delete(k);
+const refs=window.__lumenRefs;for(const [k,v] of refs)if(!v.isConnected)refs.delete(k);const seen=new Set();
 let more=0,frames=0,outside=0;const vis=e=>{const b=e.getBoundingClientRect();if(b.width<1&&b.height<1)return false;const s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none'&&s.opacity!=='0'};
 const tx=s=>(s||'').replace(/\s+/g,' ').trim();
 const name=e=>{const a=e.getAttribute('aria-label');if(a)return tx(a);
@@ -3104,7 +3104,7 @@ const walk=(p,d)=>{for(const e of p.children){
   if(r&&(ACT.has(r)||(!O.interactive&&(r==='heading'||(r==='img'&&d<3))))&&vis(e)){
   const act=ACT.has(r);let s='  '.repeat(Math.min(d,8))+'- '+r;const nm=name(e).slice(0,100).replace(/"/g,"'");if(nm)s+=' "'+nm+'"';
   if(r==='heading')s+=' [h'+e.tagName[1]+']';
-  if(act){let id=e.getAttribute('data-lumen-ref');if(!id||!/^e\d+$/.test(id)){window.__lumenRefN++;id='e'+window.__lumenRefN;e.setAttribute('data-lumen-ref',id)}else{const k=+id.slice(1);if(k>window.__lumenRefN)window.__lumenRefN=k}refs.set(id,e);if(!window.__lumenRefInfo)window.__lumenRefInfo={};window.__lumenRefInfo[id]={role:r,name:nm};s+=' [ref='+id+']';if(nm)controls.push([id,nm])}
+  if(act){let id=e.getAttribute('data-lumen-ref');const held=id&&refs.get(id);if(!id||!/^e\d+$/.test(id)||seen.has(id)||(held&&held!==e&&held.isConnected)){window.__lumenRefN++;id='e'+window.__lumenRefN;e.setAttribute('data-lumen-ref',id)}else{const k=+id.slice(1);if(k>window.__lumenRefN)window.__lumenRefN=k}seen.add(id);refs.set(id,e);if(!window.__lumenRefInfo)window.__lumenRefInfo={};window.__lumenRefInfo[id]={role:r,name:nm};s+=' [ref='+id+']';if(nm)controls.push([id,nm])}
   if(['checkbox','radio','switch','menuitemcheckbox'].includes(r)&&(e.checked||e.getAttribute('aria-checked')==='true'))s+=' checked';
   if(e.getAttribute('aria-expanded'))s+=' expanded='+e.getAttribute('aria-expanded');
   if(e.getAttribute('aria-selected')==='true')s+=' selected';
