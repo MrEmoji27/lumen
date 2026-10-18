@@ -402,7 +402,9 @@ pub fn fake(s: &mut UiState) {
             v("https://example.org/", "", "Yesterday", "09:00"),
         ]);
     }
-    if fake_has("report") {
+    // Only while the page has nothing: after a real reset the numbers must be the
+    // real, empty ones.
+    if fake_has("report") && s.report.is_none() {
         use crate::privacy_stats::{Bar, Counts, SiteRow, Snapshot};
         let day = |n: u64, blocked: u64, bytes: u64| Bar { day: format!("2026-10-{n:02}"), blocked, bytes };
         let c = Counts {

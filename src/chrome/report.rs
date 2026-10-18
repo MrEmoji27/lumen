@@ -368,15 +368,8 @@ pub fn click(i: &mut Inner, c: Click) {
         Click::Site(h) => send(p, json!({"t": "report", "site": h})),
         Click::AllSites => send(p, json!({"t": "report", "site": ""})),
         Click::Reset => {
-            // The question runs its own message loop: give it a thread, as Lumen does elsewhere.
-            let proxy = p.clone();
-            let near = i.hwnd.0 as isize;
-            std::thread::spawn(move || {
-                let pick = crate::chrome::dialog::choose("Reset statistics", "Forget every count in the privacy report?", &["Reset", "Cancel"], near);
-                if pick == Some(0) {
-                    send(&proxy, json!({"t": "reportReset"}));
-                }
-            });
+            // The drawn question; its Reset sends the wipe on the way out.
+            super::confirm::open(i, super::confirm::ConfirmKind::ResetStats);
         }
     }
 }

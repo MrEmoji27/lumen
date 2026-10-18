@@ -2853,21 +2853,9 @@ impl App {
                     self.ext_gate.finish(&origin, &scheme, extlink::Answer::Cancel, Instant::now());
                     return;
                 }
-                let (title, text) = extlink::prompt_words(&origin, &scheme);
-                let (near, proxy) = (self.ctx.window.hwnd() as isize, self.ctx.proxy.clone());
-                // The box has a message loop of its own, so it lives on its own thread.
-                std::thread::Builder::new()
-                    .name("lumen-ext-ask".into())
-                    .spawn(move || {
-                        let buttons: &[&str] = if remember { &["Open", "Always for this site", "Cancel"] } else { &["Open", "Cancel"] };
-                        let answer = match chrome::dialog::choose(&title, &text, buttons, near) {
-                            Some(0) => extlink::Answer::Once,
-                            Some(1) if remember => extlink::Answer::Always,
-                            _ => extlink::Answer::Cancel,
-                        };
-                        let _ = proxy.send_event(Ev::ExternalAnswer { origin, uri, answer });
-                    })
-                    .ok();
+                // The drawn question, on the chrome. Its answer comes back as an
+                // ExternalAnswer event, the same door the box used to come through.
+                self.chrome.ask_external(&origin, &scheme, remember, &uri);
             }
         }
     }

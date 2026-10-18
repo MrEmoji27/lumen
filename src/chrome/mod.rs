@@ -5,7 +5,6 @@
 //! them unchanged. The address bar and new-tab search are real Win32 edit boxes;
 //! everything else is drawn.
 
-pub mod dialog;
 mod gfx;
 pub mod layout;
 mod motion;
@@ -14,6 +13,7 @@ mod report;
 mod dashboard;
 mod color;
 mod form;
+mod confirm;
 #[cfg(debug_assertions)]
 mod shot;
 mod style;
@@ -392,6 +392,9 @@ pub enum Hit {
     FormCard,
     FormSave,
     FormCancel,
+    /// The question card: the card itself, and its buttons.
+    ConfirmCard,
+    ConfirmButton(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -688,6 +691,8 @@ pub(crate) struct Inner {
     form_edits: [HWND; 3],
     /// The form card, open while it waits for Save or Cancel.
     form: Option<form::FormCard>,
+    /// The question card, open while it waits for a button.
+    confirm: Option<confirm::ConfirmCard>,
 }
 
 /// A message being written to an agent: the card over the sidebar.
@@ -1175,6 +1180,7 @@ impl Chrome {
                 color: None,
                 form_edits,
                 form: None,
+                confirm: None,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -1352,6 +1358,18 @@ impl Chrome {
     pub fn open_message(&self, session: &str, name: &str) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         i.open_say(session.to_string(), name.to_string());
+    }
+
+    /// A site wants to open an app: the drawn question. The answer comes back to the
+    /// main loop as an ExternalAnswer event, which is what finishes the ask.
+    pub fn ask_external(&self, origin: &str, scheme: &str, remember: bool, uri: &str) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        confirm::open(&mut i, confirm::ConfirmKind::External {
+            origin: origin.to_string(),
+            uri: uri.to_string(),
+            remember,
+            scheme: scheme.to_string(),
+        });
     }
 
     /// Ctrl+Shift+A: the quick switcher over the sidebar. A second press closes it.
@@ -1631,6 +1649,16 @@ impl Inner {
                     "Edit bookmark",
                     &[("Title", "The Rust Programming Language"), ("Address", "https://doc.rust-lang.org/book/")],
                     form::FormAct::EditBookmark { id: 1, folder: String::new() },
+                ),
+                Ok("confirm") => confirm::open(self, confirm::ConfirmKind::ResetStats),
+                Ok("confirm3") => confirm::open(
+                    self,
+                    confirm::ConfirmKind::External {
+                        origin: "https://open.spotify.com".into(),
+                        uri: "spotify:track:1".into(),
+                        remember: true,
+                        scheme: "spotify".into(),
+                    },
                 ),
                 _ => {}
             }
@@ -2222,14 +2250,18 @@ impl Inner {
         // The cards over everything else. Their order is their z-order.
         color::draw(self, s);
         form::draw(self, s);
+        confirm::draw(self, s);
         self.motion.end();
     }
 
-    /// One card at a time: opening one puts the others away. A form is dropped
-    /// (its action never runs); a colour keeps what it shows.
+    /// One card at a time: opening one puts the others away. A form and a question
+    /// are dropped (their actions never run); a colour keeps what it shows.
     fn close_cards(&mut self) {
         if self.form.is_some() {
             form::cancel(self);
+        }
+        if self.confirm.is_some() {
+            confirm::cancel(self);
         }
         if self.color.is_some() {
             color::done(self);
@@ -4229,8 +4261,10 @@ impl Inner {
         {
             color::done(self);
         }
-        // A click outside the form cancels it, as Escape does.
+        // A click outside the form cancels it, as Escape does. So does one outside
+        // a question.
         form::clicked_outside(self, &h);
+        confirm::clicked_outside(self, &h);
         let p = &self.proxy;
         match h.unwrap() {
             Hit::Back => send(p, json!({"t": "back"})),
@@ -4310,6 +4344,8 @@ impl Inner {
             Hit::FormCard => {}
             Hit::FormSave => form::save(self),
             Hit::FormCancel => form::cancel(self),
+            Hit::ConfirmCard => {}
+            Hit::ConfirmButton(n) => confirm::pick(self, n),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => {
@@ -4710,6 +4746,10 @@ impl Inner {
         }
         // The form: Escape cancels, Enter saves.
         if form::key(self, vk) {
+            return true;
+        }
+        // The question: Escape cancels, Enter is its first button.
+        if confirm::key(self, vk) {
             return true;
         }
         // The tab search and the lock's card sit over the sidebar: Escape puts them away.
