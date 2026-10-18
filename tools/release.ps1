@@ -40,9 +40,13 @@ foreach ($name in @("lumen.exe","lumen-agent.exe")) {
     }
 }
 
-# 6. release build
+# 6. release build. embed_resource sometimes cannot find RC.EXE; a second try passes.
 cargo build --release -j 2
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "release build failed; trying once more"
+    cargo build --release -j 2
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 
 # 7. print version with LUMEN_DATA temp
 $tmp = Join-Path $env:TEMP ("lumen-release-" + [guid]::NewGuid().ToString())

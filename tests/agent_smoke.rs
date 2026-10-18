@@ -79,7 +79,8 @@ fn serve(mut s: std::net::TcpStream) {
 <input type="checkbox" name="bacon"> bacon
 <select name="pick"><option>Apple</option><option>Banana</option></select>
 <button type="submit">submit</button>
-</form>"#.to_string(),
+</form>
+<button type="button" aria-label="more" onclick="document.body.append('more')">more</button>"#.to_string(),
         "/done" => "<title>Done</title><h1>Done</h1>".to_string(),
         "/big" => {
             let mut b = String::from("<title>Big</title>");
@@ -133,6 +134,8 @@ fn smoke() {
 
     let mut cmd = Command::new(LUMEN);
     cmd.arg("--headless").env("LUMEN_HEADLESS","1").env("LUMEN_DATA",&dir).env("LUMEN_DOWNLOADS",&downloads);
+    // The idle clock puts a quiet agent's view to sleep after 2 s here, not 30.
+    cmd.env("LUMEN_STAGE_IDLE_MS", "2000");
     let lumen = KillLumen(cmd.spawn().unwrap());
     // wait token
     let mut token = String::new();
@@ -261,6 +264,28 @@ fn smoke() {
     assert_eq!(code, 0);
     assert!(vis.contains("visible"), "back on the stage but hidden: {vis}");
     eprintln!("TIME watch_mid_task: {:.1}s", t0.elapsed().as_secs_f64());
+
+    // A click that only changes the page says how much changed.
+    let more_ref = ref_of(&snap, "button", "more");
+    let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", more_ref)]);
+    eprintln!("CLICK MORE: {}", out);
+    assert_eq!(code, 0);
+    assert!(out.contains(" on the page") && !out.contains("nothing on the page"), "a click that changed the page said: {out}");
+
+    // stage_idle_wakes: quiet past the idle clock (2 s, ticks every 3 s), the view sleeps;
+    // the next click wakes it and lands.
+    let t0 = Instant::now();
+    thread::sleep(Duration::from_secs(7));
+    let (code, state) = run_agent(&dir, "smoke", "browser_test_state", &[]);
+    assert_eq!(code, 0);
+    let state: Value = serde_json::from_str(&state).expect("test state json");
+    let me = state.as_array().unwrap().iter().find(|t| t["id"] == tab).expect("the agent tab");
+    assert_eq!(me["asleep"], true, "a quiet agent's stage view kept painting: {me}");
+    let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", radio_ref)]);
+    eprintln!("CLICK AFTER IDLE: {}", out);
+    assert_eq!(code, 0);
+    assert!(out.contains("it is now checked"), "a click after the view slept did not land: {out}");
+    eprintln!("TIME stage_idle_wakes: {:.1}s", t0.elapsed().as_secs_f64());
 
     // click submit
     let t0 = Instant::now();

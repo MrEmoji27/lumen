@@ -5593,6 +5593,11 @@ impl App {
         if !self.pending_own.is_empty() {
             return true;
         }
+        // A stage view still painting: the tick is what puts it to sleep once its
+        // agent goes quiet. After that nothing here wants a tick.
+        if self.tabs.iter().any(|t| t.agent && t.view.is_some() && !t.stage_idle && !self.on_stage(t.id)) {
+            return true;
+        }
         // A Drive run is going: its output and its session want a look.
         if self.drive.is_some() && now >= self.next_drive {
             return true;
@@ -5947,7 +5952,7 @@ impl App {
                 let all: Vec<Value> = self
                     .tabs
                     .iter()
-                    .map(|t| json!({"id": t.id, "agent": t.agent, "owner": t.owner_name, "granted": self.agent_granted(t), "crashed": t.crashed, "url": t.url}))
+                    .map(|t| json!({"id": t.id, "agent": t.agent, "owner": t.owner_name, "granted": self.agent_granted(t), "crashed": t.crashed, "url": t.url, "asleep": t.stage_idle}))
                     .collect();
                 let _ = reply.send(if cfg!(debug_assertions) { Ok(Value::Array(all)) } else { Err("no such thing".into()) });
             }

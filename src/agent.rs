@@ -77,7 +77,7 @@ pub fn click_outcome(before: &PageMark, after: &PageMark) -> String {
     }
     let changes = after.mutations.saturating_sub(before.mutations);
     if changes > 0 {
-        return format!("{} changes on the page", changes);
+        return if changes == 1 { "1 change on the page".to_string() } else { format!("{changes} changes on the page") };
     }
     "nothing on the page changed; try another way or take a new browser_snapshot".to_string()
 }

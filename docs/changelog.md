@@ -11,14 +11,15 @@ digit. A batch of new features bumps the middle one.
 
 - Agents: the stage. Every agent tab's view lives in a second, off-screen tool window where
   Chromium keeps it visible, so clicks and keys land and no agent action can bring anything to
-  the front. An agent tab idle for 30 s stops painting and wakes on the next call.
+  the front: `browser_open` always opens in the background, and `browser_show` no longer
+  activates anything. An agent tab idle for 30 s stops painting and wakes on the next call.
 - Agents: the person can watch any agent tab. Click it in the sidebar: the same view moves into
   the window live (no reload) while the agent keeps working; leave it and the view goes back to
   the stage.
 - Agents: `open` and `navigate` say a failed page's status on the first line (`HTTP 429 Too Many
   Requests`), and return only the controls in view, not the whole page.
 - Agents: a click says what it changed — the page went somewhere, a new tab opened, the target is
-  now checked — or that nothing on the page changed.
+  now checked, or how many changes the page made — or that nothing on the page changed.
 - Agents: page text is fenced and marked as the page's own writing; a page cannot pose as the
   person. The bridge and Lumen compare build stamps, and a stale bridge is told to reconnect.
 - Agents: a smoke suite drives a real headless Lumen against local pages (open, type, click,
