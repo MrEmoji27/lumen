@@ -18,6 +18,45 @@ use windows::Win32::{
 };
 use windows::core::HSTRING;
 
+/// Where Send posts a report: a Formspree form that mails it to zemo. Only on a press of
+/// Send, only the text the page shows.
+pub const SEND_TO: &str = "https://formspree.io/f/mojgjdjd";
+
+/// The line a report holds until the person says what happened.
+pub const STORY_PLACEHOLDER: &str = "(say what you did, what you expected, and what Lumen did instead)";
+
+/// The report with the person's own words in place of the placeholder. Empty words leave
+/// the placeholder, so the reader sees nothing was said.
+pub fn with_story(report: &str, story: &str) -> String {
+    let story = story.trim();
+    if story.is_empty() { report.to_string() } else { report.replacen(STORY_PLACEHOLDER, story, 1) }
+}
+
+/// Post a report to `SEND_TO`. Blocking: call it off the window's thread. `kind` is
+/// "problem" or "crash". Err says why, in a few words.
+pub fn send(report: &str, kind: &str, version: &str) -> Result<(), String> {
+    let config = ureq::config::Config::builder().timeout_global(Some(std::time::Duration::from_secs(20))).http_status_as_error(false).build();
+    let agent = ureq::Agent::new_with_config(config);
+    let body = serde_json::json!({
+        "_subject": format!("Lumen {version} {kind} report"),
+        "kind": kind,
+        "version": version,
+        "message": report,
+    });
+    let res = agent
+        .post(SEND_TO)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
+        .map_err(|e| format!("could not reach the report box ({})", short(&e.to_string())))?;
+    let code = res.status().as_u16();
+    if (200..300).contains(&code) { Ok(()) } else { Err(format!("the report box said HTTP {code}")) }
+}
+
+fn short(s: &str) -> String {
+    s.chars().take(80).collect()
+}
+
 /// What the report knows about this run, as plain strings the window fills in.
 #[derive(Debug, Clone)]
 pub struct Facts {
@@ -150,7 +189,8 @@ pub fn build(f: &Facts, journal: &str, crash: &str) -> String {
         out.push_str(&format!(" · WebView2 {}", f.webview.trim()));
     }
     out.push_str("\n\nWhat happened:\n");
-    out.push_str("(say what you did, what you expected, and what Lumen did instead)\n\n");
+    out.push_str(STORY_PLACEHOLDER);
+    out.push_str("\n\n");
     out.push_str(&format!(
         "Setup: look {} · layout {} · theme {} · blocker {} · agent door {}\n",
         f.look,
@@ -381,6 +421,13 @@ mod tests {
         // The last lines only, and a file that is not there says nothing.
         assert_eq!(crash_tail(&path, 1), "last line at …");
         assert_eq!(crash_tail(&dir.0.join("gone.log"), 3), "");
+    }
+
+    #[test]
+    fn the_story_takes_the_placeholders_place() {
+        let r = format!("What happened:\n{STORY_PLACEHOLDER}\n\nSetup: x");
+        assert_eq!(with_story(&r, "  the tab went blank  "), "What happened:\nthe tab went blank\n\nSetup: x");
+        assert_eq!(with_story(&r, "   "), r, "nothing said leaves the placeholder");
     }
 
     #[test]

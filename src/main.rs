@@ -484,6 +484,12 @@ struct App {
     mem: Option<(u64, u32)>,
     /// The problem report, made when its page opens.
     bug_report: Option<String>,
+    /// "problem", or "crash" when the page was opened from the start page's crash note.
+    bug_kind: &'static str,
+    /// This report has gone: Send does not send it twice.
+    bug_sent: bool,
+    /// The run before this one never said goodbye: the start page offers a report, once.
+    unclean_last: bool,
     born: Instant,
     /// When the tick next wants to run. TICK apart, so a step that is not
     /// ready cannot wake the loop again on the same deadline.
@@ -744,7 +750,7 @@ fn main() {
     engine::purge_at_start();
     // The journal opens before anything else runs, so a run that never gets a
     // window up still says hello. Also the one place old journals are cleaned.
-    journal::start(&settings, restored_tabs(&session));
+    let unclean = journal::start(&settings, restored_tabs(&session));
 
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
     // Lumen never reads a raw device event. By default tao registers for raw mouse
@@ -881,6 +887,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         dirty: false,
         mem: None,
         bug_report: None,
+        bug_kind: "problem",
+        bug_sent: false,
+        unclean_last: false,
         born: Instant::now(),
         next_tick: Instant::now() + TICK,
         next_mem: Instant::now() + MEM_TICK,
@@ -949,6 +958,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         vault: None,
         vault_seen: Instant::now(),
     };
+    app.unclean_last = unclean;
     {
         // One small thread asks aria2 about its jobs. It sleeps on a condvar
         // until a download gives it something to ask about.
@@ -2083,6 +2093,8 @@ impl App {
                     .collect(),
                 drive: self.drive_view(),
                 bug_report: (self.panel == Panel::Bug).then(|| self.bug_report.clone()).flatten(),
+                bug_sent: self.bug_sent,
+                unclean_last: self.unclean_last && !headless(),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
                 zoom: self.active_tab().map_or(100, |t| t.zoom),
                 zooms: self.zooms.iter().map(|(h, p)| (h.clone(), *p)).collect(),
@@ -3365,8 +3377,12 @@ impl App {
     fn set_panel(&mut self, p: Panel) {
         let was = self.panel;
         self.panel = p;
-        // The report is made when its page opens, so it says how things are now.
+        // The report is made when its page opens, so it says how things are now. Opened
+        // after a crash, it says so in its subject; either way the crash note has done its job.
         if p == Panel::Bug && was != Panel::Bug {
+            self.bug_kind = if self.unclean_last { "crash" } else { "problem" };
+            self.unclean_last = false;
+            self.bug_sent = false;
             self.bug_report = Some(self.make_bug_report());
         }
         // The page is open now: the dot on the footer button has done its job.
@@ -4730,6 +4746,38 @@ impl App {
                     let after = self.idx(self.active);
                     self.new_tab(Some(url), after);
                 }
+            }
+            "bugSend" => {
+                // Exactly what the page shows, with the person's words in it, posted off the
+                // window's thread; the answer comes back as a "bugSent" message.
+                if let Some(report) = self.bug_report.clone().filter(|_| !self.bug_sent) {
+                    let text = bugreport::with_story(&report, m["what"].as_str().unwrap_or(""));
+                    let (kind, proxy) = (self.bug_kind, self.ctx.proxy.clone());
+                    self.bug_sent = true;
+                    self.chrome.flash("Sending…".into());
+                    self.push();
+                    let _ = std::thread::Builder::new().name("lumen-report".into()).spawn(move || {
+                        let r = bugreport::send(&text, kind, env!("CARGO_PKG_VERSION"));
+                        let msg = json!({"t": "bugSent", "ok": r.is_ok(), "why": r.err().unwrap_or_default()});
+                        let _ = proxy.send_event(Ev::Ui(msg.to_string()));
+                    });
+                }
+            }
+            "bugSent" => {
+                if m["ok"].as_bool().unwrap_or(false) {
+                    self.chrome.flash("Sent to zemo. Thank you.".into());
+                } else {
+                    // Not sent: it may be sent again, or copied and sent another way.
+                    self.bug_sent = false;
+                    let why = m["why"].as_str().unwrap_or("it did not go");
+                    self.chrome.flash(format!("Not sent: {why}. Copy it instead, or try again."));
+                }
+                journal::feature("report_send", false);
+                self.push();
+            }
+            "crashSeen" => {
+                self.unclean_last = false;
+                self.push();
             }
             "bugSave" => {
                 // The report as a file in Downloads, named by the minute it was made.

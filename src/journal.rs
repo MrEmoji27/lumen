@@ -630,11 +630,13 @@ pub struct Sample {
 }
 
 /// Start the journal: old files go, the last run's end is looked at, today's
-/// file is opened and the `start` line is written.
-pub fn start(settings: &Settings, restored: usize) {
+/// file is opened and the `start` line is written. True when the run before this one
+/// never said goodbye (a crash, a kill, a power cut).
+pub fn start(settings: &Settings, restored: usize) -> bool {
     if !settings.journal {
-        return;
+        return false;
     }
+    let mut unclean = false;
     let dir = crate::store::data_dir().join("journal");
     let _ = fs::create_dir_all(&dir);
     let today = local_date(now_secs());
@@ -652,6 +654,7 @@ pub fn start(settings: &Settings, restored: usize) {
             fields.push(("log", json!(log)));
         }
         journal.write("unclean_exit", &fields);
+        unclean = true;
     }
     journal.write(
         "start",
@@ -670,6 +673,7 @@ pub fn start(settings: &Settings, restored: usize) {
     journal.flush();
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(journal);
     ENABLED.store(true, Ordering::Relaxed);
+    unclean
 }
 
 /// The last line: a clean goodbye, with how long the window was up. A run that

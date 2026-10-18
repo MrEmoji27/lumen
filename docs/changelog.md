@@ -7,6 +7,18 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.4 — 2026-10-18
+
+Reports reach zemo.
+
+- Report a problem has a box for what happened and a **Send to zemo** button. Send posts
+  exactly the text on the page, with your words in it, to zemo's inbox (through Formspree).
+  Nothing goes without the press; a report goes once; when it cannot go, the page says why and
+  Copy still works.
+- After a run that never closed properly (a crash, a kill, a power cut), the start page says so
+  once and offers a report. Its x puts it away.
+- The report's journal times are local time.
+
 ## 0.6.3 — 2026-10-18
 
 For daily use.

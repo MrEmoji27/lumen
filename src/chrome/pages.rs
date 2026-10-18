@@ -99,9 +99,12 @@ pub enum PageHit {
     Panels(&'static str),
     /// A link that opens in a tab of its own.
     OpenTab(&'static str),
-    /// The problem report: onto the clipboard, or into Downloads as a file.
+    /// The problem report: to zemo, onto the clipboard, or into Downloads as a file.
+    BugSend,
     BugCopy,
     BugSave,
+    /// The start page's crash note, put away without a report.
+    CrashSeen,
     /// The start page's "what is new" note, put away unread.
     SeenVersion,
 }
@@ -2618,32 +2621,59 @@ fn draw_changes(i: &mut Inner, st: R) {
     close_button(i, st);
 }
 
+/// Where the report page's "what happened" box sits, in stage coordinates. The edit control
+/// (mod.rs) is placed over it; the page's head does not scroll, so neither does the box.
+pub fn bug_story_rect(st: R, s5: f32) -> R {
+    let col = column(st, COL_W);
+    R::new(col.x, st.y + s5 + 2.0 + 74.0 + 40.0 + 22.0, col.w, 44.0)
+}
+
 /// Report a problem: the whole report on the page, so the person reads what it says before
-/// it goes anywhere, and the three ways to send it on.
+/// it goes anywhere; a box for what happened; Send, Copy, Save.
 fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let lo = i.look.clone();
     let col = column(st, COL_W);
-    i.gfx.clip(st);
-    let mut y = st.y + lo.s5 + 2.0 - i.page.scroll;
+    let story = super::wide_text(i.bug_edit);
     let flash = i.page.flash.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < 8.0).map(|(m, _)| m.clone());
-    let sub = flash.unwrap_or_else(|| "Read it all, then copy it or save it".to_string());
-    y = title_block(i, col, y, "Report a problem", &sub);
+    let sub = flash.unwrap_or_else(|| "Read it all, then send it".to_string());
+    let mut y = title_block(i, col, st.y + lo.s5 + 2.0, "Report a problem", &sub);
     i.gfx.text_wrap(
-        "Nothing leaves this PC until you send it yourself. The report holds no addresses, no page titles and nothing typed into pages. Fill in what happened at the top.",
-        R::new(col.x + 4.0, y - 6.0, col.w - 8.0, 40.0),
+        "Nothing leaves this PC until you press Send, and then only the text below, to zemo's inbox. It holds no addresses, no page titles and nothing typed into pages.",
+        R::new(col.x + 4.0, y - 4.0, col.w - 8.0, 36.0),
         lo.small,
         th.faint,
     );
     y += 40.0;
+    i.label("What happened", R::new(col.x + 4.0, y, col.w, 16.0), th.faint);
+    // The box itself is a real edit window over this card.
+    let field = bug_story_rect(st, lo.s5);
+    let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.bug_edit;
+    i.gfx.round(field, lo.r_card, th.raise);
+    i.gfx.round_stroke(field, lo.r_card, if focused { th.text.alpha(0.45) } else { th.line }, if focused { 1.5 } else { 1.0 });
+    if story.is_empty() && !focused {
+        i.gfx.text("What you did, what you expected, what Lumen did instead", R::new(field.x + 16.0, field.y, field.w - 32.0, field.h), lo.body, th.faint);
+    }
+    y = field.bottom() + lo.s3;
     let mut x = col.x;
-    x = outline_button(i, x, y, "Copy report", PageHit::BugCopy, true).right() + lo.s2;
-    x = outline_button(i, x, y, "Save to Downloads", PageHit::BugSave, false).right() + lo.s2;
-    outline_button(i, x, y, "Send to zemo", PageHit::OpenTab(PORTFOLIO), false);
+    let sent = s.bug_sent;
+    x = outline_button(i, x, y, if sent { "Sent" } else { "Send to zemo" }, PageHit::BugSend, true).right() + lo.s2;
+    if sent {
+        // Sent once is enough: the button goes quiet until the page opens again.
+        let r = R::new(col.x, y, x - lo.s2 - col.x, 30.0);
+        i.gfx.round(r, lo.round(30.0), th.raise.alpha(0.55));
+    }
+    x = outline_button(i, x, y, "Copy report", PageHit::BugCopy, false).right() + lo.s2;
+    outline_button(i, x, y, "Save to Downloads", PageHit::BugSave, false);
     y += 30.0 + lo.s4;
-    // The report itself, in the monospace face, as it will read when pasted.
+
+    // The report as it will be sent, with the words from the box in it, in the monospace face.
+    let below = R::new(st.x, y - 4.0, st.w, (st.bottom() - y + 4.0).max(0.0));
+    i.gfx.clip(below);
+    let top = y;
+    let mut y = top - i.page.scroll;
     let mono = lo.mono_at(12.0, 450);
-    let text = s.bug_report.clone().unwrap_or_else(|| "Gathering…".to_string());
+    let text = s.bug_report.as_deref().map(|r| crate::bugreport::with_story(r, &story)).unwrap_or_else(|| "Gathering…".to_string());
     let w = col.w - 36.0;
     if i.page.bug_lines.as_ref().is_none_or(|(bw, n, _)| (*bw - w).abs() > 0.5 || *n != text.len()) {
         let lines: Vec<String> = text.lines().flat_map(|l| if l.trim().is_empty() { vec![String::new()] } else { wrap_lines(i, l, mono, w) }).collect();
@@ -2656,7 +2686,7 @@ fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.round_stroke(card, lo.r_card, th.line, 1.0);
     for (n, l) in lines.iter().enumerate() {
         let ly = card.y + 14.0 + n as f32 * LINE;
-        if ly + LINE < st.y || ly > st.bottom() {
+        if ly + LINE < below.y || ly > st.bottom() {
             continue;
         }
         i.gfx.text(l, R::new(card.x + 18.0, ly, w, LINE), mono, if n == 0 { th.text } else { th.dim });
@@ -3559,9 +3589,16 @@ pub fn click(i: &mut Inner, p: PageHit) {
         }
         PageHit::OpenTab(url) => send(&i.proxy, json!({"t": "openTab", "url": url})),
         PageHit::SeenVersion => set(i, "seen_version", json!(env!("CARGO_PKG_VERSION"))),
+        PageHit::BugSend => {
+            if !s.bug_sent {
+                send(&i.proxy, json!({"t": "bugSend", "what": super::wide_text(i.bug_edit)}));
+            }
+        }
+        PageHit::CrashSeen => send(&i.proxy, json!({"t": "crashSeen"})),
         PageHit::BugCopy => {
-            if let Some(text) = s.bug_report.as_deref() {
-                super::copy_text(i.hwnd, text);
+            if let Some(report) = s.bug_report.as_deref() {
+                let text = crate::bugreport::with_story(report, &super::wide_text(i.bug_edit));
+                super::copy_text(i.hwnd, &text);
                 i.page.flash = Some(("Copied. Paste it wherever you report it.".into(), std::time::Instant::now()));
                 i.invalidate();
             }

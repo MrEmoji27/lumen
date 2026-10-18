@@ -1,6 +1,6 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.3,
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.4,
 18 October 2026. Early, in daily use by one person, Windows only.
 
 ## What it is
@@ -210,7 +210,8 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 - Can be set as Windows' default for web links.
 - A usage journal on the PC (memory, CPU, slow sites, crashes) that sends nothing anywhere.
 - Settings > About: what's new (the changelog, built in, a card per version), a problem report
-  you read in full before it goes anywhere, and who made Lumen.
+  you read in full and send with one press, and who made Lumen. After a crash, the start page
+  offers that report once.
 
 ## For AI agents
 

@@ -179,6 +179,10 @@ pub struct UiState {
     pub drive: Option<DriveView>,
     /// The problem report, plain text, while its page is open.
     pub bug_report: Option<String>,
+    /// That report has been sent.
+    pub bug_sent: bool,
+    /// The run before this one never said goodbye: the start page offers a report.
+    pub unclean_last: bool,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
     pub upnp_port_open: bool,
     /// The active page's zoom, in percent.
@@ -661,6 +665,8 @@ pub(crate) struct Inner {
     say_edit: HWND,
     /// The Settings page's search box.
     set_edit: HWND,
+    /// The report page's "what happened" box.
+    bug_edit: HWND,
 }
 
 /// A message being written to an agent: the card over the sidebar.
@@ -739,6 +745,7 @@ const ID_DRIVE: usize = 104;
 const ID_SRCH: usize = 105;
 const ID_SAY: usize = 106;
 const ID_SET: usize = 107;
+const ID_BUG: usize = 108;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -1018,7 +1025,22 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit] {
+            let bug_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_BUG as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit] {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
@@ -1087,6 +1109,7 @@ impl Chrome {
                 say: None,
                 say_edit,
                 set_edit,
+                bug_edit,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -1355,7 +1378,8 @@ impl Inner {
             SendMessageW(self.bm_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.drive_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.set_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit] {
+            SendMessageW(self.bug_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
+            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit, self.bug_edit] {
                 SendMessageW(e, EM_SETMARGINS, Some(WPARAM((EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize)), Some(LPARAM(0)));
             }
         }
@@ -1441,6 +1465,7 @@ impl Inner {
             unsafe {
                 SetWindowTextW(self.bm_edit, &HSTRING::new()).ok();
                 SetWindowTextW(self.set_edit, &HSTRING::new()).ok();
+                SetWindowTextW(self.bug_edit, &HSTRING::new()).ok();
             }
             self.page.bm_collapsed.clear();
             // The Drive page opens with the cursor in its task box: typing is the point.
@@ -1773,6 +1798,8 @@ impl Inner {
         place(self.drive_edit, R::new(d.x + 8.0, d.y + (d.h - 22.0) / 2.0, d.w - 16.0, 22.0), show);
         let q = pages::set_search_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3));
         place(self.set_edit, R::new(q.x + 34.0, q.y + (q.h - 20.0) / 2.0, q.w - 46.0, 20.0), s.full && s.panel == "settings" && self.page.font_pick.is_none());
+        let b = pages::bug_story_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3), self.look.s5);
+        place(self.bug_edit, R::new(b.x + 16.0, b.y + (b.h - 22.0) / 2.0, b.w - 32.0, 22.0), s.full && s.panel == "bugreport");
         // The Drive page takes the cursor once, when it opens.
         if show && std::mem::take(&mut self.drive_focus) {
             unsafe {
@@ -3835,25 +3862,40 @@ impl Inner {
         let now = env!("CARGO_PKG_VERSION");
         // Never in a headless run, but for a debug shot of it (LUMEN_TEST_NOTE).
         let shot = cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_NOTE").is_some();
-        if s.settings.seen_version == now || (crate::headless() && !shot) {
+        if crate::headless() && !shot {
             return;
         }
+        // After a run that never said goodbye, that comes first: a report, if the person
+        // wants to send one. Then, after an update, what is new.
+        let crash = s.unclean_last || (shot && std::env::var("LUMEN_TEST_NOTE").is_ok_and(|v| v == "crash"));
+        if !crash && s.settings.seen_version == now {
+            return;
+        }
+        let (text, open, gone) = if crash {
+            ("Lumen did not close properly last time · send a report".to_string(), pages::PageHit::Panels("bugreport"), pages::PageHit::CrashSeen)
+        } else {
+            (format!("Lumen {now} is here · see what's new"), pages::PageHit::Panels("changes"), pages::PageHit::SeenVersion)
+        };
         let lo = self.look.clone();
         let th = lo.theme;
-        let text = format!("Lumen {now} is here · see what's new");
         let f = lo.font(12.5, 500);
         let w = self.gfx.measure(&text, f) + 80.0;
         let r = R::new(st.x + (st.w - w) / 2.0, st.y + 16.0, w, 34.0);
         let a = self.motion.enter(Id::Named("update-note"), Prop::Opacity, 0.0, 1.0, 220, Ease::OutCubic);
-        let open = Hit::Page(pages::PageHit::Panels("changes"));
+        let open = Hit::Page(open);
         let hov = self.is_hover(&open);
         self.gfx.round(r, lo.round(r.h), th.raise.mix(th.hover, if hov { 0.6 } else { 0.0 }).alpha(a));
         self.gfx.round_stroke(r, lo.round(r.h), th.line.alpha(a), 1.0);
-        self.gfx.icon("info", r.x + 14.0, r.y + 10.0, 14.0, th.dim.alpha(a));
+        // A crash is something that went wrong: the live colour's dot, not the quiet info mark.
+        if crash {
+            self.gfx.circle(r.x + 21.0, r.y + r.h / 2.0, 3.5, th.accent.alpha(a));
+        } else {
+            self.gfx.icon("info", r.x + 14.0, r.y + 10.0, 14.0, th.dim.alpha(a));
+        }
         self.gfx.text(&text, R::new(r.x + 36.0, r.y, r.w - 72.0, r.h), f, th.text.alpha(a));
         self.hit(r, open);
         let x = R::new(r.right() - 30.0, r.y + 5.0, 24.0, 24.0);
-        let gone = Hit::Page(pages::PageHit::SeenVersion);
+        let gone = Hit::Page(gone);
         if self.is_hover(&gone) {
             self.gfx.round(x, lo.round(x.h), th.press.alpha(a));
         }
@@ -4883,6 +4925,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     i.invalidate();
                 } else if id == ID_DRIVE && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
                     i.invalidate();
+                } else if id == ID_BUG && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    // The report below shows the words as they are typed.
+                    i.invalidate();
                 } else if id == ID_SET && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
                     // What matches starts at the top.
                     if code == EN_CHANGE {
@@ -5025,7 +5070,7 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         }
                         _ => {}
                     }
-                } else if (id == ID_BM || id == ID_SET) && vk == VK_ESCAPE.0 {
+                } else if (id == ID_BM || id == ID_SET || id == ID_BUG) && vk == VK_ESCAPE.0 {
                     // Escape clears the search first; with nothing typed it leaves the page.
                     if wide_text(hwnd).is_empty() {
                         send(&i.proxy, json!({"t": "panel", "open": false}));
