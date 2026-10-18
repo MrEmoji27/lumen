@@ -497,7 +497,7 @@ struct App {
     /// Last time any agent asked for anything. A Lumen started headless for agents
     /// leaves when they have been quiet a while.
     agent_last: Instant,
-    /// Off-screen stage window hosting agent tabs' views.
+    /// Off-screen stage window hosting agent tabs' views. Made with the first agent tab.
     stage: Option<stage::Stage>,
     /// Modifier keys as the main window last saw them.
     mods: ModifiersState,
@@ -808,7 +808,6 @@ fn main() {
     let chrome = chrome::Chrome::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
     // The split divider: a strip of its own between the two panes.
     let divider = split::Divider::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
-    let stage = stage::Stage::new(&event_loop);
 
 let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     // Read before the struct literal moves `settings` into the app.
@@ -870,7 +869,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         agent: agent::Agent::new(&store::data_dir()),
         agent_seen: None,
         agent_last: Instant::now(),
-        stage: Some(stage),
+        stage: None,
         mods: ModifiersState::empty(),
         rules: store::load_rules(),
         zooms: store::load_zooms(),
@@ -2125,7 +2124,8 @@ impl App {
                 // Onto the off-screen stage, where Chromium counts it as visible. A tab the
                 // person is watching (a sleeping one they clicked) stays in the window.
                 let watched = t.id == self.active || self.split == Some(t.id);
-                if !watched && let Some(stage) = self.stage.as_mut() {
+                if !watched {
+                    let stage = self.stage.get_or_insert_with(stage::Stage::new);
                     let (sx, sy, sw, sh) = stage.slot(t.id, (w, h));
                     let hwnd = stage.hwnd();
                     let _ = v.reparent(hwnd);
@@ -2235,13 +2235,13 @@ impl App {
                 // Send it back to the stage.
                 if let Some(v) = self.tabs[pidx].view.as_ref() {
                     let page = self.stage();
-                    if let Some(stage) = self.stage.as_mut() {
-                        let (sx, sy, sw, sh) = stage.slot(pid, (page.2, page.3));
-                        let hwnd = stage.hwnd();
-                        let _ = v.reparent(hwnd);
-                        let _ = v.set_bounds(logical_rect(sx, sy, sw, sh));
-                        let _ = v.set_visible(true);
-                    }
+                    // A tab that was born watched has never been on the stage, which may not exist yet.
+                    let stage = self.stage.get_or_insert_with(stage::Stage::new);
+                    let (sx, sy, sw, sh) = stage.slot(pid, (page.2, page.3));
+                    let hwnd = stage.hwnd();
+                    let _ = v.reparent(hwnd);
+                    let _ = v.set_bounds(logical_rect(sx, sy, sw, sh));
+                    let _ = v.set_visible(true);
                 }
             }
             let p = &mut self.tabs[pidx];

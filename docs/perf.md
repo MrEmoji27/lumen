@@ -319,3 +319,56 @@ request whose host, or a domain above it, is in the table is a tracker; the rest
 
 The old matcher files (`engine.dat`, `engine2.dat`, `engine3.dat`, about 31 MB) are deleted on start.
 
+## Agents, 18 October
+
+`tests/agent_bench.rs` runs fixed tasks on local pages through the agent door, three times each in
+one warm headless Lumen. No model: the number of calls stands in for the model's round trips, the
+reply bytes for what it reads.
+
+```
+cargo test --release -j 2 --test agent_bench -- --ignored --nocapture
+```
+
+Where the time went, before: not the browser. A snapshot of a page is 2 ms of WebView2 work. But
+every agent call redrew the whole sidebar, about 35 ms, and a tool makes several calls to the
+window (the policy look-up, the script, the DevTools events). And the waits were clocks: 550 ms at
+least for a page to load, 350 ms after every click in case it navigated, 400 ms of network quiet.
+
+Before and after, both debug builds (a release build is within a few percent: the waits are the page's, not Rust's):
+
+| Task | 0.3.0 | 0.4.0 | Calls | Reply bytes |
+|---|---|---|---|---|
+| read title and URL | 1147 ms | 749 ms | 2 | 204 |
+| extract 100 links | 1094 ms | 736 ms | 2 | 8805 |
+| fill and send a form | 5716 ms | 1684 ms | 9 | 1662 |
+| table built by JS | 1320 ms | 764 ms | 3 | 1316 |
+| ten-step workflow | 8772 ms | 2639 ms | 12 | 3963 |
+| two tabs, two reads | 2135 ms | 1381 ms | 4 | 676 |
+
+The same tasks with the new tools, 0.4.0 release:
+
+| Task | Time | Calls | Reply bytes |
+|---|---|---|---|
+| form, `browser_fill` | 1721 ms | 3 (from 9) | 1038 |
+| links, `browser_links` | 905 ms | 2 | 6956 |
+| table, `browser_table` | 1164 ms | 3 | 1637 |
+| workflow, a Luau script (it also reads a second result) | 3358 ms | 1 (from 12) | 580 |
+| two tabs, `browser_batch` | 1380 ms | 1 (from 4) | 1029 |
+
+Wall time barely moves with fewer calls: here the calls are local and the waits are the page's.
+What moves is the model's side: one round trip instead of twelve, 580 bytes to read instead of
+4 KB. With a model that thinks for a few seconds a turn, that is the whole game.
+
+| Per call, 0.4.0 release | |
+|---|---|
+| HTTP alone (ping) | 0.5 ms |
+| a round trip to the window | 0.7 ms (35 ms before) |
+| snapshot | 2 ms |
+| open, warm session | 756 ms: view 100 to 180 ms, load about 240 ms, 250 ms of network quiet |
+| open, first in a new session | about 2.6 s: WebView2 builds the agent's own profile |
+| click | 357 ms |
+| type | 137 ms |
+
+Memory: a warm idle Lumen is 19.2 MB, 19.1 MB at 0.3.0. Luau is in the exe (15.5 MB, from
+14.0 MB) and costs nothing until a script runs: each run gets a fresh VM, capped at 32 MB, gone
+when it ends.

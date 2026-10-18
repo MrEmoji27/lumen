@@ -131,6 +131,9 @@ fn smoke() {
     std::fs::create_dir_all(&downloads).unwrap();
     let settings = json!({"agent": true, "agent_port": 47680});
     std::fs::write(dir.join("settings.json"), settings.to_string()).unwrap();
+    // A script the person wrote that tries a tool agents may not use (upload is off).
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(dir.join("scripts").join("sneaky.luau"), "--- Tries an upload.\nlocal ok, why = lumen.try('browser_upload', {tab = input.tab, ref = 'e1', paths = {'C:/x'}})\nreturn {ok = ok, why = why}\n").unwrap();
 
     let mut cmd = Command::new(LUMEN);
     cmd.arg("--headless").env("LUMEN_HEADLESS","1").env("LUMEN_DATA",&dir).env("LUMEN_DOWNLOADS",&downloads);
@@ -293,6 +296,31 @@ fn smoke() {
     eprintln!("SUBMIT: {}", out);
     assert_eq!(code, 0);
     eprintln!("TIME submit: {:.1}s", t0.elapsed().as_secs_f64());
+
+    // batch_is_never_a_permission: each step is authorized alone. Step 2 (upload, off by
+    // default) is refused, step 1 stays done, step 3 never runs.
+    let t0 = Instant::now();
+    let steps = json!([
+        {"tool": "browser_open", "args": {"url": page("/done")}},
+        {"tool": "browser_upload", "args": {"tab": "$1", "ref": "e1", "paths": ["C:/x"]}},
+        {"tool": "browser_close", "args": {"tab": "$1"}}]);
+    let (code, out) = run_agent(&dir, "smoke", "browser_batch", &[&format!("steps={steps}")]);
+    eprintln!("BATCH DENIED: {code} {out}");
+    assert!(out.contains("1 ok browser_open") && out.contains("2 ERR browser_upload") && !out.contains("3 ok"), "{out}");
+    let opened: u64 = out.lines().find_map(|l| l.strip_prefix("Tab ").and_then(|r| r.split(' ').next()).and_then(|n| n.parse().ok())).expect("the batch shows the tab it stopped on");
+    let _ = run_agent(&dir, "smoke", "browser_close", &[&format!("tab={opened}")]);
+    // No runs inside runs, and no more than 20 steps.
+    let nested = json!([{"tool": "browser_batch", "args": {"steps": []}}]);
+    let (_, out) = run_agent(&dir, "smoke", "browser_batch", &[&format!("steps={nested}")]);
+    assert!(out.contains("cannot run inside a run"), "{out}");
+    let many: Vec<Value> = (0..21).map(|_| json!({"tool": "browser_tabs"})).collect();
+    let (_, out) = run_agent(&dir, "smoke", "browser_batch", &[&format!("steps={}", json!(many))]);
+    assert!(out.contains("1 to 20 steps"), "{out}");
+    // A script is no more than its agent: the upload it tries is refused the same way.
+    let (code, out) = run_agent(&dir, "smoke", "browser_script_run", &["name=sneaky", &format!("input={}", json!({"tab": tab}))]);
+    eprintln!("SCRIPT DENIED: {code} {out}");
+    assert!(out.contains("\"ok\": false") && out.contains("upload"), "{out}");
+    eprintln!("TIME batch_and_script_rules: {:.1}s", t0.elapsed().as_secs_f64());
 
     // close tabs
     let _ = run_agent(&dir, "smoke", "browser_close", &[&format!("tab={}", tab)]);

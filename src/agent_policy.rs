@@ -179,6 +179,8 @@ pub const RULES: &[Rule] = &[
     rule("browser_consent", Scope::Tab, Gate::Nothing),
     // Runs of other tools: each step is authorized on its own, so the run itself needs nothing.
     rule("browser_batch", Scope::Free, Gate::Nothing),
+    rule("browser_scripts", Scope::Free, Gate::Nothing),
+    rule("browser_script_run", Scope::Free, Gate::Nothing),
     rule("browser_fill", Scope::Tab, Gate::Nothing),
     // Read the page the way a snapshot does.
     rule("browser_table", Scope::Tab, Gate::Nothing),

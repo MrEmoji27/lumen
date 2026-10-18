@@ -57,6 +57,10 @@ pub struct Who {
     pub bridge: String,
 }
 
+/// Luau scripts the person writes and agents run. Inside this module: it calls `run`.
+#[path = "agent_script.rs"]
+mod script;
+
 #[derive(Clone, Debug)]
 pub struct PageMark {
     pub url: String,
@@ -789,7 +793,9 @@ browser_read adds the page text; browser_article gives just the article, cheapes
 browser_wait waits for text or an element. browser_console, browser_network and browser_network_body show what \
 the page logged, fetched, and what a response said. browser_state_save / browser_state_load keep a login between \
 sessions of your own profile. browser_record_start / browser_record_stop / browser_replay save a sequence of calls \
-and run it again. \
+and run it again. Fewer calls are faster for you: browser_batch runs up to 20 calls in one (\"tab\": \"$1\" is the tab \
+step 1 opened), browser_fill fills a whole form, browser_table and browser_links read tables and links as data, and \
+browser_scripts lists the person's Luau scripts, which browser_script_run runs as one call. \
 Before you pay, send a message, delete anything, or log in: stop and call browser_handoff with one line for the \
 person, and wait. Never do those alone. \
 Tabs you open are yours alone; other agents cannot touch them. Close them when done. \
@@ -879,7 +885,10 @@ pub fn tools() -> Value {
                  "stop_on_error": {"type": "boolean"}, "result": {"type": "string", "enum": ["last", "all"]}}), &["steps"]),
         t("browser_fill", "Fill a form in one call: each field by ref gets its value (text is typed, a select picks the option, a checkbox or radio is set to \"true\"/\"false\"). Every field is read back; the answer names any that did not take. submit=ref clicks that after.",
           json!({"tab": tab, "fields": {"type": "array", "items": {"type": "object", "properties": {"ref": {"type": "string"}, "value": {"type": "string"}}, "required": ["ref", "value"]}}, "submit": r#ref}), &["tab", "fields"]),
-        t("browser_table", "A table as JSON rows, the header row as keys. ref or a CSS selector picks the table; nothing picks the biggest one. At most 500 rows.",
+        t("browser_scripts", "The person's Luau scripts: name, what each does, what it takes. browser_script_run runs one: a whole task in one call.", json!({}), &[]),
+        t("browser_script_run", "Run one of the person's Luau scripts with its input. Every call it makes is checked and allowed as if you made it. Answers one line per call, then the script's result as JSON.",
+          json!({"name": {"type": "string"}, "input": {"type": "object", "description": "What the script's --@input lines ask for"}}), &["name"]),
+        t("browser_table", "A table as JSON: {columns, rows}, each row a list of cell texts. ref or a CSS selector picks the table; nothing picks the biggest one. At most 500 rows.",
           json!({"tab": tab, "ref": r#ref, "selector": {"type": "string"}, "max_rows": {"type": "integer"}}), &["tab"]),
         t("browser_links", "The page's links as [text](url), deduped. match keeps those whose text or URL has it; same_site keeps this site's.",
           json!({"tab": tab, "match": {"type": "string"}, "same_site": {"type": "boolean"}, "max": {"type": "integer", "description": "Default 100, at most 1000"}}), &["tab"]),
@@ -890,7 +899,8 @@ pub fn tools() -> Value {
     ])}
 
 fn help_text(topic: &str) -> String {
-    let all = "Tools: browser_open, browser_navigate, browser_back, browser_forward, browser_reload, browser_snapshot, browser_read, browser_article, browser_find, browser_click, browser_hover, browser_type, browser_press, browser_select, browser_scroll, browser_drag, browser_upload, browser_wait, browser_screenshot, browser_pdf, browser_eval, browser_console, browser_network, browser_dialogs, browser_resize, browser_tabs, browser_show, browser_handoff, browser_download, browser_downloads, browser_close, browser_help, browser_status, browser_whoami, browser_consent.\n\
+    let all = "Tools: browser_open, browser_navigate, browser_back, browser_forward, browser_reload, browser_snapshot, browser_read, browser_article, browser_find, browser_click, browser_hover, browser_type, browser_press, browser_select, browser_scroll, browser_drag, browser_upload, browser_wait, browser_screenshot, browser_pdf, browser_eval, browser_console, browser_network, browser_dialogs, browser_resize, browser_tabs, browser_show, browser_handoff, browser_download, browser_downloads, browser_close, browser_help, browser_status, browser_whoami, browser_consent, \
+browser_batch, browser_fill, browser_table, browser_links, browser_scripts, browser_script_run.\n\
 Use browser_help with topic=<tool name> for details and examples.";
     if topic.is_empty() {
         return all.to_string();
@@ -901,6 +911,9 @@ Use browser_help with topic=<tool name> for details and examples.";
         "browser_snapshot" => "browser_snapshot: tab, scope?, interactive?, max_lines?. Fresh refs. Example: {\"tab\":3}".into(),
         "browser_read" => "browser_read: tab, max_chars?. Snapshot plus visible text. Example: {\"tab\":3,\"max_chars\":4000}".into(),
         "browser_wait" => "browser_wait: tab, text?/text_gone?/selector?/url?, timeout_ms?. Example: {\"tab\":3,\"text\":\"Done\",\"timeout_ms\":5000}".into(),
+        "browser_batch" => "browser_batch: steps (up to 20 of {tool, args}), stop_on_error?, result? (last|all). \"tab\": \"$1\" is the tab step 1 opened. Example: {\"steps\":[{\"tool\":\"browser_open\",\"args\":{\"url\":\"example.com\"}},{\"tool\":\"browser_article\",\"args\":{\"tab\":\"$1\"}}]}".into(),
+        "browser_fill" => "browser_fill: tab, fields [{ref, value}], submit?. Selects pick by value or text; checkboxes take \"true\"/\"false\". Example: {\"tab\":3,\"fields\":[{\"ref\":\"e2\",\"value\":\"Ada\"},{\"ref\":\"e5\",\"value\":\"true\"}],\"submit\":\"e9\"}".into(),
+        "browser_script_run" => "browser_script_run: name, input?. Runs one of the person's Luau scripts (browser_scripts lists them, with their inputs). Example: {\"name\":\"links\",\"input\":{\"urls\":[\"example.com\"]}}".into(),
         "browser_handoff" => "browser_handoff: tab, message, reason?, timeout_ms?. Hands the tab to the person. reason: captcha|login|consent|confirmation|other. Example: {\"tab\":3,\"message\":\"solve captcha\",\"reason\":\"captcha\"}".into(),
         _ => format!("No detailed help for {topic}. {all}"),
     }
@@ -2390,6 +2403,8 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             Ok(text(format!("saved {n} steps to {}. browser_replay runs them again.", path.display())))
         }
         "browser_batch" => batch(sh, who, args),
+        "browser_scripts" => script::list(),
+        "browser_script_run" => script::run_script(sh, who, args),
         "browser_fill" => fill(sh, who, args),
         "browser_table" => {
             let tab = tab_arg(args)?;
@@ -2408,7 +2423,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             let rows = v["rows"].as_array().map_or(0, Vec::len);
             let more = v["more"].as_u64().unwrap_or(0);
             let mut out = format!("{rows} rows{}\n", if more > 0 { format!(" (and {more} more left out)") } else { String::new() });
-            out.push_str(&fence(&serde_json::to_string(&v["rows"]).unwrap_or_default()));
+            out.push_str(&fence(&serde_json::to_string(&json!({"columns": v["columns"], "rows": v["rows"]})).unwrap_or_default()));
             Ok(text(out))
         }
         "browser_links" => {
@@ -2725,16 +2740,15 @@ walk(root,0);
 document.querySelectorAll('[data-lumen-ref]').forEach(e=>e.setAttribute('data-lumen-gen',String(window.__lumenGen)));
 return {title:document.title,url:location.href,lines,more,frames,outside,controls,gen:window.__lumenGen};})()"#;
 
-/// A table as rows: header cells as keys (th of thead, or of the first row). `pick()` finds
-/// the table; it is defined by the caller.
+/// A table as columns (th of thead, or of the first row) and rows of cells: the names once,
+/// not once a row. `pick()` finds the table; it is defined by the caller.
 const TABLE_JS: &str = r#"const t=pick();if(!t||t.tagName!=='TABLE')return {error:'no table there'};
 const tx=c=>(c.innerText||'').replace(/\s+/g,' ').trim();const all=[...t.rows];if(!all.length)return {error:'the table is empty'};
 let head=t.tHead&&t.tHead.rows.length?[...t.tHead.rows[0].cells]:null;let body=all;
 if(head){body=all.filter(r=>r.parentElement!==t.tHead)}else if([...all[0].cells].every(c=>c.tagName==='TH')){head=[...all[0].cells];body=all.slice(1)}
-const keys=head?head.map((c,i)=>tx(c)||('col'+(i+1))):null;const rows=[];
-for(const r of body.slice(0,__MAX__)){const cs=[...r.cells].map(tx);if(!cs.some(Boolean))continue;
- if(keys){const o={};cs.forEach((v,i)=>{o[keys[i]||('col'+(i+1))]=v});rows.push(o)}else rows.push(cs)}
-return {rows,more:Math.max(0,body.length-__MAX__)};"#;
+const columns=head?head.map((c,i)=>tx(c)||('col'+(i+1))):[];const rows=[];
+for(const r of body.slice(0,__MAX__)){const cs=[...r.cells].map(tx);if(cs.some(Boolean))rows.push(cs)}
+return {columns,rows,more:Math.max(0,body.length-__MAX__)};"#;
 
 /// The page's links, deduped by URL: `[text](url)`. Only http(s).
 const LINKS_JS: &str = r#"(()=>{const O=__OPT__;const seen=new Set();const out=[];let more=0;

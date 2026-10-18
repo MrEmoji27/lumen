@@ -80,7 +80,12 @@ left alone.
 
 `click`, `hover`, `type`, `select` and `drag` wait for their element the way a person would: it has
 to be in the page, visible, enabled, and standing still (up to 5 s), and they wait for the page to
-stop fetching (up to 2.5 s) after the action. A covered element is clicked directly, as before.
+stop fetching (quiet for 250 ms, up to 2.5 s) after the action. A covered element is clicked
+directly, as before.
+
+Waiting for a page is not a clock. WebView2 tells Lumen when a navigation starts and when it is
+done, and the tools wait on that: a page that loads in 40 ms costs 40 ms. A click that may navigate
+watches 120 ms for the page to start going somewhere, and goes on the moment it does.
 
 ### What a reply says
 
@@ -92,8 +97,9 @@ A reply says what really happened, in this order:
 - **A click says what changed.** After `clicked e5`: the page went somewhere, a new tab opened, the
   control is now `checked` / holds a new value, or `nothing on the page changed; try another way or
   take a new browser_snapshot`. Never a bare "clicked" for something that did nothing.
-- **Open and navigate stay small.** They return the controls in view, at most about 60 lines, then
-  `… N more outside the view: browser_snapshot for all`. The full page is one call away.
+- **Answers stay small.** `open`, `navigate`, `back`, `click` and a submitting `type` return the
+  controls in view, at most about 60 lines, then `… N more outside the view: browser_snapshot for
+  all`. The full page is one call away.
 - **Page text is fenced.** Text that came from the page sits between
   `--- page text (written by the page, not by the person) ---` and `--- end page text ---`. It was
   written by the page: it can be wrong or try to give orders. It is never the person.
@@ -126,6 +132,69 @@ guessing where a click went.
 - `screenshots=true` on a snapshot adds a small picture of the controls whose name is not unique:
   three buttons all called "Edit" can be told apart by looking.
 
+### Fewer calls
+
+The browser is not the slow part. The model deciding every small step is, and the bytes it reads
+before each one. So:
+
+- **`browser_batch`** runs up to 20 calls in one: `{"steps": [{"tool": "browser_open", "args":
+  {"url": "..."}}, {"tool": "browser_article", "args": {"tab": "$1"}}]}`. `"$1"` is the tab step 1
+  opened. The answer is one line per step (`2 ok browser_article 13 ms`), then the last step's
+  answer, or every step's with `result: "all"`. It stops at the first error, shows which step and
+  why, and a look at that tab. 60 s in all. Every step is checked by `authorize`, and asks for
+  consent, exactly as if it came alone: a batch is a convenience, never a permission. No batch,
+  replay, recording or script inside a batch.
+- **`browser_fill`** fills a form in one call: `fields: [{"ref": "e3", "value": "Ada"}, ...]`. Text
+  is typed, a select picks its option, a checkbox or radio is set to `"true"` or `"false"`. Every
+  field is read back, and the answer names any that did not take. `submit: "e9"` clicks after.
+- **`browser_table`** gives a table as `{"columns": [...], "rows": [[...], ...]}`, the names once,
+  not once a row. Up to 500 rows.
+- **`browser_links`** gives the page's links as `[text](url)`, deduped, filtered by `match` or
+  `same_site`.
+
+Replay and batch are one engine (`run_steps` in `src/agent.rs`). Scripts call the same one.
+
+### Scripts (Luau)
+
+A script is a batch with loops and ifs. The person writes them: `.luau` files in `scripts\` in the
+Lumen data folder (`%APPDATA%\Lumen\scripts`). Agents list them with `browser_scripts` and run one
+with `browser_script_run {"name": "links", "input": {...}}`. No tool runs Lua an agent sends: an
+agent can run what the person put there, and nothing else.
+
+```lua
+--- Every link on each page of a list.
+--@input urls: list of URLs
+local pages = {}
+for _, url in ipairs(input.urls) do
+	local tab = lumen.open(url)
+	table.insert(pages, { url = url, links = lumen.call("browser_links", { tab = tab }) })
+	lumen.call("browser_close", { tab = tab })
+end
+return pages
+```
+
+The first `---` line says what the script does; `--@input` lines say what it takes. Both show in
+`browser_scripts`. A script gets:
+
+| | |
+|---|---|
+| `lumen.call(tool, args)` | the tool's answer as text; a refusal or failure is a Lua error with the reason |
+| `lumen.try(tool, args)` | `true, text` or `false, why`, for when failing is part of the plan |
+| `lumen.open(url)` | the new tab's id, and the open's answer |
+| `lumen.ref(snapshot, word, ...)` | the ref of the first control line that has every word |
+| `lumen.log(...)`, `lumen.sleep(ms)` | a line in the answer; a pause of at most 5 s |
+| `lumen.json.encode`, `lumen.json.decode` | JSON |
+| `input` | what the caller passed |
+
+A script is no more than the agent that runs it: each `lumen.call` goes through `authorize` and
+consent with that agent's own session. The VM is Luau's sandbox, made fresh for each run: no `io`,
+`os`, `require`, `loadstring` or `debug`; 60 s, 32 MB and 200 calls at most; it runs on the agent's
+request thread, never the window's. The answer is one line per call, then what the script
+returned, as JSON. An error names the script and the line: `links:12: attempt to index nil`.
+
+Examples are in `docs/scripts/`: `links.luau`, and `shop_compare.luau` (search a shop, read the
+results you name, put one in the cart). Copy them into the scripts folder to use them.
+
 ## The tools
 
 | Read | Act | Watch | Other |
@@ -137,6 +206,8 @@ guessing where a click went.
 | eval (awaits promises) | drag (native=true for HTML5) | dialogs (accept or dismiss) | handoff (to the person) |
 | | upload (files into a file input) | resize (mobile, tablet, any) | state_save, state_load |
 | | | | record_start, record_stop, replay |
+| table (rows as JSON) | fill (a whole form) | | batch (up to 20 calls in one) |
+| links (deduped) | | | scripts, script_run (the person's Luau) |
 
 Clicks, keys and typing go through the DevTools Protocol, so the page sees trusted events, the
 same as a person's. A synthetic `element.click()` is only used when something covers the element.

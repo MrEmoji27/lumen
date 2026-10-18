@@ -244,6 +244,59 @@ fn t_two_tabs(d: &mut Door, base: &str) {
     d.close(b);
 }
 
+// ------------------------------------------------- the same tasks, with the newer tools
+
+fn t_form_fill(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/form"));
+    let s = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true}));
+    let f = |w: &[&str], v: &str| json!({"ref": find_ref(&s, w), "value": v});
+    let fields = json!([f(&["Name"], "Ada"), f(&["Email"], "ada@example.com"), f(&["City"], "London"), f(&["Notes"], "Ring twice"),
+        f(&["combobox"], "Large"), f(&["checkbox"], "true")]);
+    let out = d.tool("browser_fill", json!({"tab": tab, "fields": fields, "submit": find_ref(&s, &["Send order"])}));
+    assert!(out.contains("every one took") && out.contains("/done"), "{out}");
+    d.close(tab);
+}
+
+fn t_links_tool(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/links"));
+    let s = d.tool("browser_links", json!({"tab": tab, "max": 200}));
+    assert!(s.contains("[Item number 99]"), "{s}");
+    d.close(tab);
+}
+
+fn t_table_tool(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/table"));
+    d.tool("browser_wait", json!({"tab": tab, "selector": "table tr:nth-child(50)"}));
+    let s = d.tool("browser_table", json!({"tab": tab}));
+    assert!(s.starts_with("50 rows") && s.contains("\"columns\":[\"Name\",\"Price\",\"Stock\"]") && s.contains("[\"Kettle 49\","), "{s}");
+    d.close(tab);
+}
+
+fn t_workflow_script(d: &mut Door, base: &str) {
+    let out = d.tool(
+        "browser_script_run",
+        json!({"name": "shop_compare", "input": {"start": format!("{base}/search"), "query": "kettle", "read": ["Kettle model 3", "Kettle model 5"], "buy": "Kettle model 3"}}),
+    );
+    assert!(out.contains("\"in_cart\": true") && out.contains("\"price\": \"59.99\""), "{out}");
+    if out.lines().any(|l| l.split_whitespace().rev().nth(1).and_then(|n| n.parse::<u64>().ok()).is_some_and(|ms| ms > 1500)) {
+        eprintln!("slow script run:\n{}", out.lines().take(20).collect::<Vec<_>>().join("\n"));
+    }
+}
+
+fn t_two_tabs_batch(d: &mut Door, base: &str) {
+    let out = d.tool(
+        "browser_batch",
+        json!({"result": "all", "steps": [
+            {"tool": "browser_open", "args": {"url": format!("{base}/item/1")}},
+            {"tool": "browser_open", "args": {"url": format!("{base}/item/2")}},
+            {"tool": "browser_article", "args": {"tab": "$1"}},
+            {"tool": "browser_article", "args": {"tab": "$2"}},
+            {"tool": "browser_close", "args": {"tab": "$1"}},
+            {"tool": "browser_close", "args": {"tab": "$2"}}]}),
+    );
+    assert!(out.contains("model 1") && out.contains("model 2") && !out.contains("ERR"), "{out}");
+}
+
 // ---------------------------------------------------------------- the run
 
 struct KillLumen(Child);
@@ -260,6 +313,11 @@ fn start() -> (KillLumen, PathBuf, String) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("dl")).unwrap();
     std::fs::write(dir.join("settings.json"), json!({"agent": true, "agent_port": PORT}).to_string()).unwrap();
+    // The example scripts, as the person would put them in.
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    for e in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/scripts")).unwrap().flatten() {
+        std::fs::copy(e.path(), dir.join("scripts").join(e.file_name())).unwrap();
+    }
     let child = Command::new(LUMEN)
         .arg("--headless")
         .env("LUMEN_HEADLESS", "1")
@@ -305,6 +363,11 @@ fn bench() {
         ("table built by JS", t_table),
         ("ten-step workflow", t_workflow),
         ("two tabs, two reads", t_two_tabs),
+        ("form, browser_fill", t_form_fill),
+        ("links, browser_links", t_links_tool),
+        ("table, browser_table", t_table_tool),
+        ("workflow, Luau script", t_workflow_script),
+        ("two tabs, browser_batch", t_two_tabs_batch),
     ];
     // Floor: what one call costs before any page work. ping is HTTP alone; browser_help
     // adds the policy round trip to the UI thread; browser_tabs adds a second one.

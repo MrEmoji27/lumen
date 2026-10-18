@@ -1,6 +1,6 @@
 [package]
 name = "lumen"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 default-run = "lumen"
 
@@ -19,6 +19,9 @@ dirs = "7.0.0"
 flate2 = "1.1"
 # UPnP IGD: open the torrent port on the router. Sync API, no TLS needed (attohttpc).
 igd-next = { version = "0.18", features = ["io_sync"] }
+# Luau, for the scripts a person puts in the scripts folder and agents run (agent_script.rs).
+# Built from source: no Lua DLL to ship.
+mlua = { version = "0.12", features = ["luau", "serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10"

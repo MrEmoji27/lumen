@@ -1,6 +1,6 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.2.1,
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.4.0,
 18 October 2026. Early, in daily use by one person, Windows only.
 
 ## What it is
@@ -27,10 +27,11 @@ its own.
 | Page engine | Microsoft WebView2 (Chromium), through wry 0.57 and webview2-com 0.39 |
 | Window and interface | tao 0.37; every pixel drawn natively with Direct2D and DirectWrite, no HTML |
 | Code | about 40,600 lines of Rust, one process for the shell |
-| Binaries | `lumen.exe` 14.0 MB, `lumen-agent.exe` 2.0 MB (release, stripped) |
+| Binaries | `lumen.exe` 15.5 MB, `lumen-agent.exe` 2.0 MB (release, stripped) |
 | Tests | 337 unit tests, plus live suites that drive a real headless Lumen |
 | Content blocker | adblock-rust 0.13, EasyList, EasyPrivacy, uBlock lists; about 1.7 µs a request |
-| Agent interface | MCP: an HTTP endpoint on localhost behind a token, and a stdio bridge; 41 tools |
+| Agent interface | MCP: an HTTP endpoint on localhost behind a token, and a stdio bridge; 47 tools |
+| Scripts | Luau (sandboxed, through mlua), for scripts the person writes and agents run |
 | Data | `%APPDATA%\Lumen`: settings, session, filters, history, the WebView2 profile |
 
 What it is built from, all pinned, anything that runs checked by SHA-256 before it runs:
@@ -94,6 +95,7 @@ added in the same release hold 81,000 hosts the same way, for 0.5 MB.
 | Customize | 22.6 MB |
 | 0.2.0 | 24.6 MB |
 | 0.2.1 | 18.5 MB |
+| 0.4.0 | 19.2 MB |
 
 ### Many tabs
 
@@ -140,7 +142,9 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 | What | Number |
 |---|---|
 | One agent tab | about 85 MB |
-| Agent tool call, reading a page | 80 to 130 ms, including starting the command-line bridge |
+| Agent tool call, a round trip to the window | 0.7 ms (35 ms before 0.4.0) |
+| Agent: fill and send a form, ten-step workflow | 1.7 s and 2.6 s (5.7 s and 8.8 s before 0.4.0) |
+| Agent: the ten-step workflow as a Luau script | 1 call and 580 bytes back, against 12 calls and 4 KB |
 | Content blocker, per request | about 1.7 µs |
 | Usage journal, on against off | under 0.1% CPU, under 1 MB |
 | CPU cap set to 50% | 52% measured |
@@ -176,9 +180,18 @@ config holds a path, never a secret.
 - When a login, a captcha or a payment needs a person, the agent hands the tab over and waits.
 - `lumen.exe --headless` runs Lumen off-screen: no focus, no taskbar button, no sound.
 
-The first real test, on 18 October, found reading fast and clicking broken. In a background tab
-a click did nothing and still answered "clicked". The fix on hand pulled the agent's tab in front
-of the person, which an agent tool must never do. The plan starts there.
+- Agent tabs live on a stage: a window of their own, off every screen, where Chromium still counts
+  them as visible. Clicks land, and nothing comes to the front. Click an agent's tab to watch it
+  live; the agent keeps working.
+- Replies say what happened: a failed page's HTTP status, what a click changed or that it changed
+  nothing. Page text is fenced, so a page cannot pose as the person.
+- Fewer calls: `browser_batch` (up to 20 calls in one), `browser_fill` (a whole form),
+  `browser_table`, `browser_links`. And Luau scripts: the person puts `.luau` files in a folder,
+  agents list and run them. Every call a script makes is checked as if the agent made it.
+
+The first real test, on 18 October, found reading fast and clicking broken: in a background tab a
+click did nothing and still answered "clicked". 0.3.0 fixed that with the stage, 0.4.0 made every
+call faster.
 
 The design for that work is in [the agent-side spec](superpowers/specs/2026-10-18-agent-side-design.md).
 
@@ -188,15 +201,16 @@ In order. Each step ships as its own version, with a line in [the changelog](cha
 
 1. **Honest replies and a smoke test.** A failed page says its HTTP status. A click says what it
    changed, or that nothing changed. Page text is marked as page text, so a page cannot pose as
-   the person. Before every release, a live test clicks real buttons. *In progress.*
+   the person. Before every release, a live test clicks real buttons. *Done in 0.3.0.*
 2. **The agent stage.** Agent tabs live in a window of their own, off every screen. WebView2 sees
-   them as visible, so clicks land, and nothing comes to the front. *In progress.*
+   them as visible, so clicks land, and nothing comes to the front. *Done in 0.3.0.*
 3. **Watching.** Click an agent's tab to see its live page, with the agent's own cursor in the
-   accent colour. Your mouse cannot knock it off.
+   accent colour. Your mouse cannot knock it off. *Watching is in 0.3.0; the cursor is next.*
 4. **Talking to an agent.** A text field to steer an agent now, queue its next task, or start a
    new one.
-5. **Speed for agents.** Fewer calls and smaller replies: batches of steps, snapshots that send
-   only what changed, and higher-level tools for forms and tables.
+5. **Speed for agents.** Fewer calls and smaller replies: batches of steps, Luau scripts, and
+   higher-level tools for forms and tables. *Done in 0.4.0.* Snapshots that send only what
+   changed are still to do.
 6. **Headless trims.** Measure first, then cut what an off-screen Lumen still does for nobody.
 7. **The comparison.** Lumen against other Chromium-based programs on the same pages and the same
    machine, published with the method.
@@ -206,8 +220,7 @@ In order. Each step ships as its own version, with a line in [the changelog](cha
    that arrive by themselves.
 
 Later, and only if they earn their memory: Servo for light sites, a local AI model reading the
-page through Ollama, small agent scripts in Luau, and an optional PDF editor that starts only when
-asked.
+page through Ollama, and an optional PDF editor that starts only when asked.
 
 ## Limits
 

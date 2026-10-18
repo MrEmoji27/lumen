@@ -7,6 +7,22 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.4.0 — 2026-10-18
+
+- Agents: every call is faster. The sidebar was redrawn on every agent call, about 35 ms each, and
+  a tool makes several; now only a call that changes what the sidebar shows redraws it. A round
+  trip to the window went from 35 ms to under 2 ms. Waiting for a page waits on WebView2's own
+  start and finish of the navigation, not on fixed sleeps. On the agent bench, filling a form went
+  from 5.7 s to 1.7 s and a ten-step workflow from 8.8 s to 2.6 s.
+- Agents: `browser_batch` (up to 20 calls in one), `browser_fill` (a whole form, read back),
+  `browser_table` and `browser_links`. Clicks and other actions answer with the controls in view.
+- Scripts: Luau. The person puts `.luau` files in the scripts folder; agents list and run them with
+  `browser_scripts` and `browser_script_run`. Each call a script makes is checked as if the agent
+  made it. Sandboxed, 60 s, 32 MB, 200 calls. The ten-step workflow as a script: one call, 580
+  bytes back, against twelve calls and 4 KB.
+- The agent stage window is made with the first agent tab, not at start.
+- `tests/agent_bench.rs`: fixed tasks on local pages, measured in calls, bytes and time.
+
 ## 0.3.0 — 2026-10-18
 
 - Agents: the stage. Every agent tab's view lives in a second, off-screen tool window where

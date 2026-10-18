@@ -21,15 +21,15 @@ EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 
 # The cover's figures: each one is a measurement the doc itself states.
 FIGURES = [
-    ("18.5 MB", "idle, Lumen itself"),
+    ("19.2 MB", "idle, Lumen itself"),
     ("91 MB", "one Wikipedia tab"),
     ("1.1 GB", "forty heavy tabs, asleep"),
-    ("41", "tools for AI agents"),
+    ("47", "tools for AI agents"),
 ]
 
 CSS = """
 @page { size: A4; margin: 18mm 17mm 20mm 17mm;
-  @bottom-left { content: "Lumen 0.2.1"; font: 8pt 'Segoe UI', system-ui, sans-serif; color: #898781; }
+  @bottom-left { content: "Lumen 0.4.0"; font: 8pt 'Segoe UI', system-ui, sans-serif; color: #898781; }
   @bottom-right { content: counter(page) " / " counter(pages); font: 8pt 'Segoe UI', system-ui, sans-serif; color: #898781; } }
 @page :first { @bottom-left { content: none; } @bottom-right { content: none; } }
 :root { --ink: #1b1b1a; --ink2: #52514e; --muted: #898781; --line: #e1e0d9; --plane: #f6f5f1; --accent: #2a78d6; }
@@ -73,7 +73,7 @@ p:has(+ table) { break-after: avoid; }
 def cover():
     figs = "".join(f'<div class="fig"><b>{v}</b><span>{k}</span></div>' for v, k in FIGURES)
     return (
-        '<section class="cover"><div><div class="mark">Version 0.2.1 · 18 October 2026</div>'
+        '<section class="cover"><div><div class="mark">Version 0.4.0 · 18 October 2026</div>'
         '<h1>Lumen</h1>'
         '<p class="lede">A native Windows shell around WebView2, written in Rust, built to keep memory low.</p>'
         '<p class="meta">What it is so far, what it measures, and where it goes next.</p></div>'
