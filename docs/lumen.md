@@ -1,6 +1,6 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.5,
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.6,
 18 October 2026. Early, in daily use by one person, Windows only.
 
 ## What it is

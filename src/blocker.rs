@@ -68,6 +68,10 @@ const MALICIOUS_MAX_BODY: usize = 4 << 20;
 static POPUP_HOSTS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Hosts on the malware/phishing lists. Loaded once from disk, refreshed weekly.
 static DANGER_HOSTS: Mutex<Option<Vec<u64>>> = Mutex::new(None);
+/// Single links on the malware/phishing lists (`||host/path^`), as hashes of the URL without
+/// its scheme. Only that link is dangerous, never its host: the phishing list names one bad
+/// Google Doc, one bad bit.ly link, and the rest of Google and bit.ly are fine.
+static DANGER_URLS: Mutex<Option<Vec<u64>>> = Mutex::new(None);
 /// Hosts the person chose to open once this session (Continue anyway). Session-only.
 static DANGER_PASS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
@@ -980,30 +984,56 @@ pub fn popup_rule(url: &str) -> bool {
     guard.as_ref().is_some_and(|set| host_matches(&host, set))
 }
 
-/// One host of a malicious list: `||host^$all` (AdGuard) or plainer. Comments,
-/// section headers and anything that is not a host fall out.
-fn parse_malicious_hosts(text: &str) -> HashSet<String> {
-    let mut out = HashSet::new();
+/// A malicious list's rules (`||rule^$all`, AdGuard form), split in two: whole hosts
+/// (`||evil.example^`), and single links (`||docs.google.com/forms/d/e/xyz^`), the second as
+/// URL hashes. Comments, headers and anything that is not a host fall out. A link rule never makes
+/// its host dangerous: Lumen did that once, and every request to google.com was refused.
+fn parse_malicious(text: &str) -> (HashSet<String>, Vec<u64>) {
+    let mut hosts = HashSet::new();
+    let mut urls = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('!') || line.starts_with('[') {
             continue;
         }
         let Some(rest) = line.strip_prefix("||") else { continue };
-        let host = rest.split(['^', '$']).next().unwrap_or("").split('/').next().unwrap_or("").trim().to_ascii_lowercase();
+        // The rule up to its options; `^` closes it.
+        let rule = rest.split('$').next().unwrap_or("").trim_end_matches('^');
+        let (host, path) = match rule.find(['/', '?']) {
+            Some(at) => (&rule[..at], &rule[at..]),
+            None => (rule, ""),
+        };
+        let host = host.trim().to_ascii_lowercase();
         if host.is_empty() || (!host.contains('.') && host.parse::<std::net::IpAddr>().is_err()) {
             continue;
         }
-        out.insert(host);
+        if path.is_empty() || path == "/" {
+            hosts.insert(host);
+        } else {
+            // The link, and the same page without its query: one bad form is bad whatever
+            // tracking tag the next mail puts on it.
+            let key = url_key(&format!("{host}{path}"));
+            if let Some((bare, _)) = key.split_once('?') {
+                urls.push(host_hash(bare.trim_end_matches('/')));
+            }
+            urls.push(host_hash(&key));
+        }
     }
-    out
+    (hosts, urls)
+}
+
+/// What a link is matched by: lower case, no scheme, no fragment, no trailing slash.
+fn url_key(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.split('#').next().unwrap_or(rest);
+    rest.trim_end_matches('/').to_ascii_lowercase()
 }
 
 /// A parse worth keeping: the list has to hold a real number of hosts, or it
 /// was an error page or a stub.
-fn parse_malicious_checked(body: &str) -> Option<HashSet<String>> {
-    let hosts = parse_malicious_hosts(body);
-    (hosts.len() >= MALICIOUS_MIN).then_some(hosts)
+fn parse_malicious_checked(body: &str) -> Option<(HashSet<String>, Vec<u64>)> {
+    let (hosts, urls) = parse_malicious(body);
+    (hosts.len() + urls.len() >= MALICIOUS_MIN).then_some((hosts, urls))
 }
 
 /// SHA-256 of some bytes, lower-case hex. The sidecar that proves the file on
@@ -1034,7 +1064,7 @@ fn fetch_malicious(url: &str, path: &Path) -> Option<String> {
 
 /// A list already on disk, with its SHA-256 verified. A hash that does not
 /// match means the file was changed after download: throw it out.
-fn load_malicious_checked(path: &Path) -> Option<HashSet<String>> {
+fn load_malicious_checked(path: &Path) -> Option<(HashSet<String>, Vec<u64>)> {
     let body = fs::read_to_string(path).ok()?;
     let want = fs::read_to_string(path.with_extension("sha256")).ok()?;
     if sha256_hex(body.as_bytes()) != want.trim() {
@@ -1043,8 +1073,9 @@ fn load_malicious_checked(path: &Path) -> Option<HashSet<String>> {
     parse_malicious_checked(&body)
 }
 
-/// A host the malware/phishing lists name. Session passes win; the set may
-/// still be loading, in which case nothing is dangerous yet.
+/// A URL the malware/phishing lists name: its host (or a domain above it) is a listed host,
+/// or the URL itself is a listed link. Session passes win; the lists may still be loading, in
+/// which case nothing is dangerous yet.
 pub fn danger_host(url: &str) -> bool {
     let host = privacy_stats::host(url);
     if host.is_empty() {
@@ -1053,8 +1084,17 @@ pub fn danger_host(url: &str) -> bool {
     if DANGER_PASS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.contains(&host)) {
         return false;
     }
-    let guard = DANGER_HOSTS.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref().is_some_and(|hashes| host_matches_hashed(&host, hashes))
+    let listed = DANGER_HOSTS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|hashes| host_matches_hashed(&host, hashes));
+    listed || danger_link(url)
+}
+
+/// The URL is one of the listed links, with or without its query.
+fn danger_link(url: &str) -> bool {
+    let guard = DANGER_URLS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(hashes) = guard.as_ref().filter(|h| !h.is_empty()) else { return false };
+    let key = url_key(url);
+    let bare = key.split('?').next().unwrap_or(&key).trim_end_matches('/');
+    hashes.binary_search(&host_hash(&key)).is_ok() || hashes.binary_search(&host_hash(bare)).is_ok()
 }
 
 /// The person chose Continue anyway for this host: it stays open until Lumen
@@ -1111,6 +1151,7 @@ fn host_matches_hashed(host: &str, hashes: &[u64]) -> bool {
 /// the build thread, once per start, whatever the ad matcher's own state.
 fn ensure_malicious(dir: &Path) {
     let mut all: Vec<u64> = Vec::new();
+    let mut links: Vec<u64> = Vec::new();
     let mut ok = false;
     for (name, url) in MALICIOUS {
         let path = dir.join(name);
@@ -1120,21 +1161,26 @@ fn ensure_malicious(dir: &Path) {
             .is_some_and(|t| SystemTime::now().duration_since(t).is_ok_and(|d| d <= MALICIOUS_MAX_AGE));
         if !fresh
             && let Some(body) = fetch_malicious(url, &path)
-            && let Some(hosts) = parse_malicious_checked(&body)
+            && let Some((hosts, urls)) = parse_malicious_checked(&body)
         {
             all.extend(hosts.iter().map(|h| host_hash(h)));
+            links.extend(urls);
             ok = true;
             continue;
         }
-        if let Some(hosts) = load_malicious_checked(&path) {
+        if let Some((hosts, urls)) = load_malicious_checked(&path) {
             all.extend(hosts.iter().map(|h| host_hash(h)));
+            links.extend(urls);
             ok = true;
         }
     }
     all.sort_unstable();
     all.dedup();
+    links.sort_unstable();
+    links.dedup();
     if ok {
         *DANGER_HOSTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(all);
+        *DANGER_URLS.lock().unwrap_or_else(|e| e.into_inner()) = Some(links);
     }
 }
 
@@ -1405,13 +1451,37 @@ mod tests {
             "||\n",
             "\n",
         );
-        let set = parse_malicious_hosts(text);
+        let (set, links) = parse_malicious(text);
         assert!(set.contains("bad.example.com"));
         assert!(set.contains("worse.example.org"));
         assert!(set.contains("192.168.1.10"), "an address on the list is kept");
-        assert!(set.contains("path.example.net"), "the host, not the path");
+        assert!(!set.contains("path.example.net"), "a link rule never lists its whole host");
+        assert_eq!(links, vec![host_hash("path.example.net/malware")], "it lists that one link");
         assert!(!set.contains("nodot"), "a name with no dot is not a host");
-        assert_eq!(set.len(), 4, "junk never lands: {set:?}");
+        assert_eq!(set.len(), 3, "junk never lands: {set:?}");
+    }
+
+    /// The phishing list names single links on big sites. Those links are dangerous; the
+    /// sites are not. Lumen once refused every request to google.com this way, and YouTube
+    /// could not fetch the script it needs before it will play a video.
+    #[test]
+    fn a_listed_link_does_not_take_its_site_down() {
+        let text = "||google.com/amp/lnkd.in/gGdeKNQk^$all\n||docs.google.com/forms/d/e/1FAIp/viewform?usp=sf_link^$all\n||evil.example^$all\n";
+        let (hosts, links) = parse_malicious(text);
+        assert_eq!(hosts.len(), 1);
+        *DANGER_HOSTS.lock().unwrap() = Some(hosts.iter().map(|h| host_hash(h)).collect());
+        let mut l = links;
+        l.sort_unstable();
+        *DANGER_URLS.lock().unwrap() = Some(l);
+        assert!(!danger_host("https://www.google.com/js/th/9p33isomN4Qopy3MPslGwbR6Aph0aF9ErFVaksMLY0k.js"));
+        assert!(!danger_host("https://accounts.google.com/ServiceLogin"));
+        assert!(!danger_host("https://docs.google.com/document/d/mine/edit"));
+        assert!(danger_host("https://google.com/amp/lnkd.in/gGdeKNQk"), "the listed link itself");
+        assert!(danger_host("https://docs.google.com/forms/d/e/1FAIp/viewform?usp=sf_link"));
+        assert!(danger_host("https://docs.google.com/forms/d/e/1FAIp/viewform?usp=other"), "the link with another query");
+        assert!(danger_host("https://sub.evil.example/x"), "a listed host and what is under it");
+        *DANGER_HOSTS.lock().unwrap() = None;
+        *DANGER_URLS.lock().unwrap() = None;
     }
 
     /// A list that parses but holds too little is a stub or an error page:
@@ -1439,7 +1509,7 @@ mod tests {
         fs::write(path.with_extension("sha256"), &hash).unwrap();
         // The file as written loads.
         let set = load_malicious_checked(&path).expect("a verified list loads");
-        assert_eq!(set.len(), MALICIOUS_MIN);
+        assert_eq!(set.0.len(), MALICIOUS_MIN);
         // Someone edits the file without updating the sidecar: out it goes.
         fs::write(&path, format!("{body}||evil.example.com^$all\n")).unwrap();
         assert!(load_malicious_checked(&path).is_none(), "a changed file fails the hash");
@@ -1472,4 +1542,5 @@ mod tests {
         *DANGER_PASS.lock().unwrap() = None;
     }
 }
+
 

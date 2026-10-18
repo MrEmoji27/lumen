@@ -7,6 +7,21 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.6 — 2026-10-18
+
+The real YouTube fix.
+
+- Hover previews would not play and videos froze on load: Lumen was refusing every request to
+  google.com, including the script YouTube runs before it will hand over a video. The phishing
+  list names single bad links on big sites (one Google Doc, one bit.ly link, `google.com/amp/...`),
+  and Lumen read each such line as "this whole host is dangerous", then counted every subdomain
+  under it too. That took down all of google.com, docs.google.com, accounts.google.com,
+  sites.google.com, bit.ly, t.co and dropbox.com, ad blocking on or off. Now a host rule
+  (`||evil.example^`) still blocks the host and what is under it, and a link rule blocks that
+  link only (with or without its query), as URL hashes. It came in with the malware lists on
+  18 October, the same day as the redraw.
+- 0.6.5's list refresh stays (lists keep as long as they say), but it was not the cause.
+
 ## 0.6.5 — 2026-10-18
 
 - YouTube videos failed with "An error occurred" and "Something went wrong" because the ad
