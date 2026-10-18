@@ -75,10 +75,6 @@ pub fn click_outcome(before: &PageMark, after: &PageMark) -> String {
     if !after.target.is_empty() && after.target != before.target {
         return format!("it is now {}", after.target.trim());
     }
-    // target state maybe includes checked/value; if changed even if before empty?
-    if !after.target.is_empty() && before.target.is_empty() {
-        return format!("it is now {}", after.target.trim());
-    }
     let changes = after.mutations.saturating_sub(before.mutations);
     if changes > 0 {
         return format!("{} changes on the page", changes);
@@ -115,7 +111,8 @@ pub enum Op {
     Show { tab: u64 },
     /// Hand the tab to the person until they press Done.
     #[allow(dead_code)]
-    Handoff { tab: u64, message: String, reason: String, timeout_ms: u64 },    Consent { tab: u64, kind: String, message: String },
+    Handoff { tab: u64, message: String, reason: String, timeout_ms: u64 },
+    Consent { tab: u64, kind: String, message: String },
     Status,
     Close { tab: u64 },
     /// Close every tab this session owns.
@@ -428,10 +425,10 @@ impl Session {
             // A named session's folder is its name; an ephemeral one gets the random
             // part too, so two "claude-code" runs never share a folder.
             downloads: if self.persistent { folder_name(&self.name) } else { format!("{}-{}", folder_name(&self.name), self.profile) },
-             keeps: self.persistent,
-             paused: self.paused,
-             bridge: self.bridge.clone(),
-         }
+            keeps: self.persistent,
+            paused: self.paused,
+            bridge: self.bridge.clone(),
+        }
     }
 }
 
@@ -870,7 +867,7 @@ pub fn tools() -> Value {
         t("browser_resize", "Emulate a screen size (responsive testing). device=\"mobile\" | \"tablet\" | \"desktop\", or width and height. device=\"reset\" undoes it.",
           json!({"tab": tab, "device": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["tab"]),
         t("browser_tabs", "List your tabs.", json!({}), &[]),
-        t("browser_show", "Bring your tab to the front so the person sees it.", json!({"tab": tab}), &["tab"]),
+        t("browser_show", "Agent tabs never come to the front; the person clicks one to watch it. Use browser_handoff when you need the person.", json!({"tab": tab}), &["tab"]),
         t("browser_handoff", "Hand the tab to the person (log in, solve a captcha, choose something). Shows them your message and waits until they press Done (up to 15 min). Returns the page snapshot after.",
           json!({"tab": tab, "message": {"type": "string"}, "reason": {"type": "string", "enum": ["captcha","login","consent","confirmation","other"]}, "timeout_ms": {"type": "integer"}}), &["tab", "message"]),        t("browser_download", "Download a file with Lumen's downloader (aria2). With a tab, its cookies go along. wait=true waits for it to finish and returns the path.",
           json!({"url": {"type": "string"}, "tab": tab, "wait": {"type": "boolean"}}), &["url"]),
@@ -1256,7 +1253,7 @@ fn native_drag(sh: &Arc<Shared>, who: &Who, tab: u64, a: &Ref, b: &Ref, rr: bool
     let _ = call(p, who, Op::DragData { tab, take: true });
     cdp(p, who, tab, "Input.setInterceptDrags", json!({"enabled": true}))?;
     let moved = |f: f64| json!({"type": "mouseMoved", "x": x1 + (x2 - x1) * f, "y": y1 + (y2 - y1) * f, "buttons": 1, "button": "left"});
-        mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
+    mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
     mouse(p, who, tab, "mousePressed", x1, y1, "left", 1)?;
     cdp(p, who, tab, "Input.dispatchMouseEvent", moved(0.15))?;
     thread::sleep(Duration::from_millis(80));
@@ -1412,8 +1409,11 @@ fn href(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) -> String {
 }
 
 fn page_mark(sh: &Arc<Shared>, who: &Who, tab: u64, r: Option<&Ref>, tabs: usize, rr: bool) -> PageMark {
-    let _ = eval(&sh.proxy, who, tab, "if(!window.__lumenMut){window.__lumenMutN=0;window.__lumenMut=new MutationObserver(function(m){window.__lumenMutN+=(m&&m.length)||0;});window.__lumenMut.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});} return window.__lumenMutN||0;");
-    let mutations = eval(&sh.proxy, who, tab, "return window.__lumenMutN||0;").ok().and_then(|v| v.as_u64()).unwrap_or(0);
+    // A raw eval runs an expression, not a function body: no top-level `return`. The
+    // observer goes in once per page and counts every change from then on.
+    let js = "(()=>{if(!window.__lumenMut){window.__lumenMutN=0;window.__lumenMut=new MutationObserver(m=>{window.__lumenMutN+=m.length});\
+              window.__lumenMut.observe(document,{subtree:true,childList:true,attributes:true,characterData:true})}return window.__lumenMutN})()";
+    let mutations = eval(&sh.proxy, who, tab, js).ok().and_then(|v| v.as_u64()).unwrap_or(0);
     let url = href(&sh.proxy, who, tab);
     let target = match r {
         Some(r) => eval_at(sh, who, tab, r, "return (e.checked?' checked':'')+(e.value&&e.value!==''?' value=\"'+String(e.value)+'\"':'')+(e.getAttribute&&e.getAttribute('aria-expanded')==='true'?' expanded':'')+(e.disabled?' disabled':'');", rr).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
@@ -1671,7 +1671,9 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
         }
         "browser_open" => {
             let url = args["url"].as_str().ok_or("missing url")?.to_string();
-            let activate = !args["background"].as_bool().unwrap_or(false);
+            // An agent's tab never comes to the front: the person clicks it to watch.
+            // `background` is still accepted, and changes nothing.
+            let activate = false;
             let tab = call(p, who, Op::Open { url, activate })?["tab"].as_u64().ok_or("no tab")?;
             wait_load(p, who, tab);
             wait_network_idle(p, who, tab, IDLE_WAIT_MS);
@@ -1806,8 +1808,8 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
                 }
             };
             let mark_before = page_mark(sh, who, tab, clicked_ref.as_ref(), tabs_before.len(), true);
-            // A mouse event needs a page that renders: the tab comes to the front.
-                        mouse(p, who, tab, "mouseMoved", x, y, button, 0)?;
+            // The view sits on the stage, where Chromium counts it as visible: the mouse lands.
+            mouse(p, who, tab, "mouseMoved", x, y, button, 0)?;
             for c in 1..=clicks {
                 mouse(p, who, tab, "mousePressed", x, y, button, c)?;
                 mouse(p, who, tab, "mouseReleased", x, y, button, c)?;
@@ -1826,7 +1828,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             wait_actionable(sh, who, tab, &r, ACTION_WAIT_MS, rr)?;
             let (x, y, _) = point_at(sh, who, tab, &r, rr)?;
             let (x, y) = frame_point(sh, who, tab, &r, x, y)?;
-                        mouse(p, who, tab, "mouseMoved", x, y, "none", 0)?;
+            mouse(p, who, tab, "mouseMoved", x, y, "none", 0)?;
             thread::sleep(Duration::from_millis(300));
             Ok(text(format!("hovering {}\n\n{}", ref_text(&r), snapshot(sh, who, tab, &json!({"interactive": true}))?)))
         }
@@ -1924,7 +1926,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             let (x2, y2, _) = point_at(sh, who, tab, &b, rr)?;
             let (x1, y1) = frame_point(sh, who, tab, &a, x1, y1)?;
             let (x2, y2) = frame_point(sh, who, tab, &b, x2, y2)?;
-                        mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
+            mouse(p, who, tab, "mouseMoved", x1, y1, "none", 0)?;
             mouse(p, who, tab, "mousePressed", x1, y1, "left", 1)?;
             for s in 1..=8 {
                 let f = s as f64 / 8.0;
@@ -2211,7 +2213,8 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
         "browser_show" => {
             let tab = tab_arg(args)?;
             call(p, who, Op::Show { tab })?;
-            Ok(text(format!("tab {tab} is in front")))
+            Ok(text(format!("tab {tab} stays where it is: Lumen never brings an agent tab to the front. \
+                 The person can click it in the sidebar to watch. If you need them, use browser_handoff.")))
         }
         "browser_handoff" => {
             let tab = tab_arg(args)?;

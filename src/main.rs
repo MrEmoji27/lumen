@@ -245,6 +245,8 @@ struct Tab {
     hidden_at: Option<Instant>,
     /// Last navigation result: (ok, WebView2 error code, HTTP status).
     last_nav: Option<(bool, i32, i32)>,
+    /// An agent tab's stage view, put to sleep by the idle clock: not painting.
+    stage_idle: bool,
     /// Its page window is on screen right now.
     visible: bool,
     /// Typed in the address bar as a bare host and not yet answered. See `Typed`.
@@ -360,6 +362,7 @@ impl Tab {
             servo: None,
             hidden_at: None,
             last_nav: None,
+            stage_idle: false,
             visible: false,
             typed: None,
             zoom: 100,
@@ -2106,8 +2109,10 @@ impl App {
                 // WebView2's own downloads of this agent land in its own folder too.
                 engine::set_profile_download_dir(&v, &agent_policy::agent_downloads_dir_for(&t.downloads));
                 let _ = v.load_url(&t.url);
-                // Move the view onto the off-screen stage so it stays visible to Chromium.
-                if let Some(stage) = self.stage.as_mut() {
+                // Onto the off-screen stage, where Chromium counts it as visible. A tab the
+                // person is watching (a sleeping one they clicked) stays in the window.
+                let watched = t.id == self.active || self.split == Some(t.id);
+                if !watched && let Some(stage) = self.stage.as_mut() {
                     let (sx, sy, sw, sh) = stage.slot(t.id, (w, h));
                     let hwnd = stage.hwnd();
                     let _ = v.reparent(hwnd);
@@ -2189,11 +2194,14 @@ impl App {
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
         self.leave_panel();
-        // Watching: an agent tab moves from the stage into the main window.
-        if self.tabs[i].agent && self.tabs[i].view.is_some() {
-            if let Some(v) = self.tabs[i].view.as_ref() {
-                let _ = v.reparent(self.ctx.window.hwnd() as isize);
-            }
+        // Watching: an agent tab moves from the stage into the main window, awake.
+        if self.tabs[i].agent
+            && let Some(v) = self.tabs[i].view.as_ref()
+        {
+            let _ = v.reparent(self.ctx.window.hwnd() as isize);
+            let _ = v.set_visible(true);
+            self.tabs[i].stage_idle = false;
+            self.tabs[i].visible = true;
         }
         self.ensure_view(i);
         // Show the new page first, then hide the old. No flash of empty stage between.
@@ -5697,22 +5705,24 @@ impl App {
             privacy_stats::flush();
             std::process::exit(0);
         }
-        // Idle agent tabs stop painting after STAGE_IDLE.
+        // A stage view whose agent has been quiet for STAGE_IDLE stops painting. Its next
+        // call wakes it (`on_agent`). A watched tab is on screen and keeps painting.
         let stage_idle = if cfg!(debug_assertions) {
             std::env::var("LUMEN_STAGE_IDLE_MS").ok().and_then(|v| v.parse::<u64>().ok()).map(Duration::from_millis).unwrap_or(STAGE_IDLE)
         } else {
             STAGE_IDLE
         };
         for i in 0..self.tabs.len() {
-            if !self.tabs[i].agent { continue; }
-            // A tab on screen in the main window (being watched) keeps painting.
-            if self.on_stage(self.tabs[i].id) { continue; }
-            let owner = self.tabs[i].owner.clone();
-            let last = self.agent.session_last(&owner).unwrap_or(now);
-            if now.duration_since(last) >= stage_idle {
-                if let Some(v) = self.tabs[i].view.as_ref() {
-                    let _ = v.set_visible(false);
-                }
+            let t = &self.tabs[i];
+            if !t.agent || t.stage_idle || self.on_stage(t.id) {
+                continue;
+            }
+            let last = self.agent.session_last(&t.owner).unwrap_or(now);
+            if now.duration_since(last) >= stage_idle
+                && let Some(v) = t.view.as_ref()
+            {
+                let _ = v.set_visible(false);
+                self.tabs[i].stage_idle = true;
             }
         }
         self.next_tick = now + TICK;
@@ -5886,26 +5896,25 @@ impl App {
         // A strictly isolated browser made since the last call: its waiting tabs get
         // their page now, so the call below finds the tab it asked for.
         self.poll_own_envs();
-        // Wake an idle stage view before acting.
+        // A stage view the idle clock put to sleep paints again before the call runs.
+        // Only then: a view that is awake costs nothing here.
         let wake_tab = match &call.op {
-            agent::Op::Navigate { tab, .. } | agent::Op::Back { tab } | agent::Op::Forward { tab } | agent::Op::Reload { tab } |
-            agent::Op::Cdp { tab, .. } | agent::Op::Log { tab, .. } | agent::Op::NetIdle { tab } |
-            agent::Op::Contexts { tab } | agent::Op::CdpForSession { tab, .. } | agent::Op::DragData { tab, .. } |
-            agent::Op::Dialogs { tab, .. } | agent::Op::Show { tab } | agent::Op::Handoff { tab, .. } |
-            agent::Op::Consent { tab, .. } | agent::Op::Close { tab } => Some(*tab),
+            Op::Navigate { tab, .. } | Op::Back { tab } | Op::Forward { tab } | Op::Reload { tab } | Op::NavInfo { tab }
+            | Op::Eval { tab, .. } | Op::Cdp { tab, .. } | Op::Log { tab, .. } | Op::NetIdle { tab }
+            | Op::Contexts { tab } | Op::CdpForSession { tab, .. } | Op::DragData { tab, .. }
+            | Op::Dialogs { tab, .. } | Op::Show { tab } | Op::Handoff { tab, .. } | Op::Consent { tab, .. } => Some(*tab),
             _ => None,
         };
-        if let Some(tab) = wake_tab {
-            if let Some(i) = self.idx(tab) {
-                if self.tabs[i].agent {
-                    if let Some(stage) = self.stage.as_mut() {
-                        stage.set_visible(true);
-                    }
-                    if let Some(v) = self.tabs[i].view.as_ref() {
-                        let _ = v.set_visible(true);
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
+        if let Some(i) = wake_tab.and_then(|t| self.idx(t))
+            && self.tabs[i].agent
+            && self.tabs[i].stage_idle
+        {
+            self.tabs[i].stage_idle = false;
+            if let Some(v) = self.tabs[i].view.as_ref() {
+                let _ = v.set_visible(true);
+                // A moment for Chromium to mark the page visible again, or the first
+                // mouse event after a long quiet is dropped.
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
         self.push();
@@ -6264,13 +6273,10 @@ impl App {
                 log.prompt_text = text;
                 let _ = reply.send(Ok(Value::Null));
             }
+            // Never in the way: no agent call brings a tab to the front. A handoff does,
+            // because there the agent needs the person. This only checks the tab is theirs.
             Op::Show { tab } => {
-                if mine(self, tab).is_none() {
-                    let _ = reply.send(no_tab(tab));
-                    return;
-                }
-                self.activate(tab);
-                let _ = reply.send(Ok(Value::Null));
+                let _ = reply.send(if mine(self, tab).is_none() { no_tab(tab) } else { Ok(Value::Null) });
             }
             Op::Handoff { tab, message, .. } => {
                 if mine(self, tab).is_none() {

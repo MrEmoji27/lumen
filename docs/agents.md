@@ -218,8 +218,11 @@ you: that tab comes to the front with a message and a Done button.
 
 - **Watch any agent tab.** Click it in the sidebar (or Ctrl+Tab to it): the same view moves into
   your window live — no reload, no lost page — and the agent keeps working in both places. Leave
-  the tab and the view goes back to its place on the stage. `browser_show` does the same thing when
-  the agent asks for it.
+  the tab and the view goes back to its place on the stage. `browser_open` never brings a tab to
+  the front, and `browser_show` no longer does either: it tells the agent to hand off instead.
+- **A tab you lent stays yours.** It is not on the stage, so while it sits in the background a
+  click in it lands nowhere, and the reply says nothing changed. Keep it in front while an agent
+  works in it.
 - **Idle tabs stop painting.** A stage view whose agent has made no call for 30 s is set invisible:
   no painting, throttled timers. Its next call makes it visible again before the call runs.
 

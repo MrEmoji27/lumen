@@ -68,10 +68,6 @@ impl Stage {
     pub fn hwnd(&self) -> isize {
         self.window.hwnd() as isize
     }
-    /// The stage window itself stays shown: its views are what idle, on the tick.
-    pub fn set_visible(&self, on: bool) {
-        let _ = self.window.set_visible(on);
-    }
     pub fn slot(&mut self, tab: u64, page: (f64, f64)) -> (f64, f64, f64, f64) {
         let idx = self.tiles.slot(tab);
         // Enough room for every tile ever handed out; freed tiles keep their place.
