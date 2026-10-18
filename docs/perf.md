@@ -454,3 +454,31 @@ p50 within a few percent of before (the largest moves: 1464 to 1356 ms on the fo
 process's private pages too, and the first segment stays resident even with nothing in it Lumen
 asked for. A shell whose whole point is what it does not hold cannot spend 61 MB it is not using.
 The idle number came back to 19.7 MB the moment the dependency left.
+
+### Pre-warming an agent session's profile
+
+At `initialize` the session's WebView2 profile is made ready off the request path: a hidden page of
+that profile in the shared environment (dropped at once, the profile stays), or the whole
+environment for `agent_strict_isolation`. An op whose answer nobody waits for; the door replies
+without it.
+
+Measured with the new bench line `first open, fresh session`: initialize, then one `browser_open`
+of the bench's local page, timed from initialize's reply, five fresh sessions a run, three runs,
+p50.
+
+| run | before | after |
+|---|---|---|
+| 1 | 626 ms | 764 ms |
+| 2 | 623 ms | 743 ms |
+| 3 | 624 ms | 722 ms |
+
+**Reverted: 624 ms to 743 ms, and that number is a finding.** In a Lumen that has already built a
+page, a fresh session's profile costs about 70 ms — the bench says a fresh session's first open is
+about 0.6 s, not the 2.6 s the Agents section names. Pre-making the profile spends a whole hidden
+page instead (the docs' own `view` figure is 100 to 180 ms), on the UI thread, inside the same
+window: the window grew by about 120 ms, which is the hidden page minus the profile it made, and
+one session initialize stalled the UI (in that run the bench's own `browser_help` floor read
+266 ms a call instead of 0.8). The 2.6 s belongs to the first session of a fresh Lumen, where the
+environment is made as well as the profile; that case was not measured here, so nothing is claimed
+for it and the pre-warm is not kept on faith. The bench line stays: it is the measurement, and it
+is the first number this repo has for a fresh session's first open.

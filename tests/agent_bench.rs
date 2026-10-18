@@ -125,7 +125,8 @@ impl Door {
 
     fn init(&mut self) {
         let stamp = {
-            let out = Command::new(LUMEN_AGENT).arg("--version").env("LUMEN_DATA", std::env::temp_dir()).output().unwrap();
+            let scratch = std::env::temp_dir().join(format!("lumen-bench-stamp-{}", std::process::id()));
+            let out = Command::new(LUMEN_AGENT).arg("--version").env("LUMEN_DATA", scratch).output().unwrap();
             String::from_utf8_lossy(&out.stdout).trim().trim_start_matches("lumen-agent ").to_string()
         };
         let (sid, _) = self.post(
@@ -297,6 +298,26 @@ fn t_two_tabs_batch(d: &mut Door, base: &str) {
     assert!(out.contains("model 1") && out.contains("model 2") && !out.contains("ERR"), "{out}");
 }
 
+/// The first open of a fresh session: initialize, then one open of the bench's local
+/// page, timed from initialize's reply. Five sessions, one open each; their p50 is
+/// printed beside the row, which is the whole five-run batch.
+fn t_first_open(d: &mut Door, base: &str) {
+    let mut ms = Vec::new();
+    for _ in 0..5 {
+        d.init();
+        let t0 = Instant::now();
+        let tab = d.open(&format!("{base}/title"));
+        ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        d.close(tab);
+    }
+    let mut sorted = ms.clone();
+    let (p50, p95) = (pct(&mut sorted, 0.5), pct(&mut sorted, 0.95));
+    eprintln!(
+        "  first open, fresh session  p50 {p50:.0} ms p95 {p95:.0} ms, every run: {}",
+        ms.iter().map(|m| format!("{m:.0}")).collect::<Vec<_>>().join(", ")
+    );
+}
+
 // ---------------------------------------------------------------- the run
 
 struct KillLumen(Child);
@@ -368,6 +389,7 @@ fn bench() {
         ("table, browser_table", t_table_tool),
         ("workflow, Luau script", t_workflow_script),
         ("two tabs, browser_batch", t_two_tabs_batch),
+        ("first open, fresh session", t_first_open),
     ];
     // Floor: what one call costs before any page work. ping is HTTP alone; browser_help
     // adds the policy round trip to the UI thread; browser_tabs adds a second one.
