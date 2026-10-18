@@ -320,6 +320,60 @@ If you did not mean to go here, go back.</p>\
     )
 }
 
+/// Lumen's page for a page that did not load: what went wrong, in words, and Try again. It
+/// takes the place of Chromium's own error page. `err` is WebView2's WebErrorStatus.
+pub fn error_html(url: &str, err: i32, dark: bool, back: bool) -> String {
+    let host = esc(&host_of(url));
+    let (title, words) = error_words(err, &host);
+    let url = esc(url);
+    let (bg, fg, dim, line, accent) = if dark { ("#161413", "#ece8e3", "#a29c94", "#2c2927", "#ece8e3") } else { ("#f7f4f0", "#1d1a17", "#6e675f", "#ddd7cf", "#1d1a17") };
+    let back = if back { "<a href=\"lumen-error:back\">Go back</a>" } else { "" };
+    format!(
+        "<!doctype html><meta charset=utf-8><title>{host}</title>\
+<style>body{{margin:0;background:{bg};color:{fg};font:15px/1.55 'Segoe UI',system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}}\
+main{{max-width:520px;padding:32px}}h1{{font:600 24px 'Segoe UI',system-ui,sans-serif;margin:0 0 10px}}p{{color:{dim};margin:0 0 22px}}\
+small{{display:block;color:{dim};opacity:.7;margin:-10px 0 22px;font-size:12px}}\
+a{{display:inline-block;margin:0 10px 10px 0;padding:8px 16px;border:1px solid {line};border-radius:8px;color:{fg};text-decoration:none}}\
+a.go{{background:{accent};border-color:{accent};color:{bg};font-weight:600}}a:hover{{border-color:{fg}}}</style>\
+<main><h1>{title}</h1><p>{words}</p><small>WebView2 error {err}</small>\
+<a class=go href=\"lumen-error:retry:{url}\">Try again</a>{back}</main>"
+    )
+}
+
+/// The title and words for a WebErrorStatus. The host is already escaped.
+fn error_words(err: i32, host: &str) -> (String, String) {
+    match err {
+        13 => (format!("Lumen could not find {host}"), "Check the address for a typo. If it is right, the site may be down, or this PC may be offline.".into()),
+        11 => ("This PC is offline".into(), "Lumen could not reach the internet. Check the Wi-Fi or the cable, then try again.".into()),
+        7 => (format!("{host} took too long"), "The site did not answer in time. It may be busy or down.".into()),
+        6 | 12 => (format!("{host} did not answer"), "The site refused the connection, or nothing is there. It may be down.".into()),
+        9 | 10 => (format!("The connection to {host} was cut"), "Something between this PC and the site dropped the connection. Trying again often works.".into()),
+        1..=5 => (
+            format!("{host} is not who it says it is"),
+            "Its security certificate is not valid, so Lumen stopped before sending anything. Someone may be pretending to be this site.".into(),
+        ),
+        15 => (format!("{host} redirects in a loop"), "The site keeps sending Lumen somewhere else. Clearing the site's data may fix it.".into()),
+        _ => (format!("{host} did not load"), "Something went wrong between this PC and the site.".into()),
+    }
+}
+
+/// A click on the error page above.
+#[derive(Debug, PartialEq)]
+pub enum ErrorChoice {
+    Back,
+    Retry(String),
+}
+
+/// Read one of the error page's links. Only http(s) may be retried.
+pub fn parse_error_choice(link: &str) -> Option<ErrorChoice> {
+    let rest = link.strip_prefix("lumen-error:")?;
+    if rest == "back" {
+        return Some(ErrorChoice::Back);
+    }
+    let url = rest.strip_prefix("retry:")?;
+    url.to_ascii_lowercase().starts_with("http").then(|| ErrorChoice::Retry(url.to_string()))
+}
+
 /// What a click on the page above means.
 #[derive(Debug, PartialEq)]
 pub enum DangerChoice {
@@ -529,6 +583,11 @@ mod tests {
         let html = danger_html("https://evil.example.com/steal?x=1&y=2", true);
         assert!(html.contains("evil.example.com"));
         assert!(html.contains("lumen-danger:continue:https://evil.example.com/steal?x=1&amp;y=2"));
+        assert_eq!(parse_error_choice("lumen-error:back"), Some(ErrorChoice::Back));
+        assert_eq!(parse_error_choice("lumen-error:retry:https://a.example/x?y=1"), Some(ErrorChoice::Retry("https://a.example/x?y=1".into())));
+        assert_eq!(parse_error_choice("lumen-error:retry:file:///c:/secret"), None);
+        assert!(error_html("https://a.example/", 13, false, true).contains("could not find a.example"));
+        assert!(error_html("https://<b>/", 99, true, false).contains("&lt;b&gt;"), "the host is escaped");
         assert_eq!(parse_danger_choice("lumen-danger:back"), Some(DangerChoice::Back));
         assert_eq!(parse_danger_choice("lumen-danger:continue:https://evil.example.com/steal?x=1&y=2"), Some(DangerChoice::Continue("https://evil.example.com/steal?x=1&y=2".into())));
         assert_eq!(parse_danger_choice("lumen-danger:continue:http://evil.example.com/"), Some(DangerChoice::Continue("http://evil.example.com/".into())));

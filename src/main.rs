@@ -218,6 +218,8 @@ struct Tab {
     pin_url: String,
     audio: bool,
     muted: bool,
+    /// Lumen's error page is up: the tab keeps the address that failed until a real page comes.
+    error_shown: bool,
     /// Questions this page asked since it loaded, and whether the person said to stop them.
     asks_n: u32,
     asks_off: bool,
@@ -434,6 +436,7 @@ impl Tab {
             pinned: false,
             pin_url: String::new(),
             audio: false,
+            error_shown: false,
             asks_n: 0,
             asks_off: false,
             call: false,
@@ -3811,6 +3814,13 @@ impl App {
             }
             Ev::Url(id, u) => {
                 if let Some(i) = self.idx(id) {
+                    // Lumen's error page is a page made from a string too.
+                    if self.tabs[i].error_shown {
+                        if !u.starts_with("http") {
+                            return;
+                        }
+                        self.tabs[i].error_shown = false;
+                    }
                     // The warning for a site without https is a page made from a string: the tab
                     // keeps the address it was asked for, until a real page replaces it.
                     if self.tabs[i].no_https.is_some() {
@@ -4007,7 +4017,13 @@ impl App {
             }
             Ev::NavDone(id, ok, err, http) => {
                 journal::nav_done(id, ok, err, http, self.blocked_count());
-                self.typed_done(id, ok, err);
+                let typed = self.typed_done(id, ok, err);
+                // No answer at all from the site (a server's own 404 is an answer): Lumen's
+                // error page, in the person's tabs. A typed name that does not resolve is a
+                // search instead, and a cancel is something else starting.
+                if !ok && !typed && http == 0 && err != 0 && err != ERR_CANCELED {
+                    self.error_page(id, err);
+                }
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].last_nav = Some((ok, err, http));
                     // Cancelled (14, OPERATION_CANCELED) is how a redirect, an https upgrade
@@ -4267,6 +4283,7 @@ impl App {
             Ev::HttpChoice(id, choice) => self.http_choice(id, choice),
             Ev::Danger(id, url) => self.danger(id, url),
             Ev::DangerChoice(id, choice) => self.danger_choice(id, choice),
+            Ev::ErrorChoice(id, choice) => self.error_choice(id, choice),
             Ev::SiteCookies(id, n) => {
                 self.site_cookies = Some((id, n));
                 self.push();
@@ -6245,14 +6262,19 @@ impl App {
 
     /// The page a typed host led to has answered. A name that does not exist
     /// becomes a search for the words; anything else lets the typing go.
-    fn typed_done(&mut self, id: u64, ok: bool, err: i32) {
-        let Some(i) = self.idx(id) else { return };
-        let Some(t) = &self.tabs[i].typed else { return };
+    /// A typed bare name's navigation ended. True when it is taken care of here (waiting for
+    /// more, or a search instead), so nothing else should answer the failure.
+    fn typed_done(&mut self, id: u64, ok: bool, err: i32) -> bool {
+        let Some(i) = self.idx(id) else { return false };
+        let Some(t) = &self.tabs[i].typed else { return false };
         match typed_verdict(t.started, ok, err) {
-            TypedVerdict::Wait => {}
-            TypedVerdict::Forget => self.tabs[i].typed = None,
+            TypedVerdict::Wait => true,
+            TypedVerdict::Forget => {
+                self.tabs[i].typed = None;
+                false
+            }
             TypedVerdict::Search => {
-                let Some(t) = self.tabs[i].typed.take() else { return };
+                let Some(t) = self.tabs[i].typed.take() else { return true };
                 let url = self.settings.search.replace("%s", &url_encode(&t.raw));
                 journal::feature("typed_name_search", self.tabs[i].private);
                 if let Some(v) = &self.tabs[i].view {
@@ -6261,6 +6283,36 @@ impl App {
                 self.tabs[i].url = url;
                 self.dirty = true;
                 self.push();
+                true
+            }
+        }
+    }
+
+    /// A page that did not load: Lumen's own page saying why, with Try again. The tab keeps
+    /// the address it failed on. Agents keep WebView2's page: their tools read the failure.
+    fn error_page(&mut self, id: u64, err: i32) {
+        let Some(i) = self.idx(id) else { return };
+        let t = &self.tabs[i];
+        if t.agent || !t.url.starts_with("http") {
+            return;
+        }
+        let html = sites::error_html(&t.url, err, self.ctx.dark.get(), t.back);
+        if let Some(v) = &t.view {
+            let _ = v.load_html(&html);
+        }
+        self.tabs[i].error_shown = true;
+    }
+
+    /// A click on the error page: the same address again, or back.
+    fn error_choice(&mut self, id: u64, choice: sites::ErrorChoice) {
+        let Some(i) = self.idx(id) else { return };
+        let Some(v) = self.tabs[i].view.as_ref() else { return };
+        match choice {
+            sites::ErrorChoice::Retry(url) => {
+                let _ = v.load_url(&url);
+            }
+            sites::ErrorChoice::Back => {
+                let _ = v.go_back();
             }
         }
     }

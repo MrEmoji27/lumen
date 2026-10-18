@@ -112,6 +112,8 @@ pub enum Ev {
     Danger(u64, String),
     /// A click on the danger page: (tab, what was chosen).
     DangerChoice(u64, crate::sites::DangerChoice),
+    /// A click on Lumen's own error page.
+    ErrorChoice(u64, crate::sites::ErrorChoice),
     /// How many cookies the page's site has, for the lock's popover: (tab, count).
     SiteCookies(u64, usize),
     /// A site's stored data was cleared: (origin, it worked).
@@ -1004,6 +1006,14 @@ fn hook_page(
                     }
                     return Ok(());
                 }
+                // A click on Lumen's error page: try again, or go back. Not a navigation.
+                if u.starts_with("lumen-error:") {
+                    args.SetCancel(true)?;
+                    if let Some(choice) = crate::sites::parse_error_choice(&u) {
+                        let _ = p.send_event(Ev::ErrorChoice(id, choice));
+                    }
+                    return Ok(());
+                }
                 // A click on the page that blocks a dangerous site. Not a navigation.
                 if u.starts_with("lumen-danger:") {
                     args.SetCancel(true)?;
@@ -1765,6 +1775,8 @@ fn hook_page_asks(ctx: &Rc<Ctx>, wv: &WebView, id: u64) {
     unsafe {
         if let Ok(s) = core.Settings() {
             let _ = s.SetAreDefaultScriptDialogsEnabled(false);
+            // A page that does not load gets Lumen's own error page (main.rs, NavDone).
+            let _ = s.SetIsBuiltInErrorPageEnabled(false);
         }
         let mut token = 0i64;
         let c = ctx.clone();
