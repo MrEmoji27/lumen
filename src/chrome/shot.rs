@@ -173,10 +173,25 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         let _ = PostMessageW(Some(hwnd), WM_MOUSEWHEEL, WPARAM(((delta & 0xffff) << 16) as usize), lp);
                     }
                     "evk" => {
-                        // A key into the address bar's edit box (ID 101), as typing there would.
-                        let vk: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-                        if let Ok(edit) = GetDlgItem(Some(hwnd), 101) {
+                        // A key into an edit box by its id, as typing there would:
+                        // "evk 9" is the address bar (101), "evk 110 9" the first form box.
+                        let (id, vk) = match args.len() {
+                            1 => (101, args[0].parse().unwrap_or(0)),
+                            _ => (args[0].parse().unwrap_or(101), args.get(1).and_then(|v| v.parse().ok()).unwrap_or(0)),
+                        };
+                        if let Ok(edit) = GetDlgItem(Some(hwnd), id) {
                             let _ = PostMessageW(Some(edit), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
+                        }
+                    }
+                    "focus" => {
+                        // Say which window has the keyboard: proof that Tab walked the form.
+                        // The chrome's own thread, not the foreground one: a headless run
+                        // is nobody's foreground.
+                        let tid = GetWindowThreadProcessId(hwnd, None);
+                        let mut info = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+                        if GetGUIThreadInfo(tid, &mut info).is_ok() {
+                            let id = if info.hwndFocus.is_invalid() { -1 } else { GetDlgCtrlID(info.hwndFocus) };
+                            eprintln!("lumen: focus {id}");
                         }
                     }
                     "drag" => {

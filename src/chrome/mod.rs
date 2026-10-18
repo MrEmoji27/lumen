@@ -13,6 +13,7 @@ mod pages;
 mod report;
 mod dashboard;
 mod color;
+mod form;
 #[cfg(debug_assertions)]
 mod shot;
 mod style;
@@ -387,6 +388,10 @@ pub enum Hit {
     ColorPreset(usize),
     ColorRecent(usize),
     ColorDone,
+    /// The form card: the card itself, and its two buttons.
+    FormCard,
+    FormSave,
+    FormCancel,
 }
 
 #[derive(Clone, Debug)]
@@ -679,6 +684,10 @@ pub(crate) struct Inner {
     color_edit: HWND,
     /// The colour picker's card, open under the swatch it was asked from.
     color: Option<color::ColorCard>,
+    /// The form card's text boxes, one per field.
+    form_edits: [HWND; 3],
+    /// The form card, open while it waits for Save or Cancel.
+    form: Option<form::FormCard>,
 }
 
 /// A message being written to an agent: the card over the sidebar.
@@ -759,6 +768,9 @@ const ID_SAY: usize = 106;
 const ID_SET: usize = 107;
 const ID_BUG: usize = 108;
 const ID_COLOR: usize = 109;
+const ID_FORM0: usize = 110;
+const ID_FORM1: usize = 111;
+const ID_FORM2: usize = 112;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -1068,7 +1080,28 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit, color_edit] {
+            let mk_form = |id: usize| {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("EDIT"),
+                    w!(""),
+                    edit_style,
+                    0,
+                    0,
+                    10,
+                    10,
+                    Some(hwnd),
+                    Some(HMENU(id as _)),
+                    Some(hinst),
+                    None,
+                )
+                .unwrap_or_default()
+            };
+            let form_edits = [mk_form(ID_FORM0), mk_form(ID_FORM1), mk_form(ID_FORM2)];
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit, color_edit]
+                .into_iter()
+                .chain(form_edits)
+            {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
@@ -1140,6 +1173,8 @@ impl Chrome {
                 bug_edit,
                 color_edit,
                 color: None,
+                form_edits,
+                form: None,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -1410,7 +1445,13 @@ impl Inner {
             SendMessageW(self.set_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.bug_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.color_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit, self.bug_edit, self.color_edit] {
+            for e in self.form_edits {
+                SendMessageW(e, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
+            }
+            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit, self.bug_edit, self.color_edit]
+                .into_iter()
+                .chain(self.form_edits)
+            {
                 SendMessageW(e, EM_SETMARGINS, Some(WPARAM((EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize)), Some(LPARAM(0)));
             }
         }
@@ -1575,12 +1616,24 @@ impl Inner {
             };
             self.page.font_pick = Some(pages::FontPick { key, filter: filter.to_string(), scroll: 0.0, shown: Vec::new() });
         }
-        // Debug: LUMEN_TEST_CARD="color" opens the colour picker without a click,
-        // so a screenshot can show it. The anchorless card sits at the right edge.
+        // Debug: LUMEN_TEST_CARD="color" or "form" opens that card without a click,
+        // so a screenshot can show it.
         #[cfg(debug_assertions)]
-        if std::env::var("LUMEN_TEST_CARD").is_ok_and(|v| v == "color") && self.color.is_none() {
-            let color = self.theme.accent;
-            color::open(self, "accent", String::new(), color, None);
+        if self.color.is_none() && self.form.is_none() {
+            match std::env::var("LUMEN_TEST_CARD").as_deref() {
+                // The anchorless card sits at the right edge.
+                Ok("color") => {
+                    let color = self.theme.accent;
+                    color::open(self, "accent", String::new(), color, None);
+                }
+                Ok("form") => form::open(
+                    self,
+                    "Edit bookmark",
+                    &[("Title", "The Rust Programming Language"), ("Address", "https://doc.rust-lang.org/book/")],
+                    form::FormAct::EditBookmark { id: 1, folder: String::new() },
+                ),
+                _ => {}
+            }
         }
         self.invalidate();
     }
@@ -1842,6 +1895,13 @@ impl Inner {
         match &self.color {
             Some(c) => place(self.color_edit, R::new(c.hex_box().x + 8.0, c.hex_box().y + 4.0, c.hex_box().w - 16.0, 18.0), true),
             None => place(self.color_edit, R::default(), false),
+        }
+        // The form card's boxes, one per field, inside the boxes it draws for them.
+        for (n, e) in self.form_edits.into_iter().enumerate() {
+            match self.form.as_ref().and_then(|f| f.boxes.get(n)) {
+                Some(b) => place(e, R::new(b.x + 8.0, b.y + (b.h - 18.0) / 2.0, b.w - 16.0, 18.0), true),
+                None => place(e, R::default(), false),
+            }
         }
         // The Drive page takes the cursor once, when it opens.
         if show && std::mem::take(&mut self.drive_focus) {
@@ -2161,7 +2221,19 @@ impl Inner {
         }
         // The cards over everything else. Their order is their z-order.
         color::draw(self, s);
+        form::draw(self, s);
         self.motion.end();
+    }
+
+    /// One card at a time: opening one puts the others away. A form is dropped
+    /// (its action never runs); a colour keeps what it shows.
+    fn close_cards(&mut self) {
+        if self.form.is_some() {
+            form::cancel(self);
+        }
+        if self.color.is_some() {
+            color::done(self);
+        }
     }
 
     fn hit(&mut self, r: R, h: Hit) {
@@ -4157,6 +4229,8 @@ impl Inner {
         {
             color::done(self);
         }
+        // A click outside the form cancels it, as Escape does.
+        form::clicked_outside(self, &h);
         let p = &self.proxy;
         match h.unwrap() {
             Hit::Back => send(p, json!({"t": "back"})),
@@ -4233,6 +4307,9 @@ impl Inner {
             Hit::ColorPreset(n) => color::pick_preset(self, n),
             Hit::ColorRecent(n) => color::pick_recent(self, n),
             Hit::ColorDone => color::done(self),
+            Hit::FormCard => {}
+            Hit::FormSave => form::save(self),
+            Hit::FormCancel => form::cancel(self),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => {
@@ -4278,16 +4355,7 @@ impl Inner {
             }
             Hit::DialAdd => {
                 // The address, and a name if you want one; blank means the site's own name.
-                if let Some(a) = dialog::ask_fields(self.hwnd, "Add to speed dial", &[("Address", ""), ("Name (optional)", "")])
-                    && let Some(s) = &self.state
-                {
-                    let mut st = s.settings.clone();
-                    if speeddial::add(&mut st.shortcuts, &a[1], &a[0]) {
-                        send(p, json!({"t": "settings", "v": st}));
-                    } else {
-                        self.page.flash = Some(("Not added: that is not an address, it is already a tile, or the page is full".into(), Instant::now()));
-                    }
-                }
+                form::open(self, "Add to speed dial", &[("Address", ""), ("Name (optional)", "")], form::FormAct::DialAdd);
             }
             Hit::Page(ph) => {
                 let picking = self.page.font_pick.is_some();
@@ -4498,11 +4566,7 @@ impl Inner {
             }
             Hit::Page(pages::PageHit::BmFolder(name)) if !name.is_empty() => {
                 match self.popup(&[(1, "Rename…".into()), (2, "Delete folder".into())], x, y) {
-                    1 => {
-                        if let Some(a) = dialog::ask_fields(self.hwnd, "Rename folder", &[("Name", &name)]) {
-                            send(&self.proxy, json!({"t": "bmFolderRename", "old": name, "new": a[0]}));
-                        }
-                    }
+                    1 => form::open(self, "Rename folder", &[("Name", &name)], form::FormAct::RenameFolder { old: name.clone() }),
                     2 => send(&self.proxy, json!({"t": "bmFolderDelete", "name": name})),
                     _ => {}
                 }
@@ -4511,12 +4575,7 @@ impl Inner {
                 match self.popup(&[(1, "Edit…".into()), (2, "Remove".into())], x, y) {
                     1 => {
                         let Some(sc) = s.settings.shortcuts.get(i) else { return };
-                        if let Some(a) = dialog::ask_fields(self.hwnd, "Edit tile", &[("Address", &sc.url), ("Name (optional)", &sc.title)]) {
-                            let mut st = s.settings.clone();
-                            if speeddial::edit(&mut st.shortcuts, i, &a[1], &a[0]) {
-                                send(&self.proxy, json!({"t": "settings", "v": st}));
-                            }
-                        }
+                        form::open(self, "Edit tile", &[("Address", &sc.url), ("Name (optional)", &sc.title)], form::FormAct::EditTile { i });
                     }
                     2 => {
                         let mut st = s.settings.clone();
@@ -4565,7 +4624,7 @@ impl Inner {
     /// The menu for one bookmark: edit it, move it to a folder, order it, remove it. The star
     /// and the rows of the Bookmarks page share it. `page` adds the entries that only make
     /// sense in the list (open in a new tab, move up and down).
-    fn mark_menu(&self, mark: &UiMark, page: bool, x: f32, y: f32) {
+    fn mark_menu(&mut self, mark: &UiMark, page: bool, x: f32, y: f32) {
         let Some(s) = &self.state else { return };
         let mut items: Vec<(u32, String)> = vec![(1, "Edit…".into())];
         if page {
@@ -4591,8 +4650,9 @@ impl Inner {
         let id = mark.id;
         let msg = match self.popup(&items, x, y) {
             1 => {
-                let Some(a) = dialog::ask_fields(self.hwnd, "Edit bookmark", &[("Title", &mark.title), ("Address", &mark.url)]) else { return };
-                json!({"t": "bmEdit", "id": id, "title": a[0], "url": a[1], "folder": mark.folder})
+                // The form card takes it from here: its Save sends the edit.
+                form::open(self, "Edit bookmark", &[("Title", &mark.title), ("Address", &mark.url)], form::FormAct::EditBookmark { id, folder: mark.folder.clone() });
+                return;
             }
             2 => json!({"t": "bmOpen", "url": mark.url, "bg": true}),
             3 => json!({"t": "bmShift", "id": id, "d": -1}),
@@ -4608,7 +4668,7 @@ impl Inner {
         send(&self.proxy, msg);
     }
 
-    fn star_menu(&self, mark: UiMark, x: f32, y: f32) {
+    fn star_menu(&mut self, mark: UiMark, x: f32, y: f32) {
         self.mark_menu(&mark, false, x, y);
     }
 
@@ -4646,6 +4706,10 @@ impl Inner {
         let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
         // The colour picker: Escape puts the old colour back, Enter is Done.
         if color::key(self, vk) {
+            return true;
+        }
+        // The form: Escape cancels, Enter saves.
+        if form::key(self, vk) {
             return true;
         }
         // The tab search and the lock's card sit over the sidebar: Escape puts them away.
@@ -5012,6 +5076,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         color::typed(&mut i);
                     }
                     i.invalidate();
+                } else if (ID_FORM0..=ID_FORM2).contains(&id) && code == EN_CHANGE {
+                    i.invalidate();
                 }
                 LRESULT(0)
             }
@@ -5138,6 +5204,24 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                                 i.sel = if v == VK_DOWN.0 { (i.sel + 1) % n } else { (i.sel + n - 1) % n };
                                 i.invalidate();
                             }
+                            return LRESULT(0);
+                        }
+                        _ => {}
+                    }
+                } else if (ID_FORM0..=ID_FORM2).contains(&id) {
+                    // A form's box: Enter saves, Escape cancels, Tab walks the fields.
+                    match vk {
+                        v if v == VK_RETURN.0 => {
+                            form::save(&mut i);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_ESCAPE.0 => {
+                            form::cancel(&mut i);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_TAB.0 => {
+                            let back = GetKeyState(VK_SHIFT.0 as i32) < 0;
+                            form::tab(&mut i, back);
                             return LRESULT(0);
                         }
                         _ => {}

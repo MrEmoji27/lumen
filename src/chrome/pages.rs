@@ -157,7 +157,7 @@ pub struct Page {
     /// The name being typed for "save this look".
     pub(super) theme_name: String,
     /// The saved looks, read from disk the first time the page needs them.
-    themes: Option<Vec<style::ThemeFile>>,
+    pub(super) themes: Option<Vec<style::ThemeFile>>,
     /// The changelog laid out for a width, so a frame does not measure it all again.
     changes: Option<(f32, Vec<ChangeBlock>)>,
     /// The problem report broken into lines for a width: (width, text length, lines).
@@ -3335,10 +3335,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
         }
         PageHit::Text(k) => {
             let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
-            let cur = if k == "greeting" { cur } else { cur };
-            if let Some(a) = super::dialog::ask_fields(i.hwnd_raw(), "Edit", &[("Text", &cur)]) {
-                set(i, k, json!(a[0]));
-            }
+            super::form::open(i, "Edit", &[("Text", &cur)], super::form::FormAct::TextSetting { key: k.to_string() });
         }
         PageHit::Fonts(k) => {
             i.page.font_pick = Some(FontPick { key: k, filter: String::new(), scroll: 0.0, shown: Vec::new() });
@@ -3361,23 +3358,8 @@ pub fn click(i: &mut Inner, p: PageHit) {
             i.invalidate();
         }
         PageHit::ThemeSave => {
-            let name = super::dialog::ask_fields(i.hwnd_raw(), "Save this look", &[("Name", &i.page.theme_name.clone())])
-                .map(|a| a[0].trim().to_string())
-                .filter(|n| !n.is_empty());
-            let Some(name) = name else { return };
-            let mut list = style::saved_themes();
-            let mut file = style::ThemeFile::of(&s.settings);
-            file.name = name.clone();
-            // Saving under a name that is already there replaces it.
-            if let Some(at) = list.iter().position(|t| t.name == name) {
-                list[at] = file;
-            } else {
-                list.push(file);
-            }
-            style::save_themes(&list);
-            i.page.themes = Some(list);
-            i.page.flash = Some((format!("Saved \"{name}\""), std::time::Instant::now()));
-            i.invalidate();
+            let cur = i.page.theme_name.clone();
+            super::form::open(i, "Save this look", &[("Name", &cur)], super::form::FormAct::SaveLook);
         }
         PageHit::ThemeApply(n) => {
             let list = style::saved_themes();
@@ -3508,9 +3490,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
             i.invalidate();
         }
         PageHit::BmNewFolder => {
-            if let Some(a) = super::dialog::ask_fields(i.hwnd_raw(), "New folder", &[("Name", "")]) {
-                send(&i.proxy, json!({"t": "bmFolderAdd", "name": a[0]}));
-            }
+            super::form::open(i, "New folder", &[("Name", "")], super::form::FormAct::NewFolder);
         }
         PageHit::BmImport => {
             // Read-only look at the other browsers' files: which are here, and how many each.
