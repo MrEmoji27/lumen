@@ -19,6 +19,7 @@ mod chrome;
 mod defaultapp;
 mod engine;
 mod extlink;
+mod favicons;
 mod glance;
 mod journal;
 mod kdbx;
@@ -3701,12 +3702,18 @@ impl App {
                 {
                     // The site's icon for the speed dial, kept past this tab. Not for private tabs:
                     // that would write down that the site was visited.
-                    if !self.tabs[i].private
-                        && !self.tabs[i].agent
-                        && sitefavs::remember(&mut self.site_favs, &self.tabs[i].url, &f)
-                    {
-                        self.site_favs_dirty = true;
-                        self.chrome.set_site_fav(&speeddial::host_of(&self.tabs[i].url), &f);
+                    if !self.tabs[i].private && !self.tabs[i].agent {
+                        if sitefavs::remember(&mut self.site_favs, &self.tabs[i].url, &f) {
+                            self.site_favs_dirty = true;
+                            self.chrome.set_site_fav(&speeddial::host_of(&self.tabs[i].url), &f);
+                        }
+                        // Same visit fills the on-disk icon cache the redesign draws from.
+                        use base64::Engine as _;
+                        if let Some(b64) = f.strip_prefix("data:image/png;base64,")
+                            && let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64)
+                        {
+                            favicons::remember(&speeddial::host_of(&self.tabs[i].url), &png);
+                        }
                     }
                     self.tabs[i].favicon = f;
                     self.fav_queue.push(id);
