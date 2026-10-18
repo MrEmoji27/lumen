@@ -322,6 +322,14 @@ fn smoke() {
     assert!(out.contains("\"ok\": false") && out.contains("upload"), "{out}");
     eprintln!("TIME batch_and_script_rules: {:.1}s", t0.elapsed().as_secs_f64());
 
+    // the_person_speaks: a message rides on the next reply, once, before anything else.
+    let (code, _) = run_agent(&dir, "smoke", "browser_test_tell", &["say=now", "text=use the cheaper one"]);
+    assert_eq!(code, 0);
+    let (_, out) = run_agent(&dir, "smoke", "browser_tabs", &[]);
+    assert!(out.starts_with("[The person says, now: \"use the cheaper one\"]"), "the message did not lead the reply: {out}");
+    let (_, out) = run_agent(&dir, "smoke", "browser_tabs", &[]);
+    assert!(!out.contains("The person says"), "a message is delivered once: {out}");
+
     // close tabs
     let _ = run_agent(&dir, "smoke", "browser_close", &[&format!("tab={}", tab)]);
 

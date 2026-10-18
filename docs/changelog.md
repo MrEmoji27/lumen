@@ -7,6 +7,20 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.5.0 — 2026-10-18
+
+- Watching: click an agent's tab and a shield goes over its page, so a stray click or scroll
+  cannot knock the agent off. The agent's cursor is drawn over it in the agent's colour, with its
+  name: it glides to every point the agent clicks, hovers or types at, and rings on a click. A
+  pill at the bottom says the agent's last step and has **Take over**: the shield goes, the page
+  is yours, the agent may only ask for it back, and **Give back** returns it.
+- Talking to an agent: the send button on an agent's row in the sidebar opens a message.
+  **Steer now** puts `[The person says, now: "..."]` at the top of that agent's next reply;
+  **Queue** says it is for after the current task; **New task** starts a Drive run. A queued
+  message to a Drive run starts the next run when this one ends. The row says what became of the
+  message: waiting for its next call, delivered with which call, or dropped because the agent
+  left. The MCP instructions tell every agent what those lines are.
+
 ## 0.4.2 — 2026-10-18
 
 From a test drive on real pages (httpbin, Wikipedia):

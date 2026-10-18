@@ -297,6 +297,34 @@ you: that tab comes to the front with a message and a Done button.
 - **Idle tabs stop painting.** A stage view whose agent has made no call for 30 s is set invisible:
   no painting, throttled timers. Its next call makes it visible again before the call runs.
 
+### Watching an agent
+
+Click an agent's tab. Its page moves into your window, live, and three things go over it:
+
+- **A shield.** Clicks, the wheel and keys stop at it, so a stray hand cannot knock the agent off.
+  The page shows at full speed under it.
+- **The agent's cursor**: an arrow in the agent's colour with its name, at the point the agent
+  last clicked, hovered or typed. It glides there, and rings on a click. It is drawn only while
+  you watch; the agent never sees it.
+- **A pill** at the bottom: the agent's last step, and **Take over**. Taken over, the shield goes
+  and the page is yours; the agent may only ask for it back (`browser_handoff`). **Give back**
+  returns it.
+
+### Talking to an agent
+
+The send button on an agent's row in the sidebar opens a message to it:
+
+- **Steer now**: the agent's next reply starts with `[The person says, now: "use the cheaper
+  one"]`. It outranks the task.
+- **Queue**: `[The person says, for when your current task is done: "then email me the link"]`.
+  To a Drive run, a queued message starts the next run when this one ends.
+- **New task**: a new Drive run. Lumen cannot start a task inside a terminal someone else opened.
+
+A message rides on the agent's next call: an agent that has finished its turn and sits in its
+terminal gets it when it calls again. The row says which: waiting, delivered (with which call),
+or dropped because the agent left. Only Lumen's window makes those lines; a page that writes
+them gets them quoted inside its page-text fence.
+
 `lumen.exe --headless` (or `LUMEN_HEADLESS=1`) runs a real Lumen whose window sits off-screen. It
 never takes focus, has no taskbar button and makes no sound, and pages still paint at full speed,
 so screenshots work. lumen-agent starts this kind when no Lumen is running. It leaves by itself

@@ -136,6 +136,8 @@ pub struct UiState {
     pub cpu_cap: bool,
     pub downloads: Vec<UiDl>,
     pub agent_busy: bool,
+    /// Per agent session: what became of the person's last message to it, in words.
+    pub agent_notes: Vec<(String, String)>,
     pub agent_cmd: String,
     /// A site waiting for a permission answer: (request id, origin, what).
     pub prompt: Option<(u64, String, &'static str)>,
@@ -243,7 +245,7 @@ fn agent_groups(s: &UiState) -> Vec<AgentGroup<'_>> {
 
 /// A colour per agent, from the session id: the dot on its group header, and nothing
 /// else. Two agents in the sidebar are told apart at a glance.
-fn agent_color(owner: &str) -> theme::Color {
+pub(crate) fn agent_color(owner: &str) -> theme::Color {
     const DOTS: [(f32, f32, f32); 6] = [
         (0.47, 0.67, 1.00),
         (1.00, 0.67, 0.47),
@@ -316,6 +318,8 @@ pub enum Hit {
     AgentStop,
     /// The Stop button on one agent's group header, for that MCP session.
     AgentStopSession(String),
+    /// The speech button on an agent's group row: a message for it. (session, its name)
+    AgentMessage(String, String),
     PermAllow(u64),
     HandoffDone,
     PermBlock(u64),
@@ -2210,7 +2214,8 @@ impl Inner {
                     let r = R::new(sb.x + pad, list.y - self.scroll + oy, sb.w - 2.0 * pad, *h - 2.0);
                     if *h > 8.0 && r.bottom() >= list.y && r.y <= list.bottom() {
                         let n = groups.iter().find(|g| g.head.id == head.id).map_or(0, |g| g.tabs.len());
-                        self.draw_agent_group(head, r, n, wf);
+                        let note = s.agent_notes.iter().find(|(id, _)| *id == head.owner).map(|(_, n)| n.clone());
+                        self.draw_agent_group(head, r, n, wf, note);
                     }
                 }
             }
@@ -2507,20 +2512,35 @@ impl Inner {
 
     /// The header of one agent's block: its colour dot, its name, how many tabs it has,
     /// and Stop, which ends that agent (its tabs close and its profile data is deleted).
-    fn draw_agent_group(&mut self, head: &UiTab, r: R, tabs: usize, alpha: f32) {
+    fn draw_agent_group(&mut self, head: &UiTab, r: R, tabs: usize, alpha: f32, note: Option<String>) {
         let lo = self.look.clone();
         let th = lo.theme;
         let dot = agent_color(&head.owner);
         self.gfx.circle(r.x + 9.0, r.y + r.h / 2.0, 4.0, dot.alpha(alpha));
         let name = if head.owner_name.trim().is_empty() { "agent" } else { head.owner_name.trim() };
-        let label = if tabs > 1 { format!("{name} · {tabs} tabs") } else { name.to_string() };
+        // What became of the person's last message to it, else how many tabs it has.
+        let label = match note {
+            Some(n) => format!("{name} · {n}"),
+            None if tabs > 1 => format!("{name} · {tabs} tabs"),
+            None => name.to_string(),
+        };
         let stop = R::new(r.right() - 46.0, r.y + 3.0, 46.0, r.h - 6.0);
+        // Talk to it: steer, queue, or a new task.
+        let say = R::new(stop.x - 26.0, r.y + 3.0, 24.0, r.h - 6.0);
+        let say_hit = Hit::AgentMessage(head.owner.clone(), name.to_string());
+        let sa = self.motion.hover(Self::button_id(&say_hit), if self.is_hover(&say_hit) { 1.0 } else { 0.0 });
+        if sa > 0.01 {
+            self.gfx.round(say, lo.r_sm, th.hover.alpha(sa.min(1.0) * alpha));
+        }
+        self.gfx.icon("send", say.x + (say.w - 13.0) / 2.0, say.y + (say.h - 13.0) / 2.0, 13.0, (if sa > 0.5 { th.text } else { th.dim }).alpha(alpha));
+        self.hit(say, say_hit);
+        let stop_x = say.x;
         let hit = Hit::AgentStopSession(head.owner.clone());
         let a = self.motion.hover(Self::button_id(&hit), if self.is_hover(&hit) { 1.0 } else { 0.0 });
         if a > 0.01 {
             self.gfx.round(stop, lo.r_sm, th.accent.alpha(0.22 * a.min(1.0) * alpha));
         }
-        self.gfx.text(&label, R::new(r.x + 19.0, r.y, stop.x - r.x - 23.0, r.h), lo.font(11.5, 600), th.dim.alpha(alpha));
+        self.gfx.text(&label, R::new(r.x + 19.0, r.y, stop_x - r.x - 23.0, r.h), lo.font(11.5, 600), th.dim.alpha(alpha));
         self.gfx.text("Stop", stop, lo.font(11.0, 600).align(Align::Center), (if a > 0.5 { th.text } else { th.accent }).alpha(alpha));
         self.hit(stop, hit);
     }
@@ -3517,6 +3537,16 @@ impl Inner {
             }
             Hit::AgentStop => send(p, json!({"t": "agentStop"})),
             Hit::AgentStopSession(session) => send(p, json!({"t": "agentStopSession", "session": session})),
+            Hit::AgentMessage(session, name) => {
+                let note = "Steer: it reads this with its next call, before anything else. Queue: for after its task. New task: a new Drive run.";
+                if let Some((n, a)) = dialog::ask_with(self.hwnd, &format!("Message to {name}"), &[(note, "")], &["Steer now", "Queue", "New task"]) {
+                    let text = a.first().cloned().unwrap_or_default();
+                    if !text.trim().is_empty() {
+                        let say = ["now", "later", "new"][n.min(2)];
+                        send(p, json!({"t": "agentTell", "session": session, "say": say, "text": text}));
+                    }
+                }
+            }
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => {

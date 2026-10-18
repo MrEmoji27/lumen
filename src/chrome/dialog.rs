@@ -20,12 +20,16 @@ use windows::{
 /// 1 and 2 are the ids Windows itself uses for Enter and Escape.
 const ID_OK: usize = 1;
 const ID_CANCEL: usize = 2;
+/// A form's other buttons are 301, 302, ...: the first is also ID_OK, Enter's.
+const ID_MORE: usize = 301;
 /// The text boxes are 101, 102, ...
 const ID_FIRST: usize = 101;
 
 thread_local! {
     static GOT: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
     static COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Which button answered the form: 0 for OK (or Enter), n for the n-th of the others.
+    static BUTTON: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -33,11 +37,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         match msg {
             WM_COMMAND => {
                 let id = wp.0 & 0xFFFF;
-                if id == ID_OK {
+                if id == ID_OK || id >= ID_MORE {
+                    BUTTON.set(if id >= ID_MORE { id - ID_MORE } else { 0 });
                     let all = (0..COUNT.get()).map(|k| super::wide_text(GetDlgItem(Some(hwnd), (ID_FIRST + k) as i32).unwrap_or_default())).collect();
                     GOT.with(|g| *g.borrow_mut() = Some(all));
                 }
-                if id == ID_OK || id == ID_CANCEL {
+                if id == ID_OK || id == ID_CANCEL || id >= ID_MORE {
                     let _ = DestroyWindow(hwnd);
                 }
                 LRESULT(0)
@@ -58,7 +63,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 /// Ask for `fields` (label, starting text). The answers in the same order, or None when
 /// cancelled. The first box has the focus and its text selected.
 pub fn ask_fields(owner: HWND, title: &str, fields: &[(&str, &str)]) -> Option<Vec<String>> {
+    ask_with(owner, title, fields, &[]).map(|(_, a)| a)
+}
+
+/// The same form with buttons of its own instead of OK (Cancel stays): which was pressed,
+/// and the answers. Enter is the first.
+pub fn ask_with(owner: HWND, title: &str, fields: &[(&str, &str)], buttons: &[&str]) -> Option<(usize, Vec<String>)> {
     GOT.with(|g| *g.borrow_mut() = None);
+    BUTTON.set(0);
     COUNT.set(fields.len());
     let class = w!("LumenForm");
     let hinst: HINSTANCE = unsafe { GetModuleHandleW(None) }.map(|h| h.into()).unwrap_or_default();
@@ -70,7 +82,8 @@ pub fn ask_fields(owner: HWND, title: &str, fields: &[(&str, &str)]) -> Option<V
         let _ = GetWindowRect(owner, &mut owner_r);
         let k = GetDpiForWindow(owner).max(96) as f32 / 96.0;
         let row = 52.0;
-        let (wpx, hpx) = ((420.0 * k) as i32, ((fields.len() as f32 * row + 98.0) * k) as i32);
+        let wide = 420.0f32.max(48.0 + 100.0 * (buttons.len().max(1) + 1) as f32);
+        let (wpx, hpx) = ((wide * k) as i32, ((fields.len() as f32 * row + 98.0) * k) as i32);
         let x = (owner_r.left + (owner_r.right - owner_r.left - wpx) / 2).max(0);
         let y = (owner_r.top + (owner_r.bottom - owner_r.top - hpx) / 2).max(0);
         let title_w: Vec<u16> = format!("{title}\0").encode_utf16().collect();
@@ -135,26 +148,35 @@ pub fn ask_fields(owner: HWND, title: &str, fields: &[(&str, &str)]) -> Option<V
                 first = edit;
             }
         }
-        let ok: Vec<u16> = "OK\0".encode_utf16().collect();
-        let cancel: Vec<u16> = "Cancel\0".encode_utf16().collect();
         let by = hpx - px(78.0);
-        for (id, text, def) in [(ID_OK, ok.as_slice(), true), (ID_CANCEL, cancel.as_slice(), false)] {
+        // Right to left: Cancel at the edge, then the answers, the first (Enter's) leftmost.
+        let mut row: Vec<(usize, String, bool)> = if buttons.is_empty() {
+            vec![(ID_OK, "OK".into(), true)]
+        } else {
+            buttons.iter().enumerate().map(|(n, b)| (ID_MORE + n, b.to_string(), n == 0)).collect()
+        };
+        row.push((ID_CANCEL, "Cancel".into(), false));
+        let mut bx = wpx - px(24.0);
+        for (id, text, def) in row.iter().rev() {
+            bx -= px(96.0);
+            let label: Vec<u16> = format!("{text}\0").encode_utf16().collect();
             let b = CreateWindowExW(
                 WS_EX_LEFT,
                 w!("BUTTON"),
-                PCWSTR(text.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((if def { BS_DEFPUSHBUTTON } else { BS_PUSHBUTTON }) as u32),
-                wpx - px(24.0) - px(196.0) + if def { px(100.0) } else { 0 },
+                PCWSTR(label.as_ptr()),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((if *def { BS_DEFPUSHBUTTON } else { BS_PUSHBUTTON }) as u32),
+                bx,
                 by,
-                px(96.0),
+                px(92.0),
                 px(28.0),
                 Some(hwnd),
-                Some(HMENU(id as _)),
+                Some(HMENU(*id as _)),
                 Some(hinst),
                 None,
             )
             .unwrap_or_default();
             let _ = SendMessageW(b, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+            bx -= px(4.0);
         }
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(first));
@@ -188,7 +210,7 @@ pub fn ask_fields(owner: HWND, title: &str, fields: &[(&str, &str)]) -> Option<V
             let _ = DeleteObject(font.into());
         }
     }
-    GOT.with(|g| g.borrow_mut().take())
+    GOT.with(|g| g.borrow_mut().take()).map(|a| (BUTTON.get(), a))
 }
 
 // ------------------------------------------------------------------- a choice

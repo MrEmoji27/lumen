@@ -34,6 +34,7 @@ mod recall;
 mod servo_engine;
 mod split;
 mod stage;
+mod watch;
 mod translate;
 mod upnp;
 mod video;
@@ -499,6 +500,12 @@ struct App {
     agent_last: Instant,
     /// Off-screen stage window hosting agent tabs' views. Made with the first agent tab.
     stage: Option<stage::Stage>,
+    /// The shield, the agent's cursor and the pill over a watched agent tab. Made with
+    /// the first watch.
+    watch: Option<watch::Watch>,
+    /// Agent sessions whose tab the person took over from the watch pill: the shield is
+    /// off and the agent may only ask for the tab back until the person gives it back.
+    taken: std::collections::HashSet<String>,
     /// Modifier keys as the main window last saw them.
     mods: ModifiersState,
     /// Remembered permission answers, and requests waiting for the user.
@@ -870,6 +877,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         agent_seen: None,
         agent_last: Instant::now(),
         stage: None,
+        watch: None,
+        taken: Default::default(),
         mods: ModifiersState::empty(),
         rules: store::load_rules(),
         zooms: store::load_zooms(),
@@ -1056,6 +1065,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 }
             }
             Event::WindowEvent { event, .. } => match event {
+                WindowEvent::Moved(_) => app.sync_watch(),
                 WindowEvent::Resized(size) => {
                     if size.width == 0 || size.height == 0 {
                         // Minimized. Nobody is looking. Trim the active page too.
@@ -1815,6 +1825,50 @@ impl App {
         if moving {
             self.push();
         }
+        self.sync_watch();
+    }
+
+    /// The watch over the page: on when the active tab is an agent's and the page shows
+    /// (no panel over it, not full-screen UI), off otherwise. Its pill says the last step.
+    fn sync_watch(&mut self) {
+        let t = self.active_tab().filter(|t| t.agent && t.view.is_some() && !t.owner.is_empty());
+        let on = t.is_some() && self.panel == Panel::None && !self.ui_full() && !self.minimized && !headless();
+        if !on {
+            if let Some(w) = &self.watch {
+                w.hide();
+            }
+            return;
+        }
+        let (owner, name) = t.map(|t| (t.owner.clone(), t.owner_name.clone())).unwrap_or_default();
+        let (act, _, _) = self.panes();
+        let step = self.agent.last_step(&owner);
+        let taken = self.taken.contains(&owner);
+        let c = chrome::agent_color(&owner);
+        let rgb = ((c.0 * 255.0) as u8, (c.1 * 255.0) as u8, (c.2 * 255.0) as u8);
+        let name = if name.trim().is_empty() { "agent".to_string() } else { name.trim().to_string() };
+        let w = self.watch.get_or_insert_with(|| watch::Watch::new(self.ctx.window.hwnd() as isize, self.ctx.proxy.clone()));
+        w.show(act, &name, rgb, &step, taken);
+    }
+
+    /// For each agent session, what became of the person's last message to it, in words.
+    fn note_states(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for n in self.agent.notes() {
+            let state = match &n.state {
+                agent::NoteState::Waiting => "message waiting for its next call".to_string(),
+                agent::NoteState::Delivered { tool, .. } => format!("message delivered with {}", tool.trim_start_matches("browser_")),
+                agent::NoteState::Dropped => "message dropped: the agent left".to_string(),
+            };
+            out.retain(|(s, _)| *s != n.session);
+            out.push((n.session.clone(), state));
+        }
+        out
+    }
+
+    /// The watched tab, if this is it: (zoom percent).
+    fn watched_zoom(&self, tab: u64) -> Option<u32> {
+        let t = self.active_tab().filter(|t| t.id == tab && t.agent)?;
+        self.watch.as_ref().filter(|w| w.shown()).map(|_| t.zoom)
     }
 
     fn focus_page(&self) {
@@ -1830,6 +1884,12 @@ impl App {
         #[cfg(feature = "servo")]
         if let Some(p) = self.active_tab().and_then(|t| t.servo.as_ref()) {
             p.focus();
+            return;
+        }
+        // A watched agent tab is behind its shield: the keys stay with the window,
+        // unless the person took the tab over.
+        if self.active_tab().is_some_and(|t| t.agent && !self.taken.contains(&t.owner)) {
+            self.chrome.focus();
             return;
         }
         match self.active_tab().and_then(|t| t.view.as_ref()) {
@@ -1924,6 +1984,7 @@ impl App {
                 dl_unseen: self.dl_unseen,
                 upnp_port_open: self.upnp.is_mapped(),
                 agent_busy: self.agent_seen.is_some(),
+                agent_notes: self.note_states(),
                 bookmarked: self.active_tab().is_some_and(|t| !t.url.is_empty() && self.library.is_bookmarked(&t.url)),
                 listen: match self.tabs.iter().find(|t| t.id == self.active) {
                     Some(t) if t.reader.is_some() && !t.agent => match &self.aloud {
@@ -2253,6 +2314,7 @@ impl App {
         self.focus_page();
         self.dirty = true;
         self.push();
+        self.sync_watch();
     }
 
     /// A page that is on screen must be neither frozen nor trimmed, however long
@@ -5357,6 +5419,50 @@ impl App {
                 self.agent_seen = None;
                 self.push();
             }
+            "watchTakeOver" | "watchGiveBack" => {
+                let Some(owner) = self.active_tab().filter(|t| t.agent).map(|t| t.owner.clone()) else { return };
+                let take = m["t"] == "watchTakeOver";
+                // Taken over: the agent may only ask for the tab back (browser_handoff) until the
+                // person gives it back. The shield goes, the page takes the keyboard.
+                self.agent.set_paused(&owner, take);
+                if take {
+                    self.taken.insert(owner);
+                } else {
+                    self.taken.remove(&owner);
+                }
+                self.sync_watch();
+                self.focus_page();
+                self.chrome.flash(if take { "The tab is yours; the agent waits until you give it back".into() } else { "Given back to the agent".into() });
+                self.push();
+            }
+            "agentTell" => {
+                let session = m["session"].as_str().unwrap_or("").to_string();
+                let text = m["text"].as_str().unwrap_or("").trim().to_string();
+                if text.is_empty() {
+                    return;
+                }
+                match m["say"].as_str().unwrap_or("") {
+                    // A new task is a new Drive run: Lumen cannot open a task inside a terminal
+                    // session someone else started.
+                    "new" => self.drive_start_task(text),
+                    say => {
+                        let say = if say == "later" { agent::Say::Later } else { agent::Say::Now };
+                        // A Drive run that already ended takes a queued message as its next run.
+                        let drive_over = self.drive.as_ref().is_some_and(|d| d.exit.is_some() && d.session.as_deref() == Some(session.as_str()));
+                        if drive_over {
+                            self.drive_start_task(text);
+                        } else if self.agent.tell(&session, say, &text) {
+                            self.chrome.flash(match say {
+                                agent::Say::Now => "Sent: it reaches the agent with its next call".into(),
+                                agent::Say::Later => "Queued: it reaches the agent with its next call, for after its task".into(),
+                            });
+                        } else {
+                            self.chrome.flash("That agent is gone; the message was not sent".into());
+                        }
+                    }
+                }
+                self.push();
+            }
             "agentStopSession" => {
                 // The per-agent Stop in the sidebar: this session ends now. Its id stops
                 // working, its tabs close, and what it left behind is wiped.
@@ -5956,6 +6062,10 @@ impl App {
             self.push();
         }
         self.agent_seen = Some(Instant::now());
+        // The pill says what the watched agent did last; its step list grows per tool call.
+        if self.watch.as_ref().is_some_and(|w| w.shown()) && self.active_tab().is_some_and(|t| t.agent && t.owner == call.who.session) {
+            self.sync_watch();
+        }
         let (reply, who) = (call.reply, call.who);
         // One line per session, not per call. No tab, no page, no content.
         journal::agent_session(&who.session, &who.name);
@@ -6102,6 +6212,14 @@ impl App {
                 }
                 let _ = reply.send(Ok(json!({"tab": id})));
             }
+            Op::Pointer { tab, x, y } => {
+                if let Some(zoom) = self.watched_zoom(tab)
+                    && let Some(w) = &self.watch
+                {
+                    w.point(x, y, zoom, "type");
+                }
+                let _ = reply.send(Ok(Value::Null));
+            }
             Op::NavInfo { tab } => {
                 if let Some(i) = mine(self, tab) {
                     let v = self.tabs[i].last_nav;
@@ -6218,6 +6336,14 @@ impl App {
                 }
                 if self.tabs[i].view.is_none() {
                     self.ensure_view(i);
+                }
+                // Watched: the agent's cursor goes where its mouse goes.
+                if method == "Input.dispatchMouseEvent"
+                    && let Some(zoom) = self.watched_zoom(tab)
+                    && let Some(w) = &self.watch
+                {
+                    let kind = if params["type"] == "mousePressed" { "press" } else { "move" };
+                    w.point(params["x"].as_f64().unwrap_or(0.0), params["y"].as_f64().unwrap_or(0.0), zoom, kind);
                 }
                 match &self.tabs[i].view {
                     Some(v) => agentkit::cdp(v, &method, &params, move |r| {
@@ -6448,12 +6574,17 @@ impl App {
     /// with Lumen as its MCP server. The run gets its own session, its own profile and
     /// its own download folder; nothing of it touches the person's tabs or logins.
     fn drive_start(&mut self) {
+        let task = self.chrome.drive_task();
+        self.drive_start_task(task);
+    }
+
+    /// A Drive run for this task: from the Drive panel, or a "New task" message.
+    fn drive_start_task(&mut self, task: String) {
         if self.drive.as_ref().is_some_and(|d| d.exit.is_none()) {
             self.chrome.flash("a Drive run is going; stop it first".into());
             self.push();
             return;
         }
-        let task = self.chrome.drive_task();
         if task.trim().is_empty() {
             self.chrome.flash("type a task in the Drive panel first".into());
             self.push();
@@ -6607,6 +6738,8 @@ impl App {
         let code = d.child.try_wait().ok().flatten().and_then(|s| s.code());
         d.exit = Some(code.unwrap_or(-1));
         let (name, session) = (d.name.clone(), d.session.clone());
+        // What the person queued for after this run is the next run's task.
+        let next = session.as_deref().map(|s| self.agent.take_later(s)).unwrap_or_default();
         // The run is over: its tabs close and its profile data goes.
         if let Some(sid) = session
             && let Some(who) = self.agent.end_session(&sid)
@@ -6616,6 +6749,9 @@ impl App {
         // Nothing of the run is left to remember but its own step list, which the panel
         // still shows; the session's state goes when a new run starts.
         self.chrome.flash(format!("Drive run {name} finished"));
+        if !next.is_empty() {
+            self.drive_start_task(next.join("\n"));
+        }
         self.push();
     }
 

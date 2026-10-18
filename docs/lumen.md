@@ -1,6 +1,6 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.4.0,
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.5.0,
 18 October 2026. Early, in daily use by one person, Windows only.
 
 ## What it is
@@ -205,9 +205,9 @@ In order. Each step ships as its own version, with a line in [the changelog](cha
 2. **The agent stage.** Agent tabs live in a window of their own, off every screen. WebView2 sees
    them as visible, so clicks land, and nothing comes to the front. *Done in 0.3.0.*
 3. **Watching.** Click an agent's tab to see its live page, with the agent's own cursor in the
-   accent colour. Your mouse cannot knock it off. *Watching is in 0.3.0; the cursor is next.*
+   accent colour. Your mouse cannot knock it off. *Done in 0.5.0.*
 4. **Talking to an agent.** A text field to steer an agent now, queue its next task, or start a
-   new one.
+   new one. *Done in 0.5.0.*
 5. **Speed for agents.** Fewer calls and smaller replies: batches of steps, Luau scripts, and
    higher-level tools for forms and tables. *Done in 0.4.0.* Snapshots that send only what
    changed are still to do.

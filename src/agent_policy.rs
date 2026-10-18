@@ -197,6 +197,7 @@ const TEST_RULES: &[Rule] = &[
     rule("browser_test_profile", Scope::Tab, Gate::Nothing),
     // Free on purpose: the watch smoke step activates the person's own first tab.
     rule("browser_test_activate", Scope::Free, Gate::Nothing),
+    rule("browser_test_tell", Scope::Free, Gate::Nothing),
     rule("browser_test_pause", Scope::Free, Gate::Nothing),
     rule("browser_test_decline", Scope::Free, Gate::Nothing),
     rule("browser_test_consent_approve", Scope::Free, Gate::Nothing),
