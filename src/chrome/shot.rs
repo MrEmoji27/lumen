@@ -138,6 +138,7 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             "newtab" => Action::NewTab,
                             "fullscreen" => Action::Fullscreen,
                             "tabsearch" => Action::TabSearch,
+                            "palette" => Action::Palette,
                             _ => continue,
                         };
                         let _ = proxy.send_event(Ev::Key(a));

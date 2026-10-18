@@ -247,6 +247,8 @@ pub enum Action {
     TranslatePage,
     /// Ctrl+Shift+A: find an open tab, of any workspace.
     TabSearch,
+    /// Ctrl+K: the command palette over the sidebar.
+    Palette,
 }
 
 pub struct Ctx {
@@ -1331,7 +1333,9 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, true, false, v) if v == k('N') => NewPrivate,
         (true, true, false, v) if v == k('T') => Reopen,
         (true, false, false, v) if v == k('W') => CloseTab,
-        (true, false, false, v) if v == k('L') || v == k('K') => Omnibox,
+        (true, false, false, v) if v == k('L') => Omnibox,
+        // Ctrl+K used to open the address bar with Ctrl+L; the palette has it now.
+        (true, false, false, v) if v == k('K') => Palette,
         (false, false, false, F6) => Omnibox,
         (true, false, false, TAB) => NextTab,
         (true, true, false, TAB) => PrevTab,
@@ -1722,6 +1726,16 @@ mod tests {
         assert!(matches!(map_key(t, true, true, false), Some(Action::Reopen)));
         assert!(map_key(n, true, false, false).is_none());
         assert!(map_key(n, false, true, false).is_none());
+    }
+
+    #[test]
+    fn ctrl_k_is_the_command_palette_and_ctrl_l_the_address_bar() {
+        let k = 'K' as u32;
+        let l = 'L' as u32;
+        assert!(matches!(map_key(k, true, false, false), Some(Action::Palette)));
+        assert!(matches!(map_key(l, true, false, false), Some(Action::Omnibox)));
+        // F6 still opens the address bar on its own.
+        assert!(matches!(map_key(0x75, false, false, false), Some(Action::Omnibox)));
     }
 
     #[test]

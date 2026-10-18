@@ -454,6 +454,8 @@ struct App {
     /// The site whose row was clicked on the report page.
     report_site: Option<String>,
     peek: bool,
+    /// The command palette is open: its rows need the history and bookmark lists.
+    pal_open: bool,
     page_fs: bool,
     user_fs: bool,
     ui_ready: bool,
@@ -869,6 +871,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         report_range: "today".into(),
         report_site: None,
         peek: false,
+        pal_open: false,
         page_fs: false,
         user_fs: false,
         ui_ready: true,
@@ -2053,7 +2056,7 @@ impl App {
                     _ => Vec::new(),
                 },
                 vault: self.vault.as_ref().map_or(0, |v| v.len()),
-                history: if self.panel == Panel::History {
+                history: if self.panel == Panel::History || self.pal_open {
                     self.library
                         .recent("", 0, 400)
                         .into_iter()
@@ -2065,7 +2068,7 @@ impl App {
                 } else {
                     Vec::new()
                 },
-                bookmarks: if self.panel == Panel::Bookmarks || bar_bookmarks {
+                bookmarks: if self.panel == Panel::Bookmarks || bar_bookmarks || self.pal_open {
                     self.library.bookmarks().into_iter().map(ui_mark).collect()
                 } else {
                     Vec::new()
@@ -4719,6 +4722,7 @@ impl App {
             Action::TranslatePage => self.toggle_translate(i),
             // The switcher lives in the chrome: it owns the list box and the typing.
             Action::TabSearch => self.chrome.open_tab_search(),
+            Action::Palette => self.chrome.open_palette(),
         }
     }
 
@@ -4955,6 +4959,11 @@ impl App {
                 if let Ok(s) = serde_json::from_value::<Settings>(m["v"].clone()) {
                     self.apply_settings(s);
                 }
+            }
+            "palOpen" => {
+                // The palette's rows list history and bookmarks while it is open.
+                self.pal_open = m["open"].as_bool().unwrap_or(false);
+                self.push();
             }
             "dashboard" => {
                 // The dashboard is Lumen's own home: the clock, the search box and

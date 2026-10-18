@@ -208,6 +208,8 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 - Downloads through aria2, torrents, saving the video on a page.
 - History you can search by what a page said.
 - Pins, bookmarks with folders and import, a speed dial, workspaces, split view, tab search.
+- Ctrl+K opens a command palette over the sidebar: type and pick a command, a setting, an open
+  tab, a bookmark or a page from history. Esc or a second Ctrl+K puts it away.
 - KeePass logins filled from a `.kdbx` file, kept in memory only, locked after 10 minutes.
 - Can be set as Windows' default for web links.
 - A usage journal on the PC (memory, CPU, slow sites, crashes) that sends nothing anywhere.

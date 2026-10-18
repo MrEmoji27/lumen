@@ -115,7 +115,7 @@ pub enum PageHit {
 pub const PORTFOLIO: &str = "https://portfolio.mremoji47.workers.dev/";
 
 #[derive(Clone, Copy)]
-enum Scale {
+pub(super) enum Scale {
     Linear(f32, f32, f32),
     Steps(&'static [u32]),
 }
@@ -194,7 +194,7 @@ struct DropRow {
 
 // ------------------------------------------------------------------ schema
 
-enum Item {
+pub(super) enum Item {
     /// Palette presets and the custom colours: the whole Colours group.
     Colors,
     /// The saved looks: save, apply, export, import.
@@ -238,7 +238,7 @@ const ENGINES: [(&str, &str); 5] = [
     ("Bing", "https://www.bing.com/search?q=%s"),
     ("Startpage", "https://www.startpage.com/do/search?q=%s"),
 ];
-const KEYS: [(&str, &str); 30] = [
+const KEYS: [(&str, &str); 31] = [
     ("New tab", "Ctrl+T"),
     ("New private tab", "Ctrl+Shift+N"),
     ("Reopen closed tab", "Ctrl+Shift+T"),
@@ -247,6 +247,7 @@ const KEYS: [(&str, &str); 30] = [
     ("Next / previous tab", "Ctrl+Tab / Ctrl+Shift+Tab"),
     ("Jump to tab", "Ctrl+1…9"),
     ("Search open tabs", "Ctrl+Shift+A"),
+    ("Command palette", "Ctrl+K"),
     ("Back / forward", "Alt+← / Alt+→"),
     ("Reload", "Ctrl+R"),
     ("Compact sidebar", "Ctrl+B"),
@@ -275,7 +276,7 @@ const KEYS: [(&str, &str); 30] = [
 /// The zoom sizes Ctrl++ steps through in Chromium, for the default-zoom slider.
 const ZOOM_STOPS: &[u32] = &[25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500];
 
-fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
+pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
     use Item::*;
     vec![
         ("General", vec![DefaultBrowser]),
@@ -2692,7 +2693,7 @@ fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
 }
 
 /// A Settings section's icon in the menu.
-fn section_icon(name: &str) -> &'static str {
+pub(super) fn section_icon(name: &str) -> &'static str {
     match name {
         "General" => "globe",
         "Appearance" => "palette",
@@ -2746,9 +2747,29 @@ fn item_words(it: &Item) -> String {
 }
 
 /// Every word typed is in the section's name or the setting's words.
-fn item_matches(q: &str, section: &str, it: &Item) -> bool {
+pub(super) fn item_matches(q: &str, section: &str, it: &Item) -> bool {
     let hay = format!("{section} {}", item_words(it)).to_lowercase();
     q.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+}
+
+/// The name a setting shows in the command palette: the words its row is called by,
+/// for the rows that are a whole widget.
+pub(super) fn pal_label(it: &Item) -> String {
+    use Item::*;
+    match it {
+        Seg(_, l, _, _) | Pick(_, l, _, _) | Toggle(_, l, _) | Range(_, l, _, _, _) | Fonts(_, l, _) | Text(_, l, _) => l.to_string(),
+        Button(l, _, _, _) | Reset(_, l) => l.to_string(),
+        Colors => "Look".into(),
+        Themes => "Saved themes".into(),
+        Wallpaper => "Wallpaper".into(),
+        Layout => "Layout".into(),
+        Engine => "Search engine".into(),
+        Keys => "Keyboard shortcuts".into(),
+        KeePass => "KeePass".into(),
+        AgentSetup => "Agent setup".into(),
+        SitePerms => "Site permissions".into(),
+        DefaultBrowser => "Default browser".into(),
+    }
 }
 
 fn draw_settings(i: &mut Inner, st: R, s: &UiState) {

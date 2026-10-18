@@ -376,6 +376,10 @@ pub enum Hit {
     TabSearch(usize),
     /// The tab search card itself: clicks on it are not clicks outside it.
     SearchCard,
+    /// A row of the command palette.
+    Pal(usize),
+    /// The command palette card itself: clicks on it are not clicks outside it.
+    PaletteCard,
     /// The message card itself, its kinds, Send and its close button.
     SayCard,
     SayMode(usize),
@@ -665,6 +669,16 @@ pub(crate) struct Inner {
     /// 1 queue, 2 new task). Its text box is a real edit window.
     say: Option<Say>,
     say_edit: HWND,
+    /// The command palette (Ctrl+K) is open.
+    pal_open: bool,
+    /// The filter box of the command palette; a real edit window.
+    palette_edit: HWND,
+    /// The row the command palette has picked.
+    pal_sel: usize,
+    /// What the last palette frame listed, so a click knows what it lands on.
+    pal_rows: Vec<PalRow>,
+    /// Words the palette left for the Settings page's own search box.
+    pal_jump: Option<String>,
     /// The Settings page's search box.
     set_edit: HWND,
     /// The report page's "what happened" box.
@@ -748,6 +762,7 @@ const ID_SRCH: usize = 105;
 const ID_SAY: usize = 106;
 const ID_SET: usize = 107;
 const ID_BUG: usize = 108;
+const ID_PAL: usize = 109;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -835,6 +850,163 @@ fn rank_rows(all: &[SwitchRow], q: &str) -> Vec<SwitchRow> {
 /// The tab search card's rectangle: at the top of the cards' area.
 fn search_card(area: R, right: bool, rows: usize, more: bool) -> R {
     let h = 52.0 + rows as f32 * 32.0 + if rows == 0 { 34.0 } else { 8.0 } + if more { 20.0 } else { 0.0 };
+    let (x, w) = float_col(area, right);
+    R::new(x, area.y + 8.0, w, h.min(area.h - 16.0))
+}
+
+/// How many rows of the command palette show before the card says how many are left.
+const PAL_ROWS: usize = 12;
+
+/// One line of the command palette: which group it heads, what it says, and what Enter does.
+#[derive(Clone)]
+struct PalRow {
+    /// Some(name) on a group's first row, so the label draws once.
+    group: Option<&'static str>,
+    label: String,
+    detail: String,
+    run: PalRun,
+}
+
+/// What a palette row does when it is picked.
+#[derive(Clone)]
+enum PalRun {
+    /// Anything the main loop already knows how to do.
+    Msg(Value),
+    /// Open Settings with the page's own search box holding these words.
+    Set(String),
+    /// Bring a tab back, the way the tab search does.
+    Switch { id: u64, other: Option<(usize, usize)> },
+    /// Open an address in a new tab.
+    Open(String),
+}
+
+/// Every word typed is in the row's label and detail.
+fn pal_words(row: &PalRow, q: &str) -> bool {
+    let hay = format!("{} {}", row.label, row.detail).to_lowercase();
+    q.split_whitespace().all(|w| hay.contains(w))
+}
+
+/// The palette's rows for `q`: the groups in order, each cut to what fits the card.
+/// With no words typed it is the actions and the open tabs; settings, bookmarks and
+/// history appear once the person starts narrowing.
+fn pal_rows(s: &UiState, q: &str) -> Vec<PalRow> {
+    let mut out: Vec<PalRow> = Vec::new();
+    let mut add = |group: &'static str, mut rows: Vec<PalRow>| {
+        rows.truncate(if q.is_empty() {
+            match group {
+                "ACTIONS" => 7,
+                "TABS" => 5,
+                _ => 0,
+            }
+        } else {
+            match group {
+                "ACTIONS" => 3,
+                "SETTINGS" => 6,
+                "TABS" => 4,
+                _ => 3,
+            }
+        });
+        for (n, r) in rows.into_iter().enumerate() {
+            out.push(PalRow { group: if n == 0 { Some(group) } else { None }, ..r });
+        }
+    };
+    // ACTIONS: the things a person does, and the pages they open.
+    let active = s.active;
+    let mut next = s.settings.clone();
+    next.compact = !next.compact;
+    let which = |w: &'static str| json!({"t": "panel", "open": true, "which": w});
+    let actions = [
+        ("New tab", PalRun::Msg(json!({"t": "newtab"}))),
+        ("New private tab", PalRun::Msg(json!({"t": "newPrivate"}))),
+        ("Close tab", PalRun::Msg(json!({"t": "close", "id": active}))),
+        ("Reload", PalRun::Msg(json!({"t": "reload"}))),
+        ("Settings", PalRun::Msg(json!({"t": "panel", "open": true}))),
+        ("Settings: Look", PalRun::Set("look".into())),
+        ("Toggle compact", PalRun::Msg(json!({"t": "settings", "v": next}))),
+        ("History", PalRun::Msg(which("history"))),
+        ("Bookmarks", PalRun::Msg(which("bookmarks"))),
+        ("Downloads", PalRun::Msg(which("downloads"))),
+        ("Control", PalRun::Msg(which("control"))),
+        ("Privacy report", PalRun::Msg(which("report"))),
+        ("Dashboard", PalRun::Msg(which("dashboard"))),
+    ];
+    let rows: Vec<PalRow> = actions
+        .into_iter()
+        .map(|(label, run)| PalRow { group: None, label: label.into(), detail: String::new(), run })
+        .filter(|r| q.is_empty() || pal_words(r, q))
+        .collect();
+    add("ACTIONS", rows);
+    // SETTINGS: only once the person is narrowing, and never every row at once.
+    if !q.is_empty() {
+        let mut rows = Vec::new();
+        for (section, items) in pages::settings_schema() {
+            for it in &items {
+                if pages::item_matches(q, section, it) {
+                    rows.push(PalRow { group: None, label: pages::pal_label(it), detail: section.into(), run: PalRun::Set(pages::pal_label(it)) });
+                }
+            }
+        }
+        add("SETTINGS", rows);
+    }
+    // TABS: the tab search's own list, filtered and ranked the same way.
+    let rows: Vec<PalRow> = switch_rows(s, q)
+        .into_iter()
+        .map(|row| {
+            let tag = if row.private {
+                "Private".to_string()
+            } else if row.other.is_some() {
+                row.ws_name.clone()
+            } else {
+                String::new()
+            };
+            PalRow { group: None, label: row.label(), detail: tag, run: PalRun::Switch { id: row.id, other: row.other } }
+        })
+        .collect();
+    add("TABS", rows);
+    // BOOKMARKS and HISTORY: open the address in a new tab.
+    if !q.is_empty() {
+        let rows: Vec<PalRow> = s
+            .bookmarks
+            .iter()
+            .map(|m| PalRow {
+                group: None,
+                label: if m.title.is_empty() { m.url.clone() } else { m.title.clone() },
+                detail: m.folder.clone(),
+                run: PalRun::Open(m.url.clone()),
+            })
+            .filter(|r| pal_words(r, q))
+            .collect();
+        add("BOOKMARKS", rows);
+        let rows: Vec<PalRow> = s
+            .history
+            .iter()
+            .map(|v| PalRow {
+                group: None,
+                label: if v.title.is_empty() { v.url.clone() } else { v.title.clone() },
+                detail: host(&v.url),
+                run: PalRun::Open(v.url.clone()),
+            })
+            .filter(|r| pal_words(r, q))
+            .collect();
+        add("HISTORY", rows);
+    }
+    out
+}
+
+/// The rows that show, the groups those head, and how many the filter found in all.
+fn pal_view(s: &UiState, q: &str) -> (Vec<PalRow>, usize, usize) {
+    let all = pal_rows(s, q);
+    let total = all.len();
+    let mut rows = all;
+    rows.truncate(PAL_ROWS);
+    let groups = rows.iter().filter(|r| r.group.is_some()).count();
+    (rows, groups, total)
+}
+
+/// The command palette card's rectangle: at the top of the cards' area, where the
+/// tab search sits, so the two read as one machine.
+fn pal_card(area: R, right: bool, rows: usize, groups: usize, more: bool) -> R {
+    let h = 56.0 + groups as f32 * 18.0 + rows as f32 * 30.0 + if rows == 0 { 34.0 } else { 0.0 } + if more { 20.0 } else { 0.0 };
     let (x, w) = float_col(area, right);
     R::new(x, area.y + 8.0, w, h.min(area.h - 16.0))
 }
@@ -1042,7 +1214,22 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit] {
+            let palette_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_PAL as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit, palette_edit] {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
@@ -1110,6 +1297,11 @@ impl Chrome {
                 search_rows: Vec::new(),
                 say: None,
                 say_edit,
+                pal_open: false,
+                palette_edit,
+                pal_sel: 0,
+                pal_rows: Vec::new(),
+                pal_jump: None,
                 set_edit,
                 bug_edit,
             }));
@@ -1276,6 +1468,7 @@ impl Chrome {
     pub fn focus_omnibox(&self) {
         let edit = {
             let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+            i.close_palette();
             i.begin_edit();
             i.edit
         };
@@ -1298,6 +1491,7 @@ impl Chrome {
             i.close_search();
             return;
         }
+        i.close_palette();
         // The card lives in the sidebar; in the icon-only sidebar show the full one.
         if i.state.as_ref().is_some_and(|s| s.settings.compact) {
             send(&i.proxy, json!({"t": "peek", "on": true}));
@@ -1312,6 +1506,35 @@ impl Chrome {
             let _ = SetFocus(Some(i.search_edit));
         }
         // The rows are rebuilt by the paint this asks for.
+        i.invalidate();
+    }
+
+    /// Ctrl+K: the command palette over the sidebar. A second press closes it.
+    pub fn open_palette(&self) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        if i.pal_open {
+            i.close_palette();
+            return;
+        }
+        i.close_search();
+        i.close_say();
+        i.site_open = false;
+        // The card lives in the sidebar; in the icon-only sidebar show the full one.
+        if i.state.as_ref().is_some_and(|s| s.settings.compact) {
+            send(&i.proxy, json!({"t": "peek", "on": true}));
+        }
+        i.pal_open = true;
+        i.pal_sel = 0;
+        unsafe {
+            SetWindowTextW(i.palette_edit, &HSTRING::from("")).ok();
+        }
+        // The rows are rebuilt by the paint this asks for, and the pages that a row
+        // opens need their lists ready: the main loop fills them while this is open.
+        send(&i.proxy, json!({"t": "palOpen", "open": true}));
+        i.layout_edits();
+        unsafe {
+            let _ = SetFocus(Some(i.palette_edit));
+        }
         i.invalidate();
     }
 }
@@ -1476,6 +1699,17 @@ impl Inner {
             }
             self.page.font_pick = None;
             self.page.theme_name.clear();
+        }
+        // The palette's Settings row: its words land in the page's own search box,
+        // right after the clear above emptied it.
+        if s.panel == "settings" {
+            if let Some(words) = self.pal_jump.take() {
+                unsafe {
+                    SetWindowTextW(self.set_edit, &HSTRING::from(words)).ok();
+                }
+            }
+        } else if page_changed {
+            self.pal_jump = None;
         }
         // A run started from a message has a task the box never saw: the box shows it, so the
         // page says what is being done. Never over what the person is typing.
@@ -1815,6 +2049,14 @@ impl Inner {
             let n = switch_rows(s, &q).len();
             let card = search_card(sb, right, n.min(SEARCH_ROWS), n > SEARCH_ROWS);
             place(self.search_edit, R::new(card.x + 38.0, card.y + 13.0, card.w - 52.0, 22.0), self.search_open);
+            // The palette's filter, inside its own card over the sidebar.
+            if self.pal_open {
+                let (rows, groups, total) = pal_view(s, &wide_text(self.palette_edit).trim().to_lowercase());
+                let card = pal_card(sb, right, rows.len(), groups, total > rows.len());
+                place(self.palette_edit, R::new(card.x + 38.0, card.y + 13.0, card.w - 52.0, 22.0), true);
+            } else {
+                place(self.palette_edit, R::default(), false);
+            }
             let card = say_card(sb, right);
             place(self.say_edit, R::new(card.x + 22.0, card.y + 50.0, card.w - 44.0, 22.0), self.say.is_some());
         } else {
@@ -1834,6 +2076,7 @@ impl Inner {
     /// Open the message card for this agent, the text box empty and focused.
     fn open_say(&mut self, session: String, name: String) {
         self.close_search();
+        self.close_palette();
         if self.state.as_ref().is_some_and(|s| s.settings.compact) {
             send(&self.proxy, json!({"t": "peek", "on": true}));
         }
@@ -1892,6 +2135,55 @@ impl Inner {
         self.layout_edits();
         send(&self.proxy, json!({"t": "focusPage"}));
         self.invalidate();
+    }
+
+    /// Close the command palette: filter box hidden, focus back on the page.
+    fn close_palette(&mut self) {
+        if !self.pal_open {
+            return;
+        }
+        self.pal_open = false;
+        self.pal_rows.clear();
+        self.pal_sel = 0;
+        if self.state.as_ref().is_some_and(|s| s.settings.compact || s.peek) {
+            send(&self.proxy, json!({"t": "peek", "on": false}));
+        }
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        send(&self.proxy, json!({"t": "palOpen", "open": false}));
+        self.layout_edits();
+        send(&self.proxy, json!({"t": "focusPage"}));
+        self.invalidate();
+    }
+
+    /// Enter in the command palette: run the picked row, then close.
+    fn run_palette(&mut self, n: usize) {
+        let Some(row) = self.pal_rows.get(n).cloned() else { return };
+        match row.run {
+            PalRun::Msg(v) => send(&self.proxy, v),
+            PalRun::Set(words) => {
+                // The Settings page has its own search box; the words land there, so
+                // the page opens on the setting the row named.
+                if self.state.as_ref().is_some_and(|s| s.panel == "settings") {
+                    unsafe {
+                        SetWindowTextW(self.set_edit, &HSTRING::from(words)).ok();
+                    }
+                } else {
+                    self.pal_jump = Some(words);
+                    send(&self.proxy, json!({"t": "panel", "open": true}));
+                }
+            }
+            PalRun::Switch { id, other } => {
+                let msg = match other {
+                    Some((ws, idx)) => json!({"t": "switchTab", "ws": ws, "idx": idx, "other": true}),
+                    None => json!({"t": "switchTab", "id": id}),
+                };
+                send(&self.proxy, msg);
+            }
+            PalRun::Open(url) => send(&self.proxy, json!({"t": "openTab", "url": url})),
+        }
+        self.close_palette();
     }
 
     /// Enter in the tab search: switch to the picked row, workspace and all.
@@ -2734,6 +3026,8 @@ impl Inner {
             self.draw_search(s);
         } else if self.site_open {
             self.draw_site_menu(s);
+        } else if self.pal_open {
+            self.draw_palette(s);
         }
     }
 
@@ -2900,6 +3194,79 @@ impl Inner {
         if self.search_rows.len() > shown {
             self.gfx.text(
                 &format!("{} more — type to narrow", self.search_rows.len() - shown),
+                R::new(card.x, y, card.w, 18.0),
+                lo.font(11.0, 400).align(Align::Center),
+                th.faint,
+            );
+        }
+    }
+
+    /// The command palette over the sidebar: one field to type into, the rows in groups
+    /// under it. The field itself is a real edit window, placed over the drawn box.
+    fn draw_palette(&mut self, s: &UiState) {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let Some(sb) = self.float_area() else { return };
+        let q = wide_text(self.palette_edit).trim().to_lowercase();
+        let (rows, groups, total) = pal_view(s, &q);
+        // The rows the frame lists, so a click knows what it lands on.
+        self.pal_rows = rows;
+        let shown = self.pal_rows.len();
+        let card = pal_card(sb, self.cards_right(), shown, groups, total > shown);
+        self.pal_sel = self.pal_sel.min(shown.saturating_sub(1));
+        self.float_card(card, 1.0);
+        // The card is not "outside itself"; rows registered after win over it.
+        self.hit(card, Hit::PaletteCard);
+        // The filter field (a real edit window is placed over this).
+        let field = R::new(card.x + 8.0, card.y + 8.0, card.w - 16.0, 32.0);
+        self.gfx.round(field, lo.round(field.h), th.bg);
+        self.gfx.round_stroke(field, lo.round(field.h), th.line, 1.0);
+        self.gfx.icon("palette", field.x + 11.0, field.y + 9.0, 14.0, th.faint);
+        if q.is_empty() {
+            self.gfx.text("Type a command", R::new(field.x + 30.0, field.y, field.w - 40.0, field.h), lo.font(12.5, 400), th.faint);
+        }
+        // Hits.
+        let mut y = card.y + 48.0;
+        if shown == 0 {
+            self.gfx.text("Nothing matches", R::new(card.x, y + 8.0, card.w, 26.0), lo.font(12.5, 400).align(Align::Center), th.faint);
+        }
+        for n in 0..shown {
+            // Right: the group it belongs to. Left: its icon and what it says.
+            let (group, label, detail, is_set, tab_url) = {
+                let row = &self.pal_rows[n];
+                let is_set = matches!(row.run, PalRun::Set(_));
+                let tab_url = match &row.run {
+                    PalRun::Switch { id, other } if other.is_none() => s.tabs.iter().find(|t| t.id == *id).map_or(String::new(), |t| t.url.clone()),
+                    _ => String::new(),
+                };
+                (row.group, row.label.clone(), row.detail.clone(), is_set, tab_url)
+            };
+            if let Some(g) = group {
+                self.label(g, R::new(card.x + 12.0, y, card.w - 24.0, 16.0), th.faint);
+                y += 18.0;
+            }
+            let r = R::new(card.x + 6.0, y, card.w - 12.0, 30.0);
+            let h = Hit::Pal(n);
+            if n == self.pal_sel {
+                self.gfx.round(r, lo.round(r.h), th.hover);
+            } else if self.is_hover(&h) {
+                self.gfx.round(r, lo.round(r.h), th.hover.alpha(0.6));
+            }
+            let tx = if detail.is_empty() { r.right() - 8.0 } else { self.tag(&detail, r.right() - 8.0, r.y + r.h / 2.0, th.faint) - 6.0 };
+            if is_set {
+                // A setting row: its section's icon, the one the Settings menu shows.
+                self.gfx.icon(pages::section_icon(&detail), r.x + 11.0, r.y + 8.0, 14.0, th.faint);
+            } else if !tab_url.is_empty() {
+                // A tab row: the same site icon the tab search gives its rows.
+                pages::site_icon(self, R::new(r.x + 10.0, r.y + 7.0, 16.0, 16.0), &host(&tab_url));
+            }
+            self.gfx.text(&label, R::new(r.x + 34.0, r.y, tx - r.x - 34.0, r.h), lo.font(12.5, 450), th.text);
+            self.hit(r, h);
+            y += 30.0;
+        }
+        if total > shown {
+            self.gfx.text(
+                &format!("{} more — type to narrow", total - shown),
                 R::new(card.x, y, card.w, 18.0),
                 lo.font(11.0, 400).align(Align::Center),
                 th.faint,
@@ -4126,6 +4493,10 @@ impl Inner {
         if self.site_open && !matches!(h, Some(Hit::SiteInfo | Hit::SitePerm(..) | Hit::SiteClear | Hit::SiteSettings | Hit::SiteAdblock)) {
             self.site_open = false;
         }
+        // The same for the command palette (the row still acts).
+        if self.pal_open && !matches!(h, Some(Hit::Pal(_)) | Some(Hit::PaletteCard)) {
+            self.close_palette();
+        }
         let p = &self.proxy;
         match h.unwrap() {
             Hit::Back => send(p, json!({"t": "back"})),
@@ -4306,6 +4677,13 @@ impl Inner {
             }
             Hit::ZoomChip => send(p, json!({"t": "zoomSet", "pct": 100})),
             Hit::TabSearch(n) => self.switch_to(n),
+            Hit::Pal(n) => self.run_palette(n),
+            Hit::PaletteCard => {
+                // A click on the card itself keeps the typing going.
+                unsafe {
+                    let _ = SetFocus(Some(self.palette_edit));
+                }
+            }
             _ => {}
         }
         self.invalidate();
@@ -4631,9 +5009,10 @@ impl Inner {
             self.close_say();
             return true;
         }
-        if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) && (self.search_open || self.site_open) {
+        if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) && (self.search_open || self.site_open || self.pal_open) {
             self.close_search();
             self.site_open = false;
+            self.close_palette();
             self.invalidate();
             return true;
         }
@@ -4984,6 +5363,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         i.search_sel = 0;
                     }
                     i.invalidate();
+                } else if id == ID_PAL && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    // Typing filters the palette; the pick starts over at the top row.
+                    if code == EN_CHANGE {
+                        i.pal_sel = 0;
+                    }
+                    i.invalidate();
                 }
                 LRESULT(0)
             }
@@ -5173,6 +5558,27 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                             let n = i.search_rows.len();
                             if n > 0 {
                                 i.search_sel = if v == VK_DOWN.0 { (i.search_sel + 1) % n } else { (i.search_sel + n - 1) % n };
+                                i.invalidate();
+                            }
+                            return LRESULT(0);
+                        }
+                        _ => {}
+                    }
+                } else if id == ID_PAL {
+                    match vk {
+                        v if v == VK_RETURN.0 => {
+                            let sel = i.pal_sel;
+                            i.run_palette(sel);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_ESCAPE.0 => {
+                            i.close_palette();
+                            return LRESULT(0);
+                        }
+                        v if v == VK_DOWN.0 || v == VK_UP.0 => {
+                            let n = i.pal_rows.len();
+                            if n > 0 {
+                                i.pal_sel = if v == VK_DOWN.0 { (i.pal_sel + 1) % n } else { (i.pal_sel + n - 1) % n };
                                 i.invalidate();
                             }
                             return LRESULT(0);
