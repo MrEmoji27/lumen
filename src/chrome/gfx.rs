@@ -155,6 +155,7 @@ impl Gfx {
                     None,
                 )
                 .ok();
+            let fonts_t0 = std::time::Instant::now();
             let bundled = load_woff2(
                 &dw,
                 &[
@@ -169,6 +170,7 @@ impl Gfx {
                     include_bytes!("../../ui/fonts/serif-newsreader-italic.woff2"),
                 ],
             );
+            crate::startup_line("fonts", fonts_t0.elapsed().as_secs_f64() * 1000.0);
             Ok(Gfx {
                 hwnd,
                 d2d,

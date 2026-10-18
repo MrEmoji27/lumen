@@ -500,3 +500,23 @@ one session initialize stalled the UI (in that run the bench's own `browser_help
 environment is made as well as the profile; that case was not measured here, so nothing is claimed
 for it and the pre-warm is not kept on faith. The bench line stays: it is the measurement, and it
 is the first number this repo has for a fresh session's first open.
+
+## Startup, 19 October
+
+Cold start, measured the plain way: release build, headless, a fresh data folder per run, a small
+local page given at launch, five runs. `LUMEN_PROFILE_PAINT=1` now prints three startup lines on
+stderr: how long the bundled fonts took to unpack, and when the first chrome frame and the first
+page were done, counted from the top of `main`.
+
+| run | fonts | first frame | first page |
+|---|---|---|---|
+| 1 | 10.6 ms | 1017 ms | 1110 ms |
+| 2 | 9.4 ms | 589 ms | 652 ms |
+| 3 | 9.3 ms | 602 ms | 680 ms |
+| 4 | 9.0 ms | 549 ms | 627 ms |
+| 5 | 8.9 ms | 531 ms | 607 ms |
+| median | 9.3 ms | 589 ms | 652 ms |
+
+Run 1 is a cold disk. The nine WOFF2 fonts cost 9 ms, under the 10 ms the plan set for making
+them lazy, so they stay as they are: half a millisecond of win is not worth a second code path.
+The 0.6 s before the first frame is somewhere else, and the next lines to add go there.

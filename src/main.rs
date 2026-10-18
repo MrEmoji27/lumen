@@ -798,7 +798,23 @@ fn show_window(w: &tao::window::Window) {
 /// Which Lumen this is: the version, then the commit it was built from and its date.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LUMEN_BUILD"), ")");
 
+/// When this run began, for the startup lines below.
+static BORN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// LUMEN_PROFILE_PAINT=1: one startup step on stderr, "lumen: startup fonts 6.2 ms".
+pub fn startup_line(what: &str, ms: f64) {
+    if std::env::var_os("LUMEN_PROFILE_PAINT").is_some() {
+        eprintln!("lumen: startup {what} {ms:.1} ms");
+    }
+}
+
+/// Milliseconds since this run began.
+pub fn since_born() -> f64 {
+    BORN.get().map_or(0.0, |b| b.elapsed().as_secs_f64() * 1000.0)
+}
+
 fn main() {
+    let _ = BORN.set(Instant::now());
     // `lumen.exe --version`: say which build this is, then done. No window.
     if std::env::args().any(|a| a == "--version") {
         say_on_console(&format!("Lumen {VERSION}"));
@@ -3837,6 +3853,11 @@ impl App {
                 }
             }
             Ev::Loading(id, on) => {
+                // The first page of the run done loading, for the startup lines.
+                static FIRST_PAGE: std::sync::Once = std::sync::Once::new();
+                if !on {
+                    FIRST_PAGE.call_once(|| startup_line("first_page_at", since_born()));
+                }
                 if let Some(i) = self.idx(id) {
                     // A page navigating again is a page that came back from "crashed".
                     if on && self.tabs[i].crashed {

@@ -5794,6 +5794,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let ms = drawn.elapsed().as_secs_f64() * 1000.0;
                 if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     crate::journal::first_frame(ms);
+                    crate::startup_line("first_frame_at", crate::since_born());
                 } else {
                     crate::journal::frame(ms);
                 }
