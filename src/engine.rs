@@ -437,6 +437,7 @@ pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
     }
     if gpu_in_process {
         // Measured: about 100 MB less commit, 55 MB less working set, one process fewer.
+        // Off by default since 0.6.7: it also took the GPU's video decoding away.
         // Cost: a GPU driver crash takes the browser down with it.
         a.push_str(" --in-process-gpu --enable-features=NetworkServiceInProcess2");
     }
@@ -604,6 +605,7 @@ fn build_tab_in(
         b = b.with_url(u);
     }
     let wv = b.build_as_child(&*ctx.window)?;
+    clip_siblings(&wv);
     drop(wc);
     if first {
         ctx.env.replace(Some(wv.environment()));
@@ -2418,6 +2420,24 @@ pub fn round_corners(wv: &WebView, r: i32) {
         let rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1, r * 2, r * 2);
         // The window owns the region after this call. Do not free it.
         SetWindowRgn(hwnd, Some(rgn), true);
+    }
+}
+
+/// A page's window paints only where no sibling is above it. Without this a page that
+/// repaints all the time (a playing video) paints over the chrome's floating cards, a menu
+/// or a question, even though the chrome is above it.
+fn clip_siblings(wv: &WebView) {
+    use windows::Win32::UI::WindowsAndMessaging::{GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOZORDER, SetWindowLongPtrW, WS_CLIPSIBLINGS};
+    unsafe {
+        let mut hwnd = HWND::default();
+        if wv.controller().ParentWindow(&mut hwnd).is_err() || hwnd.is_invalid() {
+            return;
+        }
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        if style & WS_CLIPSIBLINGS.0 as isize == 0 {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_CLIPSIBLINGS.0 as isize);
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
     }
 }
 

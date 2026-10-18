@@ -304,7 +304,7 @@ impl Default for Settings {
             userscripts: true,
             battery_saver: true,
             show_memory: true,
-            gpu_in_process: true,
+            gpu_in_process: false,
             share_processes: true,
             save_passwords: true,
             accelerate_downloads: true,
@@ -372,7 +372,7 @@ impl Default for Settings {
     }
 }
 
-const SETTINGS_VERSION: u32 = 3;
+const SETTINGS_VERSION: u32 = 4;
 /// Where the torrent port may live. High enough to dodge the usual listeners.
 pub(crate) const BT_PORT_MIN: u16 = 20000;
 pub(crate) const BT_PORT_MAX: u16 = 60000;
@@ -484,6 +484,8 @@ fn clean_font(v: &mut String, default: &str) {
 impl Settings {
     /// Version 2 is the minimal redesign. Old look values were defaults, not choices.
     /// Version 3 splits the motion switch into full/reduced/off.
+    /// Version 4 turns graphics in the browser process off: it took the GPU's video decoding
+    /// with it, and every video was decoded on the CPU. It was a default, not a choice.
     fn migrate(&mut self) {
         if self.version < 2 {
             let d = Settings::default();
@@ -491,6 +493,9 @@ impl Settings {
             self.backdrop = d.backdrop;
             self.sidebar_width = d.sidebar_width;
             self.accent.clear();
+        }
+        if self.version < 4 {
+            self.gpu_in_process = false;
         }
         self.version = SETTINGS_VERSION;
     }
@@ -828,6 +833,20 @@ mod tests {
         s.clear_on_exit = true;
         s.clamp();
         assert!(s.clear_on_exit);
+    }
+
+    /// Graphics in the browser process cost the GPU's video decoding. A file that has it on from
+    /// the old default gets it off, once; after that the person's choice stands.
+    #[test]
+    fn graphics_in_the_browser_process_goes_off_once() {
+        let mut s: Settings = serde_json::from_str(r#"{"version":3,"gpu_in_process":true}"#).expect("loads");
+        s.migrate();
+        assert!(!s.gpu_in_process);
+        assert_eq!(s.version, SETTINGS_VERSION);
+        let mut t: Settings = serde_json::from_str(r#"{"version":4,"gpu_in_process":true}"#).expect("loads");
+        t.migrate();
+        assert!(t.gpu_in_process, "a choice made after the change stands");
+        assert!(!Settings::default().gpu_in_process);
     }
 
     /// A file from before every customization field still loads: the layout is

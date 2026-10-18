@@ -394,7 +394,7 @@ fn limits_schema() -> Vec<Item> {
         Range("ram_limit_mb", "RAM limit", "Over the limit, the hidden tab looked at longest ago unloads.", Scale::Steps(RAM), "mb"),
         Range("cpu_limit_pct", "CPU limit", "Hard cap for the whole browser, share of all cores.", Scale::Linear(5.0, 100.0, 5.0), "%"),
         Range("net_limit_kbps", "Network limit", "Bandwidth cap for each tab. Downloads are not capped.", Scale::Steps(NET), "kbps"),
-        Toggle("gpu_in_process", "Graphics in browser process", "About 100 MB less memory. A driver crash restarts the browser. Applies after restart."),
+        Toggle("gpu_in_process", "Graphics in browser process", "About 55 MB less memory, but video is decoded on the CPU instead of the graphics card: YouTube costs about twice the CPU and drops frames. A driver crash restarts the browser. Applies after restart."),
         Toggle("share_processes", "Share processes within a site", "Far fewer processes. One heavy tab can slow its siblings. Applies after restart."),
     ]
 }

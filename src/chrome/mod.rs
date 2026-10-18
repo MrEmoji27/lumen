@@ -1268,7 +1268,8 @@ impl Chrome {
                 WINDOW_EX_STYLE::default(),
                 CLASS,
                 w!(""),
-                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                // Clip siblings: below the page, the chrome's repaints never land on it.
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                 0,
                 0,
                 240,
@@ -4184,7 +4185,7 @@ impl Inner {
         if show_x {
             let x = R::new(right - 22.0, r.y + (r.h - 22.0) / 2.0, 22.0, 22.0);
             if self.is_hover(&Hit::TabX(t.id)) {
-                self.gfx.round(x, lo.r_sm, th.press.alpha(alpha));
+                self.gfx.round(x, lo.r_sm, if active { th.pill_ink.alpha(0.14 * alpha) } else { th.press.alpha(alpha) });
             }
             let ink = if active { th.pill_ink } else if self.is_hover(&Hit::TabX(t.id)) { th.text } else { th.dim };
             self.gfx.icon("close", x.x + 4.0, x.y + 4.0, 14.0, ink.alpha(alpha * if active { 0.75 } else { 1.0 }));
@@ -4194,7 +4195,7 @@ impl Inner {
         if t.audio || t.muted || t.call {
             let b = R::new(right - 22.0, r.y + (r.h - 22.0) / 2.0, 22.0, 22.0);
             if self.is_hover(&Hit::TabSnd(t.id)) {
-                self.gfx.round(b, lo.r_sm, th.press.alpha(alpha));
+                self.gfx.round(b, lo.r_sm, if active { th.pill_ink.alpha(0.14 * alpha) } else { th.press.alpha(alpha) });
             }
             let ink = if active { th.pill_ink.alpha(0.75) } else { th.faint };
             self.gfx.icon(sound_icon(t), b.x + 4.0, b.y + 4.0, 14.0, ink.alpha(alpha));
@@ -4206,7 +4207,7 @@ impl Inner {
             // picture-in-picture window, asked for the same way the page would.
             let b = R::new(right - 22.0, r.y + (r.h - 22.0) / 2.0, 22.0, 22.0);
             if self.is_hover(&Hit::TabPip(t.id)) {
-                self.gfx.round(b, lo.r_sm, th.press.alpha(alpha));
+                self.gfx.round(b, lo.r_sm, if active { th.pill_ink.alpha(0.14 * alpha) } else { th.press.alpha(alpha) });
             }
             let ink = if active { th.pill_ink.alpha(0.75) } else { th.faint };
             self.gfx.icon("pip", b.x + 4.0, b.y + 4.0, 14.0, ink.alpha(alpha));
