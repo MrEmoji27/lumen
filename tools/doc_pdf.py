@@ -21,10 +21,10 @@ EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 
 # The cover's figures: each one is a measurement the doc itself states.
 FIGURES = [
-    ("18.7 MB", "idle, Lumen itself"),
+    ("19.9 MB", "idle, Lumen itself"),
     ("91 MB", "one Wikipedia tab"),
     ("1.1 GB", "forty heavy tabs, asleep"),
-    ("47", "tools for AI agents"),
+    ("48", "tools for AI agents"),
 ]
 
 CSS = """
@@ -80,7 +80,7 @@ def version():
 def cover():
     figs = "".join(f'<div class="fig"><b>{v}</b><span>{k}</span></div>' for v, k in FIGURES)
     return (
-        f'<section class="cover"><div><div class="mark">Version {version()} · 18 October 2026</div>'
+        f'<section class="cover"><div><div class="mark">Version {version()} · 19 October 2026</div>'
         '<h1>Lumen</h1>'
         '<p class="lede">A native Windows shell around WebView2, written in Rust, built to keep memory low.</p>'
         '<p class="meta">What it is so far, what it measures, and where it goes next.</p></div>'
