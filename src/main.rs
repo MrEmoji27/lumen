@@ -828,6 +828,7 @@ fn main() {
     let blocker = blocker::Blocker::start(store::data_dir());
     blocker.set_enabled(settings.adblock);
     blocker.set_cosmetic(settings.cosmetic);
+    blocker.set_off_sites(&settings.adblock_off_sites);
     privacy_stats::set_enabled(settings.privacy_stats);
     blocker.set_gpc(settings.gpc);
     {
@@ -3598,6 +3599,9 @@ impl App {
         if old.gpc != self.settings.gpc {
             self.blocker.set_gpc(self.settings.gpc);
             self.ctx.gpc.set(self.settings.gpc);
+        }
+        if old.adblock_off_sites != self.settings.adblock_off_sites {
+            self.blocker.set_off_sites(&self.settings.adblock_off_sites);
         }
         if old.perm_defaults != self.settings.perm_defaults {
         }

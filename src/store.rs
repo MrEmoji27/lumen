@@ -241,6 +241,9 @@ pub struct Settings {
     pub https_first: bool,
     /// Hosts the person said may stay on plain http.
     pub http_ok: Vec<String>,
+    /// Hosts where the person turned ad blocking off, from the switch in the site
+    /// card: keyed by `blocker::site_key`, so `www.` and subdomains count as one.
+    pub adblock_off_sites: Vec<String>,
     /// Send "Sec-GPC: 1" and tell pages not to sell or share what they know of you.
     pub gpc: bool,
 }
@@ -342,6 +345,7 @@ impl Default for Settings {
             default_zoom: 100,
             https_first: true,
             http_ok: Vec::new(),
+            adblock_off_sites: Vec::new(),
             gpc: true,
             speed_dial: true,
             shortcuts: vec![
@@ -525,6 +529,13 @@ impl Settings {
         self.http_ok.sort();
         self.http_ok.dedup();
         self.http_ok.truncate(500);
+        // A per-site switch stores the host the way the blocker compares it, so a
+        // hand-edited file and the site card's own copy land on the same words.
+        self.adblock_off_sites.iter_mut().for_each(|h| *h = crate::blocker::site_key(h));
+        self.adblock_off_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
+        self.adblock_off_sites.sort();
+        self.adblock_off_sites.dedup();
+        self.adblock_off_sites.truncate(500);
         // 0 means "never chosen"; a real port stays inside the range.
         if self.bt_port != 0 {
             self.bt_port = self.bt_port.clamp(BT_PORT_MIN, BT_PORT_MAX);

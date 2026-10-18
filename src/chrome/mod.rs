@@ -368,6 +368,8 @@ pub enum Hit {
     SiteClear,
     /// "Site settings…" in the site popover: open the Sites page.
     SiteSettings,
+    /// The ad-block switch in the site popover: this site is in or out of the off list.
+    SiteAdblock,
     /// The zoom chip in the address bar: click takes the page back to 100%.
     ZoomChip,
     /// A row of the tab search card.
@@ -2754,7 +2756,7 @@ impl Inner {
             }
         }
         let lo = self.look.clone();
-        let h = 150.0 + kinds.len() as f32 * 56.0;
+        let h = 196.0 + kinds.len() as f32 * 56.0;
         let card = if self.look.kind.top_toolbar() {
             let o = self.omni_rect();
             R::new(o.x, o.bottom() + 6.0, o.w.min(320.0), h)
@@ -2776,6 +2778,18 @@ impl Inner {
         let mut y = card.y + 60.0;
         self.gfx.line(card.x + 1.0, y, card.right() - 1.0, y, th.line, 1.0);
         y += 12.0;
+        // The site's own switch: out of the list means ads and trackers are blocked here.
+        // The words are long for a card this wide, so they wrap beside the switch.
+        let row = R::new(card.x + 12.0, y, card.w - 24.0, 40.0);
+        self.gfx.text_wrap(
+            "Block ads and trackers on this site",
+            R::new(row.x + 4.0, row.y + 3.0, row.w - 54.0, 34.0),
+            lo.font(12.5, 450),
+            th.faint,
+        );
+        let on = !crate::blocker::site_off(&s.settings.adblock_off_sites, &site);
+        self.switch(R::new(row.right() - 38.0, row.y + (row.h - 22.0) / 2.0, 38.0, 22.0), on, "siteadblock", 1.0, Some(Hit::SiteAdblock));
+        y += 46.0;
         for kind in &kinds {
             self.label(&crate::sites::label(kind), R::new(card.x + 16.0, y, card.w - 32.0, 16.0), th.faint);
             y += 20.0;
@@ -3720,6 +3734,20 @@ impl Inner {
         self.gfx.round_stroke(r, lo.r_card, th.line.alpha(a), 1.0);
     }
 
+    /// A switch: a track and a knob that glides to the side `on` says. `a` dims it when
+    /// it cannot be pressed; no hit makes it dead.
+    fn switch(&mut self, r: R, on: bool, key: &'static str, a: f32, hit: Option<Hit>) {
+        let th = self.theme;
+        let t = self.motion.tween(Id::Chip(key), Prop::Progress, if on { 1.0 } else { 0.0 }, 160, Ease::OutCubic);
+        let on_fill = if self.look.style == theme::Style::Signal { th.pill } else { th.accent };
+        self.gfx.round(r, 11.0, th.line.mix(on_fill, t).alpha(a));
+        let kx = r.x + 3.0 + 16.0 * t;
+        self.gfx.circle(kx + 8.0, r.y + 11.0, 8.0, th.raise.mix(th.pill_ink, t).alpha(a));
+        if let Some(h) = hit {
+            self.hit(r.inset(-4.0, -4.0), h);
+        }
+    }
+
     /// A pill button. Primary is the look's ink (Signal) or its accent; quiet sits on the card
     /// with a hairline.
     fn pill_button(&mut self, r: R, label: &str, hit: Hit, primary: bool, a: f32) {
@@ -4095,7 +4123,7 @@ impl Inner {
             self.close_say();
         }
         // The same for the lock's card, which acts through its own hits.
-        if self.site_open && !matches!(h, Some(Hit::SiteInfo | Hit::SitePerm(..) | Hit::SiteClear | Hit::SiteSettings)) {
+        if self.site_open && !matches!(h, Some(Hit::SiteInfo | Hit::SitePerm(..) | Hit::SiteClear | Hit::SiteSettings | Hit::SiteAdblock)) {
             self.site_open = false;
         }
         let p = &self.proxy;
@@ -4258,6 +4286,23 @@ impl Inner {
             Hit::SiteSettings => {
                 self.site_open = false;
                 send(p, json!({"t": "panel", "open": true, "which": "sites"}));
+            }
+            Hit::SiteAdblock => {
+                // The switch: take this site out of the list or put it back, then reload
+                // so the page settles the way the switch now says.
+                if let Some(s) = &self.state
+                    && let Some(tab) = s.active_tab()
+                {
+                    let key = crate::blocker::site_key(&host(&tab.url));
+                    let mut st = s.settings.clone();
+                    if st.adblock_off_sites.contains(&key) {
+                        st.adblock_off_sites.retain(|h| *h != key);
+                    } else {
+                        st.adblock_off_sites.push(key);
+                    }
+                    send(p, json!({"t": "settings", "v": st}));
+                    send(p, json!({"t": "reload"}));
+                }
             }
             Hit::ZoomChip => send(p, json!({"t": "zoomSet", "pct": 100})),
             Hit::TabSearch(n) => self.switch_to(n),

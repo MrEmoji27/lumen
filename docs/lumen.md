@@ -199,7 +199,9 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 
 - Three looks (Signal, Glass, Precise), in vertical, horizontal or hybrid layouts. Colours,
   fonts, shapes, motion, clock and wallpaper can all be changed, and Settings has a search box.
-- Content blocking for ads, trackers and cookie banners, on by default.
+- Content blocking for ads, trackers and cookie banners, on by default. The lock in the top bar
+  opens the site card, with one switch that turns blocking off for that site alone; Settings >
+  Site permissions lists every such site with a Reset on its row.
 - Pop-ups blocked unless you clicked for them. Malware and phishing sites get a warning page.
 - A privacy report: what was blocked and what was counted, with trends.
 - Reader view, dark pages, translation on the PC, read aloud.
