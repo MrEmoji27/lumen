@@ -33,7 +33,7 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, CLEARTYPE_QUALITY, ClientToScreen, ScreenToClient, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW,
+            BeginPaint, CLEARTYPE_QUALITY, ClientToScreen, CombineRgn, CreateRectRgn, CreateRoundRectRgn, RGN_DIFF, RGN_OR, SetWindowRgn, ScreenToClient, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW,
             BLACKNESS, CreateSolidBrush, DEFAULT_CHARSET, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetTextFaceW,
             HBRUSH, HDC, HFONT, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PatBlt, SelectObject, SetBkColor, SetTextColor,
         },
@@ -588,9 +588,13 @@ pub(crate) struct Inner {
     favs: HashMap<u64, Vec<u8>>,
     /// One icon per site (png bytes, by host), for the speed dial's tiles.
     site_favs: HashMap<String, Vec<u8>>,
+    /// The floating cards drawn this frame (rect, corner radius), and the ones the chrome's
+    /// window region was last cut to, in device pixels. Empty: the chrome is not raised.
+    floats: Vec<(R, f32)>,
+    float_layer: Vec<[i32; 5]>,
     /// The disk cache's answer per host, read once: hits stay, misses are asked again
     /// after a while, since a fetch may have landed the icon since.
-    disk_favs: HashMap<String, (Option<Vec<u8>>, std::time::Instant)>,
+    disk_favs: HashMap<String, (Option<Vec<u8>>, std::time::Instant, std::time::Instant)>,
     /// Hosts whose icon has been fetched from the site this run, so each is asked once.
     fav_asked: std::collections::HashSet<String>,
     dial_drag: Option<DialDrag>,
@@ -671,9 +675,21 @@ const SAY_MODES: [(&str, &str, &str); 3] = [
     ("New task", "new", "Starts a new Drive run."),
 ];
 
-/// The message card's rectangle: over the sidebar, at its top.
-fn say_card(sb: R) -> R {
-    R::new(sb.x + 8.0, 8.0, (sb.w - 16.0).max(200.0), 168.0)
+/// The narrowest a floating card gets: a compact sidebar is an icon column, and a card
+/// that wide could not say anything.
+const FLOAT_MIN_W: f32 = 248.0;
+
+/// A floating card's column in its area: the area less a margin, never narrower than
+/// `FLOAT_MIN_W`. Wider than a sidebar on the right, it grows leftwards, over the page.
+fn float_col(area: R, right: bool) -> (f32, f32) {
+    let w = (area.w - 16.0).max(FLOAT_MIN_W);
+    (if right { area.right() - 8.0 - w } else { area.x + 8.0 }, w)
+}
+
+/// The message card's rectangle: at the top of the cards' area.
+fn say_card(area: R, right: bool) -> R {
+    let (x, w) = float_col(area, right);
+    R::new(x, area.y + 8.0, w, 168.0)
 }
 
 /// A tab that just closed. The row is drawn once more, collapsing.
@@ -805,10 +821,11 @@ fn rank_rows(all: &[SwitchRow], q: &str) -> Vec<SwitchRow> {
     order.into_iter().map(|i| all[i].clone()).collect()
 }
 
-/// The tab search card's rectangle: over the sidebar, starting at its top.
-fn search_card(sb: R, rows: usize, more: bool) -> R {
+/// The tab search card's rectangle: at the top of the cards' area.
+fn search_card(area: R, right: bool, rows: usize, more: bool) -> R {
     let h = 52.0 + rows as f32 * 32.0 + if rows == 0 { 34.0 } else { 8.0 } + if more { 20.0 } else { 0.0 };
-    R::new(sb.x + 8.0, 8.0, (sb.w - 16.0).max(180.0), h.min(sb.h - 16.0))
+    let (x, w) = float_col(area, right);
+    R::new(x, area.y + 8.0, w, h.min(area.h - 16.0))
 }
 
 /// Put history and bookmark hits into a suggestion list: under the "Switch to tab" rows (an
@@ -1025,6 +1042,8 @@ impl Chrome {
                 drag: None,
                 favs: HashMap::new(),
                 site_favs: HashMap::new(),
+                floats: Vec::new(),
+                float_layer: Vec::new(),
                 disk_favs: HashMap::new(),
                 fav_asked: std::collections::HashSet::new(),
                 dial_drag: None,
@@ -1542,6 +1561,67 @@ impl Inner {
         self.look.metrics()
     }
 
+    /// Where the floating cards live: the sidebar, or with none (horizontal) a column at the
+    /// left under the top rows, over the page.
+    fn float_area(&self) -> Option<R> {
+        if let Some(sb) = self.sidebar() {
+            return Some(sb);
+        }
+        self.state.as_ref()?;
+        let (w, h) = self.size_dip();
+        let top = self.metrics().top();
+        Some(R::new(0.0, top, (FLOAT_MIN_W + 16.0).min(w), (h - top).max(1.0)))
+    }
+
+    /// The cards sit against the right edge when the sidebar does.
+    fn cards_right(&self) -> bool {
+        self.look.kind.sidebar() && self.state.as_ref().is_some_and(|s| s.settings.sidebar_side == "right")
+    }
+
+    /// The page is a window over the chrome, so a card drawn over the page would be hidden
+    /// under it. While cards reach over the page, the chrome rises above it, cut down to its
+    /// own strips and those cards; when they close it sinks back, whole, to the bottom.
+    fn sync_float_layer(&mut self, s: &UiState) {
+        let k = self.k();
+        let stage = R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3);
+        let meets = |r: &R| r.x < stage.right() && r.right() > stage.x && r.y < stage.bottom() && r.bottom() > stage.y;
+        let key: Vec<[i32; 5]> = if s.full {
+            Vec::new()
+        } else {
+            self.floats
+                .iter()
+                .filter(|(r, _)| meets(r))
+                .map(|(r, rad)| [(r.x * k) as i32, (r.y * k) as i32, (r.right() * k).ceil() as i32, (r.bottom() * k).ceil() as i32, (rad * k) as i32])
+                .collect()
+        };
+        if key == self.float_layer {
+            return;
+        }
+        self.float_layer = key;
+        unsafe {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+            if self.float_layer.is_empty() {
+                let _ = SetWindowRgn(self.hwnd, None, true);
+                let _ = SetWindowPos(self.hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, flags);
+                return;
+            }
+            let mut rc = RECT::default();
+            let _ = GetClientRect(self.hwnd, &mut rc);
+            let rgn = CreateRectRgn(0, 0, rc.right, rc.bottom);
+            let hole = CreateRectRgn((stage.x * k) as i32, (stage.y * k) as i32, (stage.right() * k).ceil() as i32, (stage.bottom() * k).ceil() as i32);
+            CombineRgn(Some(rgn), Some(rgn), Some(hole), RGN_DIFF);
+            let _ = DeleteObject(hole.into());
+            for c in &self.float_layer {
+                let card = CreateRoundRectRgn(c[0], c[1], c[2] + 1, c[3] + 1, 2 * c[4], 2 * c[4]);
+                CombineRgn(Some(rgn), Some(rgn), Some(card), RGN_OR);
+                let _ = DeleteObject(card.into());
+            }
+            // The window owns the region from here on.
+            SetWindowRgn(self.hwnd, Some(rgn), true);
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags);
+        }
+    }
+
     /// The sidebar's rectangle, in chrome coordinates. None for a layout with no
     /// sidebar. The chrome covers the whole window, so this is always the edge
     /// strip, with or without a panel open.
@@ -1684,7 +1764,7 @@ impl Inner {
         let show = s.full && s.panel == "drive";
         place(self.drive_edit, R::new(d.x + 8.0, d.y + (d.h - 22.0) / 2.0, d.w - 16.0, 22.0), show);
         let q = pages::set_search_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3));
-        place(self.set_edit, R::new(q.x + 34.0, q.y + (q.h - 20.0) / 2.0, q.w - 46.0, 20.0), s.full && s.panel == "settings");
+        place(self.set_edit, R::new(q.x + 34.0, q.y + (q.h - 20.0) / 2.0, q.w - 46.0, 20.0), s.full && s.panel == "settings" && self.page.font_pick.is_none());
         // The Drive page takes the cursor once, when it opens.
         if show && std::mem::take(&mut self.drive_focus) {
             unsafe {
@@ -1692,12 +1772,13 @@ impl Inner {
             }
         }
         // The tab search's filter, inside the card over the sidebar.
-        if let Some(sb) = self.sidebar() {
+        if let Some(sb) = self.float_area() {
+            let right = self.cards_right();
             let q = wide_text(self.search_edit).trim().to_lowercase();
             let n = switch_rows(s, &q).len();
-            let card = search_card(sb, n.min(SEARCH_ROWS), n > SEARCH_ROWS);
+            let card = search_card(sb, right, n.min(SEARCH_ROWS), n > SEARCH_ROWS);
             place(self.search_edit, R::new(card.x + 38.0, card.y + 13.0, card.w - 52.0, 22.0), self.search_open);
-            let card = say_card(sb);
+            let card = say_card(sb, right);
             place(self.say_edit, R::new(card.x + 22.0, card.y + 50.0, card.w - 44.0, 22.0), self.say.is_some());
         } else {
             place(self.say_edit, R::default(), false);
@@ -1901,6 +1982,7 @@ impl Inner {
         }
         self.draw_all(&s);
         self.gfx.end();
+        self.sync_float_layer(&s);
         // The frame timer runs only while something moves, so an idle chrome
         // costs nothing: no timer, no repaint, no wake.
         if self.motion.running() != self.animating {
@@ -1922,6 +2004,7 @@ impl Inner {
         let lo = self.look.clone();
         let th = lo.theme;
         self.hits.clear();
+        self.floats.clear();
         if lo.style == theme::Style::Glass {
             // Glass's wallpaper: two soft blooms on its ground, under everything else.
             let (w, h) = self.size_dip();
@@ -1979,6 +2062,7 @@ impl Inner {
             Kind::Hybrid => {
                 self.draw_toolbar(s);
                 self.draw_side_body(s);
+                self.draw_suggestions(s);
             }
         }
         // The page's own outline, when it was asked for. The page is a window
@@ -2610,7 +2694,7 @@ impl Inner {
     /// The site popover under the lock: what the site may do, what it stores, and the ways out.
     fn draw_site_menu(&mut self, s: &UiState) {
         let th = self.theme;
-        let Some(sb) = self.sidebar() else { return };
+        let Some(sb) = self.float_area() else { return };
         let Some(tab) = s.active_tab() else { return };
         let origin = crate::engine::origin_of(&tab.url);
         if !origin.starts_with("http") {
@@ -2626,7 +2710,14 @@ impl Inner {
             }
         }
         let lo = self.look.clone();
-        let card = R::new(sb.x + 8.0, 86.0 + self.ws_h(s), sb.w - 16.0, 150.0 + kinds.len() as f32 * 56.0);
+        let h = 150.0 + kinds.len() as f32 * 56.0;
+        let card = if self.look.kind.top_toolbar() {
+            let o = self.omni_rect();
+            R::new(o.x, o.bottom() + 6.0, o.w.min(320.0), h)
+        } else {
+            let (x, w) = float_col(sb, self.cards_right());
+            R::new(x, 86.0 + self.ws_h(s), w, h)
+        };
         self.float_card(card, 1.0);
         // Who: the site's icon and name, and what it keeps.
         let site = host(&tab.url);
@@ -2670,9 +2761,9 @@ impl Inner {
     fn draw_say(&mut self) {
         let lo = self.look.clone();
         let th = lo.theme;
-        let Some(sb) = self.sidebar() else { return };
+        let Some(sb) = self.float_area() else { return };
         let Some((session, name, mode)) = self.say.as_ref().map(|s| (s.session.clone(), s.name.clone(), s.mode)) else { return };
-        let card = say_card(sb);
+        let card = say_card(sb, self.cards_right());
         self.float_card(card, 1.0);
         self.hit(card, Hit::SayCard);
         // Who it is for.
@@ -2705,11 +2796,11 @@ impl Inner {
     fn draw_search(&mut self, s: &UiState) {
         let lo = self.look.clone();
         let th = lo.theme;
-        let Some(sb) = self.sidebar() else { return };
+        let Some(sb) = self.float_area() else { return };
         let q = wide_text(self.search_edit).trim().to_lowercase();
         self.search_rows = switch_rows(s, &q);
         let shown = self.search_rows.len().min(SEARCH_ROWS);
-        let card = search_card(sb, shown, self.search_rows.len() > shown);
+        let card = search_card(sb, self.cards_right(), shown, self.search_rows.len() > shown);
         self.search_sel = self.search_sel.min(self.search_rows.len().saturating_sub(1));
         self.float_card(card, 1.0);
         // The card is not "outside itself"; rows registered after win over it.
@@ -2853,13 +2944,16 @@ impl Inner {
     fn draw_cards(&mut self, s: &UiState, sb: R, compact: bool) {
         let lo = self.look.clone();
         let th = lo.theme;
+        // Above the footer in a sidebar; with none (horizontal), above the window's edge.
+        let _ = compact;
+        let foot = if self.sidebar().is_some() { 44.0 } else { 12.0 };
         // An agent asking the person to take over: the live dot, what it needs, one button.
         if let Some((who, msg)) = s.handoff.as_ref().filter(|_| s.prompt.is_none()) {
             // As tall as what it says, up to five lines.
-            let w = sb.w - if compact { 8.0 } else { 16.0 };
+            let (x, w) = float_col(sb, self.cards_right());
             let lines = pages::wrap_lines(self, msg, lo.font(12.5, 400), w - 28.0).len().clamp(1, 5) as f32;
             let ch = 92.0 + 18.0 * lines;
-            let card = R::new(sb.x + if compact { 4.0 } else { 8.0 }, sb.bottom() - 44.0 - ch, w, ch);
+            let card = R::new(x, sb.bottom() - foot - ch, w, ch);
             let o = self.motion.enter(Id::Chip("handoff"), Prop::Opacity, 0.0, 1.0, 160, Ease::OutCubic);
             let card = R::new(card.x, card.y + (1.0 - o) * 9.0, card.w, card.h);
             self.float_card(card, o);
@@ -2871,7 +2965,8 @@ impl Inner {
         }
         // A site asking for something: a card above the footer.
         if let Some((pid, origin, kind)) = &s.prompt {
-            let card = if compact { R::new(sb.x + 4.0, sb.bottom() - 156.0, sb.w - 8.0, 112.0) } else { R::new(sb.x + 8.0, sb.bottom() - 156.0, sb.w - 16.0, 112.0) };
+            let (x, w) = float_col(sb, self.cards_right());
+            let card = R::new(x, sb.bottom() - foot - 112.0, w, 112.0);
             let o = self.motion.enter(Id::Chip("prompt"), Prop::Opacity, 0.0, 1.0, 160, Ease::OutCubic);
             let card = R::new(card.x, card.y + (1.0 - o) * 9.0, card.w, card.h);
             self.float_card(card, o);
@@ -3120,6 +3215,11 @@ impl Inner {
         if let Some(bm) = bm {
             self.draw_bm_bar(s, bm);
         }
+        if let Some(area) = self.float_area() {
+            self.draw_cards(s, area, false);
+        }
+        self.draw_footer_overlays(s);
+        self.draw_suggestions(s);
     }
 
     /// The tab strip: pinned tabs as small icon cells at the left, then the tabs,
@@ -3184,16 +3284,32 @@ impl Inner {
         let hov = self.is_hover(&h_) || self.is_hover(&Hit::TabX(t.id)) || self.is_hover(&Hit::TabSnd(t.id));
         let h = self.motion.hover(Id::Tab(t.id), if hov { 1.0 } else { 0.0 }).min(1.0);
         let pressed = self.press.as_ref() == Some(&h_);
-        let base = if active { th.raise } else { th.side };
-        let plate = if pressed { th.press } else { base.mix(th.hover, h) };
-        self.gfx.round(r, lo.r_md, plate);
-        if active && !pinned {
-            self.gfx.round_stroke(r, lo.r_md, th.line, 1.0);
+        // As in the sidebar: pins are small cards, the active tab is the ink pill, the
+        // others light up under the mouse.
+        let rad = lo.round(r.h);
+        let on_pill = active && !pinned;
+        if pinned {
+            let lit = th.raise.mix(th.hover, h * 0.6);
+            let c = if t.status == "off" && !active { lit.alpha(0.55 + 0.45 * h) } else { lit };
+            self.gfx.round(r, lo.r_md, c);
+            self.gfx.round_stroke(r, lo.r_md, if active { th.text } else { th.line }, if active { 1.5 } else { 1.0 });
+        } else if active {
+            self.gfx.round(r, rad, th.pill);
+            if lo.style == theme::Style::Precise {
+                // Precise marks the current tab with its one accent, as its sidebar does.
+                self.gfx.line(r.x + rad.max(6.0), r.bottom() - 1.0, r.right() - rad.max(6.0), r.bottom() - 1.0, th.accent, 2.0);
+            }
+        } else if h > 0.01 || pressed {
+            self.gfx.round(r, rad, if pressed { th.press } else { th.hover.alpha(h) });
         }
+        // What is written on the pill is in the pill's ink.
+        let ink = |c: theme::Color| if on_pill { th.pill_ink } else { c };
         self.hit(r, Hit::Tab(t.id));
         // The site's icon, or its letter; a spinner while it loads.
-        let (fx, fy) = if pinned { (r.x + (r.w - 16.0) / 2.0, r.y + (r.h - 16.0) / 2.0) } else { (r.x + 8.0, r.y + (r.h - 16.0) / 2.0) };
+        let (fx, fy) = if pinned { (r.x + (r.w - 16.0) / 2.0, r.y + (r.h - 16.0) / 2.0) } else { (r.x + 10.0, r.y + (r.h - 16.0) / 2.0) };
         let fav = R::new(fx, fy, 16.0, 16.0);
+        let asleep = matches!(t.status, "asleep" | "off" | "crashed");
+        let dim = if asleep { 0.5 } else { 1.0 };
         if t.loading {
             let phase = (self.born.elapsed().as_secs_f32() / 0.8).fract();
             self.gfx.spinner(fx + 8.0, fy + 8.0, 6.5, phase, th.line, th.accent);
@@ -3201,11 +3317,17 @@ impl Inner {
             let png = lo.show_favicons.then(|| self.favs.get(&t.id).cloned()).flatten();
             let bmp = png.filter(|p| !p.is_empty()).and_then(|p| self.gfx.bitmap(t.id, &p));
             match bmp {
-                Some(b) => self.gfx.draw_bitmap(&b, fav, 1.0),
+                Some(b) => self.gfx.draw_bitmap(&b, fav, dim),
+                None if t.status == "new" => {
+                    self.gfx.round_stroke(fav, 5.0, ink(th.dim).alpha(0.5), 1.0);
+                    self.gfx.icon("plus", fav.x + 3.0, fav.y + 3.0, 10.0, ink(th.dim));
+                }
                 None => {
-                    let letter = if t.status == "new" { "+".to_string() } else { host(&t.url).chars().next().unwrap_or('·').to_uppercase().to_string() };
-                    self.gfx.round(fav, 5.0, th.press.mix(th.accent, 0.3));
-                    self.gfx.text(&letter, fav, lo.font(9.5, 650).align(Align::Center), th.text);
+                    // No icon: the site's letter on a quiet tile, never a colour of its own.
+                    let letter = host(&t.url).chars().next().unwrap_or('·').to_uppercase().to_string();
+                    self.gfx.round(fav, 5.0, th.raise.alpha(dim));
+                    self.gfx.round_stroke(fav, 5.0, th.line.alpha(dim), 1.0);
+                    self.gfx.text(&letter, fav, lo.font(9.5, 650).align(Align::Center), th.dim.alpha(dim));
                 }
             }
         }
@@ -3234,25 +3356,26 @@ impl Inner {
         };
         if show_x {
             let x = R::new(right - 20.0, r.y + (r.h - 20.0) / 2.0, 20.0, 20.0);
-            if self.is_hover(&Hit::TabX(t.id)) {
-                self.gfx.round(x, lo.r_sm, th.press);
+            let xh = self.is_hover(&Hit::TabX(t.id));
+            if xh {
+                self.gfx.round(x, lo.round(20.0), if on_pill { th.pill_ink.alpha(0.18) } else { th.press });
             }
-            self.gfx.icon("close", x.x + 3.0, x.y + 3.0, 14.0, if self.is_hover(&Hit::TabX(t.id)) { th.text } else { th.dim });
+            self.gfx.icon("close", x.x + 3.0, x.y + 3.0, 14.0, ink(if xh { th.text } else { th.dim }));
             self.hit(x, Hit::TabX(t.id));
             right = x.x - 2.0;
         }
         if t.audio || t.muted {
             let b = R::new(right - 20.0, r.y + (r.h - 20.0) / 2.0, 20.0, 20.0);
             if self.is_hover(&Hit::TabSnd(t.id)) {
-                self.gfx.round(b, lo.r_sm, th.press);
+                self.gfx.round(b, lo.round(20.0), if on_pill { th.pill_ink.alpha(0.18) } else { th.press });
             }
-            self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 3.0, b.y + 3.0, 14.0, th.dim);
+            self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 3.0, b.y + 3.0, 14.0, ink(th.dim));
             self.hit(b, Hit::TabSnd(t.id));
             right = b.x - 2.0;
         }
         if t.split {
             let b = R::new(right - 16.0, r.y + (r.h - 16.0) / 2.0, 16.0, 16.0);
-            self.gfx.icon("split", b.x, b.y, 16.0, if active { th.dim } else { th.faint });
+            self.gfx.icon("split", b.x, b.y, 16.0, ink(th.faint));
             right = b.x - 3.0;
         }
         if t.translated || t.translating {
@@ -3268,10 +3391,9 @@ impl Inner {
             let h = host(&t.url);
             if h.is_empty() { "Untitled".into() } else { h }
         };
-        let c = if active || hov { th.text } else { th.dim };
-        let asleep = matches!(t.status, "asleep" | "off" | "crashed");
+        let c = ink(if hov { th.text } else { th.dim });
         let c = if asleep { c.alpha(0.5) } else { c };
-        self.gfx.text(&title, R::new(fx + 24.0, r.y, (right - fx - 24.0).max(0.0), r.h), lo.font(12.5, 450), c);
+        self.gfx.text(&title, R::new(fx + 24.0, r.y, (right - fx - 24.0).max(0.0), r.h), lo.font(12.5, if on_pill { 550 } else { 450 }), c);
         let _ = s;
     }
 
@@ -3543,7 +3665,8 @@ impl Inner {
 
     /// A card: the look's raised surface, a hairline, and in Glass a frosted pane.
     /// A card that floats over the chrome: a soft shadow under it, then the card.
-    fn float_card(&self, r: R, a: f32) {
+    fn float_card(&mut self, r: R, a: f32) {
+        self.floats.push((r, self.look.r_card));
         let lo = &self.look;
         let th = lo.theme;
         self.gfx.round(R::new(r.x, r.y + 6.0, r.w, r.h), lo.r_card, th.shade.alpha(0.55 * a));
@@ -3727,16 +3850,20 @@ impl Inner {
         if let Some(p) = self.site_favs.get(host).filter(|p| !p.is_empty()) {
             return Some(p.clone());
         }
-        let stale = |(p, at): &(Option<Vec<u8>>, std::time::Instant)| p.is_none() && at.elapsed().as_secs() >= 4;
-        if self.disk_favs.get(host).is_none_or(stale) {
+        // A miss is read again every few seconds for the first minute (a fetch takes up to
+        // its deadline to land), then left be until the next run.
+        let stale = |(p, at, first): &(Option<Vec<u8>>, std::time::Instant, std::time::Instant)| p.is_none() && at.elapsed().as_secs() >= 4 && first.elapsed().as_secs() < 60;
+        let first = self.disk_favs.get(host).map(|e| e.2);
+        if first.is_none() || self.disk_favs.get(host).is_some_and(stale) {
             let png = crate::favicons::get(host);
             if png.is_some() {
-                // A new picture under the same key: drop the letter tile's bitmap, if any.
+                // A new picture under the same key: drop any bitmap made from an older one.
                 self.gfx.bitmaps.remove(&site_key(host));
             }
-            self.disk_favs.insert(host.to_string(), (png, std::time::Instant::now()));
+            let now = std::time::Instant::now();
+            self.disk_favs.insert(host.to_string(), (png, now, first.unwrap_or(now)));
         }
-        let png = self.disk_favs.get(host).and_then(|(p, _)| p.clone());
+        let png = self.disk_favs.get(host).and_then(|(p, _, _)| p.clone());
         if png.is_none() && fetch && !crate::headless() && !host.is_empty() && self.fav_asked.insert(host.to_string()) {
             crate::favicons::fetch(vec![host.to_string()]);
         }
@@ -4008,7 +4135,14 @@ impl Inner {
                     }
                 }
             }
-            Hit::Page(ph) => pages::click(self, ph),
+            Hit::Page(ph) => {
+                let picking = self.page.font_pick.is_some();
+                pages::click(self, ph);
+                // The font list opened or closed: the settings search box hides under it.
+                if picking != self.page.font_pick.is_some() {
+                    self.layout_edits();
+                }
+            }
             Hit::SiteInfo => {
                 // The lock: open what the site may do, or put it away again.
                 let opening = !self.site_open;
@@ -4652,7 +4786,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if i.key(wp.0 as u32) {
                     return LRESULT(0);
                 }
+                let picking = i.page.font_pick.is_some();
                 if pages::key(&mut i, wp.0 as u32) {
+                    if picking != i.page.font_pick.is_some() {
+                        i.layout_edits();
+                    }
                     return LRESULT(0);
                 }
                 drop(i);

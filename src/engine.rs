@@ -2064,7 +2064,7 @@ pub fn raise(wv: &WebView) {
 /// Private working set of this app plus every WebView2 process it owns.
 /// Same number Task Manager shows as "Memory".
 pub fn memory(env: &ICoreWebView2Environment) -> (u64, u32) {
-    let (_, total, count, _) = memory_with_cpu(env, false);
+    let (_, total, count, _) = memory_with_cpu(Some(env), false);
     (total, count)
 }
 
@@ -2072,13 +2072,16 @@ pub fn memory(env: &ICoreWebView2Environment) -> (u64, u32) {
 /// (this process alone, the whole tree, process count, the tree's CPU time in
 /// 100 ns units). `cpu` costs a `GetProcessTimes` per process, so the callers
 /// that do not need it do not ask: there is no second walk for the journal.
-pub fn memory_with_cpu(env: &ICoreWebView2Environment, cpu: bool) -> (u64, u64, u32, u64) {
+pub fn memory_with_cpu(env: Option<&ICoreWebView2Environment>, cpu: bool) -> (u64, u64, u32, u64) {
     use crate::monitor::{cpu_time, private_ws};
     let me = unsafe { GetCurrentProcess() };
     let own = private_ws(me);
     let mut total = own;
     let mut ticks = if cpu { cpu_time(me) } else { 0 };
     let mut count = 1u32;
+    // No page has been made yet (the start page is Lumen's own drawing): no WebView2
+    // processes exist, and Lumen alone is the whole figure.
+    let Some(env) = env else { return (own, total, count, ticks) };
     unsafe {
         let Ok(list) = env.cast::<ICoreWebView2Environment8>().and_then(|e| e.GetProcessInfos()) else {
             return (own, total, count, ticks);

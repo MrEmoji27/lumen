@@ -53,15 +53,29 @@ pub struct Slot {
     pub pinned: bool,
     /// It has a page. An unloaded pin is not a place to go after closing something.
     pub loaded: bool,
+    /// An agent's tab: never where the person lands.
+    pub agent: bool,
 }
 
 /// Where to go after unloading the active tab at `i`: the next tab, else the one before,
 /// skipping pins that are unloaded (landing on one would load it, the opposite of closing).
 /// None: there is nowhere, and a fresh tab takes its place.
 pub fn next_after_close(slots: &[Slot], i: usize) -> Option<usize> {
-    let ok = |s: &Slot| !(s.pinned && !s.loaded);
+    let ok = |s: &Slot| !s.agent && !(s.pinned && !s.loaded);
     let after = (i + 1..slots.len()).find(|&n| ok(&slots[n]));
     after.or_else(|| (0..i.min(slots.len())).rev().find(|&n| ok(&slots[n])))
+}
+
+/// Where to go after the active tab at `i` was removed (`slots` is the row without it) and
+/// there is no tab the person was on before it: the nearest tab that is not pinned, after it
+/// then before it; else the nearest pin that has its page. Never an unloaded pin: landing on
+/// one would load it, and a start page closed at launch would wake a pin nobody asked for.
+/// None: nowhere, and a fresh start page takes its place.
+pub fn after_remove(slots: &[Slot], i: usize) -> Option<usize> {
+    let near = |ok: &dyn Fn(&Slot) -> bool| {
+        (i..slots.len()).find(|&n| ok(&slots[n])).or_else(|| (0..i.min(slots.len())).rev().find(|&n| ok(&slots[n])))
+    };
+    near(&|s| !s.agent && !s.pinned).or_else(|| near(&|s| !s.agent && s.loaded))
 }
 
 #[cfg(test)]
@@ -69,7 +83,7 @@ mod tests {
     use super::*;
 
     fn slot(pinned: bool, loaded: bool) -> Slot {
-        Slot { pinned, loaded }
+        Slot { pinned, loaded, agent: false }
     }
 
     #[test]
@@ -127,6 +141,21 @@ mod tests {
     fn at_the_end_it_goes_back_to_a_live_tab() {
         let v = [slot(false, true), slot(true, false), slot(true, true)];
         assert_eq!(next_after_close(&v, 2), Some(0));
+    }
+
+    #[test]
+    fn closing_the_start_page_never_wakes_an_unloaded_pin() {
+        // Launch: [pin(off), pin(off)] and the start page, now closed. Nowhere to go.
+        assert_eq!(after_remove(&[slot(true, false), slot(true, false)], 2), None);
+        // A plain tab anywhere in the row wins over the pins, even one further away.
+        assert_eq!(after_remove(&[slot(true, false), slot(false, false), slot(true, true)], 3), Some(1));
+        // With only pins left, one that has its page is fine.
+        assert_eq!(after_remove(&[slot(true, false), slot(true, true)], 2), Some(1));
+        // The neighbour after the closed tab first, then the one before.
+        assert_eq!(after_remove(&[slot(false, true), slot(false, true)], 1), Some(1));
+        assert_eq!(after_remove(&[slot(false, true), slot(false, true)], 2), Some(1));
+        // An agent's tab is never where the person lands.
+        assert_eq!(after_remove(&[Slot { pinned: false, loaded: true, agent: true }], 1), None);
     }
 
     #[test]

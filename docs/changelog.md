@@ -7,6 +7,27 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.2 — 2026-10-18
+
+- Closing the start page no longer wakes a pinned tab. Pins restored at launch were never
+  visited, so "the tab you were on before" had nothing to say, and the old fallback took the
+  neighbour in the row: a pin, which then loaded. Now: the tab you were on before, else the
+  nearest plain tab, else a pin that already has its page, else a fresh start page. A pin
+  without its page is never where you land.
+- Lumen's memory shows before any page has opened. It was measured through WebView2, which
+  does not exist until the first page does, so a start page alone showed nothing.
+- Every layout gets every card. Horizontal had no tab search, no message card, no "needs
+  you" card, no site prompt and no address suggestions: they hung off a sidebar it does not
+  have. Hybrid had no address suggestions. A compact sidebar squeezed the cards to its icon
+  column; they now keep a readable width and grow over the page. The page is a window above
+  the chrome, so while a card reaches over it the chrome rises above the page, cut down to
+  its own strips and the cards, and sinks back when they close.
+- The horizontal tab strip draws like the sidebar: pins as small cards, the current tab as
+  the ink pill, quiet letter tiles.
+- Drive scrolls under its task card instead of not at all; a step's time lands on its own
+  step when an agent has several calls in the air; the settings search box hides under the
+  font list.
+
 ## 0.6.1 — 2026-10-18
 
 The rest of the redraw.

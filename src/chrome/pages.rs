@@ -649,7 +649,10 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
         // One run at a time: Run waits, quietly, until this one is over.
         i.gfx.round(run, lo.round(run.h), th.raise.alpha(0.55));
     }
-    let mut y = card.bottom() + lo.s4;
+    // Under the card, the run scrolls: clipped there, so it never slides over the task box.
+    let below = R::new(st.x, card.bottom() + 2.0, st.w, (st.bottom() - card.bottom() - 2.0).max(0.0));
+    i.gfx.clip(below);
+    let mut y = card.bottom() + lo.s4 - i.page.scroll;
 
     match &s.drive {
         None => {
@@ -684,7 +687,7 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
             let last = d.steps.len().saturating_sub(1);
             for (n, (what, ms)) in d.steps.iter().enumerate() {
                 let r = R::new(steps.x, y + n as f32 * ROW, steps.w, ROW);
-                if r.bottom() < st.y || r.y > st.bottom() {
+                if r.bottom() < below.y || r.y > st.bottom() {
                     continue;
                 }
                 if n > 0 {
@@ -716,6 +719,7 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.text(&format!("Command: {}", s.settings.drive_cmd), R::new(col.x + 4.0, y, col.w, 20.0), lo.small, th.faint);
     i.gfx.text("Safety: the task Lumen sends tells the agent to call browser_handoff before paying, sending or deleting.", R::new(col.x + 4.0, y + 20.0, col.w, 20.0), lo.small, th.faint);
     y += 44.0;
+    i.gfx.unclip();
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
     close_button(i, st);

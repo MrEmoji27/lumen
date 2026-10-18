@@ -2488,7 +2488,7 @@ impl App {
             self.unsplit();
         }
         if id == self.active {
-            let slots: Vec<pins::Slot> = self.tabs.iter().map(|t| pins::Slot { pinned: t.pinned, loaded: t.has_page() }).collect();
+            let slots: Vec<pins::Slot> = self.tabs.iter().map(|t| pins::Slot { pinned: t.pinned, loaded: t.has_page(), agent: t.agent }).collect();
             match pins::next_after_close(&slots, i) {
                 Some(n) => {
                     let next = self.tabs[n].id;
@@ -2568,16 +2568,27 @@ impl App {
         }
         if id == self.active {
             // Back to the tab the person was on before this one, when it still
-            // exists. An agent tab is never where the person lands. Failing
-            // that, the old choice: the other half of a split, else the
-            // neighbour in the row.
+            // exists. An agent tab is never where the person lands, nor a pin
+            // whose page is gone (landing there loads it). Failing that, the
+            // other half of a split, else the nearest plain tab in the row, else
+            // a fresh start page: pins restored at launch were never visited.
             let next = self
                 .mru
-                .back(id, |t| self.idx(t).is_some_and(|j| !self.tabs[j].agent))
+                .back(id, |t| self.idx(t).is_some_and(|j| !self.tabs[j].agent && !(self.tabs[j].pinned && !self.tabs[j].has_page())))
                 .or_else(|| keep.filter(|k| self.idx(*k).is_some()))
-                .unwrap_or_else(|| self.tabs[i.min(self.tabs.len() - 1)].id);
-            self.active = 0;
-            self.activate(next);
+                .or_else(|| {
+                    let slots: Vec<pins::Slot> = self.tabs.iter().map(|t| pins::Slot { pinned: t.pinned, loaded: t.has_page(), agent: t.agent }).collect();
+                    pins::after_remove(&slots, i).map(|n| self.tabs[n].id)
+                });
+            match next {
+                Some(next) => {
+                    self.active = 0;
+                    self.activate(next);
+                }
+                None => {
+                    self.new_tab(None, None);
+                }
+            }
         } else {
             self.layout();
             self.dirty = true;
@@ -6043,8 +6054,7 @@ impl App {
         self.next_mem = now + MEM_TICK;
         let journal_work = journal::on() && self.journal_busy();
         let env = self.ctx.env.borrow();
-        let Some(env) = env.as_ref() else { return };
-        let (own, total, procs, cpu) = engine::memory_with_cpu(env, journal_work);
+        let (own, total, procs, cpu) = engine::memory_with_cpu(env.as_ref(), journal_work);
         if journal_work {
             // The 60 s line, on the minute, and the write to disk behind it.
             journal::mem_read(own, total, cpu);

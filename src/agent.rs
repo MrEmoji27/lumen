@@ -245,8 +245,10 @@ pub struct SessionState {
     /// Last snapshot's frames, per tab.
     frames: HashMap<u64, Vec<FrameEntry>>,
     /// The tool calls of this session, newest last: what the Drive panel shows as steps,
-    /// each with how long it took once it is over.
-    steps: VecDeque<(Step, Option<u64>)>,
+    /// each with its number and how long it took once it is over.
+    steps: VecDeque<(u64, Step, Option<u64>)>,
+    /// How many steps this session has put on the list: the next one's number.
+    step_n: u64,
     /// Cross-origin frames already attached, per tab: frameId -> session id.
     targets: HashMap<u64, HashMap<String, String>>,
 }
@@ -412,7 +414,7 @@ impl Agent {
     /// or page text beyond a host and a few typed words.
     pub fn steps(&self, session: &str) -> Vec<(String, Option<u64>)> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.get(session).map(|s| s.steps.iter().map(|(x, ms)| (doing(&x.tool, &x.args), *ms)).collect()).unwrap_or_default()
+        state.get(session).map(|s| s.steps.iter().map(|(_, x, ms)| (doing(&x.tool, &x.args), *ms)).collect()).unwrap_or_default()
     }
 
     /// A message from the person to one agent. It rides on that agent's next tool reply.
@@ -458,7 +460,7 @@ impl Agent {
     /// What the agent of this session did last, as the watch pill says it: `click "Submit order"`.
     pub fn last_step(&self, session: &str) -> String {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.get(session).and_then(|s| s.steps.back()).map(|(x, _)| doing(&x.tool, &x.args)).unwrap_or_default()
+        state.get(session).and_then(|s| s.steps.back()).map(|(_, x, _)| doing(&x.tool, &x.args)).unwrap_or_default()
     }
 
     /// Paste into a terminal and Claude Code can browse with Lumen. `lumen-agent` (next to
@@ -1882,17 +1884,7 @@ fn screenshot_content(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) -> Result
 fn run(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value) -> Result<Vec<Value>, String> {
     let session = who.session.as_str();
     let t0 = Instant::now();
-    let shown = !is_run_tool(name);
-    // The step's time, on the step this call put on the list.
-    let stamp = || {
-        if shown {
-            sh.with_state(session, |st| {
-                if let Some((_, ms)) = st.steps.back_mut().filter(|(_, ms)| ms.is_none()) {
-                    *ms = Some(t0.elapsed().as_millis() as u64);
-                }
-            });
-        }
-    };
+    let mut mine = None;
     let recording = sh.with_state(session, |st| {
         let on = st.recording.is_some() && !st.replaying && !is_run_tool(name);
         if !is_run_tool(name) {
@@ -1901,11 +1893,30 @@ fn run(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value) -> Result<Vec<Valu
             if st.steps.len() >= 60 {
                 st.steps.pop_front();
             }
-            st.steps.push_back((step, None));
+            st.step_n += 1;
+            mine = Some(st.step_n);
+            st.steps.push_back((st.step_n, step, None));
         }
         on
     });
-    let ctx = PolicyCtx::from_value(&call(&sh.proxy, who, Op::Policy)?);
+    // The step's time, on the step this call put on the list: by its number, since an agent
+    // may have several calls in the air at once.
+    let stamp = || {
+        if let Some(n) = mine {
+            sh.with_state(session, |st| {
+                if let Some((_, _, ms)) = st.steps.iter_mut().find(|(k, _, _)| *k == n) {
+                    *ms = Some(t0.elapsed().as_millis() as u64);
+                }
+            });
+        }
+    };
+    let ctx = match call(&sh.proxy, who, Op::Policy) {
+        Ok(v) => PolicyCtx::from_value(&v),
+        Err(e) => {
+            stamp();
+            return Err(e);
+        }
+    };
     let out = match authorize(who, name, args, &ctx) {
         Ok(approval) => {
             let res = run_tool(sh, who, name, args, &approval);
