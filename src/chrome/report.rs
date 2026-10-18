@@ -114,11 +114,11 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         let h = Hit::Report(Click::Range(key));
         let hov = i.is_hover(&h);
         if on {
-            i.gfx.round(r, i.look.r_md, th.accent.alpha(0.18));
+            i.gfx.round(r, i.look.round(r.h), th.pill);
         } else if hov {
             i.gfx.round(r, i.look.r_md, th.hover);
         }
-        i.gfx.text(label, r, f, if on { th.accent } else if hov { th.text } else { th.dim });
+        i.gfx.text(label, r, f, if on { th.pill_ink } else if hov { th.text } else { th.dim });
         i.hit(r, h);
         x = r.right() + i.look.s1;
     }
@@ -291,7 +291,7 @@ fn draw_sites(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
         i.gfx.text(&row.host, R::new(col.x, cy, col.w * 0.5, 18.0), i.look.body, th.text);
         let bar = R::new(col.x + col.w * 0.55, y + ROW_H / 2.0 - 2.0, col.w * 0.25, 4.0);
         i.gfx.round(bar, 2.0, th.line);
-        i.gfx.round(R::new(bar.x, bar.y, (bar.w * row.share).max(2.0), 4.0), 2.0, th.accent.alpha(0.8));
+        i.gfx.round(R::new(bar.x, bar.y, (bar.w * row.share).max(2.0), 4.0), 2.0, th.text.alpha(0.85));
         let n = format!("{} blocked", row.counts.blocked());
         i.gfx.text(&n, R::new(col.right() - 120.0, cy, 120.0, 18.0), i.look.small.align(Align::Right), th.dim);
         y += ROW_H;

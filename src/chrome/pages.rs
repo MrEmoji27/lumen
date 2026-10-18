@@ -2750,8 +2750,9 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     let tw = (col.w - 3.0 * gap) / 4.0;
     for (n, (label, value, note)) in tiles.into_iter().enumerate() {
         let r = R::new(col.x + n as f32 * (tw + gap), y, tw, 92.0);
-        i.gfx.round(r, i.look.r_lg, th.bg);
-        i.gfx.text(label, R::new(r.x + i.look.s4, r.y + i.look.s3, r.w - 2.0 * i.look.s4, 16.0), i.look.caption, th.faint);
+        i.gfx.round(r, i.look.r_card, th.raise);
+        i.gfx.round_stroke(r, i.look.r_card, th.line, 1.0);
+        i.label(label, R::new(r.x + i.look.s4, r.y + i.look.s3, r.w - 2.0 * i.look.s4, 16.0), th.faint);
         let (v, c) = match value {
             Some(v) => (v, th.text),
             None => ("—".to_string(), th.faint),
@@ -2767,9 +2768,10 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     let mem_r = cpu_r - 72.0;
     let bar_x = mem_r - 80.0 - i.look.s4 - 96.0;
     let name_w = (bar_x - i.look.s4 - col.x).max(80.0);
-    i.gfx.text("TAB", R::new(col.x, y, 200.0, 20.0), i.look.caption, th.faint);
+    i.label("Tab", R::new(col.x, y, 200.0, 20.0), th.faint);
     for (label, right) in [("MEMORY", mem_r), ("CPU", cpu_r), ("NETWORK", net_r)] {
-        i.gfx.text(label, R::new(right - 90.0, y, 90.0, 20.0), i.look.caption.align(Align::Right), th.faint);
+        let lw = i.gfx.measure_tracked(&label.to_uppercase(), i.look.label, i.look.label_track);
+        i.label(label, R::new(right - lw, y, lw + 4.0, 20.0), th.faint);
     }
     y += 24.0;
     i.gfx.line(col.x, y, col.right(), y, th.line, 1.0);
@@ -2819,7 +2821,7 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
         let nw = i.gfx.measure(&row.name, i.look.body).min(name_w - 90.0).max(40.0);
         i.gfx.text(&row.name, R::new(col.x, y, nw + 2.0, ROW_H), i.look.body, c_text);
         if !row.state.is_empty() {
-            let c = if row.state == "Active" { th.accent } else { th.faint };
+            let c = if row.state == "Active" { th.text } else { th.faint };
             i.gfx.text(row.state, R::new(col.x + nw + i.look.s3, y, 90.0, ROW_H), i.look.small, c);
         }
         if known {
@@ -2828,7 +2830,7 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.round(bar, 2.0, th.press);
             let w = (96.0 * (row.mem / total_mem).min(1.0) as f32).max(if row.mem > 0.0 { 3.0 } else { 0.0 });
             if w > 0.0 {
-                i.gfx.round(R::new(bar.x, bar.y, w, 4.0), 2.0, th.accent.alpha(0.8));
+                i.gfx.round(R::new(bar.x, bar.y, w, 4.0), 2.0, th.text.alpha(0.85));
             }
         }
         let vals = [

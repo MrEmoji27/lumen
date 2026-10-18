@@ -7,6 +7,29 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.0 — 2026-10-18
+
+Lumen, redrawn, to docs/design/lumen-ui.html.
+
+- Three looks, each a whole set of colours, type, corners and motion: **Signal** (the default:
+  warm paper and ink, monospace labels, one red signal; light and dark), **Glass** (a frosted
+  sidebar over a colour wallpaper, the page a floating card) and **Precise** (near-black,
+  hairlines, square-ish corners, one violet accent). Settings > Appearance picks one.
+- First run: "Pick a look", Signal chosen. Anyone who already had Lumen never sees it.
+- One accent, one meaning: something live (a working agent, a running Drive, the download
+  badge, the clock's colon). Buttons, chosen options and the active tab are ink.
+- One sans for everything; titles bold; labels, figures and addresses in monospace. The display
+  serif is gone from the chrome.
+- Sidebar: a pill address field, pinned tabs as cards, a TABS label with +, the active tab as a
+  solid pill that slides, AI and PRIVATE as quiet tags, agent rows with Message and Stop, the
+  footer's buttons on the left and the memory on the right.
+- Start page: a big monospace clock, "blocked today" and Lumen's own memory as cards, an ink
+  search bar, site cards with icon, name and address.
+- Settings: an icon menu, every section a card. History, Downloads, Dashboard (one row per agent),
+  Control and the Privacy report: cards, spaced labels, ink bars.
+- Closing a tab goes back to the tab you were on before it, not to a pinned tab.
+- Site icons are kept on disk by site, so tiles and History show them.
+
 ## 0.5.1 — 2026-10-18
 
 - The message box is a card in Lumen's own look, over the sidebar: who it is for, the text,
