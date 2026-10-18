@@ -15,6 +15,7 @@ mod color;
 mod form;
 mod confirm;
 mod menu;
+pub mod nowebview;
 mod files;
 #[cfg(debug_assertions)]
 mod shot;

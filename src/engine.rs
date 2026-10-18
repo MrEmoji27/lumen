@@ -340,6 +340,16 @@ fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Vec<u8> {
 }
 
 /// The WebView2 runtime's version, for the problem report. Empty when none has started.
+/// The WebView2 Runtime is on this PC. Without it Lumen cannot show a page. A debug build
+/// pretends it is missing under LUMEN_TEST_NO_WEBVIEW2, to look at the window that says so.
+pub fn webview2_present() -> bool {
+    if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_NO_WEBVIEW2").is_some() {
+        return false;
+    }
+    let mut v = PWSTR::null();
+    unsafe { GetAvailableCoreWebView2BrowserVersionString(PCWSTR::null(), &mut v) }.is_ok() && !take(v).is_empty()
+}
+
 pub fn browser_version(env: &ICoreWebView2Environment) -> String {
     let mut p = PWSTR::null();
     if unsafe { env.BrowserVersionString(&mut p) }.is_err() {

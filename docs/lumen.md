@@ -210,6 +210,11 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 - Downloads through aria2, torrents, saving the video on a page.
 - A PiP button on a tab that has sound, a now-playing card in the footer with pause and
   next, and the keyboard's media keys acting on the tab that is playing.
+- Hidden tabs sleep: trimmed, then frozen, then unloaded, never one with sound or in a call
+  (a microphone, camera or call link that is live, talking or not). When Windows runs short of
+  memory, the hidden tab looked at longest ago goes first. On battery, battery saver makes them
+  sleep sooner and the chrome move less; a leaf in the footer says so.
+- The address bar fills in the site you go to most as you type: `yout`, Enter, YouTube.
 - History you can search by what a page said.
 - Pins, bookmarks with folders and import, a speed dial, workspaces, split view, tab search.
 - Ctrl+K opens a command palette over the sidebar: type and pick a command, a setting, an open

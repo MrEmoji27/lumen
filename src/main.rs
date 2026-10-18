@@ -835,6 +835,15 @@ fn main() {
     launch::sweep();
     defaultapp::startup_check();
     install_panic_hook();
+    // No WebView2 Runtime: say so in a window of Lumen's own, offer Microsoft's download,
+    // and leave. Nothing below can work without it. A headless Lumen just leaves (the shot
+    // hook still draws the window, for a look at it).
+    if !engine::webview2_present() {
+        if !headless() || std::env::var_os("LUMEN_TEST_SHOT").is_some() {
+            chrome::nowebview::show();
+        }
+        return;
+    }
     // Before WebView2 starts: its processes must be born inside the job.
     let job = monitor::Job::adopt_self();
     let mut settings = store::load_settings();
