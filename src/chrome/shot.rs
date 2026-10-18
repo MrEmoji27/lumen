@@ -164,6 +164,11 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             std::thread::sleep(std::time::Duration::from_millis(40));
                             let _ = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), lp);
                         }
+                        if cmd == "rclick" {
+                            let _ = PostMessageW(Some(hwnd), WM_RBUTTONDOWN, WPARAM(0), lp);
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                            let _ = PostMessageW(Some(hwnd), WM_RBUTTONUP, WPARAM(0), lp);
+                        }
                     }
                     "wheel" => {
                         let (x, y) = xy(&args);
@@ -173,10 +178,29 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         let _ = PostMessageW(Some(hwnd), WM_MOUSEWHEEL, WPARAM(((delta & 0xffff) << 16) as usize), lp);
                     }
                     "evk" => {
-                        // A key into the address bar's edit box (ID 101), as typing there would.
-                        let vk: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-                        if let Ok(edit) = GetDlgItem(Some(hwnd), 101) {
+                        // A key into an edit box by its id, as typing there would:
+                        // "evk 9" is the address bar (101), "evk 110 9" the first form box.
+                        let (id, vk) = match args.len() {
+                            1 => (101, args[0].parse().unwrap_or(0)),
+                            _ => (args[0].parse().unwrap_or(101), args.get(1).and_then(|v| v.parse().ok()).unwrap_or(0)),
+                        };
+                        if let Ok(edit) = GetDlgItem(Some(hwnd), id) {
                             let _ = PostMessageW(Some(edit), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
+                        }
+                    }
+                    "killfocus" => {
+                        // The keyboard left the app, as Alt-Tab takes it: a menu must close.
+                        let _ = PostMessageW(Some(hwnd), WM_KILLFOCUS, WPARAM(0), LPARAM(0));
+                    }
+                    "focus" => {
+                        // Say which window has the keyboard: proof that Tab walked the form.
+                        // The chrome's own thread, not the foreground one: a headless run
+                        // is nobody's foreground.
+                        let tid = GetWindowThreadProcessId(hwnd, None);
+                        let mut info = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+                        if GetGUIThreadInfo(tid, &mut info).is_ok() {
+                            let id = if info.hwndFocus.is_invalid() { -1 } else { GetDlgCtrlID(info.hwndFocus) };
+                            eprintln!("lumen: focus {id}");
                         }
                     }
                     "drag" => {
@@ -352,6 +376,11 @@ pub fn fake(s: &mut UiState) {
     if fake_has("handoff") {
         s.handoff = Some(("claude-code".into(), "Log in to the shop with your account, then press Done and I carry on.".into()));
     }
+    if fake_has("cardcolor") && s.settings.recent_colors.is_empty() {
+        // A few colours picked before, so the recents row is full. Only once: the
+        // real list, as the picker updates it, must not be overwritten on a state push.
+        s.settings.recent_colors = vec!["#2f6bff".into(), "#13a36b".into(), "#f0a070".into(), "#5a43e6".into(), "#c4241c".into(), "#3c6e71".into()];
+    }
     if fake_has("prompt") {
         s.prompt = Some((1, "https://meet.example.com".into(), "camera"));
     }
@@ -405,7 +434,9 @@ pub fn fake(s: &mut UiState) {
             v("https://example.org/", "", "Yesterday", "09:00"),
         ]);
     }
-    if fake_has("report") {
+    // Only while the page has nothing: after a real reset the numbers must be the
+    // real, empty ones.
+    if fake_has("report") && s.report.is_none() {
         use crate::privacy_stats::{Bar, Counts, SiteRow, Snapshot};
         let day = |n: u64, blocked: u64, bytes: u64| Bar { day: format!("2026-10-{n:02}"), blocked, bytes };
         let c = Counts {

@@ -3,12 +3,6 @@
 //! written through serde, so a new setting is one line in a schema.
 
 use serde_json::{Value, json};
-use windows::Win32::UI::Controls::Dialogs::{
-    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
-    OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
-};
-use windows::Win32::Foundation::COLORREF;
-use windows::core::{PCWSTR, PWSTR};
 
 use super::{
     Hit, Inner, UiDl, UiState, send,
@@ -158,7 +152,7 @@ pub struct Page {
     /// The name being typed for "save this look".
     pub(super) theme_name: String,
     /// The saved looks, read from disk the first time the page needs them.
-    themes: Option<Vec<style::ThemeFile>>,
+    pub(super) themes: Option<Vec<style::ThemeFile>>,
     /// The changelog laid out for a width, so a frame does not measure it all again.
     changes: Option<(f32, Vec<ChangeBlock>)>,
     /// The problem report broken into lines for a width: (width, text length, lines).
@@ -418,7 +412,7 @@ fn get(s: &Settings, k: &str) -> Value {
     serde_json::to_value(s).ok().and_then(|v| v.get(k).cloned()).unwrap_or(Value::Null)
 }
 
-fn set(i: &mut Inner, k: &str, v: Value) {
+pub(super) fn set(i: &mut Inner, k: &str, v: Value) {
     let Some(st) = i.state.as_mut() else { return };
     let mut all = serde_json::to_value(&st.settings).unwrap_or(json!({}));
     if all.get(k) == Some(&v) {
@@ -496,23 +490,29 @@ fn local_offset() -> i64 {
     wall - unix_now() as i64
 }
 
-/// The slice of history to clear: Some(None) = everything, Some(Some(t)) = from
-/// unix `t` on, None = the menu was dismissed.
-fn ask_range(i: &Inner) -> Option<Option<u64>> {
+/// The slice of history to clear: None = everything, Some(t) = from unix `t` on.
+/// The menu asks, and `done` runs with the answer once a row is chosen.
+fn ask_range(i: &mut Inner, done: impl FnOnce(&mut Inner, Option<u64>) + 'static) {
     let now = unix_now();
     let items: Vec<(u32, String)> = [(1u32, "Last hour"), (2, "Today"), (3, "Last 7 days"), (4, "Last 4 weeks"), (5, "Everything")]
         .into_iter()
         .map(|(id, label)| (id, label.to_string()))
         .collect();
     let (x, y) = i.mouse;
-    match i.popup(&items, x, y) {
-        1 => Some(Some(now - 3600)),
-        2 => Some(Some(midnight())),
-        3 => Some(Some(now - 7 * 86_400)),
-        4 => Some(Some(now - 28 * 86_400)),
-        5 => Some(None),
-        _ => None,
-    }
+    super::menu::open(i, &items, x, y, move |i, cmd| {
+        let since = match cmd {
+            1 => now - 3600,
+            2 => midnight(),
+            3 => now - 7 * 86_400,
+            4 => now - 28 * 86_400,
+            5 => {
+                done(i, None);
+                return;
+            }
+            _ => return,
+        };
+        done(i, Some(since));
+    });
 }
 
 fn ratio(scale: Scale, v: f32) -> f32 {
@@ -1611,119 +1611,19 @@ fn classify_link(text: &str) -> &'static str {
     }
 }
 
-/// A native open-file dialog for a .torrent; the file's bytes when picked.
-fn pick_torrent(owner: windows::Win32::Foundation::HWND) -> Option<Vec<u8>> {
-    let mut buf = vec![0u16; 32768];
-    let filter: Vec<u16> = "Torrents\0*.torrent\0All files\0*.*\0\0".encode_utf16().collect();
-    let title: Vec<u16> = "Open a torrent file\0".encode_utf16().collect();
-    let mut ofn = OPENFILENAMEW {
-        lStructSize: size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: owner,
-        lpstrFilter: PCWSTR(filter.as_ptr()),
-        lpstrFile: PWSTR(buf.as_mut_ptr()),
-        nMaxFile: buf.len() as u32,
-        lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
-        ..Default::default()
-    };
-    if !unsafe { GetOpenFileNameW(&mut ofn) }.as_bool() {
-        return None;
+/// Apply an imported look: keep it among the saved ones, and put it on.
+pub(super) fn apply_theme(i: &mut Inner, t: style::ThemeFile) {
+    let Some(s) = i.state.clone() else { return };
+    let mut list = style::saved_themes();
+    if !t.name.is_empty() {
+        list.push(t.clone());
+        style::save_themes(&list);
+        i.page.themes = Some(list);
     }
-    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
-    let path = String::from_utf16_lossy(&buf[..len]);
-    std::fs::read(path).ok()
-}
-
-/// The file dialog for a .kdbx. Returns the path, not the bytes: the parse
-/// happens on a worker thread, with the password.
-fn pick_kdbx(owner: windows::Win32::Foundation::HWND) -> Option<String> {
-    let mut buf = vec![0u16; 32768];
-    let filter: Vec<u16> = "KeePass files\0*.kdbx\0All files\0*.*\0\0".encode_utf16().collect();
-    let title: Vec<u16> = "Open a KeePass file\0".encode_utf16().collect();
-    let mut ofn = OPENFILENAMEW {
-        lStructSize: size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: owner,
-        lpstrFilter: PCWSTR(filter.as_ptr()),
-        lpstrFile: PWSTR(buf.as_mut_ptr()),
-        nMaxFile: buf.len() as u32,
-        lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
-        ..Default::default()
-    };
-    if !unsafe { GetOpenFileNameW(&mut ofn) }.as_bool() {
-        return None;
-    }
-    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
-    Some(String::from_utf16_lossy(&buf[..len]))
-}
-
-/// The file dialog for a wallpaper image. Returns the path.
-fn pick_image(owner: windows::Win32::Foundation::HWND) -> Option<String> {
-    let mut buf = vec![0u16; 32768];
-    let filter: Vec<u16> = "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.gif\0All files\0*.*\0\0".encode_utf16().collect();
-    let title: Vec<u16> = "Choose a wallpaper\0".encode_utf16().collect();
-    let mut ofn = OPENFILENAMEW {
-        lStructSize: size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: owner,
-        lpstrFilter: PCWSTR(filter.as_ptr()),
-        lpstrFile: PWSTR(buf.as_mut_ptr()),
-        nMaxFile: buf.len() as u32,
-        lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
-        ..Default::default()
-    };
-    if !unsafe { GetOpenFileNameW(&mut ofn) }.as_bool() {
-        return None;
-    }
-    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
-    Some(String::from_utf16_lossy(&buf[..len]))
-}
-
-/// A "save as" dialog for a theme file. Returns the chosen path.
-fn pick_save(owner: windows::Win32::Foundation::HWND, suggested: &str) -> Option<String> {
-    let mut buf = vec![0u16; 32768];
-    for (n, c) in suggested.encode_utf16().take(buf.len() - 1).enumerate() {
-        buf[n] = c;
-    }
-    let filter: Vec<u16> = "Lumen theme\0*.json\0All files\0*.*\0\0".encode_utf16().collect();
-    let title: Vec<u16> = "Export this look\0".encode_utf16().collect();
-    let mut ofn = OPENFILENAMEW {
-        lStructSize: size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: owner,
-        lpstrFilter: PCWSTR(filter.as_ptr()),
-        lpstrFile: PWSTR(buf.as_mut_ptr()),
-        nMaxFile: buf.len() as u32,
-        lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
-        ..Default::default()
-    };
-    if !unsafe { GetSaveFileNameW(&mut ofn) }.as_bool() {
-        return None;
-    }
-    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
-    Some(String::from_utf16_lossy(&buf[..len]))
-}
-
-/// An "open file" dialog for a theme file. Returns the chosen path.
-fn pick_open(owner: windows::Win32::Foundation::HWND) -> Option<String> {
-    let mut buf = vec![0u16; 32768];
-    let filter: Vec<u16> = "Lumen theme\0*.json\0All files\0*.*\0\0".encode_utf16().collect();
-    let title: Vec<u16> = "Import a look\0".encode_utf16().collect();
-    let mut ofn = OPENFILENAMEW {
-        lStructSize: size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: owner,
-        lpstrFilter: PCWSTR(filter.as_ptr()),
-        lpstrFile: PWSTR(buf.as_mut_ptr()),
-        nMaxFile: buf.len() as u32,
-        lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
-        ..Default::default()
-    };
-    if !unsafe { GetOpenFileNameW(&mut ofn).as_bool() } {
-        return None;
-    }
-    let len = (0..buf.len()).take_while(|&i| buf[i] != 0).count();
-    Some(String::from_utf16_lossy(&buf[..len]))
+    let mut next = s.settings.clone();
+    t.apply(&mut next);
+    send(&i.proxy, json!({"t": "settings", "v": serde_json::to_value(&next).unwrap_or_default()}));
+    i.page.flash = Some(("Imported".into(), std::time::Instant::now()));
 }
 
 /// The settings one "Reset" button owns. Not the layout: a look is colours,
@@ -1769,204 +1669,6 @@ fn reset_group(i: &mut Inner, group: &str) {
         i.page.flash = Some(("Back to the defaults".into(), std::time::Instant::now()));
     }
     i.invalidate();
-}
-
-/// Control ids. 1 and 2 are the ids Windows itself presses for Enter and
-/// Escape, so the two buttons keep those numbers.
-const ID_PASS: usize = 101;
-const ID_OPEN: usize = 1;
-const ID_CANCEL: usize = 2;
-
-/// The master password, in a small native dialog. Modal: the owner is
-/// disabled until OK or Cancel. The text leaves this stack frame only as the
-/// return value — never stored, never logged, never written.
-fn ask_password(owner: windows::Win32::Foundation::HWND, file: &str) -> Option<String> {
-    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{
-        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject, FF_DONTCARE, FW_NORMAL, OUT_DEFAULT_PRECIS,
-    };
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus, VK_ESCAPE, VK_RETURN};
-    use windows::Win32::UI::WindowsAndMessaging::*;
-    use windows::core::{HSTRING, w};
-
-    thread_local! {
-        static GOT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-    }
-
-    unsafe extern "system" fn pass_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-        use windows::Win32::UI::WindowsAndMessaging::*;
-        // Edition 2024: an unsafe fn body is not unsafe on its own.
-        unsafe {
-            match msg {
-                WM_COMMAND => {
-                    let id = (w.0 & 0xFFFF) as usize;
-                    // Open keeps what was typed; either button closes the window.
-                    if id == ID_OPEN {
-                        let s = super::wide_text(GetDlgItem(Some(hwnd), ID_PASS as i32).unwrap_or_default());
-                        GOT.with(|g| *g.borrow_mut() = Some(s));
-                    }
-                    if id == ID_OPEN || id == ID_CANCEL {
-                        let _ = DestroyWindow(hwnd);
-                    }
-                    LRESULT(0)
-                }
-                WM_CLOSE => {
-                    let _ = DestroyWindow(hwnd);
-                    LRESULT(0)
-                }
-                WM_DESTROY => {
-                    PostQuitMessage(0);
-                    LRESULT(0)
-                }
-                _ => DefWindowProcW(hwnd, msg, w, l),
-            }
-        }
-    }
-
-    GOT.with(|g| *g.borrow_mut() = None);
-    let class = w!("LumenPass");
-    let hinst: HINSTANCE = unsafe { GetModuleHandleW(None) }.map(|h| h.into()).unwrap_or_default();
-    let wc = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(pass_wndproc),
-        hInstance: hinst,
-        lpszClassName: class,
-        ..Default::default()
-    };
-    unsafe {
-        // Already registered on a second use: fine, the class is the same.
-        let _ = RegisterClassExW(&wc);
-        let mut owner_r = RECT::default();
-        let _ = GetWindowRect(owner, &mut owner_r);
-        let k = GetDpiForWindow(owner).max(96) as f32 / 96.0;
-        let (wpx, hpx) = ((380.0 * k) as i32, (170.0 * k) as i32);
-        let x = (owner_r.left + (owner_r.right - owner_r.left - wpx) / 2).max(0);
-        let y = (owner_r.top + (owner_r.bottom - owner_r.top - hpx) / 2).max(0);
-        let title: Vec<u16> = "KeePass master password\0".encode_utf16().collect();
-        let Ok(hwnd) = CreateWindowExW(
-            WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
-            class,
-            PCWSTR(title.as_ptr()),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-            x,
-            y,
-            wpx,
-            hpx,
-            Some(owner),
-            None,
-            Some(hinst),
-            None,
-        ) else {
-            return None;
-        };
-        let face = HSTRING::from("Segoe UI");
-        let font = CreateFontW(
-            -(13.0 * k).round() as i32,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            FF_DONTCARE.0 as u32,
-            &face,
-        );
-        let label: Vec<u16> = format!("Master password for {}\0", file.rsplit(['\\', '/']).next().unwrap_or(file)).encode_utf16().collect();
-        let caption = CreateWindowExW(
-            WS_EX_LEFT,
-            w!("STATIC"),
-            PCWSTR(label.as_ptr()),
-            WS_CHILD | WS_VISIBLE,
-            12,
-            12,
-            wpx - 24,
-            20,
-            Some(hwnd),
-            None,
-            Some(hinst),
-            None,
-        )
-        .unwrap_or_default();
-        let edit = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            w!("EDIT"),
-            w!(""),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32) | WINDOW_STYLE(ES_PASSWORD as u32),
-            12,
-            38,
-            wpx - 24,
-            24,
-            Some(hwnd),
-            Some(HMENU(ID_PASS as _)),
-            Some(hinst),
-            None,
-        )
-        .unwrap_or_default();
-        let ok: Vec<u16> = "Open\0".encode_utf16().collect();
-        let cancel: Vec<u16> = "Cancel\0".encode_utf16().collect();
-        // Every child gets the same font, the caption and the box included.
-        let _ = SendMessageW(caption, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
-        let _ = SendMessageW(edit, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
-        let bx = wpx - 24 - 196;
-        for (id, text, def) in [(ID_OPEN, ok.as_slice(), true), (ID_CANCEL, cancel.as_slice(), false)] {
-            let b = CreateWindowExW(
-                WS_EX_LEFT,
-                w!("BUTTON"),
-                PCWSTR(text.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((if def { BS_DEFPUSHBUTTON } else { BS_PUSHBUTTON }) as u32),
-                bx + if def { 100 } else { 0 },
-                hpx - 44,
-                96,
-                28,
-                Some(hwnd),
-                Some(HMENU(id as _)),
-                Some(hinst),
-                None,
-            )
-            .unwrap_or_default();
-            let _ = SendMessageW(b, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
-        }
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(GetDlgItem(Some(hwnd), ID_PASS as i32).ok());
-        let _ = EnableWindow(owner, false);
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            // This is not a real dialog box, so it has no default button for
-            // the dialog manager to press: Enter and Escape are read here,
-            // before the edit box can beep at them. Tab still walks the
-            // controls through IsDialogMessage.
-            if msg.message == WM_KEYDOWN {
-                let key = msg.wParam.0 as u16;
-                if key == VK_RETURN.0 {
-                    GOT.with(|g| *g.borrow_mut() = Some(super::wide_text(edit)));
-                    let _ = DestroyWindow(hwnd);
-                    continue;
-                }
-                if key == VK_ESCAPE.0 {
-                    let _ = DestroyWindow(hwnd);
-                    continue;
-                }
-            }
-            if IsDialogMessageW(hwnd, &msg).as_bool() {
-                continue;
-            }
-            let _ = TranslateMessage(&msg);
-            let _ = DispatchMessageW(&msg);
-        }
-        let _ = EnableWindow(owner, true);
-        let _ = SetForegroundWindow(owner);
-        if !font.is_invalid() {
-            let _ = DeleteObject(font.into());
-        }
-    }
-    GOT.with(|g| g.borrow_mut().take())
 }
 
 fn chip_label(kbps: u32) -> &'static str {
@@ -3319,28 +3021,23 @@ pub fn click(i: &mut Inner, p: PageHit) {
         }
         PageHit::AccentReset => set(i, "accent", json!("")),
         PageHit::Accent => {
-            if let Some(c) = pick_color(i.hwnd_raw(), i.theme.accent) {
-                set(i, "accent", json!(c.hex()));
-            }
+            // The card opens under the swatch that was clicked.
+            let anchor = i.hits.iter().find(|(_, h)| *h == Hit::Page(PageHit::Accent)).map(|(r, _)| *r);
+            super::color::open(i, "accent", s.settings.accent.clone(), i.theme.accent, anchor);
         }
         PageHit::Color(k) => {
             let start = role_color(i, k, &s);
-            if let Some(c) = pick_color(i.hwnd_raw(), start) {
-                set(i, k, json!(c.hex()));
-            }
+            let was = get(&s.settings, k).as_str().unwrap_or("").to_string();
+            let anchor = i.hits.iter().find(|(_, h)| *h == Hit::Page(PageHit::Color(k))).map(|(r, _)| *r);
+            super::color::open(i, k, was, start, anchor);
         }
         PageHit::ColorClear(k) => set(i, k, json!("")),
         PageHit::Text("wallpaper") => {
-            if let Some(path) = pick_image(i.hwnd_raw()) {
-                set(i, "wallpaper", json!(path));
-            }
+            super::files::open(i, super::files::FileWhat::Image);
         }
         PageHit::Text(k) => {
             let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
-            let cur = if k == "greeting" { cur } else { cur };
-            if let Some(a) = super::dialog::ask_fields(i.hwnd_raw(), "Edit", &[("Text", &cur)]) {
-                set(i, k, json!(a[0]));
-            }
+            super::form::open(i, "Edit", &[("Text", &cur)], super::form::FormAct::TextSetting { key: k.to_string() });
         }
         PageHit::Fonts(k) => {
             i.page.font_pick = Some(FontPick { key: k, filter: String::new(), scroll: 0.0, shown: Vec::new() });
@@ -3363,23 +3060,8 @@ pub fn click(i: &mut Inner, p: PageHit) {
             i.invalidate();
         }
         PageHit::ThemeSave => {
-            let name = super::dialog::ask_fields(i.hwnd_raw(), "Save this look", &[("Name", &i.page.theme_name.clone())])
-                .map(|a| a[0].trim().to_string())
-                .filter(|n| !n.is_empty());
-            let Some(name) = name else { return };
-            let mut list = style::saved_themes();
-            let mut file = style::ThemeFile::of(&s.settings);
-            file.name = name.clone();
-            // Saving under a name that is already there replaces it.
-            if let Some(at) = list.iter().position(|t| t.name == name) {
-                list[at] = file;
-            } else {
-                list.push(file);
-            }
-            style::save_themes(&list);
-            i.page.themes = Some(list);
-            i.page.flash = Some((format!("Saved \"{name}\""), std::time::Instant::now()));
-            i.invalidate();
+            let cur = i.page.theme_name.clone();
+            super::form::open(i, "Save this look", &[("Name", &cur)], super::form::FormAct::SaveLook);
         }
         PageHit::ThemeApply(n) => {
             let list = style::saved_themes();
@@ -3403,32 +3085,11 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::ThemeExport => {
             let mut file = style::ThemeFile::of(&s.settings);
             file.name = i.page.theme_name.clone();
-            let text = file.to_json();
-            if let Some(path) = pick_save(i.hwnd_raw(), &format!("{}.json", if file.name.is_empty() { "lumen-theme" } else { &file.name })) {
-                match std::fs::write(&path, text) {
-                    Ok(()) => i.page.flash = Some((format!("Exported to {}", path.rsplit(['\\', '/']).next().unwrap_or(&path)), std::time::Instant::now())),
-                    Err(_) => i.page.flash = Some(("Could not write that file".into(), std::time::Instant::now())),
-                }
-            }
-            i.invalidate();
+            let suggested = format!("{}.json", if file.name.is_empty() { "lumen-theme" } else { &file.name });
+            super::files::open(i, super::files::FileWhat::ThemeSave { text: file.to_json(), suggested });
         }
         PageHit::ThemeImport => {
-            let Some(path) = pick_open(i.hwnd_raw()) else { return };
-            let Some(t) = std::fs::read_to_string(&path).ok().and_then(|t| style::ThemeFile::from_json(&t)) else {
-                i.page.flash = Some(("That file is not a Lumen theme".into(), std::time::Instant::now()));
-                i.invalidate();
-                return;
-            };
-            let mut list = style::saved_themes();
-            if !t.name.is_empty() {
-                list.push(t.clone());
-                style::save_themes(&list);
-                i.page.themes = Some(list);
-            }
-            let mut next = s.settings.clone();
-            t.apply(&mut next);
-            send(&i.proxy, json!({"t": "settings", "v": serde_json::to_value(&next).unwrap_or_default()}));
-            i.page.flash = Some(("Imported".into(), std::time::Instant::now()));
+            super::files::open(i, super::files::FileWhat::ThemeOpen);
         }
         PageHit::ResetGroup(group) => reset_group(i, group),
         PageHit::Engine(n) => set(i, "search", json!(ENGINES[n].1)),
@@ -3444,13 +3105,9 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::Slider(_) => {}
         PageHit::ClearPasswords => send(&i.proxy, json!({"t": "clearPasswords"})),
         PageHit::KdbxOpen => {
-            // The file and the password are asked for here, in the chrome; the
-            // pair crosses to the main loop on an event that is never logged.
-            if let Some(path) = pick_kdbx(i.hwnd_raw())
-                && let Some(pw) = ask_password(i.hwnd_raw(), &path)
-            {
-                let _ = i.proxy.send_event(crate::engine::Ev::VaultOpen(path, pw));
-            }
+            // The file card picks the .kdbx; the password form follows it. The pair
+            // crosses to the main loop on an event that is never logged.
+            super::files::open(i, super::files::FileWhat::Kdbx);
         }
         PageHit::KdbxLock => send(&i.proxy, json!({"t": "kdbxLock"})),
         PageHit::CopyAgent => super::copy_text(i.hwnd_raw(), &s.agent_cmd),
@@ -3469,27 +3126,27 @@ pub fn click(i: &mut Inner, p: PageHit) {
             }
         }
         PageHit::DlTorrentPick => {
-            if let Some(bytes) = pick_torrent(i.hwnd_raw()) {
-                use base64::Engine as _;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                send(&i.proxy, json!({"t": "dl", "a": "addTorrent", "b64": b64}));
-            }
+            super::files::open(i, super::files::FileWhat::Torrent);
         }
         PageHit::DlLimit => {
-            // The native menu of speeds aria2 accepts as max-overall-download-limit.
+            // The drawn menu of speeds aria2 accepts as max-overall-download-limit.
             let (x, y) = i.mouse;
-            let kbps = match i.popup(
+            super::menu::open(
+                i,
                 &[(1, "No limit".into()), (2, "1 MB/s".into()), (3, "5 MB/s".into()), (4, "10 MB/s".into())],
                 x,
                 y,
-            ) {
-                1 => 0,
-                2 => 1024,
-                3 => 5120,
-                4 => 10240,
-                _ => return,
-            };
-            send(&i.proxy, json!({"t": "dl", "a": "limit", "kbps": kbps}));
+                |i, cmd| {
+                    let kbps = match cmd {
+                        1 => 0,
+                        2 => 1024,
+                        3 => 5120,
+                        4 => 10240,
+                        _ => return,
+                    };
+                    send(&i.proxy, json!({"t": "dl", "a": "limit", "kbps": kbps}));
+                },
+            );
         }
         PageHit::DlNote => {
             // The firewall line is dismissed for good; it never comes back.
@@ -3510,9 +3167,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
             i.invalidate();
         }
         PageHit::BmNewFolder => {
-            if let Some(a) = super::dialog::ask_fields(i.hwnd_raw(), "New folder", &[("Name", "")]) {
-                send(&i.proxy, json!({"t": "bmFolderAdd", "name": a[0]}));
-            }
+            super::form::open(i, "New folder", &[("Name", "")], super::form::FormAct::NewFolder);
         }
         PageHit::BmImport => {
             // Read-only look at the other browsers' files: which are here, and how many each.
@@ -3528,37 +3183,38 @@ pub fn click(i: &mut Inner, p: PageHit) {
                 items.push((50, "All of them".into()));
             }
             let (x, y) = i.mouse;
-            let pick = i.popup(&items, x, y);
-            let browser = match pick {
-                0 => return,
-                50 => "all".to_string(),
-                n => match found.get(n as usize - 1) {
-                    Some(f) => f.browser.to_string(),
-                    None => return,
-                },
-            };
-            send(&i.proxy, json!({"t": "bmImport", "browser": browser}));
+            super::menu::open(i, &items, x, y, move |i, cmd| {
+                let browser = match cmd {
+                    0 => return,
+                    50 => "all".to_string(),
+                    n => match found.get(n as usize - 1) {
+                        Some(f) => f.browser.to_string(),
+                        None => return,
+                    },
+                };
+                send(&i.proxy, json!({"t": "bmImport", "browser": browser}));
+            });
         }
         PageHit::DriveStart => send(&i.proxy, json!({"t": "driveStart"})),
         PageHit::DriveStop => send(&i.proxy, json!({"t": "driveStop"})),
         PageHit::DrivePause => send(&i.proxy, json!({"t": "drivePause"})),
         PageHit::ClearHistory => {
-            // One native menu of time ranges first, then the wipe.
-            if let Some(since) = ask_range(i) {
-                send(&i.proxy, json!({"t": "clearHistory", "since": since}));
-            }
+            // One drawn menu of time ranges first, then the wipe.
+            ask_range(i, |i, since| send(&i.proxy, json!({"t": "clearHistory", "since": since})));
         }
         PageHit::ClearData => {
-            if let Some(since) = ask_range(i) {
+            ask_range(i, |i, since| {
                 let (x, y) = i.mouse;
                 // Second choice: history only, or the cookies and cache with it.
-                let more = match i.popup(&[(1, "History only".into()), (2, "History, cookies and cache".into())], x, y) {
-                    1 => false,
-                    2 => true,
-                    _ => return,
-                };
-                send(&i.proxy, json!({"t": "clearData", "since": since, "more": more}));
-            }
+                super::menu::open(i, &[(1, "History only".into()), (2, "History, cookies and cache".into())], x, y, move |i, cmd| {
+                    let more = match cmd {
+                        1 => false,
+                        2 => true,
+                        _ => return,
+                    };
+                    send(&i.proxy, json!({"t": "clearData", "since": since, "more": more}));
+                });
+            });
         }
         PageHit::DefaultMake => {
             let note = crate::defaultapp::make_default();
@@ -3679,25 +3335,6 @@ pub fn pick_char(i: &mut Inner, ch: u32) -> bool {
         i.invalidate();
     }
     true
-}
-
-/// The Windows color dialog. Blocks while open, which is what a picker should do.
-fn pick_color(owner: windows::Win32::Foundation::HWND, start: Color) -> Option<Color> {
-    let mut custom = [COLORREF(0); 16];
-    let mut cc = CHOOSECOLORW {
-        lStructSize: size_of::<CHOOSECOLORW>() as u32,
-        hwndOwner: owner,
-        rgbResult: COLORREF(start.colorref()),
-        lpCustColors: custom.as_mut_ptr(),
-        Flags: CC_FULLOPEN | CC_RGBINIT,
-        ..Default::default()
-    };
-    if unsafe { ChooseColorW(&mut cc) }.as_bool() {
-        let v = cc.rgbResult.0;
-        Some(Color((v & 0xff) as f32 / 255.0, ((v >> 8) & 0xff) as f32 / 255.0, ((v >> 16) & 0xff) as f32 / 255.0, 1.0))
-    } else {
-        None
-    }
 }
 
 impl Inner {

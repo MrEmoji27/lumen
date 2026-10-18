@@ -51,6 +51,9 @@ pub struct Settings {
     pub palette: String,
     /// Accent color override. Empty means palette default.
     pub accent: String,
+    /// The last colours picked in the colour picker, newest first. Shown as its own
+    /// row of swatches.
+    pub recent_colors: Vec<String>,
     /// "solid" | "mica" | "acrylic". Solid is the fastest.
     pub backdrop: String,
     /// "dark" | "light" | "system". Also drives prefers-color-scheme in pages.
@@ -257,6 +260,7 @@ impl Default for Settings {
             seen_version: env!("CARGO_PKG_VERSION").into(),
             palette: "graphite".into(),
             accent: String::new(),
+            recent_colors: Vec::new(),
             backdrop: "solid".into(),
             theme: "dark".into(),
             look: "signal".into(),
@@ -497,6 +501,7 @@ impl Settings {
         for c in [&mut self.bg_color, &mut self.side_color, &mut self.surface_color, &mut self.text_color, &mut self.dim_color] {
             clean_color(c);
         }
+        self.recent_colors.truncate(6);
         clean_font(&mut self.ui_font, "segoe");
         clean_font(&mut self.display_font, "instrument");
         clean_font(&mut self.mono_font, "cascadia");
