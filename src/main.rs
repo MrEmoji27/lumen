@@ -13,6 +13,7 @@ mod agent_result;
 mod agent_tasks;
 mod agent_consent;
 mod aloud;
+mod backdrop;
 mod blocker;
 mod bookmarks;
 mod chrome;
@@ -957,6 +958,23 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     // WebView2's own history. It happens as soon as there is a page to ask.
     app.clear_pending = store::clear_history_pending();
     app.apply_backdrop();
+    // Test hook for the backdrop measurement (docs/briefs/ui-backdrop.md):
+    // LUMEN_TEST_BACKDROP=acrylic|mica puts Windows' own frost on the window at
+    // start, so a headless run can be measured against one started without it.
+    if cfg!(debug_assertions)
+        && let Ok(v) = std::env::var("LUMEN_TEST_BACKDROP")
+    {
+        let b = match v.to_ascii_lowercase().as_str() {
+            "mica" => Some(backdrop::Backdrop::Mica),
+            "acrylic" => Some(backdrop::Backdrop::Acrylic),
+            "none" => Some(backdrop::Backdrop::None),
+            _ => None,
+        };
+        if let Some(b) = b {
+            let took = backdrop::set(app.ctx.window.hwnd(), b, dark);
+            eprintln!("lumen: backdrop {b:?} dark={dark} took={took}");
+        }
+    }
     app.apply_limits(None);
     app.refresh_dark();
     app.load_downloads();
