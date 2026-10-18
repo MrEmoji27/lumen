@@ -417,6 +417,12 @@ fn group_digits(n: u64) -> String {
     out
 }
 
+/// What a full page sits on: the look's ground, or in Glass a dark see-through pane over
+/// the wallpaper.
+fn page_ground(lo: &Look) -> theme::Color {
+    if lo.style == theme::Style::Glass { theme::Color(0.05, 0.04, 0.09, 0.55) } else { lo.theme.bg }
+}
+
 /// A start-page site card's height (the cell is this and a 12 DIP gap).
 const NTP_CARD_H: f32 = 112.0;
 
@@ -1867,6 +1873,12 @@ impl Inner {
         let lo = self.look.clone();
         let th = lo.theme;
         self.hits.clear();
+        if lo.style == theme::Style::Glass {
+            // Glass's wallpaper: two soft blooms on its ground, under everything else.
+            let (w, h) = self.size_dip();
+            self.gfx.bloom(w * 0.08, -h * 0.1, w.max(h) * 0.72, theme::Color::from_hex("#5a43e6").unwrap_or(th.accent).alpha(0.95));
+            self.gfx.bloom(w * 1.02, h * 1.08, w.max(h) * 0.62, theme::Color::from_hex("#d2457e").unwrap_or(th.accent).alpha(0.85));
+        }
         self.motion.set_config(lo.motion);
         self.motion.begin();
         // The workspace changed: the tab list cross-fades in its place.
@@ -1896,7 +1908,7 @@ impl Inner {
             let (x, y, w, h) = s.stage;
             let st = R::new(x, y, w, h);
             // A page is the look's ground; its blocks are cards on it.
-            self.gfx.round(st, lo.page_radius, th.bg);
+            self.gfx.round(st, lo.page_radius, page_ground(&lo));
             if s.panel != "none" {
                 // Opening: a fade and a slight rise, over the surface underneath.
                 let a = self.motion.enter(Id::Panel(s.panel), Prop::Opacity, 0.0, 1.0, 170, Ease::OutCubic);
@@ -1904,7 +1916,7 @@ impl Inner {
                 let st = R::new(st.x, st.y + rise, st.w, st.h);
                 pages::draw(self, st, s);
                 if a < 1.0 {
-                    self.gfx.round(st, lo.page_radius, th.bg.alpha(1.0 - a));
+                    self.gfx.round(st, lo.page_radius, page_ground(&lo).alpha(1.0 - a));
                 }
             } else if self.ntp_visible() && !s.settings.first_run_done {
                 pages::draw_first_run(self, st, s);
@@ -2076,8 +2088,15 @@ impl Inner {
         let Some(sb) = self.sidebar() else { return };
         let lo = self.look.clone();
         let th = lo.theme;
-        // The sidebar's own colour; the page gaps behind the window keep `bg`.
-        self.gfx.fill(sb, th.side);
+        // The sidebar's own colour; the page gaps behind the window keep `bg`. Glass draws a
+        // frosted pane over its wallpaper instead.
+        if lo.style == theme::Style::Glass {
+            let pane = sb.inset(3.0, 3.0);
+            self.gfx.round(pane, 16.0, theme::Color(1.0, 1.0, 1.0, 0.07));
+            self.gfx.round_stroke(pane, 16.0, theme::Color(1.0, 1.0, 1.0, 0.12), 1.0);
+        } else {
+            self.gfx.fill(sb, th.side);
+        }
         if lo.style != theme::Style::Glass {
             let x = if s.settings.sidebar_side == "right" { sb.x + 0.5 } else { sb.right() - 0.5 };
             self.gfx.line(x, sb.y, x, sb.bottom(), th.line, 1.0);
@@ -3421,7 +3440,7 @@ impl Inner {
     fn draw_ntp(&mut self, st: R, s: &UiState) {
         let lo = self.look.clone();
         let th = lo.theme;
-        if lo.ntp_bg != style::NtpBg::Wallpaper {
+        if lo.ntp_bg != style::NtpBg::Wallpaper && lo.style != theme::Style::Glass {
             self.gfx.fill(st, th.bg);
         }
         self.draw_wallpaper(st);

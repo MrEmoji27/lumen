@@ -1701,7 +1701,7 @@ impl App {
             side as f32,
             right,
             self.top_h() as f32,
-            self.settings.gap as f32,
+            if self.settings.look == "glass" { self.settings.gap.max(10) } else { self.settings.gap } as f32,
         );
         (x as f64, y as f64, sw as f64, sh as f64)
     }
@@ -1796,7 +1796,8 @@ impl App {
         self.sync_panes();
         let (act, other, div) = self.panes();
         let scale = self.ctx.window.scale_factor();
-        let radius = if fs { 0 } else { (self.settings.radius as f64 * scale).round() as i32 };
+        let r = if self.settings.look == "glass" { self.settings.radius.max(14) } else { self.settings.radius };
+        let radius = if fs { 0 } else { (r as f64 * scale).round() as i32 };
         // The divider only shows when the pages do.
         match div.filter(|_| !self.ui_full()) {
             Some((x, y, dw, dh)) => {
