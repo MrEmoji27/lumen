@@ -216,7 +216,8 @@ Alerts and confirms do not freeze anything: Lumen answers them (accept by defaul
 they said into the console log.
 
 **handoff** is for what an agent must not do alone: a login, a captcha, a payment, a choice. The
-tab comes to the front, the sidebar shows the agent's message and a Done button, and the agent
+tab comes to the front, a card shows the agent's message and a Done button (at the foot of the
+sidebar; in the horizontal layout, at the foot of the window, over the page), and the agent
 waits until the person presses it.
 
 ## Many agents at once
@@ -261,10 +262,12 @@ never be closed or resized by an agent.
 
 ## The Drive panel
 
-The sidebar's arrow opens Drive: type a task once ("find the cheapest kettle and put it in the
-cart, stop before paying") and press Run. Lumen starts an agent CLI of its own with Lumen as its
-MCP server, and shows the run: its tool calls as a step list, and what the agent says, line by
-line.
+The arrow in the footer opens Drive: type a task once ("find the cheapest kettle and put it in
+the cart, stop before paying") and press Run. Lumen starts an agent CLI of its own with Lumen as
+its MCP server, and shows the run: its tool calls as numbered steps in plain words ("going to
+amazon.com", "typing “stainless kettle”"), each with how long it took and the one going
+now marked NOW, and beside them what the agent says, line by line. While a run goes the arrow is
+in the accent colour.
 
 - **The command** is a setting (Settings > AI agent > Drive panel's command): `{task}` is replaced
   by the task plus the safety rule. Presets: opencode (default), cmdc, claude. Anything else goes
@@ -312,8 +315,9 @@ Click an agent's tab. Its page moves into your window, live, and three things go
 
 ### Talking to an agent
 
-The send button on an agent's row in the sidebar, or **Message** on the watch pill, opens a card over
-the sidebar: type, pick the kind (Tab switches), Enter sends.
+The send button on an agent's row in the sidebar, or **Message** on the watch pill, opens a card at
+the top of the sidebar (in the horizontal layout, under the toolbar): type, pick the kind (Tab
+switches), Enter sends.
 
 - **Steer now**: the agent's next reply starts with `[The person says, now: "use the cheaper
   one"]`. It outranks the task.

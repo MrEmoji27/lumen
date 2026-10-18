@@ -21,7 +21,7 @@ EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 
 # The cover's figures: each one is a measurement the doc itself states.
 FIGURES = [
-    ("19.2 MB", "idle, Lumen itself"),
+    ("18.7 MB", "idle, Lumen itself"),
     ("91 MB", "one Wikipedia tab"),
     ("1.1 GB", "forty heavy tabs, asleep"),
     ("47", "tools for AI agents"),
@@ -29,7 +29,7 @@ FIGURES = [
 
 CSS = """
 @page { size: A4; margin: 18mm 17mm 20mm 17mm;
-  @bottom-left { content: "Lumen 0.5.0"; font: 8pt 'Segoe UI', system-ui, sans-serif; color: #898781; }
+  @bottom-left { content: "Lumen VERSION"; font: 8pt 'Segoe UI', system-ui, sans-serif; color: #898781; }
   @bottom-right { content: counter(page) " / " counter(pages); font: 8pt 'Segoe UI', system-ui, sans-serif; color: #898781; } }
 @page :first { @bottom-left { content: none; } @bottom-right { content: none; } }
 :root { --ink: #1b1b1a; --ink2: #52514e; --muted: #898781; --line: #e1e0d9; --plane: #f6f5f1; --accent: #2a78d6; }
@@ -64,16 +64,23 @@ th { text-align: left; font-weight: 600; color: var(--ink2); font-size: 8pt; tex
 td { padding: 1.7mm 2.4mm; border-bottom: 1px solid var(--line); vertical-align: top; font-variant-numeric: tabular-nums; }
 td:first-child { font-weight: 500; }
 img.chart { display: block; width: 100%; height: auto; margin: 2mm 0 4mm; break-inside: avoid; }
+img.shot { display: block; width: 100%; height: auto; margin: 2mm 0 4mm; border-radius: 2mm; border: 1px solid var(--line); break-inside: avoid; }
 .keep { break-inside: avoid; }
 /* A sentence that introduces a table stays on the table's page. */
 p:has(+ table) { break-after: avoid; }
 """
 
 
+def version():
+    """The version, from Cargo.toml: the one number, never typed twice."""
+    toml = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    return re.search(r'^version\s*=\s*"([^"]+)"', toml, flags=re.M).group(1)
+
+
 def cover():
     figs = "".join(f'<div class="fig"><b>{v}</b><span>{k}</span></div>' for v, k in FIGURES)
     return (
-        '<section class="cover"><div><div class="mark">Version 0.5.0 · 18 October 2026</div>'
+        f'<section class="cover"><div><div class="mark">Version {version()} · 18 October 2026</div>'
         '<h1>Lumen</h1>'
         '<p class="lede">A native Windows shell around WebView2, written in Rust, built to keep memory low.</p>'
         '<p class="meta">What it is so far, what it measures, and where it goes next.</p></div>'
@@ -93,12 +100,14 @@ def build():
         md,
         flags=re.S,
     )
+    # Screenshots: by absolute file URL too, since the page is printed from a temp folder.
+    md = md.replace('src="img/', f'src="{img}/')
     # The cover carries the title, tagline and version; drop the doc's own opening lines.
     md = re.sub(r"\A# Lumen\n\n.*?\n\n", "", md, flags=re.S)
     body = markdown.markdown(md, extensions=["tables", "sane_lists"])
     # Keep each h3 with the chart under it.
     body = re.sub(r'(<h3>.*?</h3>\s*<img class="chart"[^>]*>)', r'<div class="keep">\1</div>', body, flags=re.S)
-    html = f'<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Lumen</title><style>{CSS}</style></head><body>{cover()}{body}</body></html>'
+    html = f'<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Lumen</title><style>{CSS.replace('VERSION', version())}</style></head><body>{cover()}{body}</body></html>'
     tmp = Path(tempfile.gettempdir()) / "lumen-print.html"
     tmp.write_text(html, encoding="utf-8")
     out = DOCS / "lumen.pdf"

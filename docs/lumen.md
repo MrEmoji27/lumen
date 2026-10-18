@@ -1,6 +1,6 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.5.0,
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.2,
 18 October 2026. Early, in daily use by one person, Windows only.
 
 ## What it is
@@ -8,7 +8,7 @@ A native Windows shell around WebView2, written in Rust, built to keep memory lo
 Lumen is a Windows program that shows web pages. It does not draw them. Pages are drawn by
 Microsoft WebView2, the Chromium-based engine already installed on every Windows 11 machine.
 Everything around the page is Lumen's own code: the window, the tabs, the sidebar, the content
-blocker, the downloads and the memory policy. That part is about 40,000 lines of Rust.
+blocker, the downloads and the memory policy. That part is about 45,000 lines of Rust.
 
 A page in Lumen costs about what the same page costs in any Chromium-based program, because it is
 the same engine. What Lumen controls is the rest: how heavy the shell is, how many renderer
@@ -18,6 +18,47 @@ come from.
 It is also a place for AI agents to work. Agents drive it over MCP, each in tabs and a profile of
 its own.
 
+## How it looks
+
+Lumen draws its own window, so it can look like anything. Until 0.6.0 it looked like a settings
+dialog. Now it has three looks, and each is a whole set: colours, type, corners and motion. Pick
+one at first run, change it in Settings > Appearance.
+
+<img class="shot" alt="Signal, light: the start page with the big clock, two number cards, the ink search bar and site cards" src="img/look-signal-light.png">
+
+**Signal** is the default. Warm paper and black ink, labels in spaced monospace capitals, one red
+signal. Light and dark.
+
+<img class="shot" alt="Signal, dark" src="img/look-signal-dark.png">
+
+**Glass** is a frosted sidebar over a colour wallpaper, the page a floating card, light type, no
+monospace. **Precise** is near-black, hairlines, square-ish corners, one violet accent.
+
+<img class="shot" alt="Glass: a violet and pink wallpaper under a translucent sidebar and cards" src="img/look-glass.png">
+
+<img class="shot" alt="Precise: near-black, thin lines, violet accent" src="img/look-precise.png">
+
+The rules all three keep:
+
+- **One accent, one meaning.** The accent colour marks something live: a working agent, a
+  running Drive, a download, the clock's colon. Nothing else gets it. Buttons, chosen options and
+  the current tab are ink.
+- **Cards.** Every page is cards on the ground: Settings, History, Downloads, Bookmarks, Site
+  settings, Control, the Dashboard, the Privacy report, Drive. Every card that floats (tab search,
+  the site card under the lock, address suggestions, an agent asking for you, a site asking for
+  the camera, a message to an agent) is the same card.
+- **Site icons**, kept on disk by site. A start-page tile without one asks that site for its own
+  icon, once a run. No icon service ever sees the address.
+- **Every layout.** Vertical (the sidebar), horizontal (a tab strip, like Chrome) and hybrid (the
+  sidebar under a toolbar), compact or not, sidebar left or right. The page is a window of its
+  own on top of Lumen's drawing, so a card that has to reach over it lifts Lumen's window above
+  the page, cut down to its own strips and the card, and drops it back when the card closes.
+
+<img class="shot" alt="The horizontal layout: a tab strip with the current tab as a black pill, the toolbar under it" src="img/look-horizontal.png">
+
+The design was drawn first, as a page of mockups, and approved before a line of it was built:
+[docs/design/lumen-ui.html](design/lumen-ui.html).
+
 ## Spec
 
 | Part | Detail |
@@ -26,9 +67,9 @@ its own.
 | Runs on | Windows 10 and 11, x64 |
 | Page engine | Microsoft WebView2 (Chromium), through wry 0.57 and webview2-com 0.39 |
 | Window and interface | tao 0.37; every pixel drawn natively with Direct2D and DirectWrite, no HTML |
-| Code | about 40,600 lines of Rust, one process for the shell |
-| Binaries | `lumen.exe` 15.5 MB, `lumen-agent.exe` 2.0 MB (release, stripped) |
-| Tests | 337 unit tests, plus live suites that drive a real headless Lumen |
+| Code | about 45,300 lines of Rust, one process for the shell |
+| Binaries | `lumen.exe` 16.5 MB, `lumen-agent.exe` 2.1 MB (release, stripped) |
+| Tests | 374 unit tests, plus live suites that drive a real headless Lumen |
 | Content blocker | adblock-rust 0.13, EasyList, EasyPrivacy, uBlock lists; about 1.7 µs a request |
 | Agent interface | MCP: an HTTP endpoint on localhost behind a token, and a stdio bridge; 47 tools |
 | Scripts | Luau (sandboxed, through mlua), for scripts the person writes and agents run |
@@ -85,7 +126,8 @@ Idle memory crept up over three days of features. A count of the heap found almo
 growth in one allocation: the content blocker's compiled rules, built in a debug mode that keeps
 every rule's text, only to tell an ad from a tracker in a report. 0.2.1 builds the rules lean and
 answers that question with a 380 KB table of tracker host hashes. The malware and phishing lists
-added in the same release hold 81,000 hosts the same way, for 0.5 MB.
+added in the same release hold 81,000 hosts the same way, for 0.5 MB. The redraw in 0.6 added
+three looks, cards, icons and floating cards, and idle went down, not up: 18.7 MB.
 
 | Build | Idle |
 |---|---|
@@ -96,6 +138,7 @@ added in the same release hold 81,000 hosts the same way, for 0.5 MB.
 | 0.2.0 | 24.6 MB |
 | 0.2.1 | 18.5 MB |
 | 0.4.0 | 19.2 MB |
+| 0.6.2, the redraw | 18.7 MB |
 
 ### Many tabs
 
@@ -154,8 +197,8 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 
 ## What it does
 
-- Sidebar or tab strip, in vertical, horizontal or hybrid layouts. Colours, fonts, shapes,
-  motion, clock and wallpaper can all be changed.
+- Three looks (Signal, Glass, Precise), in vertical, horizontal or hybrid layouts. Colours,
+  fonts, shapes, motion, clock and wallpaper can all be changed, and Settings has a search box.
 - Content blocking for ads, trackers and cookie banners, on by default.
 - Pop-ups blocked unless you clicked for them. Malware and phishing sites get a warning page.
 - A privacy report: what was blocked and what was counted, with trends.
@@ -179,6 +222,11 @@ config holds a path, never a secret.
   cannot see another's tabs, and none can see yours unless you lend one.
 - When a login, a captcha or a payment needs a person, the agent hands the tab over and waits.
 - `lumen.exe --headless` runs Lumen off-screen: no focus, no taskbar button, no sound.
+- Drive: type a task, press Run, and Lumen starts an agent CLI on it. The page shows the steps in
+  plain words ("going to amazon.com", "typing ...") with how long each took, and what the agent
+  says beside them.
+
+<img class="shot" alt="The Drive page: the task card with Run, six numbered steps with times, the last marked NOW, and the agent's words" src="img/look-drive.png">
 
 - Agent tabs live on a stage: a window of their own, off every screen, where Chromium still counts
   them as visible. Clicks land, and nothing comes to the front. Click an agent's tab to watch it
@@ -218,6 +266,10 @@ In order. Each step ships as its own version, with a line in [the changelog](cha
    uBlock's scriptlets are GPL-3.0.
 9. **An installer.** Signed, so Windows does not warn about an unknown publisher, with updates
    that arrive by themselves.
+
+Next to think through with the person, before anything is built: a scraping tool baked into
+Lumen, with room for the scraping tools people already use, and agents at scale, many of them
+browsing at once.
 
 Later, and only if they earn their memory: Servo for light sites, a local AI model reading the
 page through Ollama, and an optional PDF editor that starts only when asked.

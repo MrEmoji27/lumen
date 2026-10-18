@@ -3656,7 +3656,8 @@ impl Inner {
             let kw = self.gfx.measure(k, kf) + 14.0;
             let kr = R::new(field.right() - 24.0 - kw, field.y + (field.h - 20.0) / 2.0, kw, 20.0);
             self.gfx.round_stroke(kr, 5.0, faint.alpha(0.6 * t2), 1.0);
-            self.gfx.text(k, kr, kf.align(Align::Center), faint.alpha(t2));
+            // Centred in a wider box than the chip: a box measured to the pixel wraps "L" away.
+            self.gfx.text(k, R::new(kr.x - 10.0, kr.y, kr.w + 20.0, kr.h), kf.align(Align::Center), faint.alpha(t2));
             let _ = ink;
             self.hit(field, Hit::NtpSearch);
         }
