@@ -280,6 +280,38 @@ impl Library {
         hits.into_iter().map(|(_, h)| h).collect()
     }
 
+    /// What the address bar fills in as you type: the site you go to most whose name starts
+    /// with what you typed ("yout" gives "youtube.com"), or with a `/` typed, the page that
+    /// starts that way. Bookmarks first, then how often and how lately, the same score the
+    /// list below uses. A whole site's visits count for its name. None for words with a
+    /// space, a typed scheme, or nothing that starts that way.
+    pub fn complete(&self, typed: &str) -> Option<String> {
+        let t = typed.trim().to_lowercase();
+        if t.is_empty() || t.contains(char::is_whitespace) || t.contains("://") {
+            return None;
+        }
+        let page = t.contains('/');
+        let keep_www = t.starts_with("www.");
+        let now = unix_now();
+        let mut best: HashMap<String, f64> = HashMap::new();
+        let mut add = |url: &str, score: f64| {
+            let Some(key) = fill_key(url, page, keep_www) else { return };
+            if key.len() > t.len() && key.starts_with(&t) {
+                *best.entry(key).or_default() += score;
+            }
+        };
+        for m in &self.marks {
+            add(&m.b.url, MARK_BOOST);
+        }
+        for e in self.hist.values() {
+            add(&e.v.url, frecency(e.v.count, now.saturating_sub(e.v.last)));
+        }
+        // Ties: the shorter name, then the alphabet, so the answer never depends on hash order.
+        best.into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.len().cmp(&a.0.len())).then_with(|| b.0.cmp(&a.0)))
+            .map(|(k, _)| k)
+    }
+
     /// History page: newest first, optional filter (same word rule), paging.
     pub fn recent(&self, filter: &str, offset: usize, limit: usize) -> Vec<Visit> {
         let words = words_of(filter);
@@ -676,6 +708,20 @@ fn frecency(count: u32, age: u64) -> f64 {
     (count as f64 + 1.0) * 0.5_f64.powf(age as f64 / HALF_LIFE as f64)
 }
 
+/// The name a URL is filled in as: its host without `www.`, or with `page`, the host and
+/// path (no scheme, no fragment, no trailing slash). Only web pages.
+fn fill_key(url: &str, page: bool, keep_www: bool) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    let rest = rest.split('#').next().unwrap_or(rest).to_lowercase();
+    let rest = if keep_www { rest.as_str() } else { rest.strip_prefix("www.").unwrap_or(&rest) };
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let key = if page { rest.trim_end_matches('/') } else { &rest[..end] };
+    (!key.is_empty()).then(|| key.to_string())
+}
+
 /// "github.com/x" starts with "github". The address bar wants that one first.
 fn host_starts_with(url: &str, q: &str) -> bool {
     if q.is_empty() {
@@ -721,6 +767,35 @@ fn atomic_write(path: &Path, text: &str) {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn the_address_bar_fills_in_the_site_you_go_to_most() {
+        let dir = tmp_dir("complete");
+        let mut lib = Library::load(&dir);
+        for _ in 0..5 {
+            lib.visit("https://www.youtube.com/watch?v=a", "A video");
+        }
+        lib.visit("https://www.youtube.com/feed/subscriptions", "Subs");
+        lib.visit("https://yourdictionary.com/word", "Word");
+        lib.visit("https://github.com/rust-lang/rust", "Rust");
+        // A whole site's visits count for its name; www. is not part of it.
+        assert_eq!(lib.complete("yo").as_deref(), Some("youtube.com"));
+        assert_eq!(lib.complete("YouT").as_deref(), Some("youtube.com"), "case does not matter");
+        assert_eq!(lib.complete("your").as_deref(), Some("yourdictionary.com"));
+        // With a slash it is a page.
+        assert_eq!(lib.complete("github.com/r").as_deref(), Some("github.com/rust-lang/rust"));
+        assert_eq!(lib.complete("youtube.com/f").as_deref(), Some("youtube.com/feed/subscriptions"));
+        // Already whole, words, a scheme, or nothing that starts so: nothing to fill.
+        assert_eq!(lib.complete("youtube.com"), None);
+        assert_eq!(lib.complete("you tube"), None);
+        assert_eq!(lib.complete("https://yo"), None);
+        assert_eq!(lib.complete("zz"), None);
+        assert_eq!(lib.complete(""), None);
+        // A bookmark beats any number of visits.
+        lib.bookmark("https://yodel.example/", "Yodel");
+        assert_eq!(lib.complete("yo").as_deref(), Some("yodel.example"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// A folder nobody else is in. Cleaned first, so runs never see each other.
     fn tmp_dir(name: &str) -> PathBuf {

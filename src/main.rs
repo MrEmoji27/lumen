@@ -3815,7 +3815,7 @@ impl App {
                         (url, name, false, snip)
                     })
                     .collect();
-                self.chrome.set_suggest(&q, hits);
+                self.chrome.set_suggest(&q, hits, None);
             }
             Ev::Favicon(id, f) => {
                 if let Some(i) = self.idx(id)
@@ -5299,7 +5299,7 @@ impl App {
                     .into_iter()
                     .map(|h| (h.url, h.title, h.kind == library::Kind::Bookmark, String::new()))
                     .collect();
-                self.chrome.set_suggest(&q, hits);
+                self.chrome.set_suggest(&q, hits, self.library.complete(&q));
                 // Then what pages said, from the worker thread, when it has looked.
                 if self.settings.remember_text && q.trim().len() >= 3 && !q.contains("://") && !(q.contains('.') && !q.contains(' ')) {
                     let proxy = self.ctx.proxy.clone();
@@ -5309,6 +5309,10 @@ impl App {
                         }
                     });
                 }
+            }
+            "complete" => {
+                let q = m["q"].as_str().unwrap_or("");
+                self.chrome.set_ntp_fill(q, self.library.complete(q));
             }
             "bookmark" => self.toggle_bookmark(),
             "listen" => self.listen_toggle(),

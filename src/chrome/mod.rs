@@ -39,11 +39,11 @@ use windows::{
         },
         System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW},
         UI::{
-            Controls::{EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE},
+            Controls::{EM_GETSEL, EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE},
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{
                 GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL,
-                VK_DOWN, VK_ESCAPE, VK_F10, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP,
+                VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F10, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP,
             },
             WindowsAndMessaging::*,
         },
@@ -625,6 +625,10 @@ pub(crate) struct Inner {
     focus_edit: bool,
     sugg: Vec<Sugg>,
     sel: usize,
+    /// What was typed in the address bar and in the start page's box, apart from what
+    /// Lumen filled in.
+    omni_typed: Typed,
+    ntp_typed: Typed,
     born: Instant,
     spinning: bool,
     /// Every animated value of the chrome.
@@ -858,6 +862,55 @@ fn merge_hits(sugg: &mut Vec<Sugg>, hits: Vec<(String, String, bool, String)>) {
     }
 }
 
+/// What the person typed into a box Lumen fills in, kept apart from what Lumen added.
+#[derive(Default)]
+struct Typed {
+    text: String,
+    /// The next change is a deletion (Backspace, Delete): fill nothing back in for it.
+    no_fill: bool,
+    /// The last change may be filled in: it added to the end of what was typed.
+    ok: bool,
+}
+
+impl Typed {
+    /// The box changed: remember what is in it now, and whether it may be filled in. Only a
+    /// change that added to the end may: not a deletion, not an edit in the middle.
+    fn changed(&mut self, edit: HWND) -> String {
+        let raw = wide_text(edit);
+        let (start, end) = edit_sel(edit);
+        let at_end = start == end && end == raw.encode_utf16().count();
+        self.ok = !self.no_fill && at_end && raw.chars().count() > self.text.chars().count();
+        self.no_fill = false;
+        self.text = raw.clone();
+        raw
+    }
+
+    /// "yout" becomes "youtube.com" with "ube.com" selected, so the next letter types over
+    /// it, Backspace takes it away and Enter goes there. Only when the typed text is exactly
+    /// the start of the site's name. Our own change: the EN_CHANGE it raises finds the chrome
+    /// borrowed and is dropped, so `text` keeps what the person typed.
+    fn fill(&self, edit: HWND, q: &str, fill: &str) -> bool {
+        if !self.ok || self.text != q || !q.is_ascii() || fill.len() <= q.len() || !fill.starts_with(&q.to_ascii_lowercase()) {
+            return false;
+        }
+        let at = q.encode_utf16().count();
+        unsafe {
+            SetWindowTextW(edit, &HSTRING::from(format!("{q}{}", &fill[q.len()..]))).ok();
+            SendMessageW(edit, EM_SETSEL, Some(WPARAM(at)), Some(LPARAM(-1)));
+        }
+        true
+    }
+}
+
+/// An edit control's selection, start and end, in UTF-16 units.
+fn edit_sel(hwnd: HWND) -> (usize, usize) {
+    let (mut start, mut end) = (0u32, 0u32);
+    unsafe {
+        SendMessageW(hwnd, EM_GETSEL, Some(WPARAM(&mut start as *mut u32 as usize)), Some(LPARAM(&mut end as *mut u32 as isize)));
+    }
+    (start as usize, end as usize)
+}
+
 fn wide_text(hwnd: HWND) -> String {
     unsafe {
         let n = GetWindowTextLengthW(hwnd);
@@ -1085,6 +1138,8 @@ impl Chrome {
                 editing: false,
                 focus_edit: false,
                 sugg: Vec::new(),
+                omni_typed: Typed::default(),
+                ntp_typed: Typed::default(),
                 sel: 0,
                 born: Instant::now(),
                 spinning: false,
@@ -1241,14 +1296,34 @@ impl Chrome {
 
     /// History and bookmark matches for `q`, from the main loop. Merged if still current.
     /// Hits are (url, title, bookmarked, detail). Detail, when not empty, is a second line.
-    pub fn set_suggest(&self, q: &str, hits: Vec<(String, String, bool, String)>) {
+    /// History's answer for what was typed, and the site to fill in, if any. Late answers
+    /// for text that has moved on are dropped.
+    pub fn set_suggest(&self, q: &str, hits: Vec<(String, String, bool, String)>, fill: Option<String>) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
-        if !i.editing || wide_text(i.edit).trim() != q {
+        if !i.editing || i.omni_typed.text.trim() != q {
             return;
         }
         merge_hits(&mut i.sugg, hits);
         i.sugg.truncate(9);
+        if let Some(f) = fill
+            && i.omni_typed.fill(i.edit, q, &f)
+        {
+            // The filled-in site is the first row, chosen, so Enter goes there.
+            i.sugg.retain(|s| !matches!(&s.kind, SuggKind::Go(_)));
+            i.sugg.insert(0, Sugg { kind: SuggKind::Go(f.clone()), label: f, detail: String::new() });
+            i.sel = 0;
+        }
         i.invalidate();
+    }
+
+    /// The site to fill into the start page's box for what was typed there.
+    pub fn set_ntp_fill(&self, q: &str, fill: Option<String>) {
+        let Ok(i) = self.inner.try_borrow_mut() else { return };
+        if let Some(f) = fill
+            && i.ntp_typed.text.trim() == q
+        {
+            i.ntp_typed.fill(i.ntp_edit, q, &f);
+        }
     }
 
     pub fn usage(&self, v: Value) {
@@ -1911,6 +1986,7 @@ impl Inner {
         let url = s.active_tab().filter(|t| t.status != "new").map(|t| t.url.clone()).unwrap_or_default();
         self.focus_edit = s.compact();
         self.editing = true;
+        self.omni_typed = Typed { text: url.clone(), ..Typed::default() };
         unsafe {
             SetWindowTextW(self.edit, &HSTRING::from(url)).ok();
         }
@@ -1952,7 +2028,7 @@ impl Inner {
     }
 
     fn suggest(&mut self) {
-        let q = wide_text(self.edit).trim().to_string();
+        let q = self.omni_typed.changed(self.edit).trim().to_string();
         self.sugg.clear();
         self.sel = 0;
         if q.is_empty() {
@@ -4914,6 +4990,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     // The placeholder goes with the first letter.
                     i.invalidate();
                 } else if id == ID_NTP && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    if code == EN_CHANGE {
+                        // Ask history for the site to fill in, as the address bar does.
+                        let edit = i.ntp_edit;
+                        let q = i.ntp_typed.changed(edit).trim().to_string();
+                        if i.ntp_typed.ok && !q.is_empty() {
+                            send(&i.proxy, json!({"t": "complete", "q": q}));
+                        }
+                    }
                     i.layout_edits();
                     i.invalidate();
                 } else if id == ID_BM && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
@@ -5040,6 +5124,10 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                             _ => {}
                         }
                     }
+                    // A deletion takes the filled-in part away and must not bring it back.
+                    if vk == VK_BACK.0 || vk == VK_DELETE.0 {
+                        i.omni_typed.no_fill = true;
+                    }
                     match vk {
                         v if v == VK_RETURN.0 => {
                             let q = wide_text(hwnd).trim().to_string();
@@ -5134,6 +5222,8 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         }
                         _ => {}
                     }
+                } else if id == ID_NTP && (vk == VK_BACK.0 || vk == VK_DELETE.0) {
+                    i.ntp_typed.no_fill = true;
                 } else if id == ID_NTP && vk == VK_RETURN.0 {
                     let q = wide_text(hwnd).trim().to_string();
                     if !q.is_empty() {

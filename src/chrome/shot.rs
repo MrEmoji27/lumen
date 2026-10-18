@@ -210,6 +210,27 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(words));
                         }
                     }
+                    "ekey" => {
+                        // A key into an edit box by its ID: "ekey 102 13" is Enter in the start
+                        // page's box.
+                        let id: i32 = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let vk: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                        if let Ok(edit) = GetDlgItem(Some(hwnd), id) {
+                            let _ = PostMessageW(Some(edit), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
+                        }
+                    }
+                    "etype" => {
+                        // Letters into an edit box by its ID, one keypress each, as typing
+                        // there would: "etype 101 yout".
+                        let (id, words) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+                        if let Some(id) = id.parse::<i32>().ok()
+                            && let Ok(edit) = GetDlgItem(Some(hwnd), id)
+                        {
+                            for c in words.encode_utf16() {
+                                let _ = PostMessageW(Some(edit), WM_CHAR, WPARAM(c as usize), LPARAM(0));
+                            }
+                        }
+                    }
                     "setq" => {
                         // Words into the Settings search box (ID 107).
                         if let Ok(edit) = GetDlgItem(Some(hwnd), 107) {
