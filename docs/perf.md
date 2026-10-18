@@ -398,8 +398,9 @@ when it ends.
 
 Three changes, measured one at a time on this laptop: release builds into `target/perf-a`,
 headless, a fresh throwaway profile under `%TEMP%` for every run, three tabs at most, muted
-(headless is). "before" is the branch point build; "after" is the same tree with only that change,
-built the same way. A change that did not help was reverted; what follows says what each one did.
+(headless is). "before" is the tree as that change found it; "after" is that tree plus the one
+change, built the same way. A change that did not help was reverted; what follows says what each
+one did.
 
 ### Hidden tabs: the low memory target, at once
 
@@ -447,6 +448,23 @@ column rides beside it, before and after.
 | mimalloc | 80.5 MB | 80.5 MB | 80.5 MB | 39 s | 548 ms a call |
 | mimalloc, a second A/B | 80.8 MB | 80.8 MB | 80.8 MB | | |
 | after the revert | 19.7 MB | 19.7 MB | 19.7 MB | | |
+
+The whole p50 column, one bench run each side:
+
+| task | before | mimalloc |
+|---|---|---|
+| read title and URL | 604 ms | 600 ms |
+| extract 100 links | 548 ms | 515 ms |
+| fill and send a form | 1464 ms | 1356 ms |
+| table built by JS | 584 ms | 534 ms |
+| ten-step workflow | 2010 ms | 2050 ms |
+| two tabs, two reads | 1177 ms | 1086 ms |
+| form, `browser_fill` | 1410 ms | 1389 ms |
+| links, `browser_links` | 564 ms | 571 ms |
+| table, `browser_table` | 652 ms | 640 ms |
+| workflow, Luau script | 2204 ms | 2201 ms |
+| two tabs, `browser_batch` | 1203 ms | 1132 ms |
+| floor, ping / help / tabs | 0.5 / 0.8 / 0.9 ms | 0.6 / 1.0 / 1.3 ms |
 
 **Reverted: idle 19.5 MB to 80.5 MB.** The bench was not slower — a little faster, and every task
 p50 within a few percent of before (the largest moves: 1464 to 1356 ms on the form, 1203 to
