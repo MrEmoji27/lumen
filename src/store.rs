@@ -42,6 +42,11 @@ pub struct Settings {
     /// reads true. Only a brand-new install, with no file at all, starts false.
     #[serde(default = "yes")]
     pub first_run_done: bool,
+    /// The last version whose changes the person has seen. Behind the running one, the start
+    /// page says what is new. A file without it predates the note: it reads empty, so the
+    /// person hears about this version once. A new install starts at its own version.
+    #[serde(default)]
+    pub seen_version: String,
     /// Named palette from the UI ("graphite", "sand", "slate", "moss", "rose").
     pub palette: String,
     /// Accent color override. Empty means palette default.
@@ -246,6 +251,7 @@ impl Default for Settings {
         Self {
             version: SETTINGS_VERSION,
             first_run_done: false,
+            seen_version: env!("CARGO_PKG_VERSION").into(),
             palette: "graphite".into(),
             accent: String::new(),
             backdrop: "solid".into(),

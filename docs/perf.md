@@ -319,6 +319,27 @@ request whose host, or a domain above it, is in the table is a tracker; the rest
 
 The old matcher files (`engine.dat`, `engine2.dat`, `engine3.dat`, about 31 MB) are deleted on start.
 
+## Frames, 18 October
+
+The journal said `ui_slow` in the first minute of nearly every run: one frame of 100 to 160 ms.
+`LUMEN_PROFILE_PAINT=1` prints each frame's three parts on stderr: begin (the render target),
+draw (Lumen's own code), end (`EndDraw`, the present). A release build, headless, start page:
+
+| | begin | draw | end |
+|---|---|---|---|
+| First frame | 108 ms | 45 ms | 48 ms |
+| Every frame after, before | 0 | 0.7 ms | 26 to 40 ms |
+| Every frame after, now | 0 | 0.7 ms | 1.2 to 2.7 ms |
+
+The drawing was never the cost. The present was: the render target was made to wait for the
+screen's vertical blank, so each frame held the UI thread, which also runs the pages' events, the
+agent calls and the person's input, for a whole refresh or two. Now it presents and goes on
+(`D2D1_PRESENT_OPTIONS_IMMEDIATELY`). Windows composes the window through DWM, so nothing
+tears.
+
+The first frame makes the GPU target, the fonts and the icon masks, and will stay slow. The
+journal now writes it as `ui_first`, so `ui_slow` only counts real stutter.
+
 ## Agents, 18 October
 
 `tests/agent_bench.rs` runs fixed tasks on local pages through the agent door, three times each in

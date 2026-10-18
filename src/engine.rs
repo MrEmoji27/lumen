@@ -329,6 +329,15 @@ fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Vec<u8> {
     out
 }
 
+/// The WebView2 runtime's version, for the problem report. Empty when none has started.
+pub fn browser_version(env: &ICoreWebView2Environment) -> String {
+    let mut p = PWSTR::null();
+    if unsafe { env.BrowserVersionString(&mut p) }.is_err() {
+        return String::new();
+    }
+    take(p)
+}
+
 pub(crate) fn take(p: PWSTR) -> String {
     if p.is_null() {
         return String::new();

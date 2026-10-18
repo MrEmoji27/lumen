@@ -211,7 +211,10 @@ impl Gfx {
                 let hp = D2D1_HWND_RENDER_TARGET_PROPERTIES {
                     hwnd: self.hwnd,
                     pixelSize: D2D_SIZE_U { width: w.max(1), height: h.max(1) },
-                    presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+                    // Present and go on. Waiting for the vertical blank held the UI thread
+                    // (pages, agent calls, input) 16 to 40 ms every frame for a 1 ms draw;
+                    // DWM composes the window, so nothing tears.
+                    presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
                 };
                 let Ok(t) = self.d2d.CreateHwndRenderTarget(&props, &hp) else { return false };
                 t.SetDpi(self.dpi, self.dpi);

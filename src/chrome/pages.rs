@@ -97,7 +97,17 @@ pub enum PageHit {
     PermDefault(&'static str, &'static str),
     /// A settings button that opens another page ("sites").
     Panels(&'static str),
+    /// A link that opens in a tab of its own.
+    OpenTab(&'static str),
+    /// The problem report: onto the clipboard, or into Downloads as a file.
+    BugCopy,
+    BugSave,
+    /// The start page's "what is new" note, put away unread.
+    SeenVersion,
 }
+
+/// Where "Made by zemo" goes.
+pub const PORTFOLIO: &str = "https://portfolio.mremoji47.workers.dev/";
 
 #[derive(Clone, Copy)]
 enum Scale {
@@ -146,6 +156,10 @@ pub struct Page {
     pub(super) theme_name: String,
     /// The saved looks, read from disk the first time the page needs them.
     themes: Option<Vec<style::ThemeFile>>,
+    /// The changelog laid out for a width, so a frame does not measure it all again.
+    changes: Option<(f32, Vec<ChangeBlock>)>,
+    /// The problem report broken into lines for a width: (width, text length, lines).
+    bug_lines: Option<(f32, usize, Vec<String>)>,
 }
 
 struct BmDrag {
@@ -365,6 +379,11 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("clear_on_exit", "Clear history when Lumen closes", "Lumen history, the words of pages and WebView2's own browsing history go when the browser closes. Private tabs leave nothing anyway."),
         ]),
         ("Keys", vec![Keys]),
+        ("About", vec![
+            Button(concat!("Lumen ", env!("CARGO_PKG_VERSION")), "What changed in this version and every one before it, from the changelog built into Lumen.", "What's new", PageHit::Panels("changes")),
+            Button("Report a problem", "A plain-text report you read in full before it goes anywhere: version, Windows, your setup, recent crashes and stalls. No addresses, no page titles, nothing typed into pages.", "Make a report…", PageHit::Panels("bugreport")),
+            Button("Made by zemo", "portfolio.mremoji47.workers.dev", "Visit", PageHit::OpenTab(PORTFOLIO)),
+        ]),
     ]
 }
 
@@ -548,6 +567,8 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
         "sites" => draw_sites(i, st, s),
         "report" => super::report::draw(i, st, s),
         "dashboard" => super::dashboard::draw(i, st, s),
+        "changes" => draw_changes(i, st),
+        "bugreport" => draw_bugreport(i, st, s),
         _ => draw_control(i, st, s),
     }
 }
@@ -2511,6 +2532,141 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
+// -------------------------------------------------------------- about
+
+/// One release as the What's new page lays it out: its heading, and its lines, each
+/// (text, kind): 0 a paragraph line, 1 a bullet's first line, 2 a bullet's next lines,
+/// 3 the gap after a paragraph.
+pub(super) struct ChangeBlock {
+    version: String,
+    date: String,
+    lines: Vec<(String, u8)>,
+}
+
+const CHANGE_LINE: f32 = 21.0;
+
+/// The changelog, broken into lines for a card `w` wide.
+fn change_blocks(i: &Inner, w: f32) -> Vec<ChangeBlock> {
+    let f = i.look.body;
+    crate::changelog::releases()
+        .into_iter()
+        .map(|r| {
+            let mut lines = Vec::new();
+            for p in &r.intro {
+                lines.extend(wrap_lines(i, p, f, w).into_iter().map(|l| (l, 0)));
+                lines.push((String::new(), 3));
+            }
+            for it in &r.items {
+                for (n, l) in wrap_lines(i, it, f, w - 16.0).into_iter().enumerate() {
+                    lines.push((l, if n == 0 { 1 } else { 2 }));
+                }
+            }
+            if lines.last().is_some_and(|l| l.1 == 3) {
+                lines.pop();
+            }
+            ChangeBlock { version: r.version, date: r.date, lines }
+        })
+        .collect()
+}
+
+/// What's new: the changelog that ships inside Lumen, newest first, a card per version.
+fn draw_changes(i: &mut Inner, st: R) {
+    let th = i.theme;
+    let lo = i.look.clone();
+    let col = column(st, COL_W);
+    let text_w = col.w - 36.0;
+    if i.page.changes.as_ref().is_none_or(|(w, _)| (*w - text_w).abs() > 0.5) {
+        let blocks = change_blocks(i, text_w);
+        i.page.changes = Some((text_w, blocks));
+    }
+    let now = env!("CARGO_PKG_VERSION");
+    i.gfx.clip(st);
+    let mut y = st.y + lo.s5 + 2.0 - i.page.scroll;
+    y = title_block(i, col, y, "What's new", &format!("Lumen {now} · the changelog, built in"));
+    let blocks = i.page.changes.take().map(|(w, b)| (w, b)).unwrap_or((text_w, Vec::new()));
+    for b in &blocks.1 {
+        let label = if b.date.is_empty() { b.version.clone() } else { format!("{} · {}", b.version, b.date) };
+        let label = if b.version == now { format!("{label} · this version") } else { label };
+        let card_h = 28.0 + b.lines.len() as f32 * CHANGE_LINE - b.lines.iter().filter(|l| l.1 == 3).count() as f32 * (CHANGE_LINE - 8.0);
+        if y + 28.0 + card_h >= st.y && y <= st.bottom() {
+            i.label(&label, R::new(col.x + 4.0, y, col.w, 18.0), if b.version == now { th.text } else { th.faint });
+            let card = R::new(col.x, y + 26.0, col.w, card_h);
+            i.gfx.round(card, lo.r_card, th.raise);
+            i.gfx.round_stroke(card, lo.r_card, th.line, 1.0);
+            let mut ly = card.y + 14.0;
+            for (text, kind) in &b.lines {
+                match kind {
+                    3 => {
+                        ly += 8.0;
+                        continue;
+                    }
+                    1 => {
+                        i.gfx.circle(card.x + 22.0, ly + CHANGE_LINE / 2.0, 2.0, th.dim);
+                        i.gfx.text(text, R::new(card.x + 34.0, ly, text_w - 16.0, CHANGE_LINE), lo.body, th.text);
+                    }
+                    2 => i.gfx.text(text, R::new(card.x + 34.0, ly, text_w - 16.0, CHANGE_LINE), lo.body, th.text),
+                    _ => i.gfx.text(text, R::new(card.x + 18.0, ly, text_w, CHANGE_LINE), lo.body, th.dim),
+                }
+                ly += CHANGE_LINE;
+            }
+        }
+        y += 26.0 + card_h + lo.s5;
+    }
+    i.page.changes = Some(blocks);
+    i.gfx.unclip();
+    i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+    close_button(i, st);
+}
+
+/// Report a problem: the whole report on the page, so the person reads what it says before
+/// it goes anywhere, and the three ways to send it on.
+fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
+    let th = i.theme;
+    let lo = i.look.clone();
+    let col = column(st, COL_W);
+    i.gfx.clip(st);
+    let mut y = st.y + lo.s5 + 2.0 - i.page.scroll;
+    let flash = i.page.flash.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < 8.0).map(|(m, _)| m.clone());
+    let sub = flash.unwrap_or_else(|| "Read it all, then copy it or save it".to_string());
+    y = title_block(i, col, y, "Report a problem", &sub);
+    i.gfx.text_wrap(
+        "Nothing leaves this PC until you send it yourself. The report holds no addresses, no page titles and nothing typed into pages. Fill in what happened at the top.",
+        R::new(col.x + 4.0, y - 6.0, col.w - 8.0, 40.0),
+        lo.small,
+        th.faint,
+    );
+    y += 40.0;
+    let mut x = col.x;
+    x = outline_button(i, x, y, "Copy report", PageHit::BugCopy, true).right() + lo.s2;
+    x = outline_button(i, x, y, "Save to Downloads", PageHit::BugSave, false).right() + lo.s2;
+    outline_button(i, x, y, "Send to zemo", PageHit::OpenTab(PORTFOLIO), false);
+    y += 30.0 + lo.s4;
+    // The report itself, in the monospace face, as it will read when pasted.
+    let mono = lo.mono_at(12.0, 450);
+    let text = s.bug_report.clone().unwrap_or_else(|| "Gathering…".to_string());
+    let w = col.w - 36.0;
+    if i.page.bug_lines.as_ref().is_none_or(|(bw, n, _)| (*bw - w).abs() > 0.5 || *n != text.len()) {
+        let lines: Vec<String> = text.lines().flat_map(|l| if l.trim().is_empty() { vec![String::new()] } else { wrap_lines(i, l, mono, w) }).collect();
+        i.page.bug_lines = Some((w, text.len(), lines));
+    }
+    let lines = i.page.bug_lines.as_ref().map(|b| b.2.clone()).unwrap_or_default();
+    const LINE: f32 = 19.0;
+    let card = R::new(col.x, y, col.w, 28.0 + lines.len() as f32 * LINE);
+    i.gfx.round(card, lo.r_card, th.raise);
+    i.gfx.round_stroke(card, lo.r_card, th.line, 1.0);
+    for (n, l) in lines.iter().enumerate() {
+        let ly = card.y + 14.0 + n as f32 * LINE;
+        if ly + LINE < st.y || ly > st.bottom() {
+            continue;
+        }
+        i.gfx.text(l, R::new(card.x + 18.0, ly, w, LINE), mono, if n == 0 { th.text } else { th.dim });
+    }
+    y = card.bottom() + lo.s5;
+    i.gfx.unclip();
+    i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
+    close_button(i, st);
+}
+
 /// A Settings section's icon in the menu.
 fn section_icon(name: &str) -> &'static str {
     match name {
@@ -2530,6 +2686,7 @@ fn section_icon(name: &str) -> &'static str {
         "AI agent" => "bot",
         "Privacy" => "shield",
         "Keys" => "keyboard",
+        "About" => "info",
         _ => "sliders",
     }
 }
@@ -2610,6 +2767,21 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
         i.gfx.icon(section_icon(name), r.x + 12.0, r.y + 8.0, 16.0, ink.alpha(if on { 1.0 } else { 0.85 }));
         i.gfx.text(name, R::new(r.x + 38.0, r.y, r.w - 44.0, r.h), lo.body, ink);
         i.hit(r, h);
+    }
+
+    // At the foot of the menu, the credit: who made this, and where to find them.
+    let credit = R::new(nav.x + lo.s3, st.bottom() - 44.0, nav.w - 2.0 * lo.s3, 30.0);
+    let last = sr.bottom() + 12.0 + schema.len() as f32 * 34.0;
+    if credit.y > last + 8.0 {
+        let h = Hit::Page(PageHit::OpenTab(PORTFOLIO));
+        let hov = i.is_hover(&h);
+        if hov {
+            i.gfx.round(credit, lo.round(credit.h), th.hover);
+        }
+        let c = if hov { th.text } else { th.faint };
+        i.gfx.text("Made by zemo", R::new(credit.x + 12.0, credit.y, credit.w - 40.0, credit.h), lo.font(12.0, 500), c);
+        i.gfx.icon("external", credit.right() - 26.0, credit.y + 8.0, 14.0, c);
+        i.hit(credit, h);
     }
 
     // Right: each section a label and a card of rows, scrolled.
@@ -3378,7 +3550,23 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::SiteZoom(host) => send(&i.proxy, json!({"t": "zoomForget", "host": host})),
         PageHit::SiteHttp(host) => send(&i.proxy, json!({"t": "httpForget", "host": host})),
         PageHit::PermDefault(kind, v) => send(&i.proxy, json!({"t": "permDefault", "kind": kind, "v": v})),
-        PageHit::Panels(which) => send(&i.proxy, json!({"t": "panel", "open": true, "which": which})),
+        PageHit::Panels(which) => {
+            // Opening the changelog is reading it: the start page's note goes.
+            if which == "changes" && s.settings.seen_version != env!("CARGO_PKG_VERSION") {
+                set(i, "seen_version", json!(env!("CARGO_PKG_VERSION")));
+            }
+            send(&i.proxy, json!({"t": "panel", "open": true, "which": which}));
+        }
+        PageHit::OpenTab(url) => send(&i.proxy, json!({"t": "openTab", "url": url})),
+        PageHit::SeenVersion => set(i, "seen_version", json!(env!("CARGO_PKG_VERSION"))),
+        PageHit::BugCopy => {
+            if let Some(text) = s.bug_report.as_deref() {
+                super::copy_text(i.hwnd, text);
+                i.page.flash = Some(("Copied. Paste it wherever you report it.".into(), std::time::Instant::now()));
+                i.invalidate();
+            }
+        }
+        PageHit::BugSave => send(&i.proxy, json!({"t": "bugSave"})),
     }
 }
 

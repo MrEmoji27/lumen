@@ -16,6 +16,8 @@ mod aloud;
 mod backdrop;
 mod blocker;
 mod bookmarks;
+mod bugreport;
+mod changelog;
 mod chrome;
 mod defaultapp;
 mod engine;
@@ -103,6 +105,10 @@ enum Panel {
     Dashboard,
     /// What each site may do, and the zoom and http choices kept per site.
     Sites,
+    /// What's new: the changelog built into the exe.
+    Changes,
+    /// Report a problem: a plain-text report to read, copy or save.
+    Bug,
 }
 
 impl Panel {
@@ -123,6 +129,8 @@ impl Panel {
             Panel::Report => "report",
             Panel::Dashboard => "dashboard",
             Panel::Sites => "sites",
+            Panel::Changes => "changes",
+            Panel::Bug => "bugreport",
         }
     }
 }
@@ -474,6 +482,8 @@ struct App {
     shown: bool,
     dirty: bool,
     mem: Option<(u64, u32)>,
+    /// The problem report, made when its page opens.
+    bug_report: Option<String>,
     born: Instant,
     /// When the tick next wants to run. TICK apart, so a step that is not
     /// ready cannot wake the loop again on the same deadline.
@@ -870,6 +880,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         shown: false,
         dirty: false,
         mem: None,
+        bug_report: None,
         born: Instant::now(),
         next_tick: Instant::now() + TICK,
         next_mem: Instant::now() + MEM_TICK,
@@ -1012,6 +1023,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             Ok("report") => Panel::Report,
             Ok("dashboard") => Panel::Dashboard,
             Ok("sites") => Panel::Sites,
+            Ok("changes") => Panel::Changes,
+            Ok("bugreport") => Panel::Bug,
             _ => Panel::None,
         };
         if panel != Panel::None || app.settings.compact {
@@ -2069,6 +2082,7 @@ impl App {
                     .flat_map(|(o, r)| r.iter().map(move |(k, a)| (o.clone(), k.clone(), *a)))
                     .collect(),
                 drive: self.drive_view(),
+                bug_report: (self.panel == Panel::Bug).then(|| self.bug_report.clone()).flatten(),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
                 zoom: self.active_tab().map_or(100, |t| t.zoom),
                 zooms: self.zooms.iter().map(|(h, p)| (h.clone(), *p)).collect(),
@@ -3351,6 +3365,10 @@ impl App {
     fn set_panel(&mut self, p: Panel) {
         let was = self.panel;
         self.panel = p;
+        // The report is made when its page opens, so it says how things are now.
+        if p == Panel::Bug && was != Panel::Bug {
+            self.bug_report = Some(self.make_bug_report());
+        }
         // The page is open now: the dot on the footer button has done its job.
         if p == Panel::Downloads {
             self.dl_unseen = false;
@@ -3364,6 +3382,30 @@ impl App {
         self.layout();
         self.focus_page();
         self.push();
+    }
+
+    /// The problem report: facts about this Lumen and this PC, and the journal's crashes and
+    /// stalls. No addresses, no titles, nothing from pages (bugreport.rs keeps it that way).
+    fn make_bug_report(&self) -> String {
+        let webview = self.ctx.env.borrow().as_ref().map(engine::browser_version).unwrap_or_default();
+        let facts = bugreport::Facts {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            build: env!("LUMEN_BUILD").to_string(),
+            os: bugreport::os_version(),
+            webview,
+            look: self.settings.look.clone(),
+            layout: self.settings.layout.clone(),
+            theme: self.settings.theme.clone(),
+            blocker: self.settings.adblock,
+            agent_door: self.settings.agent,
+            uptime_s: self.born.elapsed().as_secs(),
+            tabs: self.tabs.len(),
+            mem_mb: self.mem.map(|(b, _)| b / (1024 * 1024)),
+        };
+        let dir = store::data_dir();
+        let journal = bugreport::journal_digest(&dir.join("journal"), 3, 60);
+        let crash = bugreport::crash_tail(&dir.join("crash.log"), 20);
+        bugreport::build(&facts, &journal, &crash)
     }
 
     /// Switching tabs or navigating closes any panel, quietly.
@@ -4681,6 +4723,28 @@ impl App {
                 }
             }
             "nav" => self.navigate(m["url"].as_str().unwrap_or("")),
+            "openTab" => {
+                // A link of Lumen's own (the credit): a tab of its own, after this one.
+                let url = m["url"].as_str().unwrap_or("").to_string();
+                if url.starts_with("https://") {
+                    let after = self.idx(self.active);
+                    self.new_tab(Some(url), after);
+                }
+            }
+            "bugSave" => {
+                // The report as a file in Downloads, named by the minute it was made.
+                if let Some(text) = self.bug_report.clone() {
+                    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+                    let name = format!("lumen-report-{:04}{:02}{:02}-{:02}{:02}.txt", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute);
+                    let path = store::download_dir().join(&name);
+                    let msg = match std::fs::write(&path, text) {
+                        Ok(()) => format!("Saved {name} in Downloads"),
+                        Err(_) => "could not write the report to Downloads".to_string(),
+                    };
+                    self.chrome.flash(msg);
+                    self.push();
+                }
+            }
             "newtab" => {
                 self.new_tab(None, None);
             }
@@ -4872,6 +4936,8 @@ impl App {
                     (true, Some("report")) => Panel::Report,
                     (true, Some("dashboard")) => Panel::Dashboard,
                     (true, Some("sites")) => Panel::Sites,
+                    (true, Some("changes")) => Panel::Changes,
+                    (true, Some("bugreport")) => Panel::Bug,
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);

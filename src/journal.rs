@@ -30,8 +30,9 @@
 //! Kinds: `start`, `exit`, `unclean_exit`, `sample` and `wake` (one minute each),
 //! `nav` / `slow_nav` (a top-level page, never a network request), `crash` (one
 //! line when the page dies, a second with `reload` when it loads again), `error`
-//! and `panic` (what Lumen told the person), `ui_slow` (a minute's stuttered
-//! frames), and `feature` (something was used, never what it was used on).
+//! and `panic` (what Lumen told the person), `ui_first` (how long the first frame took),
+//! `ui_slow` (a minute's stuttered frames), and `feature` (something was used, never what it
+//! was used on).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -199,7 +200,7 @@ fn line(kind: &str, at: u64, fields: &[(&str, Value)]) -> String {
 /// The kinds that may be dropped first when the buffer is full. A crash or an
 /// error is not one of them.
 fn droppable(first: &str) -> bool {
-    first.contains("\"k\":\"sample\"") || first.contains("\"k\":\"wake\"") || first.contains("\"k\":\"ui_slow\"")
+    first.contains("\"k\":\"sample\"") || first.contains("\"k\":\"wake\"") || first.contains("\"k\":\"ui_slow\"") || first.contains("\"k\":\"ui_first\"")
 }
 
 // ------------------------------------------------------------- the day files
@@ -740,6 +741,12 @@ pub fn wake() {
     if ENABLED.load(Ordering::Relaxed) {
         WAKES.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// The first chrome frame of a run, in milliseconds. It builds the GPU target, the fonts and
+/// the icons, so it is always slow; it gets a line of its own instead of hiding in `ui_slow`.
+pub fn first_frame(ms: f64) {
+    with(|journal| journal.write("ui_first", &[("ms", json!((ms * 10.0).round() / 10.0))]));
 }
 
 /// A chrome frame was drawn, in milliseconds. Counted only when it was slow.

@@ -177,6 +177,8 @@ pub struct UiState {
     pub dl_unseen: bool,
     /// The Drive panel's run: steps, the agent's own words. Filled only while it is open.
     pub drive: Option<DriveView>,
+    /// The problem report, plain text, while its page is open.
+    pub bug_report: Option<String>,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).
     pub upnp_port_open: bool,
     /// The active page's zoom, in percent.
@@ -1594,12 +1596,18 @@ impl Inner {
                 .map(|(r, rad)| [(r.x * k) as i32, (r.y * k) as i32, (r.right() * k).ceil() as i32, (r.bottom() * k).ceil() as i32, (rad * k) as i32])
                 .collect()
         };
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
         if key == self.float_layer {
+            // Same cards: only stay on top. A page made since (a new tab) starts above us.
+            if !key.is_empty() {
+                unsafe {
+                    let _ = SetWindowPos(self.hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags);
+                }
+            }
             return;
         }
         self.float_layer = key;
         unsafe {
-            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
             if self.float_layer.is_empty() {
                 let _ = SetWindowRgn(self.hwnd, None, true);
                 let _ = SetWindowPos(self.hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, flags);
@@ -1977,11 +1985,19 @@ impl Inner {
             let _ = GetClientRect(self.hwnd, &mut rc);
         }
         let th = self.theme;
+        let t0 = Instant::now();
         if !self.gfx.begin(rc.right as u32, rc.bottom as u32, th.bg) {
             return;
         }
+        let t1 = Instant::now();
         self.draw_all(&s);
+        let t2 = Instant::now();
         self.gfx.end();
+        // LUMEN_PROFILE_PAINT=1: each frame's three phases on stderr. Read once.
+        static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *PROFILE.get_or_init(|| std::env::var_os("LUMEN_PROFILE_PAINT").is_some()) {
+            eprintln!("PAINT begin {:.1} draw {:.1} end {:.1}", (t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, t2.elapsed().as_secs_f64() * 1e3);
+        }
         self.sync_float_layer(&s);
         // The frame timer runs only while something moves, so an idle chrome
         // costs nothing: no timer, no repaint, no wake.
@@ -2054,6 +2070,7 @@ impl Inner {
                 pages::draw_first_run(self, st, s);
             } else if self.ntp_visible() {
                 self.draw_ntp(st, s);
+                self.draw_update_note(st, s);
             }
         }
         match lo.kind {
@@ -3812,6 +3829,38 @@ impl Inner {
         }
     }
 
+    /// After an update, once: a quiet note at the top of the start page that this version is
+    /// new, which opens the changelog. Its x puts it away unread.
+    fn draw_update_note(&mut self, st: R, s: &UiState) {
+        let now = env!("CARGO_PKG_VERSION");
+        // Never in a headless run, but for a debug shot of it (LUMEN_TEST_NOTE).
+        let shot = cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_NOTE").is_some();
+        if s.settings.seen_version == now || (crate::headless() && !shot) {
+            return;
+        }
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let text = format!("Lumen {now} is here · see what's new");
+        let f = lo.font(12.5, 500);
+        let w = self.gfx.measure(&text, f) + 80.0;
+        let r = R::new(st.x + (st.w - w) / 2.0, st.y + 16.0, w, 34.0);
+        let a = self.motion.enter(Id::Named("update-note"), Prop::Opacity, 0.0, 1.0, 220, Ease::OutCubic);
+        let open = Hit::Page(pages::PageHit::Panels("changes"));
+        let hov = self.is_hover(&open);
+        self.gfx.round(r, lo.round(r.h), th.raise.mix(th.hover, if hov { 0.6 } else { 0.0 }).alpha(a));
+        self.gfx.round_stroke(r, lo.round(r.h), th.line.alpha(a), 1.0);
+        self.gfx.icon("info", r.x + 14.0, r.y + 10.0, 14.0, th.dim.alpha(a));
+        self.gfx.text(&text, R::new(r.x + 36.0, r.y, r.w - 72.0, r.h), f, th.text.alpha(a));
+        self.hit(r, open);
+        let x = R::new(r.right() - 30.0, r.y + 5.0, 24.0, 24.0);
+        let gone = Hit::Page(pages::PageHit::SeenVersion);
+        if self.is_hover(&gone) {
+            self.gfx.round(x, lo.round(x.h), th.press.alpha(a));
+        }
+        self.gfx.icon("close", x.x + 6.0, x.y + 6.0, 12.0, th.dim.alpha(a));
+        self.hit(x, gone);
+    }
+
     /// A site card: the site's icon at the top, its name and address at the bottom. "+" is an
     /// empty card that says what it does.
     fn draw_dial_tile(&mut self, r: R, name: &str, url: &str, plus: bool, hov: f32, a: f32) {
@@ -4681,8 +4730,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let _hdc: HDC = BeginPaint(hwnd, &mut ps);
                 let drawn = Instant::now();
                 i.paint();
-                // The journal's `ui_slow`: one atomic add when a frame stuttered.
-                crate::journal::frame(drawn.elapsed().as_secs_f64() * 1000.0);
+                // The journal's `ui_slow`: one atomic add when a frame stuttered. The first
+                // frame of a run builds everything and is reported on its own.
+                static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+                let ms = drawn.elapsed().as_secs_f64() * 1000.0;
+                if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    crate::journal::first_frame(ms);
+                } else {
+                    crate::journal::frame(ms);
+                }
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }

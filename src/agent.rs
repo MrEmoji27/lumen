@@ -2974,15 +2974,14 @@ if(!a||!a.content)return {title:document.title,url:location.href,fallback:true,t
 const d=new DOMParser().parseFromString(a.content,'text/html');
 return {title:a.title||document.title,url:location.href,byline:a.byline||'',text:clean(md(d.body))};"#;
 
+/// A line for a bridge built from other code than this Lumen. Only lumen-agent says which
+/// build it is; a client that says nothing is not lumen-agent at all (an MCP client talking
+/// HTTP straight to the door) and has nothing to reconnect.
 pub fn bridge_note(bridge: &str, ours: &str) -> Option<String> {
-    if bridge == ours {
+    if bridge.is_empty() || bridge == ours {
         return None;
     }
-    if bridge.is_empty() {
-        Some(format!("lumen-agent is older than Lumen {ours}: reconnect the MCP server (in Claude Code: /mcp)"))
-    } else {
-        Some(format!("lumen-agent {bridge} is not Lumen {ours}: reconnect the MCP server (in Claude Code: /mcp)"))
-    }
+    Some(format!("lumen-agent {bridge} is not Lumen {ours}: reconnect the MCP server (in Claude Code: /mcp)"))
 }
 
 pub fn fence(page_text: &str) -> String {
@@ -3078,8 +3077,8 @@ mod tests {
         assert_eq!(bridge_note("0.2.0 (fab283d 2026-10-18)", "0.2.0 (fab283d 2026-10-18)"), None);
         assert_eq!(bridge_note("0.2.0 (fab283d 2026-10-18)", "0.2.1 (aaaaaaa 2026-10-19)").as_deref(),
             Some("lumen-agent 0.2.0 (fab283d 2026-10-18) is not Lumen 0.2.1 (aaaaaaa 2026-10-19): reconnect the MCP server (in Claude Code: /mcp)"));
-        assert_eq!(bridge_note("", "0.2.1 (aaaaaaa 2026-10-19)").as_deref(),
-            Some("lumen-agent is older than Lumen 0.2.1 (aaaaaaa 2026-10-19): reconnect the MCP server (in Claude Code: /mcp)"));
+        // A client that is not lumen-agent says no build, and is told nothing.
+        assert_eq!(bridge_note("", "0.2.1 (aaaaaaa 2026-10-19)"), None);
     }
 
     #[test]

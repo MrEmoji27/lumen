@@ -7,6 +7,32 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.3 — 2026-10-18
+
+For daily use.
+
+- Every frame of the window drew in under a millisecond and then waited 16 to 40 ms for the
+  screen's next refresh before Lumen could do anything else: pages, agent calls and your clicks
+  queued behind it. It no longer waits (Windows composes the window, so nothing tears). A frame
+  now costs about 1.5 ms all told.
+- Settings > About: the version with **What's new**, **Report a problem**, and who made Lumen.
+- What's new: the changelog is built into Lumen and shown as a page, a card per version. After
+  an update the start page says so once, and opens it.
+- Report a problem: a plain-text report you read in full first: version, Windows, WebView2,
+  your look and layout, uptime, and the journal's recent starts, exits, crashes, errors and
+  stalls. No addresses, no page titles, nothing typed into pages. Copy it, save it to
+  Downloads, or open the page to send it to.
+- Made by zemo, in Settings, linked to [the portfolio](https://portfolio.mremoji47.workers.dev/).
+- The journal reports the first frame of a run as `ui_first`, on its own: it builds the GPU
+  target and the fonts and was always "slow", which hid the real stalls in `ui_slow`.
+- An MCP client talking to the door straight over HTTP was told "lumen-agent is older than
+  Lumen: reconnect" at the top of every reply. Only lumen-agent says which build it is; a
+  client that says nothing is not lumen-agent and is now told nothing.
+- The live agent checklist passes all nine points. It had failed on that line since it was
+  written, and a failed run left its Lumen running; it now stops it whatever happens.
+- While a card floats over a page, a tab opened meanwhile no longer covers it.
+- The start page's Ctrl L chip in Glass no longer wraps its L away.
+
 ## 0.6.2 — 2026-10-18
 
 - Closing the start page no longer wakes a pinned tab. Pins restored at launch were never

@@ -14,6 +14,17 @@ use serde_json::{Value, json};
 
 const LUMEN: &str = env!("CARGO_BIN_EXE_lumen");
 
+/// The Lumen under test, stopped when the test ends, also when an assert fails: a failed
+/// run used to leave it running, holding the test's output pipe open.
+struct Lumen(std::process::Child);
+
+impl Drop for Lumen {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn tmp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("lumen-check-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -75,7 +86,7 @@ fn agent_checklist() {
     let mut cmd = Command::new(LUMEN);
     cmd.arg("--headless").env("LUMEN_HEADLESS","1").env("LUMEN_DATA",&dir).env("LUMEN_DOWNLOADS",&downloads)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let mut child = cmd.spawn().unwrap();
+    let mut child = Lumen(cmd.spawn().unwrap());
     // wait for token
     let mut token = String::new();
     let start = Instant::now();
@@ -88,8 +99,7 @@ fn agent_checklist() {
     let port: u16 = 47999;
     // need port in settings; rewrite with port
     // Actually settings already written without port; agent_port default? Lumen reads settings agent_port. We didn't set. Let's set default port 47640 by rewriting settings before start? Too late. Instead use LUMEN_AGENT_PORT? Lumen uses settings.agent_port. Default maybe 0? Let's check: we must set agent_port. We'll kill and restart with port.
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
     thread::sleep(Duration::from_millis(500));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -99,7 +109,7 @@ fn agent_checklist() {
     let mut cmd = Command::new(LUMEN);
     cmd.arg("--headless").env("LUMEN_HEADLESS","1").env("LUMEN_DATA",&dir).env("LUMEN_DOWNLOADS",&downloads)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let mut child = cmd.spawn().unwrap();
+    let mut child = Lumen(cmd.spawn().unwrap());
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(60) {
         if let Ok(t) = std::fs::read_to_string(dir.join("agent_token")) {
@@ -187,8 +197,8 @@ fn agent_checklist() {
     println!("PASS 9 protect session state (whoami)");
 
     // cleanup
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = child.0.kill();
+    let _ = child.0.wait();
     let _ = std::fs::remove_dir_all(&dir);
     println!("ALL CHECKLIST ITEMS PASSED");
 }
