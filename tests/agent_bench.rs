@@ -73,6 +73,16 @@ document.getElementById('t').innerHTML=h+'</tbody></table>'},300)</script>"#
             }
             b + "</ol>"
         }
+        "/products" => {
+            // Fifty products in a table: what extract, browser_table and browser_read each cost.
+            let mut b = String::from(
+                "<title>Products</title><h1>Products</h1><table><thead><tr><th>Name</th><th>Price</th><th>Link</th></tr></thead><tbody>",
+            );
+            for i in 0..50 {
+                b += &format!("<tr><td class=\"n\">Kettle {i}</td><td class=\"p\">{}.99</td><td><a href=\"/item/{i}\">Kettle {i}</a></td></tr>", 20 + i);
+            }
+            b + "</tbody></table>"
+        }
         p if p.starts_with("/item/") => {
             let n = p.trim_start_matches("/item/");
             format!(
@@ -314,6 +324,33 @@ fn t_table_tool(d: &mut Door, base: &str) {
     d.close(tab);
 }
 
+/// Fifty products as JSON: the fields, the price, the link.
+fn t_extract_products(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/products"));
+    let s = d.tool(
+        "browser_extract",
+        json!({"tab": tab, "items": "tbody tr",
+               "fields": {"name": "td.n", "price": "td.p", "href": {"selector": "a", "attr": "href"}}}),
+    );
+    assert!(s.starts_with("50 items") && s.contains("Kettle 49") && s.contains("/item/49"), "{s}");
+    d.close(tab);
+}
+
+/// The same fifty products through browser_table, and the whole page through browser_read.
+fn t_table_products(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/products"));
+    let s = d.tool("browser_table", json!({"tab": tab}));
+    assert!(s.starts_with("50 rows") && s.contains("Kettle 49"), "{s}");
+    d.close(tab);
+}
+
+fn t_read_products(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/products"));
+    let s = d.tool("browser_read", json!({"tab": tab, "max_chars": 20000}));
+    assert!(s.contains("Kettle 49"), "{s}");
+    d.close(tab);
+}
+
 fn t_workflow_script(d: &mut Door, base: &str) {
     let out = d.tool(
         "browser_script_run",
@@ -430,6 +467,9 @@ fn bench() {
         ("form, browser_fill", t_form_fill),
         ("links, browser_links", t_links_tool),
         ("table, browser_table", t_table_tool),
+        ("extract 50 products", t_extract_products),
+        ("table 50 products", t_table_products),
+        ("read 50 products", t_read_products),
         ("workflow, Luau script", t_workflow_script),
         ("two tabs, browser_batch", t_two_tabs_batch),
         ("first open, fresh session", t_first_open),

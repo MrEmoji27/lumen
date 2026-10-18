@@ -71,7 +71,7 @@ The design was drawn first, as a page of mockups, and approved before a line of 
 | Binaries | `lumen.exe` 16.5 MB, `lumen-agent.exe` 2.1 MB (release, stripped) |
 | Tests | 374 unit tests, plus live suites that drive a real headless Lumen |
 | Content blocker | adblock-rust 0.13, EasyList, EasyPrivacy, uBlock lists; about 1.7 µs a request |
-| Agent interface | MCP: an HTTP endpoint on localhost behind a token, and a stdio bridge; 47 tools |
+| Agent interface | MCP: an HTTP endpoint on localhost behind a token, and a stdio bridge; 48 tools |
 | Scripts | Luau (sandboxed, through mlua), for scripts the person writes and agents run |
 | Data | `%APPDATA%\Lumen`: settings, session, filters, history, the WebView2 profile |
 
@@ -239,8 +239,9 @@ config holds a path, never a secret.
 - Replies say what happened: a failed page's HTTP status, what a click changed or that it changed
   nothing. Page text is fenced, so a page cannot pose as the person.
 - Fewer calls: `browser_batch` (up to 20 calls in one), `browser_fill` (a whole form),
-  `browser_table`, `browser_links`. And Luau scripts: the person puts `.luau` files in a folder,
-  agents list and run them. Every call a script makes is checked as if the agent made it.
+  `browser_table`, `browser_extract` (a repeating list as JSON), `browser_links`. And Luau scripts:
+  the person puts `.luau` files in a folder, agents list and run them. Every call a script makes is
+  checked as if the agent made it.
 
 The first real test, on 18 October, found reading fast and clicking broken: in a background tab a
 click did nothing and still answered "clicked". 0.3.0 fixed that with the stage, 0.4.0 made every

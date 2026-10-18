@@ -927,6 +927,8 @@ sessions of your own profile. browser_record_start / browser_record_stop / brows
 and run it again. Fewer calls are faster for you: browser_batch runs up to 20 calls in one (\"tab\": \"$1\" is the tab \
 step 1 opened), browser_fill fills a whole form, browser_table and browser_links read tables and links as data, and \
 browser_scripts lists the person's Luau scripts, which browser_script_run runs as one call. \
+browser_extract reads a repeating list as JSON: items is a CSS selector for each row, fields maps a name to a \
+selector (its text) or to an attribute (\"attr\", absolute for href and src) or to every match (\"all\": true). \
 Before you pay, send a message, delete anything, or log in: stop and call browser_handoff with one line for the \
 person, and wait. Never do those alone. \
 Tabs you open are yours alone; other agents cannot touch them. Close them when done. \
@@ -1021,6 +1023,11 @@ pub fn tools() -> Value {
           json!({"name": {"type": "string"}, "input": {"type": "object", "description": "What the script's --@input lines ask for"}}), &["name"]),
         t("browser_table", "A table as JSON: {columns, rows}, each row a list of cell texts. ref or a CSS selector picks the table; nothing picks the biggest one. At most 500 rows.",
           json!({"tab": tab, "ref": r#ref, "selector": {"type": "string"}, "max_rows": {"type": "integer"}}), &["tab"]),
+        t("browser_extract", "Structured data out of a page, as JSON, without a model reading it. Each field is a CSS selector (its trimmed text) or {\"selector\", \"attr\", \"all\"}: read an attribute (href and src come back absolute), or every match. With items, every element it matches becomes one object with the fields read inside it. Main frame only, like browser_table.",
+          json!({"tab": tab,
+                "fields": {"type": "object", "description": "name -> \"css selector\", or {\"selector\": \"...\", \"attr\": \"href\", \"all\": true}"},
+                "items": {"type": "string", "description": "CSS selector of each repeated item; without it the answer is one object"},
+                "limit": {"type": "integer", "description": "Most items, default 200, at most 1000"}}), &["tab", "fields"]),
         t("browser_links", "The page's links as [text](url), deduped. match keeps those whose text or URL has it; same_site keeps this site's.",
           json!({"tab": tab, "match": {"type": "string"}, "same_site": {"type": "boolean"}, "max": {"type": "integer", "description": "Default 100, at most 1000"}}), &["tab"]),
         t("browser_help", "Short usage and examples. topic optional.", json!({"topic": {"type": "string", "description": "Tool name, e.g. browser_click"}}), &[]),
@@ -1031,7 +1038,7 @@ pub fn tools() -> Value {
 
 fn help_text(topic: &str) -> String {
     let all = "Tools: browser_open, browser_navigate, browser_back, browser_forward, browser_reload, browser_snapshot, browser_read, browser_article, browser_find, browser_click, browser_hover, browser_type, browser_press, browser_select, browser_scroll, browser_drag, browser_upload, browser_wait, browser_screenshot, browser_pdf, browser_eval, browser_console, browser_network, browser_dialogs, browser_resize, browser_tabs, browser_show, browser_handoff, browser_download, browser_downloads, browser_close, browser_help, browser_status, browser_whoami, browser_consent, \
-browser_batch, browser_fill, browser_table, browser_links, browser_scripts, browser_script_run.\n\
+browser_batch, browser_fill, browser_table, browser_extract, browser_links, browser_scripts, browser_script_run.\n\
 Use browser_help with topic=<tool name> for details and examples.";
     if topic.is_empty() {
         return all.to_string();
@@ -1044,6 +1051,7 @@ Use browser_help with topic=<tool name> for details and examples.";
         "browser_wait" => "browser_wait: tab, text?/text_gone?/selector?/url?, timeout_ms?. Example: {\"tab\":3,\"text\":\"Done\",\"timeout_ms\":5000}".into(),
         "browser_batch" => "browser_batch: steps (up to 20 of {tool, args}), stop_on_error?, result? (last|all). \"tab\": \"$1\" is the tab step 1 opened. Example: {\"steps\":[{\"tool\":\"browser_open\",\"args\":{\"url\":\"example.com\"}},{\"tool\":\"browser_article\",\"args\":{\"tab\":\"$1\"}}]}".into(),
         "browser_fill" => "browser_fill: tab, fields [{ref, value}], submit?. Selects pick by value or text; checkboxes take \"true\"/\"false\". Example: {\"tab\":3,\"fields\":[{\"ref\":\"e2\",\"value\":\"Ada\"},{\"ref\":\"e5\",\"value\":\"true\"}],\"submit\":\"e9\"}".into(),
+        "browser_extract" => "browser_extract: tab, fields (name -> selector, or {selector, attr, all}), items?, limit?. With items: one object per item. Example: {\"tab\":3,\"items\":\"li\",\"fields\":{\"name\":\"a\",\"price\":\".price\",\"href\":{\"selector\":\"a\",\"attr\":\"href\"}}}".into(),
         "browser_script_run" => "browser_script_run: name, input?. Runs one of the person's Luau scripts (browser_scripts lists them, with their inputs). Example: {\"name\":\"links\",\"input\":{\"urls\":[\"example.com\"]}}".into(),
         "browser_handoff" => "browser_handoff: tab, message, reason?, timeout_ms?. Hands the tab to the person. reason: captcha|login|consent|confirmation|other. Example: {\"tab\":3,\"message\":\"solve captcha\",\"reason\":\"captcha\"}".into(),
         _ => format!("No detailed help for {topic}. {all}"),
@@ -1781,6 +1789,49 @@ fn replay(sh: &Arc<Shared>, who: &Who, steps: &[Step], tab: Option<u64>) -> Resu
     }
     // The answer is short on purpose: a replay is one call, the run of it is not.
     Ok(text(format!("replayed {} steps of the recording", done.len())))
+}
+
+/// One `fields` entry of a browser_extract call, checked.
+#[derive(Clone, Debug, PartialEq)]
+struct Field {
+    name: String,
+    selector: String,
+    /// An attribute to read instead of the text; `href` and `src` come back absolute.
+    attr: Option<String>,
+    /// Every match, not just the first.
+    all: bool,
+}
+
+/// The fields, the items selector and the limit out of a browser_extract call. No
+/// fields, a field without a selector, and a field that is neither a selector nor an
+/// object, are refused here, before any page work.
+fn extract_plan(args: &Value) -> Result<(Vec<Field>, Option<String>, u64), String> {
+    let Some(fields) = args["fields"].as_object().filter(|f| !f.is_empty()) else {
+        return Err("fields: {\"name\": \"css selector\"} or {\"name\": {\"selector\": \"...\", \"attr\": \"href\", \"all\": true}}".into());
+    };
+    if fields.len() > 50 {
+        return Err("at most 50 fields in one extract".into());
+    }
+    let mut out = Vec::new();
+    for (name, spec) in fields {
+        let f = match spec {
+            Value::String(s) => Field { name: name.clone(), selector: s.trim().to_string(), attr: None, all: false },
+            Value::Object(o) => Field {
+                name: name.clone(),
+                selector: o.get("selector").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+                attr: o.get("attr").and_then(Value::as_str).map(str::trim).filter(|a| !a.is_empty()).map(String::from),
+                all: o.get("all").and_then(Value::as_bool).unwrap_or(false),
+            },
+            _ => return Err(format!("field \"{name}\": a selector, or {{\"selector\": ..., \"attr\": ..., \"all\": true}}")),
+        };
+        if f.selector.is_empty() {
+            return Err(format!("field \"{name}\" has no selector"));
+        }
+        out.push(f);
+    }
+    let items = args["items"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let limit = args["limit"].as_u64().unwrap_or(200).clamp(1, 1000);
+    Ok((out, items, limit))
 }
 
 /// A form in one call. Each field goes through the tool a person-like agent would use for
@@ -2618,6 +2669,29 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             out.push_str(&fence(&serde_json::to_string(&json!({"columns": v["columns"], "rows": v["rows"]})).unwrap_or_default()));
             Ok(text(out))
         }
+        "browser_extract" => {
+            let tab = tab_arg(args)?;
+            let (fields, items, limit) = extract_plan(args)?;
+            let opt = json!({
+                "fields": fields.iter().map(|f| json!({"name": f.name, "selector": f.selector, "attr": f.attr, "all": f.all})).collect::<Vec<_>>(),
+                "items": items,
+                "limit": limit,
+            });
+            let v = eval(p, who, tab, &EXTRACT_JS.replace("__OPT__", &opt.to_string()))?;
+            if let Some(e) = v["error"].as_str() {
+                return Err(e.to_string());
+            }
+            let more = v["more"].as_u64().unwrap_or(0);
+            match items {
+                Some(_) => {
+                    let n = v["items"].as_array().map_or(0, Vec::len);
+                    let note = if more > 0 { format!(" (and {more} more: raise limit)") } else { String::new() };
+                    Ok(text(format!("{n} items{note}\n{}", fence(&serde_json::to_string(&v["items"]).unwrap_or_default()))))
+                }
+                // One object, read once: nothing to count.
+                None => Ok(text(fence(&serde_json::to_string(&v["value"]).unwrap_or_default()))),
+            }
+        }
         "browser_links" => {
             let tab = tab_arg(args)?;
             let opt = json!({
@@ -2765,9 +2839,20 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
 /// page, so a diff never counts it.
 const PAGE_CHANGED: &str = "[page changed since last snapshot]";
 
-/// The lines of one snapshot, as a diff compares them.
+/// The lines of one snapshot, as a diff compares them: the snapshot's own `- ` list
+/// marker is dropped, so a diff line is one marker and the line itself, indentation and
+/// all. The "page changed" note is not part of the page and never counts either.
 fn snapshot_lines(full: &str) -> Vec<String> {
-    full.lines().filter(|l| *l != PAGE_CHANGED).map(String::from).collect()
+    full.lines()
+        .filter(|l| *l != PAGE_CHANGED)
+        .map(|l| {
+            let at = l.len() - l.trim_start().len();
+            match l[at..].strip_prefix("- ") {
+                Some(rest) => format!("{}{rest}", &l[..at]),
+                None => l.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// The URL line of a snapshot.
@@ -3049,6 +3134,20 @@ const columns=[];for(let x=0;x<w;x++){const parts=[];for(const r of head){const 
 const rows=[];for(const r of body.slice(0,__MAX__)){const cs=[];for(let x=0;x<w;x++)cs.push(r[x]||'');if(cs.some(Boolean))rows.push(cs)}
 return {columns:hn?columns:[],rows,more:Math.max(0,body.length-__MAX__)};"#;
 
+/// One field of `browser_extract`, read at `root` (the page, or one item): the trimmed
+/// text, an attribute (href and src absolute), or every match. `__OPT__` holds the fields.
+const EXTRACT_JS: &str = r#"(()=>{const O=__OPT__;
+const tx=e=>(e.innerText||'').replace(/\s+/g,' ').trim();
+const read=(root,f)=>{let els;try{els=[...root.querySelectorAll(f.selector)]}catch(e){return {error:'bad selector '+f.selector}};
+ const val=e=>{if(f.attr){const v=e.getAttribute(f.attr);if(v==null)return null;if(f.attr==='href'||f.attr==='src'){try{return new URL(v,location.href).href}catch(_){return v}}return v}return tx(e)};
+ if(f.all)return els.map(val);
+ return els.length?val(els[0]):null};
+const one=root=>{const o={};for(const f of O.fields){const v=read(root,f);if(v&&v.error)return v;o[f.name]=v}return o};
+if(!O.items)return {value:one(document)};
+let els;try{els=[...document.querySelectorAll(O.items)]}catch(e){return {error:'bad items selector '+O.items}}
+const out=[];for(const e of els.slice(0,O.limit)){const o=one(e);if(o.error)return o;out.push(o)}
+return {items:out,more:Math.max(0,els.length-O.limit)};})()"#;
+
 /// The page's links, deduped by URL: `[text](url)`. Only http(s).
 const LINKS_JS: &str = r#"(()=>{const O=__OPT__;const seen=new Set();const out=[];let more=0;
 for(const a of document.querySelectorAll('a[href]')){let u;try{u=new URL(a.href,location.href)}catch(e){continue}
@@ -3264,6 +3363,40 @@ mod tests {
         assert_eq!(lines, l(&["Title: Steps", "URL: http://a/steps"]));
         assert_eq!(snapshot_url(&lines), "http://a/steps");
         assert_eq!(snapshot_url(&l(&["Title: x"])), "", "no URL line: nothing to compare against");
+        // The snapshot's own list marker is dropped, and the indentation stays.
+        let lines = snapshot_lines("- button \"Go\" [ref=e1]\n  - link \"Away\" [ref=e2]");
+        assert_eq!(lines, l(&["button \"Go\" [ref=e1]", "  link \"Away\" [ref=e2]"]));
+    }
+
+    #[test]
+    fn extract_takes_what_a_call_may_ask_for() {
+        let (fields, items, limit) = extract_plan(&json!({
+            "fields": {"name": "h1", "link": {"selector": "a", "attr": "href", "all": true}},
+            "items": " li ",
+            "limit": 5,
+        }))
+        .unwrap();
+        assert_eq!(fields.len(), 2);
+        let field = |n: &str| fields.iter().find(|f| f.name == n).cloned().unwrap();
+        assert_eq!(field("name"), Field { name: "name".into(), selector: "h1".into(), attr: None, all: false });
+        assert_eq!(field("link"), Field { name: "link".into(), selector: "a".into(), attr: Some("href".into()), all: true });
+        assert_eq!(items.as_deref(), Some("li"), "the items selector is trimmed");
+        assert_eq!(limit, 5);
+        // A call that says nothing: one object, 200 items at most.
+        let (_, items, limit) = extract_plan(&json!({"fields": {"a": "p"}})).unwrap();
+        assert!(items.is_none());
+        assert_eq!(limit, 200);
+        // The limit is clamped both ways.
+        assert_eq!(extract_plan(&json!({"fields": {"a": "p"}, "limit": 0})).unwrap().2, 1);
+        assert_eq!(extract_plan(&json!({"fields": {"a": "p"}, "limit": 99_999})).unwrap().2, 1000);
+        // No fields, an empty set, a field with no selector, a field that is no field,
+        // and more fields than a page can carry.
+        for bad in [json!({}), json!({"fields": {}}), json!({"fields": {"a": ""}}), json!({"fields": {"a": "  "}}), json!({"fields": {"a": 7}}), json!({"fields": {"a": {"attr": "href"}}})] {
+            assert!(extract_plan(&bad).is_err(), "{bad}");
+        }
+        let many: serde_json::Map<String, Value> = (0..51).map(|i| (format!("f{i}"), json!("p"))).collect();
+        let e = extract_plan(&json!({"fields": many})).unwrap_err();
+        assert!(e.contains("50 fields"), "{e}");
     }
 
     #[test]

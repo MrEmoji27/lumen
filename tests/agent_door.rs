@@ -416,11 +416,21 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
             extra += "Content-Disposition: attachment; filename=\"file.bin\"\r\n";
             ("application/octet-stream", vec![7u8; 4096])
         }
+        // Three products in a list: the page browser_extract reads.
+        "/list" => (
+            "text/html",
+            b"<title>Products</title><h1>Products</h1><ul>\
+              <li class=p><a href=\"/item/1\">Kettle One</a><span class=price>20.99</span></li>\
+              <li class=p><a href=\"/item/2\">Kettle Two</a><span class=price>21.99</span></li>\
+              <li class=p><a href=\"/item/3\">Kettle Three</a><span class=price>22.99</span></li>\
+              </ul>"
+                .to_vec(),
+        ),
         _ => ("text/plain", b"not found".to_vec()),
     };
     let code = if matches!(
         path,
-        "/page" | "/probe" | "/plain" | "/upload" | "/file.bin" | "/frames" | "/inner" | "/popup" | "/fetch" | "/api" | "/state" | "/steps"
+        "/page" | "/probe" | "/plain" | "/upload" | "/file.bin" | "/frames" | "/inner" | "/popup" | "/fetch" | "/api" | "/state" | "/steps" | "/list"
     ) {
         "200 OK"
     } else {
@@ -890,7 +900,7 @@ fn the_agent_door() {
         say(&format!("one click, one line: {diff:?}"));
         // The ref from the snapshot before the click still clicks: it is the same button.
         d.tool(&a, "browser_click", json!({"tab": tab, "ref": step})).expect("the same ref again");
-        let diff = d.tool(&a, "browser_snapshot", json!({"tab": tab, "diff": true})).expect("diff again");
+        let diff = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true, "diff": true})).expect("diff again");
         assert!(diff.contains("+ button \"Step 2\""), "{diff}");
         // A new element gets a number of its own: never the one an older snapshot used.
         d.tool(&a, "browser_click", json!({"tab": tab, "ref": add})).expect("add a button");
@@ -903,6 +913,34 @@ fn the_agent_door() {
         let moved = d.tool(&a, "browser_snapshot", json!({"tab": tab, "diff": true})).expect("diff after a navigation");
         assert!(moved.contains("full snapshot") && moved.contains("Plain page"), "{moved}");
         say("the page navigated; the diff came back as the whole page and said so");
+        d.tool(&a, "browser_close", json!({"tab": tab})).unwrap();
+    }
+
+    head("7e. browser_extract: a list as JSON, one object without items, refused arguments");
+    {
+        let tab = d.open(&a, &page(p1, "/list"));
+        let out = d.tool(
+            &a,
+            "browser_extract",
+            json!({"tab": tab, "items": "li.p", "fields": {"name": "a", "price": ".price", "href": {"selector": "a", "attr": "href"}}}),
+        )
+        .expect("extract");
+        assert!(out.starts_with("3 items"), "{out}");
+        assert!(out.contains("\"name\":\"Kettle Two\"") && out.contains("\"price\":\"21.99\""), "{out}");
+        assert!(out.contains(&format!("\"href\":\"http://127.0.0.1:{p1}/item/2\"")), "href comes back absolute: {out}");
+        say(&format!("three items as JSON: {}", out.lines().next().unwrap_or("")));
+        // No items: one object, every match listed, a field that finds nothing is null.
+        let one = d.tool(&a, "browser_extract", json!({"tab": tab, "fields": {"heading": "h1", "names": {"selector": "a", "all": true}, "none": ".nope"}})).expect("one object");
+        assert!(one.contains("\"heading\":\"Products\""), "{one}");
+        assert!(one.contains("\"names\":[\"Kettle One\",\"Kettle Two\",\"Kettle Three\"]"), "{one}");
+        assert!(one.contains("\"none\":null"), "{one}");
+        say("without items: one object; all=true lists every match, a miss is null");
+        // The arguments are checked before any page work.
+        for bad in [json!({"tab": tab}), json!({"tab": tab, "fields": {}}), json!({"tab": tab, "fields": {"x": {"attr": "href"}}})] {
+            let e = d.tool(&a, "browser_extract", bad).expect_err("bad extract");
+            assert!(e.contains("fields") || e.contains("selector"), "{e}");
+        }
+        say("no fields, and a field without a selector: refused");
         d.tool(&a, "browser_close", json!({"tab": tab})).unwrap();
     }
 

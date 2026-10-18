@@ -158,6 +158,10 @@ before each one. So:
   field is read back, and the answer names any that did not take. `submit: "e9"` clicks after.
 - **`browser_table`** gives a table as `{"columns": [...], "rows": [[...], ...]}`, the names once,
   not once a row. Up to 500 rows.
+- **`browser_extract`** gives a repeating list as JSON: `items` is a CSS selector for each row,
+  `fields` maps a name to a selector (its trimmed text) or to `{"selector", "attr", "all"}`:
+  read an attribute (`href` and `src` come back absolute), or every match. `limit` caps the
+  rows, 200 by default. Without `items` the answer is one object.
 - **`browser_links`** gives the page's links as `[text](url)`, deduped, filtered by `match` or
   `same_site`.
 
@@ -216,7 +220,7 @@ results you name, put one in the cart). Copy them into the scripts folder to use
 | | upload (files into a file input) | resize (mobile, tablet, any) | state_save, state_load |
 | | | | record_start, record_stop, replay |
 | table (rows as JSON) | fill (a whole form) | | batch (up to 20 calls in one) |
-| links (deduped) | | | scripts, script_run (the person's Luau) |
+| links (deduped), extract (items as JSON) | | | scripts, script_run (the person's Luau) |
 
 Clicks, keys and typing go through the DevTools Protocol, so the page sees trusted events, the
 same as a person's. A synthetic `element.click()` is only used when something covers the element.
