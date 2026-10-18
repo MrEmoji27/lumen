@@ -558,91 +558,170 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
     }
 }
 
-/// Where the Drive panel's task box sits, in stage coordinates. The native text box is
-/// placed here too, so what is typed and what is drawn agree.
+/// The Drive page's column: wide enough for the steps and the agent's words side by side.
+const DRIVE_W: f32 = 880.0;
+/// What the Run button takes at the right of the task card.
+const DRIVE_RUN_W: f32 = 104.0;
+
+/// The task card's text part, in stage coordinates. The native text box is placed over it,
+/// so what is typed and what is drawn agree; Run sits in the rest of the card.
 pub fn drive_task_rect(st: R, s5: f32) -> R {
-    let col = column(st, 760.0);
-    R::new(col.x, st.y + s5 + 96.0, col.w, 40.0)
+    let col = column(st, DRIVE_W);
+    R::new(col.x + 10.0, st.y + s5 + 2.0 + 74.0, col.w - DRIVE_RUN_W - 10.0, 56.0)
 }
 
-/// The Drive panel: type a task, an agent runs it in Lumen. The steps are its tool
-/// calls, the lines under them are what it said. Stop ends the run; "Pause and take
+/// Text broken into lines no wider than `w`, at spaces; a word longer than a line is cut
+/// by the drawing, not here.
+fn wrap_lines(i: &Inner, text: &str, f: super::gfx::Font, w: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let next = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && i.gfx.measure(&next, f) > w {
+            out.push(std::mem::replace(&mut line, word.to_string()));
+        } else {
+            line = next;
+        }
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// A step's time: milliseconds while short, tenths of a second after.
+fn fmt_ms(ms: u64) -> String {
+    if ms < 500 { format!("{ms} ms") } else { format!("{:.1} s", ms as f64 / 1000.0) }
+}
+
+/// A quiet button with a small square before its label, both in the live colour: Stop.
+pub(super) fn stop_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageHit) -> R {
+    let th = i.theme;
+    let f = i.look.body.align(Align::Center);
+    let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * i.look.s4 + 18.0, 30.0);
+    let h = Hit::Page(hit);
+    let rad = i.look.round(30.0);
+    i.gfx.round(r, rad, if i.is_hover(&h) { th.hover } else { th.raise });
+    i.gfx.round_stroke(r, rad, th.line, 1.0);
+    i.gfx.round_stroke(R::new(r.x + i.look.s4 - 2.0, r.y + 10.0, 10.0, 10.0), 2.5, th.accent, 1.6);
+    i.gfx.text(label, R::new(r.x + 18.0, r.y, r.w - 18.0, r.h), f, th.accent);
+    i.hit(r, h);
+    r
+}
+
+/// The Drive panel: type a task, an agent runs it in Lumen. The steps are its tool calls in
+/// plain words, the card beside them is what it said. Stop ends the run; "Pause and take
 /// over" hands the tab to the person and only browser_handoff gets the agent back in.
 fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
     let lo = i.look.clone();
     let th = i.theme;
-    let col = column(st, 760.0);
+    let col = column(st, DRIVE_W);
     i.gfx.clip(st);
     let running = s.drive.as_ref().is_some_and(|d| d.running);
-    let sub = match &s.drive {
-        Some(d) if d.running && d.paused => format!("{} is paused ({}): the tab is yours. Hand it back with Done.", d.name, d.elapsed),
-        Some(d) if d.running => format!("{} is working ({}). Stop ends it.", d.name, d.elapsed),
-        Some(d) => format!("{} finished{}.", d.name, d.exit.map(|c| format!(" (exit code {c})")).unwrap_or_default()),
-        None => "An agent CLI runs the task in Lumen over MCP: its own profile, its own tabs.".to_string(),
-    };
-    title_block(i, col, st.y + lo.s5 + 2.0 - i.page.scroll, "Drive", &sub);
-
-    // The task box. The control itself is a real Win32 edit box placed over this rect.
-    let field = drive_task_rect(st, lo.s5);
-    i.gfx.round(field, lo.r_md, th.bg);
-    let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.drive_edit;
-    i.gfx.round_stroke(field, lo.r_md, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
-    // Both buttons right-aligned under the box: Run (or Stop), and Pause beside it.
     let paused = s.drive.as_ref().is_some_and(|d| d.paused);
-    let f = lo.body.align(Align::Center);
-    let run_label = if running { "Stop" } else { "Run" };
-    let run_w = i.gfx.measure(run_label, f) + 2.0 * lo.s4;
-    let pause_w = if running && !paused { i.gfx.measure("Pause and take over", f) + 2.0 * lo.s4 } else { 0.0 };
-    let run_x = field.right() - run_w;
-    let pause = R::new(run_x - lo.s3 - pause_w, field.bottom() + lo.s3, pause_w, 30.0);
-    outline_button(i, run_x, field.bottom() + lo.s3, run_label, if running { PageHit::DriveStop } else { PageHit::DriveStart }, true);
-    if pause_w > 0.0 {
-        let h = Hit::Page(PageHit::DrivePause);
-        let hov = i.is_hover(&h);
-        if hov {
-            i.gfx.round(pause, lo.r_md, th.hover);
+    let sub = match &s.drive {
+        Some(d) if d.running && d.paused => format!("{} paused · the tab is yours", d.name),
+        Some(d) if d.running => format!("{} working · {}", d.name, d.elapsed),
+        Some(d) => match d.exit {
+            Some(c) if c != 0 => format!("{} finished · exit code {c}", d.name),
+            _ => format!("{} finished", d.name),
+        },
+        None => "An agent CLI runs your task in Lumen".to_string(),
+    };
+    let title_y = st.y + lo.s5 + 2.0;
+    title_block(i, col, title_y, "Drive", &sub);
+    // While a run goes, its two ways out sit at the right of the title.
+    if running {
+        let f = lo.body.align(Align::Center);
+        let stop_w = i.gfx.measure("Stop", f) + 2.0 * lo.s4 + 18.0;
+        let x = col.right() - 48.0 - stop_w;
+        stop_button(i, x, title_y + 22.0, "Stop", PageHit::DriveStop);
+        if !paused {
+            let w = i.gfx.measure("Pause and take over", f) + 2.0 * lo.s4;
+            outline_button(i, x - lo.s2 - w, title_y + 22.0, "Pause and take over", PageHit::DrivePause, false);
         }
-        i.gfx.round_stroke(pause, lo.r_md, th.line, 1.0);
-        i.gfx.text("Pause and take over", pause, f, if hov { th.text } else { th.dim });
-        i.hit(pause, h);
     }
-    // The command this panel runs, straight from the settings row.
-    i.gfx.text(&format!("Command: {}", s.settings.drive_cmd), R::new(col.x, field.bottom() + lo.s3 + 38.0, col.w, 20.0), lo.small, th.faint);
-    i.gfx.text("Safety: the task Lumen sends tells the agent to call browser_handoff before paying, sending or deleting.", R::new(col.x, field.bottom() + lo.s3 + 58.0, col.w, 20.0), lo.small, th.faint);
-    let mut y = field.bottom() + lo.s3 + 88.0;
-    if let Some(d) = s.drive.as_ref().filter(|d| !d.task.is_empty()) {
-        i.gfx.text(&format!("Task: {}", d.task), R::new(col.x, y, col.w, 20.0), lo.small, th.dim);
-        y += 26.0;
+
+    // The task card. The text box itself is a real Win32 edit placed over its left part.
+    let field = drive_task_rect(st, lo.s5);
+    let card = R::new(col.x, field.y, col.w, field.h);
+    let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.drive_edit;
+    i.gfx.round(card, lo.r_card, th.raise);
+    i.gfx.round_stroke(card, lo.r_card, if focused { th.text.alpha(0.45) } else { th.line }, if focused { 1.5 } else { 1.0 });
+    let f = lo.body_strong.align(Align::Center);
+    let run_w = i.gfx.measure("Run", f) + 2.0 * lo.s4;
+    let run = outline_button(i, card.right() - 12.0 - run_w, card.y + (card.h - 30.0) / 2.0, "Run", PageHit::DriveStart, true);
+    if running {
+        // One run at a time: Run waits, quietly, until this one is over.
+        i.gfx.round(run, lo.round(run.h), th.raise.alpha(0.55));
     }
+    let mut y = card.bottom() + lo.s4;
 
     match &s.drive {
         None => {
             let hint = "Give it a task and press Run. It browses in its own agent tabs, in a profile of its own: it never touches your tabs or your logins. Everything it downloads lands in \"Agent downloads\" under its own name.";
-            empty_state(i, R::new(col.x, y, col.w, 170.0), "send", "Nothing has run yet", hint);
+            y = empty_state(i, R::new(col.x, y + lo.s4, col.w, 170.0), "send", "Nothing has run yet", hint) + lo.s4;
         }
         Some(d) => {
-            y = group_label(i, col, y, "Steps", d.steps.len());
-            for (tool, note) in &d.steps {
-                i.gfx.text(tool.trim_start_matches("browser_").trim_start_matches('_'), R::new(col.x, y, 200.0, 26.0), lo.body_strong, th.text);
-                i.gfx.text(note, R::new(col.x + 205.0, y, col.w - 205.0, 26.0), lo.body, th.dim);
-                y += 26.0;
+            // Left: the steps, numbered, in plain words, each with its time; the one going
+            // now says so in the live colour. Right: what the agent said, in its own words.
+            let gap = 14.0;
+            let lw = ((col.w - gap) * 0.53).floor();
+            let left = R::new(col.x, y, lw, 0.0);
+            let right = R::new(col.x + lw + gap, y, col.w - lw - gap, 0.0);
+            i.label(&format!("{} · {}", d.name, d.elapsed), R::new(left.x + 4.0, y, left.w, 18.0), th.faint);
+            i.label("What it says", R::new(right.x + 4.0, y, right.w, 18.0), th.faint);
+            y += 26.0;
+            const ROW: f32 = 44.0;
+            let rows = d.steps.len().max(1);
+            let steps = R::new(left.x, y, left.w, rows as f32 * ROW);
+            let mono = lo.mono_at(11.5, 450);
+            let lines: Vec<String> = d.log.iter().flat_map(|l| wrap_lines(i, l, mono, right.w - 32.0)).collect();
+            let words_h = 28.0 + 20.0 * lines.len().max(1) as f32;
+            let h = steps.h.max(words_h).max(4.0 * ROW);
+            let words = R::new(right.x, y, right.w, h);
+            for c in [steps, words] {
+                i.gfx.round(c, lo.r_card, th.raise);
+                i.gfx.round_stroke(c, lo.r_card, th.line, 1.0);
             }
             if d.steps.is_empty() {
-                i.gfx.text("no tool calls yet", R::new(col.x, y, col.w, 24.0), lo.body, th.faint);
-                y += 26.0;
+                i.gfx.text("No tool calls yet.", R::new(steps.x + 18.0, y, steps.w - 36.0, ROW), lo.body, th.faint);
             }
-            y += lo.s3;
-            y = group_label(i, col, y, "The agent said", d.log.len());
-            for line in &d.log {
-                i.gfx.text(line, R::new(col.x, y, col.w, 22.0), lo.small, th.dim);
-                y += 22.0;
+            let last = d.steps.len().saturating_sub(1);
+            for (n, (what, ms)) in d.steps.iter().enumerate() {
+                let r = R::new(steps.x, y + n as f32 * ROW, steps.w, ROW);
+                if r.bottom() < st.y || r.y > st.bottom() {
+                    continue;
+                }
+                if n > 0 {
+                    i.gfx.line(r.x + 1.0, r.y, r.right() - 1.0, r.y, th.line, 1.0);
+                }
+                let now = running && n == last && ms.is_none();
+                let time = match ms {
+                    Some(ms) => fmt_ms(*ms),
+                    None if now => "NOW".to_string(),
+                    None => "—".to_string(),
+                };
+                let tw = i.gfx.measure(&time, mono) + 4.0;
+                i.gfx.text(&format!("{:02}", n + 1), R::new(r.x + 16.0, r.y, 30.0, ROW), mono, th.faint);
+                i.gfx.text(what, R::new(r.x + 52.0, r.y, (r.w - 52.0 - 18.0 - tw - 8.0).max(40.0), ROW), lo.body, th.text);
+                i.gfx.text(&time, R::new(r.right() - 16.0 - tw, r.y, tw, ROW), mono.align(Align::Right), if now { th.accent } else { th.faint });
             }
+            let mut ly = words.y + 14.0;
             if d.log.is_empty() {
-                i.gfx.text("nothing yet", R::new(col.x, y, col.w, 22.0), lo.small, th.faint);
-                y += 24.0;
+                i.gfx.text("Nothing yet.", R::new(words.x + 16.0, ly, words.w - 32.0, 20.0), mono, th.faint);
             }
+            for line in &lines {
+                i.gfx.text(line, R::new(words.x + 16.0, ly, words.w - 32.0, 20.0), mono, th.dim);
+                ly += 20.0;
+            }
+            y += h + lo.s5;
         }
     }
+    // What runs, and the rule it runs under.
+    i.gfx.text(&format!("Command: {}", s.settings.drive_cmd), R::new(col.x + 4.0, y, col.w, 20.0), lo.small, th.faint);
+    i.gfx.text("Safety: the task Lumen sends tells the agent to call browser_handoff before paying, sending or deleting.", R::new(col.x + 4.0, y + 20.0, col.w, 20.0), lo.small, th.faint);
+    y += 44.0;
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
     close_button(i, st);
@@ -936,7 +1015,7 @@ pub fn draw_first_run(i: &mut Inner, st: R, s: &UiState) {
 pub(super) fn site_icon(i: &mut Inner, r: R, host: &str) {
     let th = i.theme;
     let key = super::site_key(host);
-    let png = i.site_favs.get(host).cloned().or_else(|| crate::favicons::get(host));
+    let png = i.fav_png(host, false);
     match png.and_then(|p| i.gfx.bitmap(key, &p)) {
         Some(b) => i.gfx.draw_bitmap(&b, r, 1.0),
         None => {
@@ -2226,7 +2305,7 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
 
 /// What the search box and the two buttons beside it take. The search gets the rest.
 const BM_BUTTONS_W: f32 = 270.0;
-const BM_ROW_H: f32 = 38.0;
+const BM_ROW_H: f32 = 46.0;
 
 /// The search box of the Bookmarks page. Fixed under the title; the list scrolls below it.
 /// The edit control (mod.rs) sits on top of this rectangle. `top` is the space the
@@ -2306,20 +2385,21 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     }
     let searching = !q.is_empty();
     let dragging = i.page.bm_drag.as_ref().filter(|d| d.moved).map(|d| d.id);
+    let lo = i.look.clone();
     for (folder, rows) in &groups {
         // A header when there is a folder to name, or Unsorted needs telling apart from them.
         if !folder.is_empty() || named {
-            let label = if folder.is_empty() { "UNSORTED" } else { &folder.to_uppercase() };
-            let h = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, 30.0);
+            let label = if folder.is_empty() { "Unsorted" } else { folder };
+            let h = R::new(col.x, y, col.w, 30.0);
             if h.bottom() >= top && h.y <= st.bottom() {
                 let hit = Hit::Page(PageHit::BmFolder(folder.to_string()));
                 let folded = i.page.bm_collapsed.contains(*folder) && !searching;
                 let hov = i.is_hover(&hit);
                 if hov {
-                    i.gfx.round(h, i.look.r_md, th.hover);
+                    i.gfx.round(h, lo.round(h.h), th.hover);
                 }
                 // A chevron: down when open, right when folded.
-                let (cx, cy) = (col.x + 6.0, y + 15.0);
+                let (cx, cy) = (col.x + 12.0, y + 15.0);
                 let c = if hov { th.dim } else { th.faint };
                 if folded {
                     i.gfx.line(cx - 2.0, cy - 4.0, cx + 2.0, cy, c, 1.5);
@@ -2328,25 +2408,34 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
                     i.gfx.line(cx - 4.0, cy - 2.0, cx, cy + 2.0, c, 1.5);
                     i.gfx.line(cx, cy + 2.0, cx + 4.0, cy - 2.0, c, 1.5);
                 }
-                i.gfx.text(&format!("{label}  {}", rows.len()), R::new(col.x + 20.0, y, col.w - 20.0, 30.0), i.look.caption, th.faint);
+                i.label(&format!("{label}  {}", rows.len()), R::new(col.x + 26.0, y + 7.0, col.w - 30.0, 16.0), if hov { th.dim } else { th.faint });
                 i.hit(h, hit);
                 i.page.bm_rows.push(DropRow { r: h, folder: folder.to_string(), id: 0 });
             }
-            y += 30.0;
+            y += 34.0;
         }
         if i.page.bm_collapsed.contains(*folder) && !searching {
-            y += i.look.s2;
+            y += lo.s2;
             continue;
         }
-        if rows.is_empty() {
-            i.gfx.text("Empty. Drag a bookmark here, or use Move to folder.", R::new(col.x + 20.0, y, col.w - 20.0, 28.0), i.look.small, th.faint);
-            y += 30.0;
+        // The folder's bookmarks, in one card.
+        let card = R::new(col.x, y, col.w, rows.len().max(1) as f32 * BM_ROW_H);
+        if card.bottom() >= top && card.y <= st.bottom() {
+            i.gfx.round(card, lo.r_card, th.raise);
+            i.gfx.round_stroke(card, lo.r_card, th.line, 1.0);
         }
-        for m in rows {
-            let r = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, BM_ROW_H);
-            y += BM_ROW_H + 2.0;
+        if rows.is_empty() {
+            i.gfx.text("Empty. Drag a bookmark here, or use Move to folder.", R::new(card.x + 18.0, y, card.w - 36.0, BM_ROW_H), lo.small, th.faint);
+            y += BM_ROW_H;
+        }
+        for (n, m) in rows.iter().enumerate() {
+            let r = R::new(card.x, y, card.w, BM_ROW_H);
+            y += BM_ROW_H;
             if r.bottom() < top || r.y > st.bottom() {
                 continue;
+            }
+            if n > 0 {
+                i.gfx.line(card.x + 1.0, r.y, card.right() - 1.0, r.y, th.line, 1.0);
             }
             i.page.bm_rows.push(DropRow { r, folder: m.folder.clone(), id: m.id });
             let open = Hit::Page(PageHit::Bm(m.id));
@@ -2354,33 +2443,31 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
             let hov = i.is_hover(&open) || i.is_hover(&rm);
             let lifted = dragging == Some(m.id);
             if hov && !lifted {
-                i.gfx.round(r, i.look.r_md, th.hover);
+                i.gfx.round(r.inset(4.0, 4.0), lo.r_md, th.hover);
             }
-            let tile = R::new(col.x, y - BM_ROW_H - 2.0 + 8.0, 22.0, 22.0);
             let name = if m.title.is_empty() { m.url.clone() } else { m.title.clone() };
             let host = super::host(&m.url);
-            let letter = host.chars().next().or_else(|| name.chars().next()).unwrap_or('·').to_uppercase().to_string();
             let fade = if lifted { 0.4 } else { 1.0 };
-            i.gfx.round(tile, 6.0, th.press.mix(th.accent, 0.3).alpha(fade));
-            i.gfx.text(&letter, tile, i.look.font(11.0, 650).align(Align::Center), th.text.alpha(fade));
-            let hw = (i.gfx.measure(&host, i.look.small) + 4.0).min(220.0);
-            let hx = col.right() - 32.0 - hw;
-            let tx = col.x + 34.0;
-            let ry = y - BM_ROW_H - 2.0;
-            i.gfx.text(&name, R::new(tx, ry, (hx - i.look.s4 - tx).max(60.0), BM_ROW_H), i.look.body, th.text.alpha(fade));
-            i.gfx.text(&host, R::new(hx, ry, hw, BM_ROW_H), i.look.small.align(Align::Right), th.faint.alpha(fade));
+            site_icon(i, R::new(r.x + 18.0, r.y + (BM_ROW_H - 18.0) / 2.0, 18.0, 18.0), &host);
+            // The host at the right, the title takes what is left, cut with an ellipsis.
+            let hf = lo.mono_at(11.5, 450);
+            let hw = (i.gfx.measure(&host, hf) + 4.0).min(240.0);
+            let hx = r.right() - 18.0 - hw - if hov { 30.0 } else { 0.0 };
+            let tx = r.x + 48.0;
+            i.gfx.text(&name, R::new(tx, r.y, (hx - lo.s4 - tx).max(60.0), BM_ROW_H), lo.body, th.text.alpha(fade));
+            i.gfx.text(&host, R::new(hx, r.y, hw, BM_ROW_H), hf.align(Align::Right), th.faint.alpha(fade));
             i.hit(r, open);
             if hov && dragging.is_none() {
-                let xr = R::new(col.right() - 28.0, ry + 5.0, 28.0, 28.0);
+                let xr = R::new(r.right() - 42.0, r.y + (BM_ROW_H - 28.0) / 2.0, 28.0, 28.0);
                 let xh = i.is_hover(&rm);
                 if xh {
-                    i.gfx.round(xr, i.look.r_sm, th.press);
+                    i.gfx.round(xr, lo.round(28.0), th.press);
                 }
                 i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if xh { th.text } else { th.dim });
                 i.hit(xr, rm);
             }
         }
-        y += i.look.s2;
+        y += lo.s4;
     }
     // Where a dragged row would land: a line between rows, or the folder lit.
     if dragging.is_some()
@@ -2392,10 +2479,10 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
             None => rows.iter().filter(|d| d.folder == folder && d.id != 0).map(|d| d.r.bottom() + 1.0).last(),
         };
         match target {
-            Some(ly) => i.gfx.line(col.x, ly, col.right(), ly, th.accent, 2.0),
+            Some(ly) => i.gfx.line(col.x + 12.0, ly, col.right() - 12.0, ly, th.text, 2.0),
             None => {
                 if let Some(h) = rows.iter().find(|d| d.folder == folder && d.id == 0) {
-                    i.gfx.round_stroke(h.r, i.look.r_md, th.accent, 1.5);
+                    i.gfx.round_stroke(h.r, i.look.round(h.r.h), th.text, 1.5);
                 }
             }
         }
@@ -2412,9 +2499,9 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     });
     title_block(i, col, st.y + i.look.s5 + 2.0, "Bookmarks", &sub);
     let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.bm_edit;
-    i.gfx.round(sr, i.look.r_md, th.bg);
-    i.gfx.round_stroke(sr, i.look.r_md, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
-    i.gfx.icon("search", sr.x + 10.0, sr.y + 9.0, 16.0, th.faint);
+    i.gfx.round(sr, i.look.round(sr.h), th.raise);
+    i.gfx.round_stroke(sr, i.look.round(sr.h), if focused { th.text.alpha(0.45) } else { th.line }, if focused { 1.5 } else { 1.0 });
+    i.gfx.icon("search", sr.x + 12.0, sr.y + 10.0, 14.0, th.faint);
     if q.is_empty() && !focused {
         i.gfx.text("Search bookmarks", R::new(sr.x + 34.0, sr.y, sr.w - 44.0, sr.h), i.look.body, th.faint);
     }
@@ -2450,28 +2537,79 @@ fn section_icon(name: &str) -> &'static str {
     }
 }
 
+/// The Settings search box, in the menu under the title. The edit control (mod.rs) sits on
+/// top of this rectangle.
+pub fn set_search_rect(st: R) -> R {
+    R::new(st.x + 14.0, st.y + 90.0, SET_NAV_W - 28.0, 34.0)
+}
+
+const SET_NAV_W: f32 = 224.0;
+
+/// The words a setting is found by: its name, its hint, its choices; for the rows that are
+/// a whole widget, what they are about.
+fn item_words(it: &Item) -> String {
+    use Item::*;
+    match it {
+        Seg(_, l, h, o) | Pick(_, l, h, o) => format!("{l} {h} {}", o.iter().map(|(_, n)| *n).collect::<Vec<_>>().join(" ")),
+        Toggle(_, l, h) | Range(_, l, h, _, _) | Fonts(_, l, h) | Text(_, l, h) => format!("{l} {h}"),
+        Button(l, h, b, _) => format!("{l} {h} {b}"),
+        Reset(_, l) => l.to_string(),
+        Colors => "look signal glass precise colours colors palette accent".into(),
+        Themes => "saved looks themes export import".into(),
+        Wallpaper => "wallpaper image picture background".into(),
+        Layout => "layout vertical horizontal sidebar toolbar".into(),
+        Engine => format!("search engine {}", ENGINES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(" ")),
+        Keys => format!("keys keyboard shortcuts {}", KEYS.iter().map(|(n, k)| format!("{n} {k}")).collect::<Vec<_>>().join(" ")),
+        KeePass => "keepass kdbx passwords vault".into(),
+        AgentSetup => "agent mcp setup lumen-agent claude".into(),
+        SitePerms => "site permissions camera microphone location notifications".into(),
+        DefaultBrowser => "default browser windows".into(),
+    }
+}
+
+/// Every word typed is in the section's name or the setting's words.
+fn item_matches(q: &str, section: &str, it: &Item) -> bool {
+    let hay = format!("{section} {}", item_words(it)).to_lowercase();
+    q.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+}
+
 fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let lo = i.look.clone();
-    let schema = settings_schema();
+    let q = super::wide_text(i.set_edit).trim().to_string();
+    let searching = !q.is_empty();
+    // While searching, each section keeps only the settings that match; a section with
+    // none is left out of the page and dimmed in the menu.
+    let schema: Vec<(&'static str, Vec<Item>)> =
+        settings_schema().into_iter().map(|(name, items)| (name, items.into_iter().filter(|it| !searching || item_matches(&q, name, it)).collect())).collect();
     // Left: the title, the build, and the sections as a menu with icons.
-    let nav = R::new(st.x, st.y, 224.0, st.h);
+    let nav = R::new(st.x, st.y, SET_NAV_W, st.h);
     i.gfx.line(nav.right(), st.y + lo.s4, nav.right(), st.bottom() - lo.s4, th.line, 1.0);
     i.gfx.text("Settings", R::new(nav.x + 24.0, nav.y + 26.0, nav.w - 32.0, 36.0), lo.font(26.0, 700), th.text);
     // Which build this is, under the title: the question people ask before reporting a bug.
     let build = env!("LUMEN_BUILD").split_whitespace().next().unwrap_or("");
     i.label(&format!("Lumen {} · {build}", env!("CARGO_PKG_VERSION")), R::new(nav.x + 24.0, nav.y + 64.0, nav.w - 32.0, 16.0), th.faint);
-    let current = i.page.sections.iter().rposition(|y| *y <= i.page.scroll + 30.0).unwrap_or(0);
-    for (n, (name, _)) in schema.iter().enumerate() {
-        let r = R::new(nav.x + lo.s3, nav.y + 96.0 + n as f32 * 34.0, nav.w - 2.0 * lo.s3, 32.0);
+    // The search box: a pill, the box itself is the edit control over it.
+    let sr = set_search_rect(st);
+    let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.set_edit;
+    i.gfx.round(sr, lo.round(sr.h), th.raise);
+    i.gfx.round_stroke(sr, lo.round(sr.h), if focused { th.text.alpha(0.45) } else { th.line }, if focused { 1.5 } else { 1.0 });
+    i.gfx.icon("search", sr.x + 12.0, sr.y + 10.0, 14.0, th.faint);
+    if q.is_empty() && !focused {
+        i.gfx.text("Search settings", R::new(sr.x + 34.0, sr.y, sr.w - 44.0, sr.h), lo.body, th.faint);
+    }
+    let current = if searching { usize::MAX } else { i.page.sections.iter().rposition(|y| *y <= i.page.scroll + 30.0).unwrap_or(0) };
+    for (n, (name, items)) in schema.iter().enumerate() {
+        let r = R::new(nav.x + lo.s3, sr.bottom() + 12.0 + n as f32 * 34.0, nav.w - 2.0 * lo.s3, 32.0);
         let h = Hit::Page(PageHit::Nav(n));
         let on = n == current;
+        let empty = items.is_empty();
         if on {
             i.gfx.round(r, lo.round(r.h), th.pill);
-        } else if i.is_hover(&h) {
+        } else if i.is_hover(&h) && !empty {
             i.gfx.round(r, lo.round(r.h), th.hover);
         }
-        let ink = if on { th.pill_ink } else { th.dim };
+        let ink = if on { th.pill_ink } else if empty { th.faint.alpha(0.6) } else { th.dim };
         i.gfx.icon(section_icon(name), r.x + 12.0, r.y + 8.0, 16.0, ink.alpha(if on { 1.0 } else { 0.85 }));
         i.gfx.text(name, R::new(r.x + 38.0, r.y, r.w - 44.0, r.h), lo.body, ink);
         i.hit(r, h);
@@ -2493,8 +2631,14 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.clip(body);
     let mut y = body.y + 34.0 - i.page.scroll;
     let mut sections = Vec::new();
+    if searching && schema.iter().all(|(_, items)| items.is_empty()) {
+        empty_state(i, R::new(col.x, y + 40.0, col.w, 200.0), "search", "Nothing matches", "Try fewer words, or another name for it.");
+    }
     for ((name, items), hs) in schema.iter().zip(heights) {
         sections.push(y + i.page.scroll - body.y - 34.0);
+        if items.is_empty() {
+            continue;
+        }
         i.label(name, R::new(col.x + 4.0, y, col.w, 18.0), th.faint);
         y += 26.0;
         let card_h: f32 = hs.iter().sum::<f32>() + 10.0;
@@ -2530,32 +2674,38 @@ enum PermTarget<'a> {
     Default(&'static str),
 }
 
-/// The Allow / Block / Ask chips of one permission row. `cur` is what is remembered (None =
-/// ask). A default row offers Block and Ask only: there is nothing to allow before a site asks.
-fn perm_chips(i: &mut Inner, right: f32, y: f32, target: PermTarget<'_>, cur: Option<bool>) -> f32 {
+/// The Allow / Block / Ask choice of one permission row, as a segmented control centred on
+/// `cy`. `cur` is what is remembered (None = ask). A default row offers Block and Ask only:
+/// there is nothing to allow before a site asks.
+fn perm_chips(i: &mut Inner, right: f32, cy: f32, target: PermTarget<'_>, cur: Option<bool>) -> f32 {
     let th = i.theme;
-    let f = i.look.small_strong.align(Align::Center);
+    let lo = i.look.clone();
+    let f = lo.font(12.5, 450).align(Align::Center);
     let opts: &[(&'static str, Option<bool>)] =
         if matches!(target, PermTarget::Site(..)) { &[("Allow", Some(true)), ("Block", Some(false)), ("Ask", None)] } else { &[("Block", Some(false)), ("Ask", None)] };
-    let widths: Vec<f32> = opts.iter().map(|(l, _)| i.gfx.measure(l, f) + 2.0 * i.look.s3).collect();
-    let total: f32 = widths.iter().sum::<f32>() + i.look.s1 * (opts.len() - 1) as f32;
-    let mut x = right - total;
+    let widths: Vec<f32> = opts.iter().map(|(l, _)| i.gfx.measure(l, f) + 22.0).collect();
+    let total: f32 = widths.iter().sum::<f32>() + 4.0;
+    let pill = R::new(right - total, cy - 15.0, total, 30.0);
+    i.gfx.round(pill, lo.round(30.0), th.bg);
+    i.gfx.round_stroke(pill, lo.round(30.0), th.line, 1.0);
+    let mut x = pill.x + 2.0;
     for ((label, v), w) in opts.iter().zip(widths) {
-        let r = R::new(x, y, w, 26.0);
+        let r = R::new(x, pill.y + 2.0, w, 26.0);
         let h = Hit::Page(match target {
             PermTarget::Site(origin, kind) => PageHit::SitePerm(origin.to_string(), kind.to_string(), label),
             PermTarget::Default(kind) => PageHit::PermDefault(kind, if *label == "Block" { "block" } else { "ask" }),
         });
-        if *v == cur {
-            i.gfx.round(r, i.look.r_sm, th.press);
+        let on = *v == cur;
+        if on {
+            i.gfx.round(r, lo.round(26.0), th.pill);
         } else if i.is_hover(&h) {
-            i.gfx.round(r, i.look.r_sm, th.hover);
+            i.gfx.round(r, lo.round(26.0), th.hover);
         }
-        i.gfx.text(label, r, f, if *v == cur { th.text } else { th.dim });
+        i.gfx.text(label, r, f, if on { th.pill_ink } else { th.dim });
         i.hit(r, h);
-        x += w + i.look.s1;
+        x += w;
     }
-    right - total
+    pill.x
 }
 
 /// A verdict as a chip state.
@@ -2567,13 +2717,28 @@ fn chip_state(v: crate::sites::Verdict) -> Option<bool> {
     }
 }
 
+/// A card of `rows` rows of `row` height at y, with hairlines between them. Returns the
+/// card; the rows are drawn by the caller, on top.
+fn rows_card(i: &mut Inner, col: R, y: f32, rows: usize, row: f32) -> R {
+    let th = i.theme;
+    let card = R::new(col.x, y, col.w, rows.max(1) as f32 * row);
+    i.gfx.round(card, i.look.r_card, th.raise);
+    i.gfx.round_stroke(card, i.look.r_card, th.line, 1.0);
+    for n in 1..rows {
+        let ly = y + n as f32 * row;
+        i.gfx.line(card.x + 1.0, ly, card.right() - 1.0, ly, th.line, 1.0);
+    }
+    card
+}
+
 /// Site settings: what each site may do, the zoom it is read at, and the data it left behind.
 /// The defaults come first, so the page answers "how do I stop notifications?" without a site.
 fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
+    let lo = i.look.clone();
     let col = column(st, COL_W);
     i.gfx.clip(st);
-    let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
+    let mut y = st.y + lo.s5 + 2.0 - i.page.scroll;
     let origins: Vec<&str> = {
         let mut o: Vec<&str> = s.rules.iter().map(|(o, _, _)| o.as_str()).collect();
         o.dedup();
@@ -2582,11 +2747,14 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     let sub = if origins.is_empty() && s.zooms.is_empty() {
         "How sites behave, and what to do about one in particular.".to_string()
     } else {
-        format!("{} sites with answers · {} read at their own zoom", origins.len(), s.zooms.len())
+        format!("{} sites with answers · {} at their own zoom", origins.len(), s.zooms.len())
     };
     y = title_block(i, col, y, "Site settings", &sub);
+    const ROW: f32 = 50.0;
+    let inner = |r: R| R::new(r.x + 18.0, r.y, r.w - 36.0, r.h);
 
-    // What pages open at, unless a site has a zoom of its own.
+    // What pages open at, unless a site has a zoom of its own. Measured out of sight first,
+    // so its card is drawn under it at the right height.
     y = group_label(i, col, y, "Pages open at", 0);
     let range = Item::Range(
         "default_zoom",
@@ -2595,94 +2763,91 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
         Scale::Steps(ZOOM_STOPS),
         "%",
     );
-    y += draw_item(i, &range, R::new(col.x, y, col.w, 54.0), s) + i.look.s5;
+    let mark = i.hits.len();
+    i.gfx.clip(R::new(-10.0, -10.0, 1.0, 1.0));
+    let h = draw_item(i, &range, R::new(inner(col).x, -2000.0, inner(col).w, 54.0), s);
+    i.gfx.unclip();
+    i.hits.truncate(mark);
+    rows_card(i, col, y, 1, h + 10.0);
+    draw_item(i, &range, R::new(inner(col).x, y + 5.0, inner(col).w, 54.0), s);
+    y += h + 10.0 + lo.s5;
 
     // The default answer per kind.
     y = group_label(i, col, y, "When a site has no answer", 0);
-    for kind in crate::sites::KINDS.iter() {
-        if y > st.bottom() || y + 33.0 < st.y {
-            y += 33.0;
+    let card = rows_card(i, col, y, crate::sites::KINDS.len(), ROW);
+    for (n, kind) in crate::sites::KINDS.iter().enumerate() {
+        let r = R::new(card.x, y + n as f32 * ROW, card.w, ROW);
+        if r.y > st.bottom() || r.bottom() < st.y {
             continue;
         }
         let cur = chip_state(crate::sites::default_for(&s.settings.perm_defaults, kind.key));
-        i.gfx.text(kind.label, R::new(col.x, y + 3.0, col.w * 0.5, 28.0), i.look.body, th.dim);
-        perm_chips(i, col.right(), y + 3.0, PermTarget::Default(kind.key), cur);
-        i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
-        y += 34.0;
+        i.gfx.text(kind.label, R::new(r.x + 18.0, r.y, r.w * 0.5, ROW), lo.font(13.0, 500), th.text);
+        perm_chips(i, r.right() - 14.0, r.y + ROW / 2.0, PermTarget::Default(kind.key), cur);
     }
-    y += i.look.s5;
+    y = card.bottom() + lo.s5;
 
-    // One block per site: its remembered answers, and what its data is worth.
+    // One card per site: its name and what can be done about it, then its answers.
     y = group_label(i, col, y, "Answers remembered", origins.len());
     if origins.is_empty() {
+        let card = rows_card(i, col, y, 1, 64.0);
         i.gfx.text_wrap(
             "No site has an answer yet. When a site asks for your camera, location or similar, the answer is remembered here and can be changed.",
-            R::new(col.x, y + 4.0, col.w, 40.0),
-            i.look.small,
+            R::new(card.x + 18.0, card.y + 14.0, card.w - 36.0, 40.0),
+            lo.small,
             th.faint,
         );
-        y += 46.0;
+        y = card.bottom() + lo.s3;
     }
     for origin in origins {
-        let answers: Vec<(&str, bool)> = s
-            .rules
-            .iter()
-            .filter(|(o, _, _)| o == origin)
-            .map(|(_, k, a)| (k.as_str(), *a))
-            .collect();
-        let header = y > st.bottom() - 40.0 || y + 80.0 < st.y;
-        if !header {
-            i.gfx.text(&super::host(origin), R::new(col.x, y + 3.0, col.w * 0.6, 30.0), i.look.body_strong, th.text);
-            let right = row_action(i, col.right(), y + 4.0, "Clear data", PageHit::SiteClear(origin.to_string()));
-            row_action(i, right, y + 4.0, "Reset all", PageHit::SiteReset(origin.to_string()));
-        }
-        y += 34.0;
-        for (kind, allow) in answers {
-            if y > st.bottom() || y + 33.0 < st.y {
-                y += 33.0;
-                continue;
+        let answers: Vec<(&str, bool)> = s.rules.iter().filter(|(o, _, _)| o == origin).map(|(_, k, a)| (k.as_str(), *a)).collect();
+        let card = rows_card(i, col, y, answers.len() + 1, ROW);
+        if card.bottom() >= st.y && card.y <= st.bottom() {
+            let host = super::host(origin);
+            site_icon(i, R::new(card.x + 18.0, y + (ROW - 18.0) / 2.0, 18.0, 18.0), &host);
+            i.gfx.text(&host, R::new(card.x + 48.0, y, card.w * 0.5, ROW), lo.body_strong, th.text);
+            let right = row_action(i, card.right() - 12.0, y + (ROW - 28.0) / 2.0, "Clear data", PageHit::SiteClear(origin.to_string()));
+            row_action(i, right, y + (ROW - 28.0) / 2.0, "Reset all", PageHit::SiteReset(origin.to_string()));
+            for (n, (kind, allow)) in answers.iter().enumerate() {
+                let r = R::new(card.x, y + (n + 1) as f32 * ROW, card.w, ROW);
+                i.gfx.text(&crate::sites::label(kind), R::new(r.x + 48.0, r.y, r.w * 0.5, ROW), lo.body, th.dim);
+                perm_chips(i, r.right() - 14.0, r.y + ROW / 2.0, PermTarget::Site(origin, kind), Some(*allow));
             }
-            i.gfx.text(&crate::sites::label(kind), R::new(col.x + i.look.s3, y + 3.0, col.w * 0.5, 28.0), i.look.body, th.dim);
-            perm_chips(i, col.right(), y + 3.0, PermTarget::Site(origin, kind), Some(allow));
-            i.gfx.line(col.x + i.look.s3, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
-            y += 34.0;
         }
-        y += i.look.s2;
+        y = card.bottom() + lo.s3;
     }
-    y += i.look.s5 - i.look.s2;
+    y += lo.s5 - lo.s3;
 
     // Zoom by site: what the person chose, and the way back to the default.
     y = group_label(i, col, y, "Zoom by site", s.zooms.len());
+    let card = rows_card(i, col, y, s.zooms.len(), ROW);
     if s.zooms.is_empty() {
-        i.gfx.text("Every site opens at the default zoom.", R::new(col.x, y + 4.0, col.w, 28.0), i.look.small, th.faint);
-        y += 34.0;
+        i.gfx.text("Every site opens at the default zoom.", R::new(card.x + 18.0, y, card.w - 36.0, ROW), lo.small, th.faint);
     }
-    for (host, pct) in &s.zooms {
-        if y > st.bottom() || y + 33.0 < st.y {
-            y += 34.0;
+    for (n, (host, pct)) in s.zooms.iter().enumerate() {
+        let r = R::new(card.x, y + n as f32 * ROW, card.w, ROW);
+        if r.y > st.bottom() || r.bottom() < st.y {
             continue;
         }
-        i.gfx.text(host, R::new(col.x, y + 3.0, col.w * 0.6, 28.0), i.look.body, th.text);
-        row_action(i, col.right(), y + 4.0, "Reset", PageHit::SiteZoom(host.clone()));
-        i.gfx.text(&format!("{pct}%"), R::new(col.right() - 130.0, y + 3.0, 60.0, 28.0), i.look.small.align(Align::Right), th.dim);
-        i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
-        y += 34.0;
+        site_icon(i, R::new(r.x + 18.0, r.y + (ROW - 18.0) / 2.0, 18.0, 18.0), host);
+        i.gfx.text(host, R::new(r.x + 48.0, r.y, r.w * 0.6, ROW), lo.body, th.text);
+        let left = row_action(i, r.right() - 12.0, r.y + (ROW - 28.0) / 2.0, "Reset", PageHit::SiteZoom(host.clone()));
+        i.gfx.text(&format!("{pct}%"), R::new(left - 80.0, r.y, 72.0, ROW), lo.mono_at(12.0, 500).align(Align::Right), th.dim);
     }
-    y += i.look.s5;
+    y = card.bottom() + lo.s5;
 
     // The hosts that may stay on plain http.
     if !s.settings.http_ok.is_empty() {
         y = group_label(i, col, y, "May stay on plain http", s.settings.http_ok.len());
-        for host in &s.settings.http_ok {
-            if y > st.bottom() || y + 33.0 < st.y {
-                y += 34.0;
+        let card = rows_card(i, col, y, s.settings.http_ok.len(), ROW);
+        for (n, host) in s.settings.http_ok.iter().enumerate() {
+            let r = R::new(card.x, y + n as f32 * ROW, card.w, ROW);
+            if r.y > st.bottom() || r.bottom() < st.y {
                 continue;
             }
-            i.gfx.text(host, R::new(col.x, y + 3.0, col.w * 0.6, 28.0), i.look.body, th.text);
-            row_action(i, col.right(), y + 4.0, "Reset", PageHit::SiteHttp(host.clone()));
-            i.gfx.line(col.x, y + 33.0, col.right(), y + 33.0, th.line, 1.0);
-            y += 34.0;
+            i.gfx.text(host, R::new(r.x + 18.0, r.y, r.w * 0.6, ROW), lo.body, th.text);
+            row_action(i, r.right() - 12.0, r.y + (ROW - 28.0) / 2.0, "Reset", PageHit::SiteHttp(host.clone()));
         }
+        y = card.bottom() + lo.s5;
     }
 
     i.gfx.unclip();

@@ -212,7 +212,8 @@ pub struct DriveView {
     pub task: String,
     /// How long the run has been going, e.g. "4m".
     pub elapsed: String,
-    pub steps: Vec<(String, String)>,
+    /// The steps in plain words, each with its time in ms once it is over.
+    pub steps: Vec<(String, Option<u64>)>,
     pub log: Vec<String>,
     /// The CLI's exit code, once it is over.
     pub exit: Option<i32>,
@@ -587,6 +588,11 @@ pub(crate) struct Inner {
     favs: HashMap<u64, Vec<u8>>,
     /// One icon per site (png bytes, by host), for the speed dial's tiles.
     site_favs: HashMap<String, Vec<u8>>,
+    /// The disk cache's answer per host, read once: hits stay, misses are asked again
+    /// after a while, since a fetch may have landed the icon since.
+    disk_favs: HashMap<String, (Option<Vec<u8>>, std::time::Instant)>,
+    /// Hosts whose icon has been fetched from the site this run, so each is asked once.
+    fav_asked: std::collections::HashSet<String>,
     dial_drag: Option<DialDrag>,
     edit: HWND,
     ntp_edit: HWND,
@@ -647,6 +653,8 @@ pub(crate) struct Inner {
     /// 1 queue, 2 new task). Its text box is a real edit window.
     say: Option<Say>,
     say_edit: HWND,
+    /// The Settings page's search box.
+    set_edit: HWND,
 }
 
 /// A message being written to an agent: the card over the sidebar.
@@ -708,6 +716,7 @@ const ID_BM: usize = 103;
 const ID_DRIVE: usize = 104;
 const ID_SRCH: usize = 105;
 const ID_SAY: usize = 106;
+const ID_SET: usize = 107;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -971,7 +980,22 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit] {
+            let set_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_SET as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit] {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
@@ -997,6 +1021,8 @@ impl Chrome {
                 drag: None,
                 favs: HashMap::new(),
                 site_favs: HashMap::new(),
+                disk_favs: HashMap::new(),
+                fav_asked: std::collections::HashSet::new(),
                 dial_drag: None,
                 edit,
                 ntp_edit,
@@ -1035,6 +1061,7 @@ impl Chrome {
                 search_rows: Vec::new(),
                 say: None,
                 say_edit,
+                set_edit,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -1302,7 +1329,8 @@ impl Inner {
             SendMessageW(self.ntp_edit, WM_SETFONT, Some(WPARAM(self.ntp_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.bm_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.drive_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit] {
+            SendMessageW(self.set_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
+            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit] {
                 SendMessageW(e, EM_SETMARGINS, Some(WPARAM((EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize)), Some(LPARAM(0)));
             }
         }
@@ -1315,7 +1343,7 @@ impl Inner {
                     let _ = DeleteObject(b.into());
                 }
             }
-            self.edit_brush = CreateSolidBrush(COLORREF(self.theme.raise.colorref()));
+            self.edit_brush = CreateSolidBrush(COLORREF(self.theme.solid(self.theme.raise).colorref()));
             self.ntp_brush = CreateSolidBrush(COLORREF(self.theme.bg.colorref()));
             if !self.bar_brush.is_invalid() {
                 let _ = DeleteObject(self.bar_brush.into());
@@ -1387,6 +1415,7 @@ impl Inner {
             // The search box starts empty each time the Bookmarks page opens.
             unsafe {
                 SetWindowTextW(self.bm_edit, &HSTRING::new()).ok();
+                SetWindowTextW(self.set_edit, &HSTRING::new()).ok();
             }
             self.page.bm_collapsed.clear();
             // The Drive page opens with the cursor in its task box: typing is the point.
@@ -1637,6 +1666,8 @@ impl Inner {
         let d = pages::drive_task_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3), self.look.s5);
         let show = s.full && s.panel == "drive";
         place(self.drive_edit, R::new(d.x + 8.0, d.y + (d.h - 22.0) / 2.0, d.w - 16.0, 22.0), show);
+        let q = pages::set_search_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3));
+        place(self.set_edit, R::new(q.x + 34.0, q.y + (q.h - 20.0) / 2.0, q.w - 46.0, 20.0), s.full && s.panel == "settings");
         // The Drive page takes the cursor once, when it opens.
         if show && std::mem::take(&mut self.drive_focus) {
             unsafe {
@@ -3657,11 +3688,11 @@ impl Inner {
         let icon = R::new(r.x + 14.0, r.y + 14.0, 26.0, 26.0);
         let host = speeddial::host_of(url);
         let key = site_key(&host);
-        let png = self.site_favs.get(&host).cloned();
+        let png = self.fav_png(&host, true);
         match png.and_then(|p| self.gfx.bitmap(key, &p)) {
             Some(b) => self.gfx.draw_bitmap(&b, icon, a),
             None => {
-                // No icon yet (it arrives when the site has been opened): its letter, quietly.
+                // No icon yet (it is being fetched, or the site has none): its letter, quietly.
                 self.gfx.round(icon, 8.0, th.hover.alpha(a));
                 let letter = name.chars().next().or_else(|| host.chars().next()).unwrap_or('?').to_uppercase().to_string();
                 self.gfx.text(&letter, icon, lo.font(13.0, 700).align(Align::Center), th.dim.alpha(a));
@@ -3669,6 +3700,29 @@ impl Inner {
         }
         self.gfx.text(name, R::new(r.x + 14.0, r.bottom() - 46.0, r.w - 28.0, 20.0), lo.font(12.5, 600), th.text.alpha(a));
         self.gfx.text(&host, R::new(r.x + 14.0, r.bottom() - 28.0, r.w - 28.0, 16.0), lo.mono_at(10.5, 450), th.faint.alpha(a));
+    }
+
+    /// A site's icon as PNG: the one its tab sent, else the disk cache. With `fetch`, a host
+    /// with neither is asked for its icon once per run, on a background thread; the tile
+    /// shows it the next time it draws. Tests never fetch: a headless run stays off the net.
+    fn fav_png(&mut self, host: &str, fetch: bool) -> Option<Vec<u8>> {
+        if let Some(p) = self.site_favs.get(host).filter(|p| !p.is_empty()) {
+            return Some(p.clone());
+        }
+        let stale = |(p, at): &(Option<Vec<u8>>, std::time::Instant)| p.is_none() && at.elapsed().as_secs() >= 4;
+        if self.disk_favs.get(host).is_none_or(stale) {
+            let png = crate::favicons::get(host);
+            if png.is_some() {
+                // A new picture under the same key: drop the letter tile's bitmap, if any.
+                self.gfx.bitmaps.remove(&site_key(host));
+            }
+            self.disk_favs.insert(host.to_string(), (png, std::time::Instant::now()));
+        }
+        let png = self.disk_favs.get(host).and_then(|(p, _)| p.clone());
+        if png.is_none() && fetch && !crate::headless() && !host.is_empty() && self.fav_asked.insert(host.to_string()) {
+            crate::favicons::fetch(vec![host.to_string()]);
+        }
+        png
     }
 
     // ------------------------------------------------------------- input
@@ -4616,6 +4670,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     i.invalidate();
                 } else if id == ID_DRIVE && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
                     i.invalidate();
+                } else if id == ID_SET && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    // What matches starts at the top.
+                    if code == EN_CHANGE {
+                        i.page.scroll = 0.0;
+                    }
+                    i.invalidate();
                 } else if id == ID_SRCH && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
                     // Typing filters the tab list; the pick starts over at the best match.
                     if code == EN_CHANGE {
@@ -4636,9 +4696,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     let _ = SetBkColor(hdc, COLORREF(fill.colorref()));
                     return LRESULT(i.bar_brush.0 as isize);
                 }
-                let is_ntp = h == i.bm_edit || h == i.drive_edit || h == i.say_edit;
+                // The composer's box sits in the page colour; every other box is on a card.
+                let is_ntp = h == i.say_edit;
                 let _ = SetTextColor(hdc, COLORREF(i.theme.text.colorref()));
-                let bg = if is_ntp { i.theme.bg } else { i.theme.raise };
+                let bg = if is_ntp { i.theme.bg } else { i.theme.solid(i.theme.raise) };
                 let _ = SetBkColor(hdc, COLORREF(bg.colorref()));
                 LRESULT(if is_ntp { i.ntp_brush.0 as isize } else { i.edit_brush.0 as isize })
             }
@@ -4751,7 +4812,7 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         }
                         _ => {}
                     }
-                } else if id == ID_BM && vk == VK_ESCAPE.0 {
+                } else if (id == ID_BM || id == ID_SET) && vk == VK_ESCAPE.0 {
                     // Escape clears the search first; with nothing typed it leaves the page.
                     if wide_text(hwnd).is_empty() {
                         send(&i.proxy, json!({"t": "panel", "open": false}));

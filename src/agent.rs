@@ -244,8 +244,9 @@ pub struct SessionState {
     replaying: bool,
     /// Last snapshot's frames, per tab.
     frames: HashMap<u64, Vec<FrameEntry>>,
-    /// The tool calls of this session, newest last: what the Drive panel shows as steps.
-    steps: VecDeque<Step>,
+    /// The tool calls of this session, newest last: what the Drive panel shows as steps,
+    /// each with how long it took once it is over.
+    steps: VecDeque<(Step, Option<u64>)>,
     /// Cross-origin frames already attached, per tab: frameId -> session id.
     targets: HashMap<u64, HashMap<String, String>>,
 }
@@ -406,12 +407,12 @@ impl Agent {
         self.sessions.all()
     }
 
-    /// What one session has been doing, newest last: (tool, one-line note). The Drive
-    /// panel draws this as the run's step list. Never a URL or page text.
-    #[allow(dead_code)]
-    pub fn steps(&self, session: &str) -> Vec<(String, String)> {
+    /// What one session has been doing, newest last: the step in plain words, and its time
+    /// in ms once it is over. The Drive panel draws this as the run's step list. Never a URL
+    /// or page text beyond a host and a few typed words.
+    pub fn steps(&self, session: &str) -> Vec<(String, Option<u64>)> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.get(session).map(|s| s.steps.iter().map(|x| (x.tool.clone(), step_note(&x.args))).collect()).unwrap_or_default()
+        state.get(session).map(|s| s.steps.iter().map(|(x, ms)| (doing(&x.tool, &x.args), *ms)).collect()).unwrap_or_default()
     }
 
     /// A message from the person to one agent. It rides on that agent's next tool reply.
@@ -457,7 +458,7 @@ impl Agent {
     /// What the agent of this session did last, as the watch pill says it: `click "Submit order"`.
     pub fn last_step(&self, session: &str) -> String {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.get(session).and_then(|s| s.steps.back()).map(|x| doing(&x.tool, &x.args)).unwrap_or_default()
+        state.get(session).and_then(|s| s.steps.back()).map(|(x, _)| doing(&x.tool, &x.args)).unwrap_or_default()
     }
 
     /// Paste into a terminal and Claude Code can browse with Lumen. `lumen-agent` (next to
@@ -1880,6 +1881,18 @@ fn screenshot_content(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) -> Result
 /// session's step list (the Drive panel draws those).
 fn run(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value) -> Result<Vec<Value>, String> {
     let session = who.session.as_str();
+    let t0 = Instant::now();
+    let shown = !is_run_tool(name);
+    // The step's time, on the step this call put on the list.
+    let stamp = || {
+        if shown {
+            sh.with_state(session, |st| {
+                if let Some((_, ms)) = st.steps.back_mut().filter(|(_, ms)| ms.is_none()) {
+                    *ms = Some(t0.elapsed().as_millis() as u64);
+                }
+            });
+        }
+    };
     let recording = sh.with_state(session, |st| {
         let on = st.recording.is_some() && !st.replaying && !is_run_tool(name);
         if !is_run_tool(name) {
@@ -1888,14 +1901,16 @@ fn run(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value) -> Result<Vec<Valu
             if st.steps.len() >= 60 {
                 st.steps.pop_front();
             }
-            st.steps.push_back(step);
+            st.steps.push_back((step, None));
         }
         on
     });
     let ctx = PolicyCtx::from_value(&call(&sh.proxy, who, Op::Policy)?);
     let out = match authorize(who, name, args, &ctx) {
         Ok(approval) => {
-            let mut res = run_tool(sh, who, name, args, &approval)?;
+            let res = run_tool(sh, who, name, args, &approval);
+            stamp();
+            let mut res = res?;
             // Any tool may ask for a picture of what it did (`screenshot: true`).
             if args["screenshot"].as_bool().unwrap_or(false)
                 && let Some(tab) = args["tab"].as_u64()
@@ -1906,6 +1921,7 @@ fn run(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value) -> Result<Vec<Valu
             Ok(res)
         }
         Err(d) => {
+            stamp();
             // The tool and why. No path, no URL, no page content.
             if d.log {
                 crate::journal::error("agent", &format!("denied {name}: {}", d.code));
@@ -1957,27 +1973,6 @@ fn doing(tool: &str, a: &Value) -> String {
         "browser_script_run" => "running a script".into(),
         t => t.trim_start_matches("browser_").replace('_', " "),
     }
-}
-
-/// What a step shows in the Drive panel's list: the tab, the ref, the url's host. Never
-/// page text, never a whole URL with a query in it.
-fn step_note(args: &Value) -> String {
-    let mut bits: Vec<String> = Vec::new();
-    if let Some(t) = args["tab"].as_u64() {
-        bits.push(format!("tab {t}"));
-    }
-    if let Some(r) = args["ref"].as_str() {
-        bits.push(r.to_string());
-    }
-    if let Some(u) = args["url"].as_str() {
-        bits.push(site_of(u));
-    }
-    for key in ["text", "key", "option", "name", "to"] {
-        if let Some(v) = args[key].as_str().filter(|v| !v.trim().is_empty()) {
-            bits.push(clip(v.trim(), 40));
-        }
-    }
-    bits.join(" · ")
 }
 
 /// The arguments as a step keeps them: the same shape, only shorter text.

@@ -48,7 +48,6 @@ fn dir() -> PathBuf {
 }
 
 /// The site's icon as PNG bytes (32x32 or larger, square), from the cache, or None.
-#[allow(dead_code)] // the integrator draws these later
 pub fn get(host: &str) -> Option<Vec<u8>> {
     get_in(&dir(), host)
 }
@@ -65,7 +64,6 @@ pub fn remember(host: &str, png: &[u8]) {
 /// Icons for hosts that have none, on a background thread. The request goes to
 /// the site itself: `https://<host>/` and its `<link rel=icon>`, else its
 /// `/favicon.ico`. No third-party icon service is ever asked.
-#[allow(dead_code)] // the integrator calls this once it has a list of hosts
 pub fn fetch(hosts: Vec<String>) {
     let d = dir();
     let _ = thread::Builder::new()

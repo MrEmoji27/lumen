@@ -201,6 +201,12 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(rest.trim()));
                         }
                     }
+                    "setq" => {
+                        // Words into the Settings search box (ID 107).
+                        if let Ok(edit) = GetDlgItem(Some(hwnd), 107) {
+                            let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(rest.trim()));
+                        }
+                    }
                     "vk" => {
                         let vk: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                         let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
@@ -285,6 +291,39 @@ pub fn fake(s: &mut UiState) {
             m(9205, "Direct2D - Wikipedia", "https://en.wikipedia.org/wiki/Direct2D", "Chrome"),
             m(9206, "crates.io: Rust Package Registry", "https://crates.io/", "Chrome"),
         ];
+    }
+    if fake_has("drive") && s.panel == "drive" {
+        let st = |w: &str, ms: Option<u64>| (w.to_string(), ms);
+        s.drive = Some(super::DriveView {
+            name: "drive-3".into(),
+            running: true,
+            paused: false,
+            task: "Find the cheapest kettle that lasts and put it in the cart. Stop before paying.".into(),
+            elapsed: "2m".into(),
+            steps: vec![
+                st("going to reddit.com", Some(812)),
+                st("looking at the page", Some(2)),
+                st("reading", Some(19)),
+                st("going to amazon.com", Some(1104)),
+                st("typing \u{201C}stainless kettle\u{201D}", Some(140)),
+                st("clicking e12", None),
+            ],
+            log: vec![
+                "The thread agrees on two: the Stagg EKG and a plain Bodum.".into(),
+                "Checking prices.".into(),
+                "Bodum 1.7 L is 39.99; the Stagg is 165.".into(),
+                "Adding the Bodum to the cart, then I stop and hand over.".into(),
+            ],
+            exit: None,
+        });
+    }
+    if fake_has("sites") && s.panel == "sites" {
+        s.rules = vec![
+            ("https://meet.example.com".into(), "camera".into(), true),
+            ("https://meet.example.com".into(), "microphone".into(), true),
+            ("https://news.example.com".into(), "notifications".into(), false),
+        ];
+        s.zooms = vec![("doc.rust-lang.org".into(), 125), ("news.ycombinator.com".into(), 110)];
     }
     if fake_has("mem") {
         s.mem = Some((412 * 1024 * 1024, 9));
