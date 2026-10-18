@@ -4718,6 +4718,10 @@ impl App {
         let Ok(m) = serde_json::from_str::<Value>(raw) else { return };
         let id = m["id"].as_u64().unwrap_or(0);
         match m["t"].as_str().unwrap_or("") {
+            "fileList" => {
+                // A folder's read, from the file card's own thread.
+                self.chrome.file_list(&m);
+            }
             "ready" => {
                 self.ui_ready = true;
                 self.fav_queue = self.tabs.iter().filter(|t| !t.favicon.is_empty()).map(|t| t.id).collect();

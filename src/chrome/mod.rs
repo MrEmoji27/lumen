@@ -15,6 +15,7 @@ mod color;
 mod form;
 mod confirm;
 mod menu;
+mod files;
 #[cfg(debug_assertions)]
 mod shot;
 mod style;
@@ -399,6 +400,16 @@ pub enum Hit {
     /// The menu card: the card itself, and its rows.
     MenuCard,
     MenuRow(usize),
+    /// The file card: the card itself, its rows, places, drives and buttons.
+    FileCard,
+    FileRow(usize),
+    FilePlace(usize),
+    FileDrive(usize),
+    FileUp,
+    FileGo,
+    FileCancel,
+    FilePath,
+    FileName,
 }
 
 #[derive(Clone, Debug)]
@@ -691,14 +702,20 @@ pub(crate) struct Inner {
     color_edit: HWND,
     /// The colour picker's card, open under the swatch it was asked from.
     color: Option<color::ColorCard>,
-    /// The form card's text boxes, one per field.
+    /// The form card's text boxes, one per field, and the one that hides its text.
     form_edits: [HWND; 3],
+    form_secret_edit: HWND,
     /// The form card, open while it waits for Save or Cancel.
     form: Option<form::FormCard>,
     /// The question card, open while it waits for a button.
     confirm: Option<confirm::ConfirmCard>,
     /// The menu card, open at the click point while it waits for a choice.
     menu: Option<menu::MenuCard>,
+    /// The file card's path and name boxes.
+    file_path_edit: HWND,
+    file_name_edit: HWND,
+    /// The file card, open while it waits for a pick.
+    files: Option<files::FileCard>,
 }
 
 /// A message being written to an agent: the card over the sidebar.
@@ -782,6 +799,9 @@ const ID_COLOR: usize = 109;
 const ID_FORM0: usize = 110;
 const ID_FORM1: usize = 111;
 const ID_FORM2: usize = 112;
+const ID_FORMPW: usize = 113;
+const ID_FILEPATH: usize = 114;
+const ID_FILENAME: usize = 115;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -1109,7 +1129,52 @@ impl Chrome {
                 .unwrap_or_default()
             };
             let form_edits = [mk_form(ID_FORM0), mk_form(ID_FORM1), mk_form(ID_FORM2)];
-            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit, color_edit]
+            let form_secret_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style | WINDOW_STYLE(ES_PASSWORD as u32),
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_FORMPW as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            let file_path_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_FILEPATH as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            let file_name_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_FILENAME as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit, color_edit, form_secret_edit, file_path_edit, file_name_edit]
                 .into_iter()
                 .chain(form_edits)
             {
@@ -1185,9 +1250,13 @@ impl Chrome {
                 color_edit,
                 color: None,
                 form_edits,
+                form_secret_edit,
                 form: None,
                 confirm: None,
                 menu: None,
+                file_path_edit,
+                file_name_edit,
+                files: None,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -1367,6 +1436,13 @@ impl Chrome {
         i.open_say(session.to_string(), name.to_string());
     }
 
+    /// A folder's read landed from the worker thread: the file card takes it, if it
+    /// is still the read that card is waiting for.
+    pub fn file_list(&self, m: &serde_json::Value) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        files::list_landed(&mut i, m);
+    }
+
     /// A site wants to open an app: the drawn question. The answer comes back to the
     /// main loop as an ExternalAnswer event, which is what finishes the ask.
     pub fn ask_external(&self, origin: &str, scheme: &str, remember: bool, uri: &str) {
@@ -1470,10 +1546,10 @@ impl Inner {
             SendMessageW(self.set_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.bug_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.color_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            for e in self.form_edits {
+            for e in [self.form_secret_edit, self.file_path_edit, self.file_name_edit].into_iter().chain(self.form_edits) {
                 SendMessageW(e, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             }
-            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit, self.bug_edit, self.color_edit]
+            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit, self.bug_edit, self.color_edit, self.form_secret_edit, self.file_path_edit, self.file_name_edit]
                 .into_iter()
                 .chain(self.form_edits)
             {
@@ -1640,10 +1716,10 @@ impl Inner {
             };
             self.page.font_pick = Some(pages::FontPick { key, filter: filter.to_string(), scroll: 0.0, shown: Vec::new() });
         }
-        // Debug: LUMEN_TEST_CARD="color" or "form" opens that card without a click,
-        // so a screenshot can show it.
+        // Debug: LUMEN_TEST_CARD="color", "form", "confirm", "files" or "files-open"
+        // opens that card without a click, so a screenshot can show it.
         #[cfg(debug_assertions)]
-        if self.color.is_none() && self.form.is_none() {
+        if self.color.is_none() && self.form.is_none() && self.confirm.is_none() && self.files.is_none() && self.menu.is_none() {
             match std::env::var("LUMEN_TEST_CARD").as_deref() {
                 // The anchorless card sits at the right edge.
                 Ok("color") => {
@@ -1657,6 +1733,31 @@ impl Inner {
                     form::FormAct::EditBookmark { id: 1, folder: String::new() },
                 ),
                 Ok("confirm") => confirm::open(self, confirm::ConfirmKind::ResetStats),
+                Ok("files") | Ok("files-open") | Ok("files-kdbx") | Ok("files-torrent") | Ok("files-image") => {
+                    // A tidy folder of Lumen's own under LUMEN_DATA, so a shot shows
+                    // sample names, never the person's real files.
+                    let dir = crate::store::data_dir().join("files-demo");
+                    let _ = std::fs::create_dir_all(dir.join("Projects"));
+                    let _ = std::fs::create_dir_all(dir.join("Saved pages"));
+                    for (name, bytes) in [
+                        ("notes.txt", 4096usize),
+                        ("my-look.json", 512),
+                        ("holiday.png", 812_000),
+                        ("kettle-report.pdf", 2_300_000),
+                        ("vault.kdbx", 64_000),
+                        ("archive.torrent", 48_000),
+                    ] {
+                        let _ = std::fs::write(dir.join(name), vec![0u8; bytes]);
+                    }
+                    let what = match std::env::var("LUMEN_TEST_CARD").as_deref() {
+                        Ok("files-open") => files::FileWhat::ThemeOpen,
+                        Ok("files-kdbx") => files::FileWhat::Kdbx,
+                        Ok("files-torrent") => files::FileWhat::Torrent,
+                        Ok("files-image") => files::FileWhat::Image,
+                        _ => files::FileWhat::ThemeSave { text: "{}".into(), suggested: "my-look.json".into() },
+                    };
+                    files::open_at(self, what, dir);
+                }
                 Ok("confirm3") => confirm::open(
                     self,
                     confirm::ConfirmKind::External {
@@ -1931,10 +2032,38 @@ impl Inner {
             None => place(self.color_edit, R::default(), false),
         }
         // The form card's boxes, one per field, inside the boxes it draws for them.
-        for (n, e) in self.form_edits.into_iter().enumerate() {
-            match self.form.as_ref().and_then(|f| f.boxes.get(n)) {
+        // A field whose text hides uses the password box.
+        let form_at = |n: usize| -> (HWND, Option<R>) {
+            let secret = self.form.as_ref().and_then(|f| f.fields.get(n)).map(|(_, _, s)| *s).unwrap_or(false);
+            let e = if secret { self.form_secret_edit } else { self.form_edits[n.min(self.form_edits.len() - 1)] };
+            (e, self.form.as_ref().and_then(|f| f.boxes.get(n)).copied())
+        };
+        for n in 0..(self.form.as_ref().map(|f| f.fields.len()).unwrap_or(0)) {
+            let (e, b) = form_at(n);
+            match b {
                 Some(b) => place(e, R::new(b.x + 8.0, b.y + (b.h - 18.0) / 2.0, b.w - 16.0, 18.0), true),
                 None => place(e, R::default(), false),
+            }
+        }
+        for n in 0..self.form_edits.len().max(1) {
+            let (e, b) = form_at(n);
+            if b.is_none() {
+                place(e, R::default(), false);
+            }
+        }
+        if self.form.is_none() {
+            place(self.form_secret_edit, R::default(), false);
+        }
+        // The file card's two boxes: the path, and the name in save mode.
+        match &self.files {
+            Some(f) => {
+                place(self.file_path_edit, R::new(f.path_box.x + 8.0, f.path_box.y + 4.0, f.path_box.w - 16.0, 20.0), true);
+                let save = matches!(f.what, files::FileWhat::ThemeSave { .. });
+                place(self.file_name_edit, R::new(f.name_box.x + 8.0, f.name_box.y + 4.0, f.name_box.w - 16.0, 18.0), save);
+            }
+            None => {
+                place(self.file_path_edit, R::default(), false);
+                place(self.file_name_edit, R::default(), false);
             }
         }
         // The Drive page takes the cursor once, when it opens.
@@ -2256,13 +2385,15 @@ impl Inner {
         // The cards over everything else. Their order is their z-order.
         color::draw(self, s);
         form::draw(self, s);
+        files::draw(self, s);
         confirm::draw(self, s);
         menu::draw(self, s);
         self.motion.end();
     }
 
-    /// One card at a time: opening one puts the others away. A form, a question and a
-    /// menu are dropped (their actions never run); a colour keeps what it shows.
+    /// One card at a time: opening one puts the others away. A form, a question, a
+    /// menu and a file card are dropped (their actions never run); a colour keeps
+    /// what it shows.
     fn close_cards(&mut self) {
         if self.form.is_some() {
             form::cancel(self);
@@ -2272,6 +2403,9 @@ impl Inner {
         }
         if self.menu.is_some() {
             menu::cancel(self);
+        }
+        if self.files.is_some() {
+            files::cancel(self);
         }
         if self.color.is_some() {
             color::done(self);
@@ -4282,10 +4416,11 @@ impl Inner {
             color::done(self);
         }
         // A click outside the form cancels it, as Escape does. So does one outside
-        // a question, or a menu.
+        // a question, a menu, or a file card.
         form::clicked_outside(self, &h);
         confirm::clicked_outside(self, &h);
         menu::clicked_outside(self, &h);
+        files::clicked_outside(self, &h);
         let p = &self.proxy;
         match h.unwrap() {
             Hit::Back => send(p, json!({"t": "back"})),
@@ -4369,6 +4504,37 @@ impl Inner {
             Hit::ConfirmButton(n) => confirm::pick(self, n),
             Hit::MenuCard => {}
             Hit::MenuRow(n) => menu::click(self, n),
+            Hit::FileCard => {}
+            Hit::FileRow(n) => files::click_row(self, n),
+            Hit::FilePlace(n) => {
+                if let Some(dir) = self.files.as_ref().and_then(|f| f.places.get(n)).map(|p| p.dir.clone()) {
+                    files::nav_to(self, dir);
+                }
+            }
+            Hit::FileDrive(n) => {
+                if let Some((name, _)) = self.files.as_ref().and_then(|f| f.drive_rects.get(n)) {
+                    files::nav_to(self, std::path::PathBuf::from(format!("{name}\\")));
+                }
+            }
+            Hit::FileUp => {
+                if let Some(dir) = self.files.as_ref().and_then(|f| f.dir.parent().map(|p| p.to_path_buf())) {
+                    files::nav_to(self, dir);
+                }
+            }
+            Hit::FileGo => files::go(self),
+            Hit::FileCancel => files::cancel(self),
+            Hit::FilePath => {
+                let e = self.file_path_edit;
+                unsafe {
+                    let _ = SetFocus(Some(e));
+                }
+            }
+            Hit::FileName => {
+                let e = self.file_name_edit;
+                unsafe {
+                    let _ = SetFocus(Some(e));
+                }
+            }
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => {
@@ -4736,6 +4902,9 @@ impl Inner {
     }
 
     fn wheel(&mut self, delta: i32) {
+        if files::wheel(self, self.mouse.0, self.mouse.1, delta) {
+            return;
+        }
         if pages::wheel(self, delta) {
             return;
         }
@@ -4762,6 +4931,10 @@ impl Inner {
         }
         // The question: Escape cancels, Enter is its first button.
         if confirm::key(self, vk) {
+            return true;
+        }
+        // The file card: Escape closes, Enter opens or takes, Up and Down move.
+        if files::key(self, vk) {
             return true;
         }
         // The tab search and the lock's card sit over the sidebar: Escape puts them away.
@@ -5035,8 +5208,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_CHAR => {
-                // Typing into the font list's filter, when it is open.
-                if !pages::pick_char(&mut i, wp.0 as u32) {
+                // Typing into the font list's filter, when it is open; or letters that
+                // jump through a file card's list.
+                if i.files.is_some() {
+                    files::typed_char(&mut i, wp.0 as u32);
+                } else if !pages::pick_char(&mut i, wp.0 as u32) {
                     drop(i);
                     return DefWindowProcW(hwnd, msg, wp, lp);
                 }
@@ -5110,7 +5286,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         color::typed(&mut i);
                     }
                     i.invalidate();
-                } else if (ID_FORM0..=ID_FORM2).contains(&id) && code == EN_CHANGE {
+                } else if (ID_FORM0..=ID_FILENAME).contains(&id) && code == EN_CHANGE {
+                    // The value a form or the file card draws under its edit child.
                     i.invalidate();
                 }
                 LRESULT(0)
@@ -5252,7 +5429,26 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         }
                         _ => {}
                     }
-                } else if (ID_FORM0..=ID_FORM2).contains(&id) {
+                } else if id == ID_FILEPATH || id == ID_FILENAME {
+                    // The file card's boxes: Enter is Open or Save, Escape closes, Tab
+                    // walks between the two.
+                    match vk {
+                        v if v == VK_RETURN.0 => {
+                            files::go(&mut i);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_ESCAPE.0 => {
+                            files::cancel(&mut i);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_TAB.0 => {
+                            let target = if id == ID_FILEPATH { i.file_name_edit } else { i.file_path_edit };
+                            let _ = SetFocus(Some(target));
+                            return LRESULT(0);
+                        }
+                        _ => {}
+                    }
+                } else if (ID_FORM0..=ID_FORM2).contains(&id) || id == ID_FORMPW {
                     // A form's box: Enter saves, Escape cancels, Tab walks the fields.
                     match vk {
                         v if v == VK_RETURN.0 => {

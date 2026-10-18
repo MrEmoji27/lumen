@@ -16,6 +16,8 @@ pub enum ConfirmKind {
     /// A site asked to open an app. The answer goes back to the main loop, which
     /// finishes the question it started.
     External { origin: String, uri: String, remember: bool, scheme: String },
+    /// Saving a look over a file that is already there: the text waits in the card.
+    Replace { path: String, text: String },
 }
 
 /// One open question: its title, its words, and its action.
@@ -38,6 +40,7 @@ const GAP: f32 = 8.0;
 fn buttons_of(act: &ConfirmKind) -> Vec<String> {
     match act {
         ConfirmKind::ResetStats => vec!["Reset".into(), "Cancel".into()],
+        ConfirmKind::Replace { .. } => vec!["Replace".into(), "Cancel".into()],
         ConfirmKind::External { remember, .. } => {
             let mut b = vec!["Open".to_string()];
             if *remember {
@@ -52,7 +55,7 @@ fn buttons_of(act: &ConfirmKind) -> Vec<String> {
 /// Whether the n-th button is the destructive one: the first, when what it runs
 /// cannot be taken back.
 fn destructive(act: &ConfirmKind, n: usize) -> bool {
-    matches!(act, ConfirmKind::ResetStats) && n == 0
+    matches!(act, ConfirmKind::ResetStats | ConfirmKind::Replace { .. }) && n == 0
 }
 
 /// The title, the words, and the button labels of the external-link question.
@@ -71,7 +74,11 @@ fn geometry(i: &Inner, act: &ConfirmKind) -> Option<(R, Vec<R>)> {
     let row = widths.iter().sum::<f32>() + GAP * (labels.len() as f32 - 1.0);
     let w = foath.max(row + 2.0 * PAD);
     let h = PAD + 14.0 + 8.0 + 36.0 + 16.0 + BTN_H + PAD;
-    let rect = R::new(x, area.y + 8.0, w, h);
+    // A question about the file card's own pick sits on that card, not in the corner.
+    let rect = match i.files.as_ref().map(|f| f.rect).filter(|r| r.w > 0.0 && matches!(act, ConfirmKind::Replace { .. })) {
+        Some(on) => R::new(on.x + (on.w - w) / 2.0, on.y + (on.h - h) / 2.0, w, h),
+        None => R::new(x, area.y + 8.0, w, h),
+    };
     // Right to left: Cancel at the edge, the first button leftmost.
     let mut buttons: Vec<R> = Vec::new();
     let mut bx = rect.right() - PAD;
@@ -87,9 +94,19 @@ fn geometry(i: &Inner, act: &ConfirmKind) -> Option<(R, Vec<R>)> {
 /// Open a question. One card at a time: whatever else was open goes away.
 pub fn open(i: &mut Inner, act: ConfirmKind) {
     i.close_cards();
+    open_over(i, act);
+}
+
+/// The same, over whatever is open now: the file card's "already there?" sits on
+/// top of the card it belongs to, and gives it back on Cancel.
+pub fn open_over(i: &mut Inner, act: ConfirmKind) {
     let (title, text) = match &act {
         ConfirmKind::ResetStats => ("Reset statistics".into(), "Forget every count in the privacy report?".into()),
         ConfirmKind::External { origin, scheme, .. } => external_parts(origin, scheme),
+        ConfirmKind::Replace { path, .. } => {
+            let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+            ("Replace the file?".into(), format!("{name} is already there. Replacing it cannot be taken back."))
+        }
     };
     let (rect, buttons) = match geometry(i, &act) {
         Some(g) => g,
@@ -127,6 +144,11 @@ pub fn pick(i: &mut Inner, n: usize) {
                 _ => extlink::Answer::Cancel,
             };
             let _ = i.proxy.send_event(Ev::ExternalAnswer { origin, uri, answer });
+        }
+        ConfirmKind::Replace { path, text } => {
+            if n == 0 {
+                super::files::write_theme(i, std::path::Path::new(&path), &text);
+            }
         }
     }
     i.invalidate();
