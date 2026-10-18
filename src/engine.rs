@@ -1106,6 +1106,15 @@ fn hook_page(
                 &mut token,
             );
         }
+
+        // The media keys (play/pause, next, previous) and the PiP button: a small shim
+        // runs at document creation, keeping a reference to the page's own Media Session
+        // action handlers so Lumen can press them. It passes the registration through
+        // untouched, so the page's behavior is unchanged.
+        let _ = core.AddScriptToExecuteOnDocumentCreated(
+            &HSTRING::from(crate::pagekit::MEDIA_SHIM),
+            &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(()))),
+        );
     }
 }
 

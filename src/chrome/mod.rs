@@ -25,7 +25,7 @@ pub use layout::{Kind, Metrics};
 /// The chrome's easing, for the things main.rs moves itself (the sidebar width).
 pub use motion::ease_out;
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Mutex, time::Instant};
 
 use serde_json::{Value, json};
 use tao::event_loop::EventLoopProxy;
@@ -132,6 +132,8 @@ pub struct UiState {
     /// Page rectangle in chrome coordinates (DIPs).
     pub stage: (f32, f32, f32, f32),
     pub mem: Option<(u64, u32)>,
+    /// The tab whose sound the footer's now-playing card follows.
+    pub media: Option<u64>,
     pub blocked: u64,
     pub cpu_cap: bool,
     pub downloads: Vec<UiDl>,
@@ -314,6 +316,12 @@ pub enum Hit {
     Tab(u64),
     TabX(u64),
     TabSnd(u64),
+    /// Picture-in-picture for the tab's biggest playing video.
+    TabPip(u64),
+    /// The footer's now-playing card: pause, next, and the title that switches to the tab.
+    MediaPlay,
+    MediaNext,
+    MediaTitle(u64),
     NewTab,
     Gear,
     /// The sidebar button: compact on or off, same as Ctrl+B.
@@ -771,6 +779,62 @@ const TIMER_SHOT: usize = 4;
 
 fn send(proxy: &EventLoopProxy<Ev>, v: Value) {
     let _ = proxy.send_event(Ev::Ui(v.to_string()));
+}
+
+// ------------------------------------------------------------- media keys
+//
+// Play/pause, next and previous from the keyboard or the earbuds arrive as
+// WM_APPCOMMAND on the window with focus. When a page has focus Chromium answers
+// them itself, through its own Media Session: those never come here. These are the
+// presses that land while Lumen's own chrome has focus, and they go to the tab
+// that last played. The subclass chains onto whatever window proc is already on
+// the top-level window (tao's), so nothing else changes hands.
+
+/// The old window procedure, and where a press is sent. One window, one subclass.
+static MEDIA_KEYS: Mutex<Option<(usize, EventLoopProxy<Ev>)>> = Mutex::new(None);
+
+unsafe extern "system" fn media_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_APPCOMMAND {
+            // The command sits in the low word of the high word of lParam.
+            let cmd = ((lp.0 >> 16) & 0xffff) as u32 & 0x7fff;
+            let which = match cmd {
+                11 => "next",
+                12 => "prev",
+                14 => "toggle",
+                _ => "",
+            };
+            if !which.is_empty() {
+                if let Ok(g) = MEDIA_KEYS.lock()
+                    && let Some((_, px)) = g.as_ref()
+                {
+                    let _ = px.send_event(Ev::Ui(format!(r#"{{"t":"media","cmd":"{which}"}}"#)));
+                }
+                return LRESULT(0);
+            }
+        }
+        let old: WNDPROC = match MEDIA_KEYS.lock() {
+            Ok(g) => g.as_ref().map(|(o, _)| std::mem::transmute(*o)),
+            Err(_) => None,
+        };
+        match old {
+            Some(old) => CallWindowProcW(Some(old), hwnd, msg, wp, lp),
+            None => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+/// Subclass the top-level window once, for the media keys. `parent` is that window.
+fn install_media_keys(parent: HWND, proxy: EventLoopProxy<Ev>) {
+    unsafe {
+        let root = GetAncestor(parent, GA_ROOT);
+        let old = SetWindowLongPtrW(root, GWLP_WNDPROC, media_wndproc as *const () as isize);
+        if old != 0
+            && let Ok(mut g) = MEDIA_KEYS.lock()
+        {
+            *g = Some((old as usize, proxy));
+        }
+    }
 }
 
 /// What a permission prompt says a site wants, in words.
@@ -1240,6 +1304,9 @@ impl Chrome {
             let dpi = GetDpiForWindow(hwnd) as f32;
             let gfx = Gfx::new(hwnd, dpi).expect("direct2d");
             let fonts = Rc::new(gfx.installed_families().to_vec());
+            // The media keys (play/pause, next, previous) while Lumen's own chrome
+            // has focus: one subclass on the top-level window.
+            install_media_keys(parent, proxy.clone());
             let inner = Rc::new(RefCell::new(Inner {
                 hwnd,
                 proxy,
@@ -2433,6 +2500,9 @@ impl Inner {
             Hit::Sidebar => "sidebar",
             Hit::Gear => "gear",
             Hit::Mem => "mem",
+            Hit::MediaPlay => "mediaplay",
+            Hit::MediaNext => "medianext",
+            Hit::MediaTitle(_) => "mediatitle",
             Hit::DlFooter => "dl",
             Hit::DashFooter => "dash",
             Hit::SiteInfo => "siteinfo",
@@ -2978,22 +3048,24 @@ impl Inner {
             }
         }
         let room = (sb.right() - 8.0 - right_edge - 6.0).max(0.0);
+        // What lives at the right end of the footer steps leftward: the agent chip or
+        // the memory number first, then the now-playing card before them.
+        let mut right = sb.right() - 8.0;
         if agent {
             // The long label when it fits, then just the verb, then only the dot: the
             // chip is the way to stop every agent, so it never leaves the footer.
             let f = lo.font(11.5, 500);
             let t = ["Agent working · Stop", "Stop"].into_iter().find(|t| self.gfx.measure(t, f) + 28.0 <= room).unwrap_or("");
             let tw = if t.is_empty() { 20.0 } else { self.gfx.measure(t, f) + 28.0 };
-            let r = R::new(sb.right() - 8.0 - tw, fy + 5.0, tw, 24.0);
+            let r = R::new(right - tw, fy + 5.0, tw, 24.0);
             let h = Hit::AgentStop;
             let a = self.motion.hover(Self::button_id(&h), if self.is_hover(&h) { 1.0 } else { 0.0 });
             self.gfx.round(r, 12.0, th.accent.alpha(0.14 + 0.16 * a.min(1.0)));
             self.gfx.circle(r.x + 10.0, r.y + 12.0, 3.0, th.accent);
             self.gfx.text(t, R::new(r.x + 18.0, r.y, r.w - 18.0, r.h), f, th.text);
             self.hit(r, h);
-            return self.draw_footer_overlays(s);
-        }
-        if !compact && lo.show_memory
+            right = r.x - 6.0;
+        } else if !compact && lo.show_memory
             && let Some((bytes, _)) = s.mem
         {
             let mb = bytes as f64 / 1048576.0;
@@ -3004,7 +3076,7 @@ impl Inner {
             // A number cut short reads wrong, so it shows whole or not at all. The
             // dashboard shows it too.
             if tw <= room {
-                let r = R::new(sb.right() - 8.0 - tw, fy + 6.0, tw, 22.0);
+                let r = R::new(right - tw, fy + 6.0, tw, 22.0);
                 let h = Hit::Mem;
                 let hov = self.is_hover(&h);
                 let a = self.motion.hover(Self::button_id(&h), if hov { 1.0 } else { 0.0 });
@@ -3013,9 +3085,54 @@ impl Inner {
                 }
                 self.gfx.text(&t, R::new(r.x + 5.0, r.y, r.w - 5.0, r.h), f, if hov { th.text } else { th.faint });
                 self.hit(r, h);
+                right = r.x - 6.0;
             }
         }
+        // Now playing: the tab that has sound, with pause and next on the card.
+        if !compact
+            && let Some(id) = s.media
+            && let Some(t) = s.tabs.iter().find(|t| t.id == id)
+        {
+            let _ = self.draw_now_playing(t, right, fy);
+        }
         self.draw_footer_overlays(s);
+    }
+
+    /// The footer's now-playing card: the tab's title (a click switches to it), pause,
+    /// next. Right-aligned ending at `right`; returns where the next thing may go.
+    fn draw_now_playing(&mut self, t: &UiTab, right: f32, fy: f32) -> f32 {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let f = lo.font(11.5, 500);
+        let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
+        // The buttons take their room first; the title takes what is left, to a cap
+        // so one long title never shoves the card off the footer.
+        let btn = 20.0;
+        let tw = self.gfx.measure(&title, f).min(170.0).max(28.0);
+        let w = 6.0 + btn + 6.0 + tw + 6.0 + btn + 6.0;
+        let r = R::new(right - w, fy + 5.0, w, 24.0);
+        self.gfx.round(r, 12.0, th.bg);
+        self.gfx.round_stroke(r, 12.0, th.line, 1.0);
+        // The card is only here while the tab has sound, so what it offers is pause.
+        let pb = R::new(r.x + 4.0, r.y + 2.0, btn, btn);
+        let ph = Hit::MediaPlay;
+        if self.is_hover(&ph) {
+            self.gfx.round(pb, 10.0, th.hover);
+        }
+        self.gfx.icon("pause", pb.x + 3.0, pb.y + 3.0, 14.0, th.dim);
+        self.hit(pb, ph);
+        let tr = R::new(pb.right() + 6.0, r.y, tw, r.h);
+        let thh = Hit::MediaTitle(t.id);
+        self.gfx.text(&title, tr, f, if self.is_hover(&thh) { th.text } else { th.dim });
+        self.hit(tr, thh);
+        let nb = R::new(tr.right() + 6.0, r.y + 2.0, btn, btn);
+        let nh = Hit::MediaNext;
+        if self.is_hover(&nh) {
+            self.gfx.round(nb, 10.0, th.hover);
+        }
+        self.gfx.icon("next", nb.x + 3.0, nb.y + 3.0, 14.0, th.dim);
+        self.hit(nb, nh);
+        r.x - 6.0
     }
 
     /// The quick switcher sits over everything else in the sidebar; so does the lock's card.
@@ -3571,6 +3688,18 @@ impl Inner {
             self.hit(b, Hit::TabSnd(t.id));
             right = b.x - 2.0;
         }
+        if t.audio && !t.muted {
+            // A tab playing video gets its own way out: the biggest video, in a
+            // picture-in-picture window, asked for the same way the page would.
+            let b = R::new(right - 22.0, r.y + (r.h - 22.0) / 2.0, 22.0, 22.0);
+            if self.is_hover(&Hit::TabPip(t.id)) {
+                self.gfx.round(b, lo.r_sm, th.press.alpha(alpha));
+            }
+            let ink = if active { th.pill_ink.alpha(0.75) } else { th.faint };
+            self.gfx.icon("pip", b.x + 4.0, b.y + 4.0, 14.0, ink.alpha(alpha));
+            self.hit(b, Hit::TabPip(t.id));
+            right = b.x - 2.0;
+        }
         let badge_y = r.y + (r.h - 16.0) / 2.0;
         // A tag: small spaced capitals in a hairline pill, quiet on any row.
         let tag_ink = if active { th.pill_ink.alpha(0.7) } else { th.faint };
@@ -3796,6 +3925,15 @@ impl Inner {
             }
             self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 3.0, b.y + 3.0, 14.0, ink(th.dim));
             self.hit(b, Hit::TabSnd(t.id));
+            right = b.x - 2.0;
+        }
+        if t.audio && !t.muted {
+            let b = R::new(right - 20.0, r.y + (r.h - 20.0) / 2.0, 20.0, 20.0);
+            if self.is_hover(&Hit::TabPip(t.id)) {
+                self.gfx.round(b, lo.round(20.0), if on_pill { th.pill_ink.alpha(0.18) } else { th.press });
+            }
+            self.gfx.icon("pip", b.x + 3.0, b.y + 3.0, 14.0, ink(th.dim));
+            self.hit(b, Hit::TabPip(t.id));
             right = b.x - 2.0;
         }
         if t.split {
@@ -4517,6 +4655,10 @@ impl Inner {
             }
             Hit::TabX(id) => send(p, json!({"t": "close", "id": id})),
             Hit::TabSnd(id) => send(p, json!({"t": "mute", "id": id})),
+            Hit::TabPip(id) => send(p, json!({"t": "pip", "id": id})),
+            Hit::MediaPlay => send(p, json!({"t": "media", "cmd": "toggle"})),
+            Hit::MediaNext => send(p, json!({"t": "media", "cmd": "next"})),
+            Hit::MediaTitle(id) => send(p, json!({"t": "activate", "id": id})),
             Hit::NewTab => send(p, json!({"t": "newtab"})),
             Hit::Sidebar => {
                 // The same change Ctrl+B makes: through the settings, so it is saved.

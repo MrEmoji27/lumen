@@ -206,6 +206,8 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 - A privacy report: what was blocked and what was counted, with trends.
 - Reader view, dark pages, translation on the PC, read aloud.
 - Downloads through aria2, torrents, saving the video on a page.
+- A PiP button on a tab that has sound, a now-playing card in the footer with pause and
+  next, and the keyboard's media keys acting on the tab that is playing.
 - History you can search by what a page said.
 - Pins, bookmarks with folders and import, a speed dial, workspaces, split view, tab search.
 - Ctrl+K opens a command palette over the sidebar: type and pick a command, a setting, an open
