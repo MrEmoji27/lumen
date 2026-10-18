@@ -25,6 +25,7 @@ mod kdbx;
 mod launch;
 mod library;
 mod monitor;
+mod mru;
 mod pacing;
 mod pagekit;
 mod privacy_stats;
@@ -432,6 +433,9 @@ struct App {
     /// Shift+clicked links open here: (tab id, url, view). Dropped on Escape.
     glance: Option<(u64, String, WebView)>,
     active: u64,
+    /// Tab ids newest-first: where the person was, so closing a tab goes back
+    /// there instead of to the neighbour in the row. See mru.rs.
+    mru: mru::Mru,
     closed: Vec<SavedTab>,
     settings: Settings,
     panel: Panel,
@@ -835,6 +839,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         active_workspace: 0,
         glance: None,
         active: 0,
+        mru: mru::Mru::new(),
         closed: Vec::new(),
         settings,
         panel: Panel::None,
@@ -2267,6 +2272,7 @@ impl App {
         }
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
+        self.mru.touch(id);
         self.leave_panel();
         // Watching: an agent tab moves from the stage into the main window, awake.
         if self.tabs[i].agent
@@ -2505,6 +2511,7 @@ impl App {
             self.pane_right = false;
         }
         let t = self.tabs.remove(i);
+        self.mru.remove(id);
         if t.agent
             && let Some(stage) = self.stage.as_mut()
         {
@@ -2536,7 +2543,15 @@ impl App {
             return;
         }
         if id == self.active {
-            let next = keep.filter(|k| self.idx(*k).is_some()).unwrap_or_else(|| self.tabs[i.min(self.tabs.len() - 1)].id);
+            // Back to the tab the person was on before this one, when it still
+            // exists. An agent tab is never where the person lands. Failing
+            // that, the old choice: the other half of a split, else the
+            // neighbour in the row.
+            let next = self
+                .mru
+                .back(id, |t| self.idx(t).is_some_and(|j| !self.tabs[j].agent))
+                .or_else(|| keep.filter(|k| self.idx(*k).is_some()))
+                .unwrap_or_else(|| self.tabs[i.min(self.tabs.len() - 1)].id);
             self.active = 0;
             self.activate(next);
         } else {
