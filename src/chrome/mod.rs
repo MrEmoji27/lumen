@@ -2478,44 +2478,47 @@ impl Inner {
         let fy = sb.bottom() - 38.0;
         let size = 28.0;
         let agent = s.agent_busy && !compact;
-        // What the left side may use: up to the leftmost button, measured, so a narrow
-        // sidebar or one more button never paints the readout under the icons.
-        let mut left_edge = sb.right() - 8.0;
-        if lo.footer_btns {
-            let gear = if compact {
-                R::new(sb.x + 28.0, fy + 3.0, 26.0, 26.0)
-            } else {
-                R::new(sb.right() - 8.0 - size, fy + 2.0, size, size)
-            };
-            self.button(gear, "sliders", Hit::Gear, true);
-            let dl = if compact { R::new(sb.x + 2.0, fy + 3.0, 26.0, 26.0) } else { R::new(gear.x - size - 2.0, gear.y, size, size) };
-            if !compact {
-                // Right to left from the downloads button: Drive, then the dashboard,
-                // which is the door to bookmarks, the privacy report and the rest.
-                // Drive: an arrow taking off, lit while a run is going.
-                let dr = R::new(dl.x - size - 2.0, dl.y, size, size);
-                self.footer_page_button(dr, s, "send", "drive", Hit::DriveFooter);
-                let db = R::new(dr.x - size - 2.0, dr.y, size, size);
-                self.footer_page_button(db, s, "dashboard", "dashboard", Hit::DashFooter);
-                left_edge = db.x;
-            } else {
-                left_edge = dl.x;
-            }
-            self.draw_dl_button(dl, s);
+        // A hairline over the footer, across the sidebar's own width.
+        if !compact {
+            let inset = if lo.style == theme::Style::Glass { 12.0 } else { 8.0 };
+            self.gfx.line(sb.x + inset, fy - 2.0, sb.right() - inset, fy - 2.0, th.line, 1.0);
         }
-        let mem_room = (left_edge - 4.0 - (sb.x + 8.0)).max(0.0);
+        // The buttons from the left: the dashboard, Drive, downloads, settings. What is
+        // live on the right: the agent chip while one works, else the memory readout.
+        let mut right_edge = sb.x + 8.0;
+        if lo.footer_btns {
+            if compact {
+                let gear = R::new(sb.x + 28.0, fy + 3.0, 26.0, 26.0);
+                self.button(gear, "sliders", Hit::Gear, true);
+                let dl = R::new(sb.x + 2.0, fy + 3.0, 26.0, 26.0);
+                self.draw_dl_button(dl, s);
+                right_edge = gear.right();
+            } else {
+                let x0 = sb.x + 8.0;
+                let db = R::new(x0, fy + 2.0, size, size);
+                self.footer_page_button(db, s, "dashboard", "dashboard", Hit::DashFooter);
+                let dr = R::new(db.right() + 2.0, db.y, size, size);
+                self.footer_page_button(dr, s, "send", "drive", Hit::DriveFooter);
+                let dl = R::new(dr.right() + 2.0, db.y, size, size);
+                self.draw_dl_button(dl, s);
+                let gear = R::new(dl.right() + 2.0, db.y, size, size);
+                self.button(gear, "sliders", Hit::Gear, true);
+                right_edge = gear.right();
+            }
+        }
+        let room = (sb.right() - 8.0 - right_edge - 6.0).max(0.0);
         if agent {
             // The long label when it fits, then just the verb, then only the dot: the
             // chip is the way to stop every agent, so it never leaves the footer.
             let f = lo.font(11.5, 500);
-            let t = ["Agent working · Stop", "Stop"].into_iter().find(|t| self.gfx.measure(t, f) + 28.0 <= mem_room).unwrap_or("");
+            let t = ["Agent working · Stop", "Stop"].into_iter().find(|t| self.gfx.measure(t, f) + 28.0 <= room).unwrap_or("");
             let tw = if t.is_empty() { 20.0 } else { self.gfx.measure(t, f) + 28.0 };
-            let r = R::new(sb.x + 8.0, fy + 5.0, tw, 24.0);
+            let r = R::new(sb.right() - 8.0 - tw, fy + 5.0, tw, 24.0);
             let h = Hit::AgentStop;
             let a = self.motion.hover(Self::button_id(&h), if self.is_hover(&h) { 1.0 } else { 0.0 });
-            self.gfx.round(r, 12.0, th.accent.alpha(0.18 + 0.17 * a.min(1.0)));
+            self.gfx.round(r, 12.0, th.accent.alpha(0.14 + 0.16 * a.min(1.0)));
             self.gfx.circle(r.x + 10.0, r.y + 12.0, 3.0, th.accent);
-            self.gfx.text(t, R::new(r.x + 18.0, r.y, r.w - 18.0, r.h), lo.font(11.5, 500), th.text);
+            self.gfx.text(t, R::new(r.x + 18.0, r.y, r.w - 18.0, r.h), f, th.text);
             self.hit(r, h);
             return self.draw_footer_overlays(s);
         }
@@ -2523,34 +2526,24 @@ impl Inner {
             && let Some((bytes, _)) = s.mem
         {
             let mb = bytes as f64 / 1048576.0;
-            let mut t = if mb >= 1024.0 { format!("{:.2} GB", mb / 1024.0) } else { format!("{} MB", mb.round()) };
-            // The figures are set in the monospace face, so they do not jump
-            // about as the numbers change.
-            let f = lo.mono;
-            // The blocked count only when the whole line fits; memory alone otherwise.
-            if s.settings.adblock && s.blocked > 0 {
-                let full = format!("{t} · {} blocked", s.blocked);
-                if self.gfx.measure(&full, f) + 10.0 <= mem_room {
-                    t = full;
-                }
-            }
+            let t = if mb >= 1024.0 { format!("{:.2} GB", mb / 1024.0) } else { format!("{} MB", mb.round()) };
+            // The figures are in the monospace face, so they do not jump about as they change.
+            let f = lo.mono_at(11.0, 500);
             let tw = self.gfx.measure(&t, f) + 10.0;
             // A number cut short reads wrong, so it shows whole or not at all. The
             // dashboard shows it too.
-            if tw > mem_room {
-                return self.draw_footer_overlays(s);
+            if tw <= room {
+                let r = R::new(sb.right() - 8.0 - tw, fy + 6.0, tw, 22.0);
+                let h = Hit::Mem;
+                let hov = self.is_hover(&h);
+                let a = self.motion.hover(Self::button_id(&h), if hov { 1.0 } else { 0.0 });
+                if a > 0.01 {
+                    self.gfx.round(r, lo.r_sm, th.hover.alpha(a.min(1.0)));
+                }
+                self.gfx.text(&t, R::new(r.x + 5.0, r.y, r.w - 5.0, r.h), f, if hov { th.text } else { th.faint });
+                self.hit(r, h);
             }
-            let r = R::new(sb.x + 8.0, fy + 6.0, tw, 22.0);
-            let h = Hit::Mem;
-            let hov = self.is_hover(&h);
-            let a = self.motion.hover(Self::button_id(&h), if hov { 1.0 } else { 0.0 });
-            if a > 0.01 {
-                self.gfx.round(r, lo.r_sm, th.hover.alpha(a.min(1.0)));
-            }
-            self.gfx.text(&t, R::new(r.x + 5.0, r.y, r.w - 5.0, r.h), f, if hov { th.text } else { th.faint });
-            self.hit(r, h);
         }
-
         self.draw_footer_overlays(s);
     }
 
@@ -2816,11 +2809,13 @@ impl Inner {
         // Drive is also lit while its run is going, wherever the person is.
         let on = s.panel == panel || (panel == "drive" && s.drive.as_ref().is_some_and(|d| d.running));
         let hov = self.is_hover(&hit);
-        let a = self.motion.hover(Self::button_id(&hit), if hov { 1.0 } else { 0.0 });
+        let a = self.motion.hover(Self::button_id(&hit), if hov || on { 1.0 } else { 0.0 });
         if a > 0.01 {
-            self.gfx.round(r, lo.r_sm + 1.0, th.hover.alpha(a.min(1.0)));
+            self.gfx.round(r, lo.r_sm + 1.0, if on { th.press } else { th.hover }.alpha(a.min(1.0)));
         }
-        self.gfx.icon(icon, r.x + 6.0, r.y + 6.0, 16.0, if on { th.accent } else if hov { th.text } else { th.dim });
+        // Drive's run going is live: its icon takes the accent while it runs.
+        let live = panel == "drive" && s.drive.as_ref().is_some_and(|d| d.running);
+        self.gfx.icon(icon, r.x + 6.0, r.y + 6.0, 16.0, if live { th.accent } else if on || hov { th.text } else { th.dim });
         self.hit(r, hit);
     }
 

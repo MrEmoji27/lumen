@@ -116,8 +116,9 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         let r = R::new(col.x + (n % per) as f32 * (tw + gap), y + (n / per) as f32 * (104.0 + gap), tw, 104.0);
         let h = tile.open.map(|p| Hit::Dash(Click::Open(p)));
         let hov = h.as_ref().is_some_and(|h| i.is_hover(h));
-        i.gfx.round(r, i.look.r_lg, if hov { th.hover } else { th.bg });
-        i.gfx.text(tile.caption, R::new(r.x + i.look.s4, r.y + i.look.s3, r.w - 2.0 * i.look.s4, 16.0), i.look.caption, th.faint);
+        i.gfx.round(r, i.look.r_card, if hov { th.raise.mix(th.hover, 0.5) } else { th.raise });
+        i.gfx.round_stroke(r, i.look.r_card, if hov { th.text.alpha(0.3) } else { th.line }, 1.0);
+        i.label(tile.caption, R::new(r.x + i.look.s4, r.y + i.look.s3, r.w - 2.0 * i.look.s4, 16.0), th.faint);
         i.gfx.text(&tile.value, R::new(r.x + i.look.s4, r.y + 30.0, r.w - 2.0 * i.look.s4, 40.0), i.look.big_num, th.text);
         i.gfx.text(&tile.note, R::new(r.x + i.look.s4, r.y + 74.0, r.w - 2.0 * i.look.s4, 18.0), i.look.small, th.faint);
         if let Some(h) = h {
@@ -149,30 +150,70 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     y += 30.0 + i.look.s5;
 
     // Agents: who is working right now.
-    i.gfx.text("AGENTS", R::new(col.x, y, col.w, 20.0), i.look.caption, th.faint);
-    y += 26.0;
+    i.label("Agents", R::new(col.x + 4.0, y, col.w, 20.0), th.faint);
+    y += 28.0;
     if agents == 0 {
-        i.gfx.text("No agent is working. Agents connect through lumen-agent (Settings > AI agent).", R::new(col.x, y, col.w, 20.0), i.look.small, th.dim);
+        i.gfx.text("No agent is working. Agents connect through lumen-agent (Settings > AI agent).", R::new(col.x + 4.0, y, col.w, 20.0), i.look.small, th.dim);
         y += 30.0;
     } else {
-        let line = format!("{agents} agent tab(s) open{}", if s.agent_busy { " · working now" } else { "" });
-        i.gfx.text(&line, R::new(col.x, y + 5.0, col.w - 160.0, 20.0), i.look.body, th.text);
-        let label = "Stop all agents";
-        let f = i.look.small_strong.align(Align::Center);
-        let w = i.gfx.measure(label, f) + 2.0 * i.look.s3;
-        let r = R::new(col.right() - w, y, w, 30.0);
-        let h = Hit::Dash(Click::StopAgents);
-        let hov = i.is_hover(&h);
-        i.gfx.round(r, i.look.r_md, if hov { th.accent } else { th.accent.alpha(0.85) });
-        i.gfx.text(label, r, f, th.bg);
-        i.hit(r, h);
-        y += 30.0 + i.look.s2;
-        for t in s.tabs.iter().filter(|t| t.agent).take(8) {
-            let name = if t.title.is_empty() { super::host(&t.url) } else { t.title.clone() };
-            i.gfx.text(&format!("·  {name}"), R::new(col.x, y, col.w, 20.0), i.look.small, th.dim);
-            y += 22.0;
+        // Each agent once, in the order its tabs are.
+        let mut seen: Vec<(String, String, usize)> = Vec::new();
+        for t in s.tabs.iter().filter(|t| t.agent) {
+            match seen.iter_mut().find(|(o, _, _)| *o == t.owner) {
+                Some(e) => e.2 += 1,
+                None => seen.push((t.owner.clone(), t.owner_name.clone(), 1)),
+            }
+        }
+        const ROW: f32 = 50.0;
+        let card = R::new(col.x, y, col.w, seen.len() as f32 * ROW);
+        i.gfx.round(card, i.look.r_card, th.raise);
+        i.gfx.round_stroke(card, i.look.r_card, th.line, 1.0);
+        for (n, (owner, name, tabs)) in seen.iter().enumerate() {
+            let r = R::new(card.x, y, card.w, ROW);
+            if n > 0 {
+                i.gfx.line(r.x + 1.0, r.y, r.right() - 1.0, r.y, th.line, 1.0);
+            }
+            let name = if name.trim().is_empty() { "agent".to_string() } else { name.trim().to_string() };
+            i.gfx.circle(r.x + 22.0, r.y + ROW / 2.0, 4.0, super::agent_color(owner));
+            let note = s.agent_notes.iter().find(|(id, _)| id == owner).map(|(_, m)| m.clone()).unwrap_or_else(|| format!("{tabs} tab{}", if *tabs == 1 { "" } else { "s" }));
+            let f = i.look.small_strong.align(Align::Center);
+            let stop_w = i.gfx.measure("Stop", f) + 34.0;
+            let msg_w = i.gfx.measure("Message", f) + 34.0;
+            let stop = R::new(r.right() - 14.0 - stop_w, r.y + 10.0, stop_w, 30.0);
+            let msg = R::new(stop.x - 8.0 - msg_w, stop.y, msg_w, 30.0);
+            i.gfx.text(&name, R::new(r.x + 36.0, r.y, 220.0, ROW), i.look.body_strong, th.text);
+            let nw = i.gfx.measure(&name, i.look.body_strong) + 12.0;
+            i.gfx.text(&format!("· {note}"), R::new(r.x + 36.0 + nw, r.y, (msg.x - r.x - 48.0 - nw).max(0.0), ROW), i.look.small, th.faint);
+            for (b, label, icon, hit, live) in [
+                (msg, "Message", "send", Hit::AgentMessage(owner.clone(), name.clone()), false),
+                (stop, "Stop", "", Hit::AgentStopSession(owner.clone()), true),
+            ] {
+                let hov = i.is_hover(&hit);
+                i.gfx.round(b, i.look.round(30.0), if hov { th.hover } else { th.raise });
+                i.gfx.round_stroke(b, i.look.round(30.0), th.line, 1.0);
+                if icon.is_empty() {
+                    i.gfx.round_stroke(R::new(b.x + 12.0, b.y + 10.0, 10.0, 10.0), 2.5, th.accent, 1.6);
+                } else {
+                    i.gfx.icon(icon, b.x + 11.0, b.y + 8.0, 14.0, th.dim);
+                }
+                i.gfx.text(label, R::new(b.x + 24.0, b.y, b.w - 26.0, b.h), f, if live { th.accent } else { th.text });
+                i.hit(b, hit);
+            }
+            y += ROW;
         }
         y += i.look.s3;
+        // Every agent at once: the kill switch.
+        let label = "Stop all agents";
+        let f = i.look.small_strong.align(Align::Center);
+        let w = i.gfx.measure(label, f) + 2.0 * i.look.s4;
+        let r = R::new(col.x, y, w, 30.0);
+        let h = Hit::Dash(Click::StopAgents);
+        let hov = i.is_hover(&h);
+        i.gfx.round(r, i.look.round(30.0), if hov { th.hover } else { th.raise });
+        i.gfx.round_stroke(r, i.look.round(30.0), th.line, 1.0);
+        i.gfx.text(label, r, f, th.accent);
+        i.hit(r, h);
+        y += 30.0 + i.look.s3;
     }
 
     i.gfx.unclip();
