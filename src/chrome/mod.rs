@@ -3871,11 +3871,10 @@ impl Inner {
         if !crash && s.settings.seen_version == now {
             return;
         }
-        let (text, open, gone) = if crash {
-            ("Lumen did not close properly last time · send a report".to_string(), pages::PageHit::Panels("bugreport"), pages::PageHit::CrashSeen)
-        } else {
-            (format!("Lumen {now} is here · see what's new"), pages::PageHit::Panels("changes"), pages::PageHit::SeenVersion)
-        };
+        let page = if crash { "bugreport" } else { "changes" };
+        let open = pages::PageHit::Panels(page);
+        let gone = if crash { pages::PageHit::CrashSeen } else { pages::PageHit::SeenVersion };
+        let text = if crash { "Lumen did not close properly last time · send a report".to_string() } else { format!("Lumen {now} is here · see what's new") };
         let lo = self.look.clone();
         let th = lo.theme;
         let f = lo.font(12.5, 500);
