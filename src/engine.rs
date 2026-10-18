@@ -20,7 +20,8 @@ use webview2_com::{
     FaviconChangedEventHandler, GetCookiesCompletedHandler, GetFaviconCompletedHandler, HistoryChangedEventHandler, IsDefaultDownloadDialogOpenChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, LaunchingExternalUriSchemeEventHandler, Microsoft::Web::WebView2::Win32::*,
     NewWindowRequestedEventHandler, SourceChangedEventHandler, TrySuspendCompletedHandler, WebMessageReceivedEventHandler,
-    WindowCloseRequestedEventHandler,
+    WindowCloseRequestedEventHandler, BasicAuthenticationRequestedEventHandler, ContextMenuRequestedEventHandler,
+    ScriptDialogOpeningEventHandler,
 };
 use windows::{
     Win32::{
@@ -77,6 +78,14 @@ pub enum Ev {
     /// The page is in a call (a live microphone, camera or screen capture, or a connected
     /// peer connection), or no longer.
     Call(u64, bool),
+    /// A page asks the person something: an alert, a confirm, a prompt, "leave site?", a sign-in.
+    PageAsk { aid: u64, tab: u64, origin: String, ask: Ask },
+    /// A right-click on a page: WebView2's own items for that spot (command id, label, enabled;
+    /// `i32::MIN` is a separator), what was under the pointer, and where, in page DIPs.
+    PageMenu { aid: u64, tab: u64, x: f32, y: f32, items: Vec<(i32, String, bool)>, link: String, selection: String },
+    /// The person's sign-in: user and password, or None for Cancel. The password never leaves
+    /// this event.
+    SignInAnswer(u64, Option<(String, String)>),
     /// Windows says memory is low (and says so again every few seconds while it stays low).
     LowMemory,
     FullScreen(u64, bool),
@@ -276,6 +285,9 @@ pub struct Ctx {
     pub passwords: Cell<bool>,
     /// Permission requests waiting for the user.
     pub perms: RefCell<HashMap<u64, (ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2Deferral)>>,
+    /// Questions pages put to the person (alert, confirm, prompt, leave, sign in, a right-click),
+    /// each waiting on its deferral until the person answers.
+    pub waiting: RefCell<HashMap<u64, Waiting>>,
     /// aria2 is up and the setting is on: http(s) downloads go to it.
     pub aria_on: Cell<bool>,
     /// URLs aria2 refused; WebView2 downloads these itself.
@@ -601,6 +613,9 @@ fn build_tab_in(
     hook_downloads(ctx, &wv, id, private);
     hook_crash(&wv, id, ctx.proxy.clone());
     hook_permissions(ctx, &wv, id, agent_page);
+    if !agent_page {
+        hook_page_asks(ctx, &wv, id);
+    }
     hook_external(&wv, id, ctx.proxy.clone(), agent_page);
     hook_popup_sensor(&wv, ctx.popup_info.clone());
     hook_rtc(&wv, who);
@@ -1658,6 +1673,216 @@ fn hook_external(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, isolated: boo
     }
 }
 
+// ------------------------------------------------------------- page questions
+
+static NEXT_ASK: AtomicU64 = AtomicU64::new(1);
+
+/// What a page asks the person.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ask {
+    Alert(String),
+    Confirm(String),
+    /// The question, and the text the box starts with.
+    Prompt(String, String),
+    /// "Leave site?": the page has something it may lose.
+    Leave,
+    /// HTTP basic auth, with the realm the site named (may be empty).
+    SignIn(String),
+}
+
+/// A page's question, waiting for the person. Its deferral is completed with the answer.
+pub enum Waiting {
+    Script(ICoreWebView2ScriptDialogOpeningEventArgs, ICoreWebView2Deferral),
+    Auth(ICoreWebView2BasicAuthenticationRequestedEventArgs, ICoreWebView2Deferral),
+    Menu(ICoreWebView2ContextMenuRequestedEventArgs, ICoreWebView2Deferral),
+}
+
+/// The realm out of a `Basic realm="Secure area"` challenge, or "".
+fn realm_of(challenge: &str) -> String {
+    challenge.split_once("realm=").map(|(_, r)| r.trim().trim_matches('"').split('"').next().unwrap_or("").to_string()).unwrap_or_default()
+}
+
+/// A menu label without its access-key marks: "&Back" is "Back", "&&" is "&".
+fn menu_label(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '&' {
+            if it.peek() == Some(&'&') {
+                out.push('&');
+                it.next();
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// WebView2's items for a right-click, flat: commands and separators. Submenus (Share, the
+/// spelling list) are left out; a separator never leads, trails or doubles.
+fn menu_items(list: &ICoreWebView2ContextMenuItemCollection) -> Vec<(i32, String, bool)> {
+    let mut out: Vec<(i32, String, bool)> = Vec::new();
+    unsafe {
+        let mut n = 0u32;
+        if list.Count(&mut n).is_err() {
+            return out;
+        }
+        for k in 0..n {
+            let Ok(item) = list.GetValueAtIndex(k) else { continue };
+            let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
+            let _ = item.Kind(&mut kind);
+            if kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR {
+                if out.last().is_some_and(|l| l.0 != i32::MIN) {
+                    out.push((i32::MIN, String::new(), false));
+                }
+                continue;
+            }
+            if kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU {
+                continue;
+            }
+            let (mut l, mut id, mut on) = (PWSTR::null(), 0i32, windows::core::BOOL::default());
+            let _ = item.Label(&mut l);
+            let _ = item.CommandId(&mut id);
+            let _ = item.IsEnabled(&mut on);
+            let label = menu_label(&take(l));
+            if !label.is_empty() {
+                out.push((id, label, on.as_bool()));
+            }
+        }
+    }
+    while out.last().is_some_and(|l| l.0 == i32::MIN) {
+        out.pop();
+    }
+    out
+}
+
+/// The person's own tabs ask the person: alerts, confirms, prompts and "leave site?" as drawn
+/// cards over the page, a sign-in as a drawn form, a right-click as Lumen's own menu. Agent tabs
+/// keep what agentkit gives them.
+fn hook_page_asks(ctx: &Rc<Ctx>, wv: &WebView, id: u64) {
+    let core = wv.webview();
+    unsafe {
+        if let Ok(s) = core.Settings() {
+            let _ = s.SetAreDefaultScriptDialogsEnabled(false);
+        }
+        let mut token = 0i64;
+        let c = ctx.clone();
+        let _ = core.add_ScriptDialogOpening(
+            &ScriptDialogOpeningEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut kind = COREWEBVIEW2_SCRIPT_DIALOG_KIND::default();
+                args.Kind(&mut kind)?;
+                let (mut u, mut m, mut d) = (PWSTR::null(), PWSTR::null(), PWSTR::null());
+                args.Uri(&mut u)?;
+                args.Message(&mut m)?;
+                let _ = args.DefaultText(&mut d);
+                let msg = take(m);
+                let ask = match kind {
+                    COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT => Ask::Alert(msg),
+                    COREWEBVIEW2_SCRIPT_DIALOG_KIND_CONFIRM => Ask::Confirm(msg),
+                    COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT => Ask::Prompt(msg, take(d)),
+                    _ => Ask::Leave,
+                };
+                let deferral = args.GetDeferral()?;
+                let aid = NEXT_ASK.fetch_add(1, Ordering::Relaxed);
+                c.waiting.borrow_mut().insert(aid, Waiting::Script(args.clone(), deferral));
+                let _ = c.proxy.send_event(Ev::PageAsk { aid, tab: id, origin: origin_of(&take(u)), ask });
+                Ok(())
+            })),
+            &mut token,
+        );
+        if let Ok(c10) = core.cast::<ICoreWebView2_10>() {
+            let c = ctx.clone();
+            let _ = c10.add_BasicAuthenticationRequested(
+                &BasicAuthenticationRequestedEventHandler::create(Box::new(move |_, args| {
+                    let Some(args) = args else { return Ok(()) };
+                    let (mut u, mut ch) = (PWSTR::null(), PWSTR::null());
+                    args.Uri(&mut u)?;
+                    let _ = args.Challenge(&mut ch);
+                    let deferral = args.GetDeferral()?;
+                    let aid = NEXT_ASK.fetch_add(1, Ordering::Relaxed);
+                    c.waiting.borrow_mut().insert(aid, Waiting::Auth(args.clone(), deferral));
+                    let _ = c.proxy.send_event(Ev::PageAsk { aid, tab: id, origin: origin_of(&take(u)), ask: Ask::SignIn(realm_of(&take(ch))) });
+                    Ok(())
+                })),
+                &mut token,
+            );
+        }
+        if let Ok(c11) = core.cast::<ICoreWebView2_11>() {
+            let c = ctx.clone();
+            let _ = c11.add_ContextMenuRequested(
+                &ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
+                    let Some(args) = args else { return Ok(()) };
+                    let items = args.MenuItems().map(|l| menu_items(&l)).unwrap_or_default();
+                    let (mut link, mut selection) = (String::new(), String::new());
+                    if let Ok(t) = args.ContextMenuTarget() {
+                        let (mut has, mut p) = (windows::core::BOOL::default(), PWSTR::null());
+                        if t.HasLinkUri(&mut has).is_ok() && has.as_bool() && t.LinkUri(&mut p).is_ok() {
+                            link = take(p);
+                        }
+                        let (mut has, mut p) = (windows::core::BOOL::default(), PWSTR::null());
+                        if t.HasSelection(&mut has).is_ok() && has.as_bool() && t.SelectionText(&mut p).is_ok() {
+                            selection = take(p);
+                        }
+                    }
+                    let mut pt = windows::Win32::Foundation::POINT::default();
+                    let _ = args.Location(&mut pt);
+                    args.SetHandled(true)?;
+                    let deferral = args.GetDeferral()?;
+                    let aid = NEXT_ASK.fetch_add(1, Ordering::Relaxed);
+                    c.waiting.borrow_mut().insert(aid, Waiting::Menu(args.clone(), deferral));
+                    let _ = c.proxy.send_event(Ev::PageMenu { aid, tab: id, x: pt.x as f32, y: pt.y as f32, items, link, selection });
+                    Ok(())
+                })),
+                &mut token,
+            );
+        }
+    }
+}
+
+/// An alert, confirm, prompt or "leave site?" answered: OK (or Leave) or not, and a prompt's text.
+pub fn answer_script(ctx: &Ctx, aid: u64, ok: bool, text: Option<&str>) {
+    let Some(Waiting::Script(args, deferral)) = ctx.waiting.borrow_mut().remove(&aid) else { return };
+    unsafe {
+        if let Some(t) = text {
+            let _ = args.SetResultText(&windows::core::HSTRING::from(t));
+        }
+        if ok {
+            let _ = args.Accept();
+        }
+        let _ = deferral.Complete();
+    }
+}
+
+/// A sign-in answered: the user and password, or None for Cancel.
+pub fn answer_sign_in(ctx: &Ctx, aid: u64, with: Option<(String, String)>) {
+    let Some(Waiting::Auth(args, deferral)) = ctx.waiting.borrow_mut().remove(&aid) else { return };
+    unsafe {
+        match with.as_ref().and_then(|w| args.Response().ok().map(|r| (r, w))) {
+            Some((r, (user, pass))) => {
+                let _ = r.SetUserName(&windows::core::HSTRING::from(user.as_str()));
+                let _ = r.SetPassword(&windows::core::HSTRING::from(pass.as_str()));
+            }
+            None => {
+                let _ = args.SetCancel(true);
+            }
+        }
+        let _ = deferral.Complete();
+    }
+}
+
+/// A right-click menu closed: the WebView2 command picked, or None.
+pub fn answer_menu(ctx: &Ctx, aid: u64, cmd: Option<i32>) {
+    let Some(Waiting::Menu(args, deferral)) = ctx.waiting.borrow_mut().remove(&aid) else { return };
+    unsafe {
+        if let Some(c) = cmd {
+            let _ = args.SetSelectedCommandId(c);
+        }
+        let _ = deferral.Complete();
+    }
+}
+
 /// Some(true) allow, Some(false) block, None let WebView2 decide (it blocks by default).
 pub fn answer_permission(ctx: &Ctx, pid: u64, allow: Option<bool>) {
     let Some((args, deferral)) = ctx.perms.borrow_mut().remove(&pid) else { return };
@@ -1798,7 +2023,18 @@ pub fn clean_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, clean_url, map_key, origin_of, purge_at_start_in, purge_queue_path, queue_purge_in, safe_key};
+    use super::{Action, clean_url, map_key, menu_label, origin_of, purge_at_start_in, purge_queue_path, queue_purge_in, realm_of, safe_key};
+
+    /// The sign-in card names the site's realm; the page menu shows labels without "&" marks.
+    #[test]
+    fn a_realm_and_a_menu_label_read_plainly() {
+        assert_eq!(realm_of("Basic realm=\"Lumen test\""), "Lumen test");
+        assert_eq!(realm_of("Basic realm=\"Intranet\", charset=\"UTF-8\""), "Intranet");
+        assert_eq!(realm_of("Basic"), "");
+        assert_eq!(menu_label("&Back"), "Back");
+        assert_eq!(menu_label("Save &as"), "Save as");
+        assert_eq!(menu_label("Tom && Jerry"), "Tom & Jerry");
+    }
 
     #[test]
     fn ctrl_shift_n_is_a_new_private_tab() {

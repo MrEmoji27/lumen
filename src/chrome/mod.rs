@@ -145,6 +145,8 @@ pub struct UiState {
     pub cpu_cap: bool,
     /// Battery saver is in force: hidden tabs sleep sooner, motion is reduced, a leaf shows.
     pub battery: bool,
+    /// The active tab's page is asking the person something: the card over the page.
+    pub page_ask: Option<UiAsk>,
     pub downloads: Vec<UiDl>,
     pub agent_busy: bool,
     /// Per agent session: what became of the person's last message to it, in words.
@@ -679,6 +681,8 @@ pub(crate) struct Inner {
     /// Lumen filled in.
     omni_typed: Typed,
     ntp_typed: Typed,
+    /// The page question whose card is up, if any.
+    page_ask_shown: Option<u64>,
     born: Instant,
     spinning: bool,
     /// Every animated value of the chrome.
@@ -1161,6 +1165,16 @@ fn merge_hits(sugg: &mut Vec<Sugg>, hits: Vec<(String, String, bool, String)>) {
     }
 }
 
+/// A page's question for the card: which one, whose, what, and whether it has asked so often
+/// that the card offers "Stop this page asking".
+#[derive(Clone, Debug)]
+pub struct UiAsk {
+    pub aid: u64,
+    pub host: String,
+    pub ask: crate::engine::Ask,
+    pub many: bool,
+}
+
 /// What the person typed into a box Lumen fills in, kept apart from what Lumen added.
 #[derive(Default)]
 struct Typed {
@@ -1549,6 +1563,7 @@ impl Chrome {
                 sugg: Vec::new(),
                 omni_typed: Typed::default(),
                 ntp_typed: Typed::default(),
+                page_ask_shown: None,
                 sel: 0,
                 born: Instant::now(),
                 spinning: false,
@@ -1679,6 +1694,61 @@ impl Chrome {
     pub fn set_state(&self, s: UiState) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         i.apply(s);
+        i.sync_page_ask();
+    }
+
+    /// A right-click on the active page, at (x, y) in page DIPs: Lumen's own menu with
+    /// WebView2's items for that spot and Lumen's. False when the chrome cannot show it now.
+    pub fn page_menu(&self, aid: u64, x: f32, y: f32, items: Vec<(i32, String, bool)>, link: String, selection: String) -> bool {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return false };
+        let Some((sx, sy, _, _)) = i.state.as_ref().map(|s| s.stage) else { return false };
+        let mut rows: Vec<(u32, String, bool)> = Vec::new();
+        for (n, (cmd, label, on)) in items.iter().enumerate() {
+            if *cmd == i32::MIN {
+                rows.push((0, String::new(), true));
+            } else {
+                rows.push((1000 + n as u32, label.clone(), *on));
+            }
+        }
+        let quote: String = selection.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !link.is_empty() || !quote.is_empty() {
+            if !rows.is_empty() {
+                rows.push((0, String::new(), true));
+            }
+            if !link.is_empty() {
+                rows.push((1, "Open link in a private tab".into(), true));
+            }
+            if !quote.is_empty() {
+                let short: String = if quote.chars().count() > 28 { quote.chars().take(27).collect::<String>() + "…" } else { quote.clone() };
+                rows.push((2, format!("Search for \u{201c}{short}\u{201d}"), true));
+            }
+        }
+        if rows.is_empty() {
+            return false;
+        }
+        let cmds: Vec<i32> = items.iter().map(|c| c.0).collect();
+        menu::open_rows_or(
+            &mut i,
+            &rows,
+            sx + x,
+            sy + y,
+            move |i, id| {
+                let cmd = match id {
+                    1 => {
+                        send(&i.proxy, json!({"t": "openPrivateUrl", "url": link}));
+                        None
+                    }
+                    2 => {
+                        send(&i.proxy, json!({"t": "searchNewTab", "q": quote}));
+                        None
+                    }
+                    n => cmds.get((n as usize).wrapping_sub(1000)).copied(),
+                };
+                send(&i.proxy, json!({"t": "pageMenuPick", "aid": aid, "cmd": cmd}));
+            },
+            move |i| send(&i.proxy, json!({"t": "pageMenuPick", "aid": aid, "cmd": null})),
+        );
+        true
     }
 
     /// What the person typed in the Drive panel's task box. Empty when it was never opened.
@@ -2854,6 +2924,33 @@ impl Inner {
     /// One card at a time: opening one puts the others away. A form, a question, a
     /// menu and a file card are dropped (their actions never run); a colour keeps
     /// what it shows.
+    /// The card for the active page's question: opened when a new one comes, put away
+    /// unanswered when the person moves to another tab (it waits there for them).
+    fn sync_page_ask(&mut self) {
+        let want = self.state.as_ref().and_then(|s| s.page_ask.clone());
+        if want.as_ref().map(|a| a.aid) == self.page_ask_shown {
+            return;
+        }
+        if self.page_ask_shown.take().is_some() {
+            confirm::put_away(self);
+            form::put_away(self);
+        }
+        let Some(a) = want else { return };
+        self.page_ask_shown = Some(a.aid);
+        use crate::engine::Ask;
+        match &a.ask {
+            Ask::Prompt(text, default) => {
+                let label: String = text.chars().take(120).collect();
+                form::open_fields(self, &format!("{} asks", a.host), &[(&label, default, false)], form::FormAct::PagePrompt { aid: a.aid });
+            }
+            Ask::SignIn(realm) => {
+                let title = if realm.is_empty() { format!("Sign in to {}", a.host) } else { format!("Sign in to {} \u{b7} {realm}", a.host) };
+                form::open_fields(self, &title, &[("User name", "", false), ("Password", "", true)], form::FormAct::SignIn { aid: a.aid });
+            }
+            _ => confirm::open(self, confirm::ConfirmKind::Page { aid: a.aid, host: a.host.clone(), ask: a.ask.clone(), many: a.many }),
+        }
+    }
+
     fn close_cards(&mut self) {
         if self.form.is_some() {
             form::cancel(self);

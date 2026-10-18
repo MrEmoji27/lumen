@@ -24,6 +24,8 @@ struct Row {
 pub struct MenuCard {
     rows: Vec<Row>,
     act: Option<Chosen>,
+    /// What closing without a pick does, when that is not nothing (a page's menu must answer).
+    on_cancel: Option<Box<dyn FnOnce(&mut Inner)>>,
     /// Where it was drawn, and each row's rectangle, in chrome DIPs.
     rect: R,
     row_rects: Vec<R>,
@@ -94,11 +96,20 @@ pub fn open(i: &mut Inner, items: &[(u32, String)], x: f32, y: f32, act: impl Fn
 
 /// The same, with rows that can be greyed out.
 pub fn open_rows(i: &mut Inner, items: &[(u32, String, bool)], x: f32, y: f32, act: impl FnOnce(&mut Inner, u32) + 'static) {
+    open_with(i, items, x, y, Box::new(act), None);
+}
+
+/// The same, and `on_cancel` runs when it closes without a pick.
+pub fn open_rows_or(i: &mut Inner, items: &[(u32, String, bool)], x: f32, y: f32, act: impl FnOnce(&mut Inner, u32) + 'static, on_cancel: impl FnOnce(&mut Inner) + 'static) {
+    open_with(i, items, x, y, Box::new(act), Some(Box::new(on_cancel)));
+}
+
+fn open_with(i: &mut Inner, items: &[(u32, String, bool)], x: f32, y: f32, act: Chosen, on_cancel: Option<Box<dyn FnOnce(&mut Inner)>>) {
     i.close_cards();
     let rows = rows_of(items);
     let (rect, row_rects) = geometry(i, &rows, x, y);
     let sel = rows.iter().position(|r| r.enabled && r.id != 0).unwrap_or(0);
-    i.menu = Some(MenuCard { rows, act: Some(Box::new(act)), rect, row_rects, sel });
+    i.menu = Some(MenuCard { rows, act: Some(act), on_cancel, rect, row_rects, sel });
     unsafe {
         let _ = SetFocus(Some(i.hwnd));
         SetCapture(i.hwnd);
@@ -108,11 +119,12 @@ pub fn open_rows(i: &mut Inner, items: &[(u32, String, bool)], x: f32, y: f32, a
 
 /// Close without a choice.
 pub fn cancel(i: &mut Inner) {
-    if i.menu.take().is_none() {
-        return;
-    }
+    let Some(card) = i.menu.take() else { return };
     unsafe {
         let _ = ReleaseCapture();
+    }
+    if let Some(f) = card.on_cancel {
+        f(i);
     }
     i.invalidate();
 }

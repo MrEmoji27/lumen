@@ -218,6 +218,9 @@ struct Tab {
     pin_url: String,
     audio: bool,
     muted: bool,
+    /// Questions this page asked since it loaded, and whether the person said to stop them.
+    asks_n: u32,
+    asks_off: bool,
     /// In a call: a live microphone, camera or screen capture, or a connected peer. Never
     /// frozen, unloaded or trimmed, sound or no sound.
     call: bool,
@@ -431,6 +434,8 @@ impl Tab {
             pinned: false,
             pin_url: String::new(),
             audio: false,
+            asks_n: 0,
+            asks_off: false,
             call: false,
             muted: false,
             suspended: false,
@@ -533,6 +538,9 @@ struct App {
     pal_open: bool,
     /// The last tab that played sound: the media keys and the footer card act on it.
     media_tab: Option<u64>,
+    /// Questions pages are waiting on (ask id, tab, origin, what), oldest first. The active
+    /// tab's first one is the card on screen.
+    page_asks: Vec<(u64, u64, String, engine::Ask)>,
     /// On battery (or Windows' battery saver is on), as last read; read every POWER_EVERY.
     on_battery: bool,
     power_at: Instant,
@@ -903,6 +911,7 @@ fn main() {
         downloads: RefCell::new(HashMap::new()),
         passwords: Cell::new(settings.save_passwords),
         perms: RefCell::new(HashMap::new()),
+        waiting: RefCell::new(HashMap::new()),
         aria_on: Cell::new(false),
         bypass: RefCell::new(Default::default()),
         dark_js: RefCell::new(None),
@@ -980,6 +989,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         peek: false,
         pal_open: false,
         media_tab: None,
+        page_asks: Vec::new(),
         on_battery: false,
         power_at: Instant::now(),
         page_fs: false,
@@ -2136,6 +2146,16 @@ impl App {
                 media: self.media_tab.and_then(|id| self.tabs.iter().find(|t| t.id == id && t.audio).map(|t| t.id)),
                 blocked: privacy_stats::tab_blocked(self.active),
                 cpu_cap: self.job.is_some(),
+                page_ask: self
+                    .page_asks
+                    .iter()
+                    .find(|a| a.1 == self.active)
+                    .map(|(aid, tab, origin, ask)| chrome::UiAsk {
+                        aid: *aid,
+                        host: host_of(origin),
+                        ask: ask.clone(),
+                        many: self.idx(*tab).is_some_and(|i| self.tabs[i].asks_n >= 2),
+                    }),
                 battery: self.power_saving(),
                 downloads: self
                     .downloads
@@ -3862,6 +3882,11 @@ impl App {
                 }
             }
             Ev::Loading(id, on) => {
+                // A new page starts its own count of questions; "stop asking" was for the last.
+                if on && let Some(i) = self.idx(id) {
+                    self.tabs[i].asks_n = 0;
+                    self.tabs[i].asks_off = false;
+                }
                 // The first page of the run done loading, for the startup lines.
                 static FIRST_PAGE: std::sync::Once = std::sync::Once::new();
                 if !on {
@@ -4001,6 +4026,37 @@ impl App {
                 }
             }
             Ev::LowMemory => self.low_memory(),
+            Ev::PageAsk { aid, tab, origin, ask } => {
+                let Some(i) = self.idx(tab) else {
+                    engine::answer_script(&self.ctx, aid, false, None);
+                    engine::answer_sign_in(&self.ctx, aid, None);
+                    return;
+                };
+                // A page the person told to stop gets its answers without a card: an alert is
+                // seen, a confirm is no, a prompt is cancelled, a leave is allowed. A sign-in
+                // always asks.
+                if self.tabs[i].asks_off && !matches!(ask, engine::Ask::SignIn(_)) {
+                    engine::answer_script(&self.ctx, aid, matches!(ask, engine::Ask::Alert(_) | engine::Ask::Leave), None);
+                    return;
+                }
+                self.tabs[i].asks_n += 1;
+                self.page_asks.push((aid, tab, origin, ask));
+                self.push();
+            }
+            Ev::SignInAnswer(aid, with) => {
+                self.page_asks.retain(|a| a.0 != aid);
+                engine::answer_sign_in(&self.ctx, aid, with);
+                self.push();
+            }
+            Ev::PageMenu { aid, tab, x, y, items, link, selection } => {
+                if tab != self.active {
+                    engine::answer_menu(&self.ctx, aid, None);
+                    return;
+                }
+                if !self.chrome.page_menu(aid, x, y, items, link, selection) {
+                    engine::answer_menu(&self.ctx, aid, None);
+                }
+            }
             Ev::Call(id, on) => {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].call = on;
@@ -4957,6 +5013,41 @@ impl App {
             }
             "newPrivate" => {
                 self.new_private_tab();
+            }
+            "pageAnswer" => {
+                // A page's alert, confirm, prompt or "leave site?", answered on its card.
+                let aid = m["aid"].as_u64().unwrap_or(0);
+                if let Some(at) = self.page_asks.iter().position(|a| a.0 == aid) {
+                    let (_, tab, _, _) = self.page_asks.remove(at);
+                    if m["stop"].as_bool().unwrap_or(false)
+                        && let Some(i) = self.idx(tab)
+                    {
+                        self.tabs[i].asks_off = true;
+                    }
+                }
+                engine::answer_script(&self.ctx, aid, m["ok"].as_bool().unwrap_or(false), m["text"].as_str());
+                self.push();
+            }
+            "pageMenuPick" => {
+                let aid = m["aid"].as_u64().unwrap_or(0);
+                engine::answer_menu(&self.ctx, aid, m["cmd"].as_i64().map(|c| c as i32));
+            }
+            "openPrivateUrl" => {
+                // The page menu's "Open link in a private tab".
+                let url = m["url"].as_str().unwrap_or("").to_string();
+                if url.starts_with("http") {
+                    self.new_private_tab();
+                    self.navigate(&url);
+                }
+            }
+            "searchNewTab" => {
+                // The page menu's "Search for": the words in a tab of their own, after this one.
+                let q = m["q"].as_str().unwrap_or("").trim().to_string();
+                if !q.is_empty() {
+                    let after = self.idx(self.active);
+                    self.new_tab(None, after);
+                    self.navigate(&q);
+                }
             }
             "activate" => self.activate(id),
             "close" => self.close(id),

@@ -36,6 +36,26 @@ pub enum FormAct {
     NewFolder,
     /// A KeePass file's master password: straight to the vault, never kept.
     VaultOpen { path: String },
+    /// A page's prompt(): its one box's text goes back to the page.
+    PagePrompt { aid: u64 },
+    /// A site's sign-in (HTTP basic auth): user and password, straight to WebView2.
+    SignIn { aid: u64 },
+}
+
+impl FormAct {
+    /// The question belongs to a page, which waits on it: the card sits over that page.
+    fn for_page(&self) -> bool {
+        matches!(self, FormAct::PagePrompt { .. } | FormAct::SignIn { .. })
+    }
+
+    /// What the first button says.
+    fn go(&self) -> &'static str {
+        match self {
+            FormAct::PagePrompt { .. } => "OK",
+            FormAct::SignIn { .. } => "Sign in",
+            _ => "Save",
+        }
+    }
 }
 
 /// One open form: its title, its boxes (label, starting text, whether what is
@@ -57,11 +77,19 @@ const BTN_W: f32 = 76.0;
 const BTN_H: f32 = 28.0;
 
 /// Where the card and its boxes sit: the top of the floating cards' column.
-fn geometry(i: &Inner, fields: usize) -> Option<(R, Vec<R>)> {
+fn geometry(i: &Inner, fields: usize, page: bool) -> Option<(R, Vec<R>)> {
     let area = i.float_area()?;
     let (x, w) = super::float_col(area, i.cards_right());
     let h = PAD + 14.0 + 10.0 + fields as f32 * (LABEL_H + 4.0 + BOX_H + 12.0) + BTN_H + 14.0 + PAD;
-    let rect = R::new(x, area.y + 8.0, w, h);
+    // A page's question sits over that page, at its top.
+    let rect = match page.then(|| i.state.as_ref().map(|s| s.stage)).flatten() {
+        Some((sx, sy, sw, _)) => {
+            let w = w.max(360.0);
+            R::new(sx + ((sw - w) / 2.0).max(8.0), sy + 16.0, w, h)
+        }
+        None => R::new(x, area.y + 8.0, w, h),
+    };
+    let w = rect.w;
     let mut boxes = Vec::new();
     let mut y = rect.y + PAD + 14.0 + 10.0;
     for _ in 0..fields {
@@ -81,7 +109,7 @@ pub fn open(i: &mut Inner, title: &str, fields: &[(&str, &str)], act: FormAct) {
 pub fn open_fields(i: &mut Inner, title: &str, fields: &[(&str, &str, bool)], act: FormAct) {
     i.close_cards();
     let fields: Vec<(String, String, bool)> = fields.iter().map(|(l, v, s)| (l.to_string(), v.to_string(), *s)).collect();
-    let (rect, boxes) = match geometry(i, fields.len()) {
+    let (rect, boxes) = match geometry(i, fields.len(), act.for_page()) {
         Some(g) => g,
         None => return,
     };
@@ -116,10 +144,24 @@ fn box_of(i: &Inner, n: usize) -> HWND {
 
 /// Put the form away without saving.
 pub fn cancel(i: &mut Inner) {
-    if i.form.take().is_none() {
-        return;
-    }
+    let Some(card) = i.form.take() else { return };
     leave(i);
+    // A page waits on its answer: Escape, Cancel or a click outside is Cancel.
+    match card.act {
+        FormAct::PagePrompt { aid } => send(&i.proxy, json!({"t": "pageAnswer", "aid": aid, "ok": false})),
+        FormAct::SignIn { aid } => {
+            let _ = i.proxy.send_event(crate::engine::Ev::SignInAnswer(aid, None));
+        }
+        _ => {}
+    }
+}
+
+/// A page's question put away unanswered: the person went to another tab, and it waits there.
+pub fn put_away(i: &mut Inner) {
+    if i.form.as_ref().is_some_and(|f| f.act.for_page()) {
+        i.form = None;
+        leave(i);
+    }
 }
 
 /// Save: the boxes' text, in order, goes straight into the pending action.
@@ -249,6 +291,14 @@ fn submit(i: &mut Inner, act: &FormAct, a: &[String]) {
                 let _ = i.proxy.send_event(crate::engine::Ev::VaultOpen(path.clone(), pw.clone()));
             }
         }
+        FormAct::PagePrompt { aid } => {
+            send(&i.proxy, json!({"t": "pageAnswer", "aid": aid, "ok": true, "text": a.first().cloned().unwrap_or_default()}));
+        }
+        FormAct::SignIn { aid } => {
+            // Like the vault's: the password goes on an event, never in a logged message.
+            let with = (a.len() >= 2).then(|| (a[0].clone(), a[1].clone()));
+            let _ = i.proxy.send_event(crate::engine::Ev::SignInAnswer(*aid, with));
+        }
     }
 }
 
@@ -257,7 +307,7 @@ pub fn draw(i: &mut Inner, _s: &UiState) {
     let Some(mut card) = i.form.take() else { return };
     let lo = i.look.clone();
     let th = lo.theme;
-    let Some((rect, boxes)) = geometry(i, card.fields.len()) else {
+    let Some((rect, boxes)) = geometry(i, card.fields.len(), card.act.for_page()) else {
         i.form = Some(card);
         return;
     };
@@ -282,7 +332,7 @@ pub fn draw(i: &mut Inner, _s: &UiState) {
     let by = rect.bottom() - PAD - BTN_H;
     let cancel = R::new(rect.right() - PAD - BTN_W, by, BTN_W, BTN_H);
     let save = R::new(cancel.x - 8.0 - BTN_W, by, BTN_W, BTN_H);
-    i.pill_button(save, "Save", Hit::FormSave, true, 1.0);
+    i.pill_button(save, card.act.go(), Hit::FormSave, true, 1.0);
     i.pill_button(cancel, "Cancel", Hit::FormCancel, false, 1.0);
     i.form = Some(card);
 }
