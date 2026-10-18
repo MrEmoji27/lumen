@@ -513,7 +513,7 @@ fn build_tab_in(
     };
     // Userscripts: the person's own tabs only, never an agent's and never a private
     // one. Read here, when the tab is made; the folder is not watched.
-    let user_js = if !agent_tab && !private && ctx.userscripts.get() { crate::userscripts::bootstrap() } else { String::new() };
+    let user_js = if !agent_tab && !private && ctx.userscripts.get() { crate::userscripts::bootstrap() } else { Vec::new() };
     let mut b = base
         .with_bounds(bounds)
         .with_visible(false)
@@ -525,7 +525,6 @@ fn build_tab_in(
         // Decided when the page is built; the header follows the setting at once.
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
         .with_initialization_script(WEBRTC_JS)
-        .with_initialization_script(user_js)
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -557,6 +556,10 @@ fn build_tab_in(
                 Err(_) => NewWindowResponse::Deny,
             }
         });
+    // One wrapper per userscript: a script that does not parse loses only itself.
+    for js in &user_js {
+        b = b.with_initialization_script(js.as_str());
+    }
     // Dark pages: the script must be in place before the first document, so that
     // navigation waits for WebView2 to confirm it (set_dark starts it).
     let agent_page = profile.agent();

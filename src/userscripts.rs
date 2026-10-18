@@ -4,17 +4,19 @@
 //! (repeatable), `@exclude` (repeatable) and `@run-at` (`document-start`, `document-end`
 //! or `document-idle`). `@match` patterns follow Chrome's match-pattern rules.
 //!
-//! A page gets one bootstrap, added the way Lumen's own scripts are
-//! (`with_initialization_script`): it carries every script with its patterns, runs each
-//! one whose patterns match at its own time, each inside its own `try`/`catch`, and only
-//! in the top frame. The person's tabs only: never an agent's tab, never a private one.
-//! The folder is read when a tab is made, never watched.
+//! Each script becomes one wrapper, added the way Lumen's own scripts are
+//! (`with_initialization_script`): its source sits in the wrapper as code, never as a
+//! string handed to `new Function`, because sites with a strict CSP or Trusted Types
+//! (YouTube, GitHub) refuse that. The wrapper runs it when its patterns match, at its own
+//! time, inside a `try`/`catch`, top frame only. One wrapper per script, so a script that
+//! does not even parse loses only itself. The person's tabs only: never an agent's tab,
+//! never a private one. The folder is read when a tab is made, never watched.
 
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::borrow::Cow;
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 /// Where the person puts their scripts.
 fn dir() -> PathBuf {
@@ -197,38 +199,35 @@ fn wildcard(pat: &str, text: &str) -> bool {
     last.is_empty() || (rest.len() >= last.len() && rest.ends_with(last))
 }
 
-/// The bootstrap a page gets, or "" when there is nothing to run: one script carrying
-/// every userscript, its patterns, its time and its source.
-pub fn bootstrap() -> String {
+/// The wrappers a page gets, one per script; none when there is nothing to run.
+pub fn bootstrap() -> Vec<String> {
     bootstrap_in(&dir())
 }
 
-/// The bootstrap for the scripts in one folder, so a test can point it at its own.
-fn bootstrap_in(dir: &Path) -> String {
-    let scripts = load(dir);
-    if scripts.is_empty() {
-        return String::new();
-    }
-    let meta: Vec<Value> = scripts
-        .iter()
-        .map(|s| {
-            json!({
-                "name": s.name,
-                "match": s.matches,
-                "exclude": s.excludes,
-                "at": match s.run_at { RunAt::Start => "start", RunAt::End => "end", RunAt::Idle => "idle" },
-                "src": s.source,
-            })
-        })
-        .collect();
-    BOOTSTRAP.replace("__SCRIPTS__", &serde_json::to_string(&meta).unwrap_or_else(|_| "[]".into()))
+/// The wrappers for the scripts in one folder, so a test can point it at its own.
+fn bootstrap_in(dir: &Path) -> Vec<String> {
+    load(dir).iter().map(wrap).collect()
 }
 
-/// The one script a page gets. Its matching is `pattern_matches`, written once more in JS
-/// because the page has to decide on its own at navigation time: keep the two in step.
+/// One script inside its wrapper. The source goes in between two newlines, so a last line
+/// that is a `//` comment cannot eat the closing brace.
+fn wrap(s: &Script) -> String {
+    let meta = json!({
+        "name": s.name,
+        "match": s.matches,
+        "exclude": s.excludes,
+        "at": match s.run_at { RunAt::Start => "start", RunAt::End => "end", RunAt::Idle => "idle" },
+    });
+    let (head, tail) = BOOTSTRAP.split_once("__RUN__").unwrap_or((BOOTSTRAP, ""));
+    let head = head.replacen("__META__", &meta.to_string(), 1);
+    format!("{head}\n{}\n{tail}", s.source)
+}
+
+/// The wrapper. Its matching is `pattern_matches`, written once more in JS because the page
+/// has to decide on its own at navigation time: keep the two in step.
 const BOOTSTRAP: &str = r#"(()=>{
 if(window!==window.top)return;
-const S=__SCRIPTS__;
+const s=__META__;
 const H=(p,u)=>{const i=u.indexOf('://');if(i<0)return false;const us=u.slice(0,i);
  if(p==='<all_urls>')return us==='http'||us==='https'||us==='file';
  const j=p.indexOf('://');if(j<0)return false;const ps=p.slice(0,j),pr=p.slice(j+3),k=pr.indexOf('/');if(k<0)return false;
@@ -241,14 +240,13 @@ const H=(p,u)=>{const i=u.indexOf('://');if(i<0)return false;const us=u.slice(0,
   return rest===''};
  const up=v<0?'/':(after[v]==='/'?after.slice(v):'/'+after.slice(v));
  return W(pp,up)};
-const go=at=>{const u=location.href;for(const s of S){if(s.at!==at)continue;
- if(!s.match||!s.match.some(p=>H(p,u)))continue;if(s.exclude&&s.exclude.some(p=>H(p,u)))continue;
- try{(new Function(s.src))()}catch(e){try{console.error('[userscript "'+s.name+'"]: '+e)}catch(_){}}}};
-go('start');
-const end=()=>{document.removeEventListener('DOMContentLoaded',end);go('end')};
-if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',end)}else{go('end')}
-const idle=()=>go('idle');
-if(document.readyState==='complete'){go('idle')}else{window.addEventListener('load',idle)}
+const u=location.href;
+if(!s.match||!s.match.some(p=>H(p,u)))return;if(s.exclude&&s.exclude.some(p=>H(p,u)))return;
+const run=function(){__RUN__};
+const go=()=>{try{run()}catch(e){try{console.error('[userscript "'+s.name+'"]: '+e)}catch(_){}}};
+if(s.at==='start')go();
+else if(s.at==='end'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',go,{once:true});else go()}
+else if(document.readyState==='complete')go();else window.addEventListener('load',go,{once:true});
 })()"#;
 
 #[cfg(test)]
@@ -353,10 +351,12 @@ mod tests {
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[0].name, "a", "the file name stands in when @name is missing");
         assert_eq!(got[1].name, "b");
-        // The bootstrap carries what the folder gave; nothing to run: nothing at all.
+        // One wrapper per script, its source in it as code; nothing to run: nothing at all.
         let js = bootstrap_in(&dir);
-        assert!(js.contains("*://a.test/*") && js.contains("// ==UserScript=="), "{js}");
-        assert_eq!(bootstrap_in(&dir.join("nope")), "");
+        assert_eq!(js.len(), 2);
+        assert!(js[0].contains("*://a.test/*") && js[0].contains("// ==UserScript=="), "{}", js[0]);
+        assert!(!js[0].contains("new Function"), "a strict CSP refuses an eval");
+        assert!(bootstrap_in(&dir.join("nope")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
