@@ -349,6 +349,7 @@ fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("adblock", "Block ads and trackers", "Stops them before they load. Saves memory and data."),
             Toggle("cosmetic", "Hide cookie banners and ad leftovers", "Filter-list hiding rules, applied as plain CSS."),
             Toggle("sponsorblock", "Skip sponsors on YouTube", "Fetches hashed-prefix segments and the player skips them, with a toast."),
+            Toggle("userscripts", "Run my userscripts", "Your *.user.js files in the userscripts folder of Lumen's data, in your own tabs. Never private or agent tabs. A new tab picks up a change."),
             Toggle("accelerate_downloads", "Accelerate downloads", "aria2 splits files into up to 16 connections, resumes, and queues. Falls back to the built-in downloader when a site refuses it."),
             Toggle("keep_seeding", "Share torrents back after they finish", "Until ratio 1.0 or one hour, whichever first. Applies on next start."),
             Range("download_limit_kbps", "Download speed limit", "Caps aria2, the download engine. 0 is no limit.", Scale::Steps(DL_SPEEDS), "kbps"),
