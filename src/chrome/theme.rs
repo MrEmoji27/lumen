@@ -96,9 +96,56 @@ impl Custom {
     }
 }
 
+/// The three looks: each one a whole set of colours, type, corners and motion. The
+/// picture they are drawn to is docs/design/lumen-ui.html.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Style {
+    /// Warm paper and ink, one red signal. Light and dark. The default.
+    #[default]
+    Signal,
+    /// A frosted sidebar over a colour wallpaper, the page a floating card. Dark.
+    Glass,
+    /// Near-black, hairlines, square-ish corners, one violet accent. Dark.
+    Precise,
+}
+
+impl Style {
+    pub fn of(name: &str) -> Style {
+        match name {
+            "glass" => Style::Glass,
+            "precise" => Style::Precise,
+            _ => Style::Signal,
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            Style::Signal => "signal",
+            Style::Glass => "glass",
+            Style::Precise => "precise",
+        }
+    }
+    /// Glass and Precise are dark looks; only Signal has a light twin.
+    pub fn dark(self, wanted: bool) -> bool {
+        self != Style::Signal || wanted
+    }
+}
+
+fn hx(s: &str) -> Color {
+    Color::from_hex(s).unwrap_or(Color(1.0, 0.0, 1.0, 1.0))
+}
+
+fn wh(a: f32) -> Color {
+    Color(1.0, 1.0, 1.0, a)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub dark: bool,
+    /// Which of the three looks this is.
+    pub style: Style,
+    /// The active tab and the chosen segment: a solid pill, and what is written on it.
+    pub pill: Color,
+    pub pill_ink: Color,
     /// The sidebar and toolbar surface. The same as `bg` until the person parts them.
     pub side: Color,
     pub bg: Color,
@@ -120,6 +167,70 @@ impl Theme {
         Theme::custom(palette_name, dark, accent_hex, &Custom::default())
     }
 
+    /// A look's own colours, with the person's accent and colours laid over them the way
+    /// `custom` does. The values are the reference picture's (`.sig`, `.sig.dark`, `.gl`, `.pr`).
+    pub fn styled(style: Style, dark: bool, accent_hex: &str, c: &Custom) -> Theme {
+        let dark = style.dark(dark);
+        // bg, raise (cards and fields), hover, press, line, text, dim, faint, accent, pill, pill ink
+        let t = match (style, dark) {
+            (Style::Signal, false) => (hx("#f1efe9"), hx("#ffffff"), hx("#e7e4dc"), hx("#dedad0"), hx("#dedad0"), hx("#141414"), hx("#3a3936"), hx("#8b877d"), hx("#e8322b"), hx("#141414"), hx("#ffffff")),
+            (Style::Signal, true) => (hx("#121211"), hx("#1c1c1a"), hx("#23221f"), hx("#2b2a27"), hx("#2b2a27"), hx("#f2efe8"), hx("#cfcbc2"), hx("#8e8a80"), hx("#ff4a3d"), hx("#f2efe8"), hx("#121211")),
+            (Style::Glass, _) => (hx("#15121f"), wh(0.08), wh(0.09), wh(0.14), wh(0.12), hx("#f4f2ff"), wh(0.82), wh(0.56), hx("#ff7ab8"), wh(0.18), hx("#ffffff")),
+            (Style::Precise, _) => (hx("#0b0b0d"), hx("#111114"), hx("#16161a"), hx("#1f1f24"), hx("#1f1f24"), hx("#ececef"), hx("#b9b9c0"), hx("#6d6d75"), hx("#8b7bff"), hx("#17171b"), hx("#ffffff")),
+        };
+        let (bg, raise, hover, press, line, text, dim, faint, accent, pill, pill_ink) = t;
+        let accent = Color::from_hex(accent_hex).unwrap_or(accent);
+        let mut th = Theme {
+            dark,
+            style,
+            pill,
+            pill_ink,
+            side: bg,
+            bg,
+            raise,
+            hover,
+            press,
+            line,
+            text,
+            dim,
+            faint,
+            accent,
+            acc_soft: bg.mix(accent, 0.22),
+            shade: Color(0.0, 0.0, 0.0, if dark { 0.5 } else { 0.10 }),
+            danger: if dark { hx("#ff6b5e") } else { hx("#c4241c") },
+        };
+        if c.is_empty() {
+            return th;
+        }
+        // The person's own colours win, as they did before the looks: a custom surface
+        // brings its own steps along.
+        th.bg = c.bg.unwrap_or(th.bg);
+        th.side = c.side.or(c.bg).unwrap_or(th.bg);
+        let toward = if dark { Color(1.0, 1.0, 1.0, 1.0) } else { Color(0.0, 0.0, 0.0, 1.0) };
+        if let Some(s) = c.surface {
+            th.raise = s;
+            th.hover = s.mix(toward, 0.05);
+            th.press = s.mix(toward, 0.11);
+            th.line = s.mix(th.text, 0.18);
+        }
+        if let Some(t) = c.text {
+            th.text = t;
+        }
+        if c.bg.is_some() || c.text.is_some() {
+            th.dim = th.text.mix(th.bg, 0.31);
+            th.faint = th.text.mix(th.bg, 0.55);
+        }
+        th.dim = c.dim.unwrap_or(th.dim);
+        th
+    }
+
+    /// A colour as it shows over the window's background: what a native edit box needs,
+    /// which cannot be see-through.
+    pub fn solid(&self, c: Color) -> Color {
+        let o = self.bg.mix(c, c.3);
+        Color(o.0, o.1, o.2, 1.0)
+    }
+
     /// The same palette, with the person's own colours laid over it. Overriding
     /// one surface pulls the steps around it along: a custom sidebar colour gets
     /// its own hover, press and line, a custom background its own dim text.
@@ -135,6 +246,9 @@ impl Theme {
         if c.is_empty() {
             return Theme {
                 dark,
+                style: Style::Signal,
+                pill: text,
+                pill_ink: bg,
                 side: bg,
                 bg,
                 raise,
@@ -171,6 +285,9 @@ impl Theme {
         let dim = c.dim.unwrap_or(dim);
         Theme {
             dark,
+            style: Style::Signal,
+            pill: text,
+            pill_ink: bg,
             side,
             bg,
             raise,
@@ -197,6 +314,21 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_look_is_its_reference_colours() {
+        let s = Theme::styled(Style::Signal, false, "", &Custom::default());
+        assert_eq!((s.bg.hex(), s.raise.hex(), s.text.hex(), s.accent.hex()), ("#f1efe9".into(), "#ffffff".into(), "#141414".into(), "#e8322b".into()));
+        assert_eq!(s.pill.hex(), "#141414");
+        let d = Theme::styled(Style::Signal, true, "", &Custom::default());
+        assert_eq!((d.bg.hex(), d.accent.hex(), d.pill.hex()), ("#121211".into(), "#ff4a3d".into(), "#f2efe8".into()));
+        // Glass and Precise are dark whatever is asked.
+        assert!(Theme::styled(Style::Glass, false, "", &Custom::default()).dark);
+        assert_eq!(Theme::styled(Style::Precise, false, "", &Custom::default()).accent.hex(), "#8b7bff");
+        // The person's accent wins.
+        assert_eq!(Theme::styled(Style::Signal, false, "#2f6bff", &Custom::default()).accent.hex(), "#2f6bff");
+        assert_eq!(Style::of("nonsense"), Style::Signal);
+    }
 
     #[test]
     fn no_overrides_is_exactly_the_palette() {

@@ -8,7 +8,7 @@ use super::{
     gfx::{Face, Font},
     layout::{Kind, Metrics},
     motion,
-    theme::{Color, Custom, Theme},
+    theme::{Color, Custom, Style, Theme},
 };
 use crate::store::Settings;
 
@@ -62,6 +62,18 @@ pub struct Look {
     pub page_radius: f32,
     /// A hairline border around the page.
     pub page_border: bool,
+    /// Which look: Signal, Glass or Precise.
+    pub style: Style,
+    /// Cards: the start page's numbers and tiles, settings groups, list blocks.
+    pub r_card: f32,
+    /// Rows, fields and buttons are full pills (Signal and Glass) or square-ish (Precise).
+    pub pill: bool,
+    /// The small uppercase labels over sections, in the look's label face, spaced out.
+    pub label: Font,
+    /// How far apart the letters of a label are, in DIPs.
+    pub label_track: f32,
+    /// The start page's clock face.
+    pub clock_font: Font,
 
     // Type, scaled by the size setting.
     pub scale: f32,
@@ -117,7 +129,8 @@ impl Look {
     /// own choice included), `system_allows` Windows' "Show animations".
     pub fn of(s: &Settings, dark: bool, system_allows: bool) -> Look {
         let custom = Custom::from_hex(&s.bg_color, &s.side_color, &s.surface_color, &s.text_color, &s.dim_color);
-        let theme = Theme::custom(&s.palette, dark, &s.accent, &custom);
+        let style = style_of(s);
+        let theme = Theme::styled(style, dark, &s.accent, &custom);
         let d = match s.density.as_str() {
             "compact" => 0.8,
             "roomy" => 1.25,
@@ -126,7 +139,22 @@ impl Look {
         let sp = |v: f32| (v * d).round();
         let scale = s.font_scale as f32 / 100.0;
         let f = |size: f32, weight: u32| Font::ui(size * scale, weight);
-        let sf = |size: f32| Font::serif_w(size * scale, s.title_weight);
+        let mono = |size: f32, weight: u32| Font { face: Face::Mono, ..Font::ui(size * scale, weight) };
+        // Titles are the sans, bold; the display serif is gone from the chrome. Glass is lighter.
+        let tw = if style == Style::Glass { 600 } else { 700 };
+        let sf = |size: f32| Font::ui(size * scale, tw);
+        let (r_sm, r_md, r_lg, r_card, pill) = match style {
+            Style::Signal => (8.0, 12.0, 16.0, 18.0, true),
+            Style::Glass => (8.0, 11.0, 14.0, 16.0, true),
+            Style::Precise => (5.0, 7.0, 8.0, 10.0, false),
+        };
+        // Signal and Precise label in monospace capitals; Glass in its own sans.
+        let label = if style == Style::Glass { f(10.5, 600) } else { mono(10.5, 500) };
+        let clock_font = match style {
+            Style::Signal => mono(104.0, 700),
+            Style::Glass => f(104.0, 300),
+            Style::Precise => mono(56.0, 600),
+        };
         let m = motion::Config::of(&s.motion, s.motion_speed, s.motion_system, system_allows);
         Look {
             theme,
@@ -138,16 +166,22 @@ impl Look {
             s3: sp(12.0),
             s4: sp(16.0),
             s5: sp(24.0),
-            r_sm: 6.0,
-            r_md: 8.0,
-            r_lg: 10.0,
+            r_sm,
+            r_md,
+            r_lg,
             page_radius: s.radius as f32,
             page_border: s.page_border,
+            style,
+            r_card,
+            pill,
+            label,
+            label_track: if style == Style::Glass { 0.6 } else { 1.3 },
+            clock_font,
             scale,
             title_weight: s.title_weight,
             title: sf(30.0),
             h2: sf(22.0),
-            big_num: sf(28.0),
+            big_num: mono(34.0, 700),
             body: f(13.0, 450),
             body_strong: f(13.0, 550),
             small: f(12.0, 400),
@@ -187,6 +221,17 @@ impl Look {
         }
     }
 
+    /// A row's or a button's corner: a full pill, or the look's square-ish radius.
+    pub fn round(&self, h: f32) -> f32 {
+        if self.pill { h / 2.0 } else { self.r_md }
+    }
+
+    /// A monospace font at `size` (Glass has none: its sans).
+    pub fn mono_at(&self, size: f32, weight: u32) -> Font {
+        let f = Font::ui(size * self.scale, weight);
+        if self.style == Style::Glass { f } else { Font { face: Face::Mono, ..f } }
+    }
+
     /// The chrome's own heights for this look.
     pub fn metrics(&self) -> Metrics {
         Metrics::new(self.kind, self.compact, self.bm_bar)
@@ -210,6 +255,21 @@ impl Look {
             (stage_w * 0.09).clamp(64.0, 104.0) * self.scale
         }
     }
+}
+
+/// Which look the settings ask for. Debug builds can force one with LUMEN_LOOK for shots.
+pub fn style_of(s: &Settings) -> Style {
+    if cfg!(debug_assertions)
+        && let Ok(v) = std::env::var("LUMEN_LOOK")
+    {
+        return Style::of(&v);
+    }
+    Style::of(look_setting(s))
+}
+
+/// The look setting. Until settings carry one of their own, every Lumen is Signal.
+fn look_setting(_s: &Settings) -> &str {
+    "signal"
 }
 
 /// The content column of the list pages, and its least side margin. Layout, not
@@ -354,24 +414,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_look_is_the_old_constant_for_constant() {
+    fn the_default_look_is_signal() {
         let lo = Look::default();
-        assert_eq!(lo.theme.bg, Theme::new("graphite", true, "").bg);
+        assert_eq!(lo.style, Style::Signal);
+        assert_eq!(lo.theme.bg, Theme::styled(Style::Signal, true, "", &Custom::default()).bg);
         assert_eq!(lo.theme.side, lo.theme.bg);
-        // The spacing and radii the pages were drawn with.
+        // The spacing, and Signal's shape: round rows, soft cards.
         assert_eq!((lo.s1, lo.s2, lo.s3, lo.s4, lo.s5), (4.0, 8.0, 12.0, 16.0, 24.0));
-        assert_eq!((lo.r_sm, lo.r_md, lo.r_lg), (6.0, 8.0, 10.0));
-        // The type scale, at 100%.
+        assert_eq!((lo.r_sm, lo.r_md, lo.r_lg, lo.r_card), (8.0, 12.0, 16.0, 18.0));
+        assert!(lo.pill);
+        assert_eq!(lo.round(34.0), 17.0);
+        // The type: one sans, titles bold; figures and labels in the monospace.
         assert_eq!(lo.body.size10, 130);
         assert_eq!(lo.body.weight, 450);
         assert_eq!(lo.small.size10, 120);
         assert_eq!(lo.caption.size10, 110);
         assert_eq!(lo.title.size10, 300);
-        assert_eq!(lo.h2.size10, 220);
-        assert_eq!(lo.big_num.size10, 280);
+        assert_eq!(lo.title.face, Face::Ui);
+        assert_eq!(lo.title.weight, 700);
+        assert_eq!(lo.big_num.face, Face::Mono);
+        assert_eq!(lo.label.face, Face::Mono);
         assert_eq!(lo.mono.face, Face::Mono);
-        assert_eq!(lo.title.weight, 400);
-        // The old defaults.
+        // The other defaults, as they were.
         assert_eq!(lo.kind, Kind::Vertical);
         assert_eq!(lo.tab_row_h, 32.0);
         assert_eq!(lo.page_radius, 10.0);
@@ -380,8 +444,19 @@ mod tests {
         assert!(lo.clock && lo.clock_24h && !lo.clock_seconds);
         assert_eq!(lo.date_fmt, DateFmt::Long);
         assert!(lo.ntp_search);
-        assert_eq!(lo.dial_tile, 60.0);
         assert!(lo.motion.enabled);
+    }
+
+    #[test]
+    fn precise_is_square_and_glass_has_no_monospace() {
+        let lo = Look::default();
+        let mut p = lo.clone();
+        p.style = Style::Precise;
+        p.pill = false;
+        assert_eq!(p.round(34.0), lo.r_md);
+        let mut g = lo.clone();
+        g.style = Style::Glass;
+        assert_eq!(g.mono_at(12.0, 500).face, Face::Ui);
     }
 
     #[test]
@@ -428,7 +503,6 @@ mod tests {
         // The type scale did move the type.
         assert_eq!(lo.body.size10, 169);
         assert_eq!(lo.title.size10, 390);
-        assert_eq!(lo.title.weight, 700);
         assert_eq!(lo.theme.side, Color::from_hex("#1c2024").unwrap());
         assert_eq!(lo.theme.bg, Color::from_hex("#101418").unwrap());
         assert_eq!(lo.theme.raise, Color::from_hex("#24282c").unwrap());

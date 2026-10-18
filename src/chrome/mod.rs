@@ -56,7 +56,7 @@ use crate::{
     speeddial,
     store::{Settings, Shortcut},
 };
-use gfx::{Align, Gfx, R};
+use gfx::{Align, Font, Gfx, R};
 
 use motion::{Ease, Id, Motion, Prop};
 use style::Look;
@@ -404,6 +404,31 @@ enum Cell {
     Add,
 }
 
+/// 1284 as "1,284": a count read at a glance.
+fn group_digits(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A start-page site card's height (the cell is this and a 12 DIP gap).
+const NTP_CARD_H: f32 = 112.0;
+
+/// The start page's search bar fill: ink in Signal, a frosted pane in Glass, a card in Precise.
+fn ntp_bar_fill(lo: &Look) -> theme::Color {
+    match lo.style {
+        theme::Style::Signal => lo.theme.pill,
+        theme::Style::Glass => theme::Color(1.0, 1.0, 1.0, 0.12),
+        theme::Style::Precise => lo.theme.raise,
+    }
+}
+
 /// Where a speed-dial cell goes. The default sizes are `speeddial`'s own grid;
 /// a tile size or column count the person chose gets the same shapes with their
 /// numbers.
@@ -571,6 +596,8 @@ pub(crate) struct Inner {
     ntp_font: HFONT,
     edit_brush: HBRUSH,
     ntp_brush: HBRUSH,
+    /// The start page's search bar: its own fill (ink, in Signal).
+    bar_brush: HBRUSH,
     editing: bool,
     /// The address bar was opened while compact hid its edit box: focus it once the peek shows it.
     focus_edit: bool,
@@ -975,6 +1002,7 @@ impl Chrome {
                 ntp_font: HFONT::default(),
                 edit_brush: HBRUSH::default(),
                 ntp_brush: HBRUSH::default(),
+                bar_brush: HBRUSH::default(),
                 editing: false,
                 focus_edit: false,
                 sugg: Vec::new(),
@@ -1283,6 +1311,10 @@ impl Inner {
             }
             self.edit_brush = CreateSolidBrush(COLORREF(self.theme.raise.colorref()));
             self.ntp_brush = CreateSolidBrush(COLORREF(self.theme.bg.colorref()));
+            if !self.bar_brush.is_invalid() {
+                let _ = DeleteObject(self.bar_brush.into());
+            }
+            self.bar_brush = CreateSolidBrush(COLORREF(self.theme.solid(ntp_bar_fill(&self.look)).colorref()));
         }
     }
 
@@ -1537,17 +1569,36 @@ impl Inner {
         let s = self.state.as_ref().unwrap();
         let lo = &self.look;
         let (x, y, w, h) = s.stage;
-        let fw = (w * 0.82).min(560.0);
+        // One column: the clock and the numbers, the search bar, the site cards.
+        let cw = (w - 112.0).clamp(300.0, 1000.0);
+        let x0 = x + (w - cw) / 2.0;
         let cells = dial_cells(s);
-        let dial_w = (w - 64.0).clamp(280.0, 720.0);
-        let grid = DialGrid::new(x + (w - dial_w) / 2.0, dial_w, cells.len(), lo.dial_tile, lo.dial_cols);
-        let clock_room = if lo.clock { 210.0 } else { 120.0 };
-        let mut fy = y + h * 0.5 - 23.0;
-        if !cells.is_empty() {
-            fy = fy.min(y + h - 30.0 - grid.height() - 28.0 - 46.0).max(y + clock_room);
+        let cols = if lo.dial_cols > 0 { lo.dial_cols } else if cw >= 760.0 { 6 } else { 4 };
+        let grid = DialGrid::new(x0, cw, cells.len(), NTP_CARD_H - 44.0 + 12.0, cols);
+        let head = if lo.clock { self.ntp_head_h() } else { 40.0 };
+        let total = head + 18.0 + 56.0 + 18.0 + grid.height();
+        let top = (y + (h - total) * 0.42).max(y + 40.0);
+        let field = R::new(x0, top + head + 18.0, cw, 56.0);
+        NtpGeo { field, grid, top: field.bottom() + 18.0, cells }
+    }
+
+    /// How tall the clock and its date are: the clock's own size, its date line, air.
+    fn ntp_head_h(&self) -> f32 {
+        let s = self.state.as_ref().unwrap();
+        let big = self.ntp_clock_font(s.stage.2).size10 as f32 / 10.0;
+        big * 0.92 + 40.0
+    }
+
+    /// The clock's face at the size the settings or the look give it.
+    fn ntp_clock_font(&self, stage_w: f32) -> Font {
+        let lo = &self.look;
+        let mut f = lo.clock_font;
+        if lo.clock_size > 0 {
+            f.size10 = lo.clock_size * 10;
+        } else if stage_w < 760.0 {
+            f.size10 = (f.size10 as f32 * 0.72) as u32;
         }
-        let field = R::new(x + (w - fw) / 2.0, fy, fw, 46.0);
-        NtpGeo { field, grid, top: field.bottom() + 28.0, cells }
+        f
     }
 
     /// Edit boxes are real windows; keep them on top of what is drawn under them.
@@ -1572,7 +1623,7 @@ impl Inner {
         // The box hides when idle and empty, so the drawn placeholder shows through.
         let ntp_live = unsafe { GetFocus() } == self.ntp_edit || !wide_text(self.ntp_edit).is_empty();
         let box_on = self.ntp_visible() && self.look.ntp_search;
-        place(self.ntp_edit, R::new(f.x + 42.0, f.y + (f.h - 22.0) / 2.0, f.w - 58.0, 22.0), box_on && ntp_live);
+        place(self.ntp_edit, R::new(f.x + 52.0, f.y + (f.h - 22.0) / 2.0, f.w - 130.0, 22.0), box_on && ntp_live);
         let b = pages::bm_search_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3), self.look.s5);
         place(self.bm_edit, R::new(b.x + 34.0, b.y + (b.h - 20.0) / 2.0, b.w - 46.0, 20.0), s.full && s.panel == "bookmarks");
         // The Drive panel's task box, always shown while that page is: it is where the
@@ -1914,6 +1965,12 @@ impl Inner {
         })
     }
 
+    /// A section label: the look's label face, in capitals, spaced out.
+    fn label(&self, text: &str, r: R, c: theme::Color) {
+        let lo = &self.look;
+        self.gfx.text_tracked(&text.to_uppercase(), r, lo.label, c, lo.label_track);
+    }
+
     fn button(&mut self, r: R, icon: &str, h: Hit, enabled: bool) {
         let th = self.theme;
         let hov = enabled && self.is_hover(&h);
@@ -1924,7 +1981,7 @@ impl Inner {
         if a > 0.01 {
             let pressed = self.press.as_ref() == Some(&h);
             let bg = if h == Hit::Close { th.danger } else if pressed { th.press } else { th.hover };
-            self.gfx.round(r, 7.0, bg.alpha(a));
+            self.gfx.round(r, self.look.r_sm, bg.alpha(a));
         }
         let c = if !enabled {
             th.faint.alpha(0.5)
@@ -2018,6 +2075,10 @@ impl Inner {
         let th = lo.theme;
         // The sidebar's own colour; the page gaps behind the window keep `bg`.
         self.gfx.fill(sb, th.side);
+        if lo.style != theme::Style::Glass {
+            let x = if s.settings.sidebar_side == "right" { sb.x + 0.5 } else { sb.right() - 0.5 };
+            self.gfx.line(x, sb.y, x, sb.bottom(), th.line, 1.0);
+        }
         let compact = s.compact();
         let top = sb.y;
         // Top bar: navigation and window buttons. The empty rest drags the window.
@@ -2132,9 +2193,12 @@ impl Inner {
         let o = self.omni_rect();
         let hov = self.is_hover(&Hit::Omni);
         let focused = self.editing;
-        self.gfx.round(o, lo.r_lg, if hov && !focused { th.hover } else { th.raise });
+        let orad = lo.round(o.h);
+        self.gfx.round(o, orad, if hov && !focused { th.raise.mix(th.hover, 0.5) } else { th.raise });
         if focused {
-            self.gfx.round_stroke(o, lo.r_lg, th.acc_soft, 1.5);
+            self.gfx.round_stroke(o, orad, th.text.alpha(0.85), 1.5);
+        } else {
+            self.gfx.round_stroke(o, orad, th.line, 1.0);
         }
         let secure = act.as_ref().is_some_and(|t| t.url.starts_with("https://"));
         let site = act.as_ref().is_some_and(|t| t.url.starts_with("http"));
@@ -2275,6 +2339,19 @@ impl Inner {
         // the drops land right. Where each row belongs, in the list's own space. Rows
         // are drawn at their animated place: an added, closed or reordered tab makes
         // the ones around it glide instead of jump.
+        if !compact {
+            let name = s.workspaces.get(s.active_workspace).filter(|_| s.workspaces.len() > 1).cloned().unwrap_or_else(|| "Tabs".into());
+            let lr = R::new(sb.x + pad + 8.0, y + 2.0, sb.w - 2.0 * pad - 44.0, 20.0);
+            self.label(&name, lr, th.faint.alpha(wf));
+            let plus = R::new(sb.right() - pad - 26.0, y, 24.0, 24.0);
+            let hp = self.is_hover(&Hit::NewTab);
+            if hp {
+                self.gfx.round(plus, lo.r_sm, th.hover);
+            }
+            self.gfx.icon("plus", plus.x + 5.0, plus.y + 5.0, 14.0, if hp { th.text } else { th.faint });
+            self.hit(plus, Hit::NewTab);
+            y += 28.0;
+        }
         let mut rows: Vec<(Row<'_>, f32)> = rests.iter().map(|t| (Row::Tab(t), step)).collect();
         for (i, g) in groups.iter().enumerate() {
             if i == 0 || !compact {
@@ -2296,7 +2373,12 @@ impl Inner {
             && !self.drag.as_ref().is_some_and(|d| d.moved && d.id == s.active)
         {
             let slid = self.motion.spring(Id::Named("active-y"), Prop::Y, want[n], 220);
-            self.gfx.round(R::new(sb.x + pad, list.y - self.scroll + slid, sb.w - 2.0 * pad, row_h), lo.r_md, th.raise.alpha(wf));
+            let hl = R::new(sb.x + pad, list.y - self.scroll + slid, sb.w - 2.0 * pad, row_h);
+            self.gfx.round(hl, lo.round(row_h), th.pill.alpha(wf));
+            if lo.style == theme::Style::Precise {
+                // Precise marks the row with a violet edge, not a fill alone.
+                self.gfx.round(R::new(hl.x, hl.y + 4.0, 2.0, hl.h - 8.0), 1.0, th.accent.alpha(wf));
+            }
         }
         for ((row, h), want_y) in rows.iter().zip(want.iter().copied()) {
             match row {
@@ -2673,7 +2755,7 @@ impl Inner {
         let lo = self.look.clone();
         let th = lo.theme;
         let dot = agent_color(&head.owner);
-        self.gfx.circle(r.x + 9.0, r.y + r.h / 2.0, 4.0, dot.alpha(alpha));
+        self.gfx.circle(r.x + 11.0, r.y + r.h / 2.0, 3.5, dot.alpha(alpha));
         let name = if head.owner_name.trim().is_empty() { "agent" } else { head.owner_name.trim() };
         // What became of the person's last message to it, else how many tabs it has.
         let label = match note {
@@ -2681,9 +2763,9 @@ impl Inner {
             None if tabs > 1 => format!("{name} · {tabs} tabs"),
             None => name.to_string(),
         };
-        let stop = R::new(r.right() - 46.0, r.y + 3.0, 46.0, r.h - 6.0);
+        let stop = R::new(r.right() - 26.0, r.y + (r.h - 22.0) / 2.0, 22.0, 22.0);
         // Talk to it: steer, queue, or a new task.
-        let say = R::new(stop.x - 26.0, r.y + 3.0, 24.0, r.h - 6.0);
+        let say = R::new(stop.x - 24.0, stop.y, 22.0, 22.0);
         let say_hit = Hit::AgentMessage(head.owner.clone(), name.to_string());
         let sa = self.motion.hover(Self::button_id(&say_hit), if self.is_hover(&say_hit) { 1.0 } else { 0.0 });
         if sa > 0.01 {
@@ -2695,10 +2777,11 @@ impl Inner {
         let hit = Hit::AgentStopSession(head.owner.clone());
         let a = self.motion.hover(Self::button_id(&hit), if self.is_hover(&hit) { 1.0 } else { 0.0 });
         if a > 0.01 {
-            self.gfx.round(stop, lo.r_sm, th.accent.alpha(0.22 * a.min(1.0) * alpha));
+            self.gfx.round(stop, lo.r_sm, th.accent.alpha(0.16 * a.min(1.0) * alpha));
         }
-        self.gfx.text(&label, R::new(r.x + 19.0, r.y, stop_x - r.x - 23.0, r.h), lo.font(11.5, 600), th.dim.alpha(alpha));
-        self.gfx.text("Stop", stop, lo.font(11.0, 600).align(Align::Center), (if a > 0.5 { th.text } else { th.accent }).alpha(alpha));
+        self.label(&label, R::new(r.x + 22.0, r.y, stop_x - r.x - 26.0, r.h), th.faint.alpha(alpha));
+        // Stop: a square in the live colour, the one thing here that means "now".
+        self.gfx.round_stroke(R::new(stop.x + 6.0, stop.y + 6.0, 10.0, 10.0), 2.5, th.accent.alpha(alpha), 1.6);
         self.hit(stop, hit);
     }
 
@@ -2863,19 +2946,24 @@ impl Inner {
         let hov = self.is_hover(&h_) || self.is_hover(&Hit::TabX(t.id)) || self.is_hover(&Hit::TabSnd(t.id));
         let h = self.motion.hover(Id::Tab(t.id), if hov { 1.0 } else { 0.0 }).min(1.0);
         let pressed = self.press.as_ref() == Some(&h_);
+        let rad = lo.round(r.h);
         if pinned {
-            let base = if active { th.press } else { th.raise };
-            let lit = if active { base } else { base.mix(th.hover, h) };
+            let lit = th.raise.mix(th.hover, h * 0.6);
             // A pin with no page loaded stays in the row, but quieter: it is a place, not a page.
-            let c = if t.status == "off" && !active { lit.alpha(0.45 + 0.55 * h) } else { lit };
+            let c = if t.status == "off" && !active { lit.alpha(0.55 + 0.45 * h) } else { lit };
             self.gfx.round(r, lo.r_md, c.alpha(alpha));
+            if active {
+                self.gfx.round_stroke(r, lo.r_md, th.text.alpha(alpha), 1.5);
+            } else {
+                self.gfx.round_stroke(r, lo.r_md, th.line.alpha(alpha), 1.0);
+            }
         } else if !active && h > 0.01 {
             // Held down: one step further than hovering, so a click feels received.
             let c = if pressed { th.press } else { th.hover };
-            self.gfx.round(r, lo.r_md, c.alpha(h * alpha));
+            self.gfx.round(r, rad, c.alpha(h * alpha));
         } else if active && alpha < 1.0 {
             // The row the person just left behind, fading with the last frame.
-            self.gfx.round(r, lo.r_md, th.raise.alpha(alpha));
+            self.gfx.round(r, rad, th.pill.alpha(alpha));
         }
         self.hit(r, Hit::Tab(t.id));
         let show_x = !pinned && match lo.close_btn {
@@ -2905,10 +2993,17 @@ impl Inner {
             match bmp {
                 Some(b) => self.gfx.draw_bitmap(&b, fav, alpha * dim),
                 None => {
-                    let letter = if t.status == "new" { "+".to_string() } else { host(&t.url).chars().next().unwrap_or('·').to_uppercase().to_string() };
-                    let bg = th.press.mix(th.accent, 0.3);
-                    self.gfx.round(fav, 5.0, bg.alpha(alpha * dim));
-                    self.gfx.text(&letter, fav, lo.font(9.5, 650).align(Align::Center), th.text.alpha(alpha * dim));
+                    let on_pill = active && !pinned;
+                    if t.status == "new" {
+                        let ink = if on_pill { th.pill_ink } else { th.dim };
+                        self.gfx.round_stroke(fav, 5.0, ink.alpha(0.5 * alpha), 1.0);
+                        self.gfx.icon("plus", fav.x + 3.0, fav.y + 3.0, 10.0, ink.alpha(alpha));
+                    } else {
+                        let letter = host(&t.url).chars().next().unwrap_or('·').to_uppercase().to_string();
+                        self.gfx.round(fav, 5.0, th.raise.alpha(alpha * dim));
+                        self.gfx.round_stroke(fav, 5.0, th.line.alpha(alpha * dim), 1.0);
+                        self.gfx.text(&letter, fav, lo.font(9.5, 650).align(Align::Center), th.dim.alpha(alpha * dim));
+                    }
                 }
             }
         }
@@ -2939,7 +3034,8 @@ impl Inner {
             if self.is_hover(&Hit::TabX(t.id)) {
                 self.gfx.round(x, lo.r_sm, th.press.alpha(alpha));
             }
-            self.gfx.icon("close", x.x + 4.0, x.y + 4.0, 14.0, if self.is_hover(&Hit::TabX(t.id)) { th.text.alpha(alpha) } else { th.dim.alpha(alpha) });
+            let ink = if active { th.pill_ink } else if self.is_hover(&Hit::TabX(t.id)) { th.text } else { th.dim };
+            self.gfx.icon("close", x.x + 4.0, x.y + 4.0, 14.0, ink.alpha(alpha * if active { 0.75 } else { 1.0 }));
             self.hit(x, Hit::TabX(t.id));
             right = x.x - 2.0;
         }
@@ -2948,31 +3044,32 @@ impl Inner {
             if self.is_hover(&Hit::TabSnd(t.id)) {
                 self.gfx.round(b, lo.r_sm, th.press.alpha(alpha));
             }
-            self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 4.0, b.y + 4.0, 14.0, th.dim.alpha(alpha));
+            let ink = if active { th.pill_ink.alpha(0.75) } else { th.faint };
+            self.gfx.icon(if t.muted { "muted" } else { "sound" }, b.x + 4.0, b.y + 4.0, 14.0, ink.alpha(alpha));
             self.hit(b, Hit::TabSnd(t.id));
             right = b.x - 2.0;
         }
-        let badge_y = r.y + (r.h - 14.0) / 2.0;
+        let badge_y = r.y + (r.h - 16.0) / 2.0;
+        // A tag: small spaced capitals in a hairline pill, quiet on any row.
+        let tag_ink = if active { th.pill_ink.alpha(0.7) } else { th.faint };
+        let tag_line = if active { th.pill_ink.alpha(0.3) } else { th.line };
+        let tag = |me: &mut Self, text: &str, right: f32| -> f32 {
+            let f = lo.mono_at(9.0, 600);
+            let w = me.gfx.measure_tracked(text, f, 0.9) + 12.0;
+            let b = R::new(right - w, badge_y, w, 16.0);
+            me.gfx.round_stroke(b, 8.0, tag_line.alpha(alpha), 1.0);
+            me.gfx.text_tracked(text, R::new(b.x + 6.0, b.y, b.w, b.h), f, tag_ink.alpha(alpha), 0.9);
+            b.x - 4.0
+        };
         if t.agent {
-            let b = R::new(right - 24.0, badge_y, 22.0, 14.0);
-            self.gfx.round(b, 4.0, th.accent.alpha(0.22 * alpha));
-            self.gfx.text("AI", b, lo.font(9.0, 650).align(Align::Center), th.accent.alpha(alpha));
-            right = b.x - 4.0;
+            right = tag(self, "AI", right);
         }
         if t.agent_ok {
-            // Lent to agents: the AI badge as an outline, so it reads as "yours, but open to them".
-            let b = R::new(right - 24.0, badge_y, 22.0, 14.0);
-            self.gfx.round_stroke(b, 4.0, th.accent.alpha(0.6 * alpha), 1.0);
-            self.gfx.text("AI", b, lo.font(9.0, 650).align(Align::Center), th.accent.alpha(alpha));
-            right = b.x - 4.0;
+            // Lent to agents: the same tag, the person's tab open to them.
+            right = tag(self, "AI OK", right);
         }
         if t.private {
-            // Same shape as the AI badge, muted violet so it never reads as accent.
-            let mark = style::private_mark(self.theme.dark);
-            let b = R::new(right - 46.0, badge_y, 44.0, 14.0);
-            self.gfx.round(b, 4.0, mark.alpha(0.22 * alpha));
-            self.gfx.text("Private", b, lo.font(9.0, 650).align(Align::Center), mark.alpha(alpha));
-            right = b.x - 4.0;
+            right = tag(self, "PRIVATE", right);
         }
         if t.split {
             // Both halves wear it, so the pair reads as one thing in the list.
@@ -3001,8 +3098,9 @@ impl Inner {
             let h = host(&t.url);
             if h.is_empty() { "Untitled".into() } else { h }
         };
-        let c = if active || self.is_hover(&Hit::Tab(t.id)) { th.text } else { th.dim };
-        self.gfx.text(&title, R::new(r.x + 34.0, r.y, (right - r.x - 34.0).max(0.0), r.h), lo.font(13.0, 400), c.alpha(alpha * dim));
+        let c = if active { th.pill_ink } else if self.is_hover(&Hit::Tab(t.id)) { th.text } else { th.dim };
+        let f = if active { lo.font(13.0, 500) } else { lo.font(13.0, 400) };
+        self.gfx.text(&title, R::new(r.x + 34.0, r.y, (right - r.x - 34.0).max(0.0), r.h), f, c.alpha(alpha * dim));
     }
 
     // ------------------------------------------------------------ top rows
@@ -3320,80 +3418,133 @@ impl Inner {
     fn draw_ntp(&mut self, st: R, s: &UiState) {
         let lo = self.look.clone();
         let th = lo.theme;
+        if lo.ntp_bg != style::NtpBg::Wallpaper {
+            self.gfx.fill(st, th.bg);
+        }
         self.draw_wallpaper(st);
-        let field = self.ntp_geometry().field;
+        let geo = self.ntp_geometry();
+        let field = geo.field;
         let now = local_now();
-        // Entrance: the clock rises first, then the date, then the shortcuts.
-        let t1 = self.motion.enter(Id::Named("ntp1"), Prop::Opacity, 0.0, 1.0, 180, Ease::OutCubic);
-        let t2 = self.motion.enter(Id::Named("ntp2"), Prop::Opacity, 0.0, 1.0, 230, Ease::OutCubic);
-        let t3 = self.motion.enter(Id::Named("ntp3"), Prop::Opacity, 0.0, 1.0, 280, Ease::OutQuint);
-        let rise1 = self.motion.enter(Id::Named("ntp1"), Prop::Y, 14.0, 0.0, 180, Ease::OutCubic);
-        let big = lo.clock_px(st.w);
-        let clock_font = if lo.clock_display_face { lo.serif(big) } else { lo.font(big, 600) };
-        let hh = now.hour(lo.clock_24h);
-        let mm = format!("{:02}", now.m);
-        let ss = format!("{:02}", now.s);
-        let wh = self.gfx.measure(&hh, clock_font);
-        let wc = self.gfx.measure(":", clock_font);
-        let wm = self.gfx.measure(&mm, clock_font);
+        // Entrance: the clock rises first, then the numbers, then the cards.
+        let t1 = self.motion.enter(Id::Named("ntp1"), Prop::Opacity, 0.0, 1.0, 200, Ease::OutCubic);
+        let t2 = self.motion.enter(Id::Named("ntp2"), Prop::Opacity, 0.0, 1.0, 260, Ease::OutCubic);
+        let t3 = self.motion.enter(Id::Named("ntp3"), Prop::Opacity, 0.0, 1.0, 320, Ease::OutQuint);
+        let rise1 = self.motion.enter(Id::Named("ntp1"), Prop::Y, 12.0, 0.0, 220, Ease::OutCubic);
+        let rise2 = self.motion.enter(Id::Named("ntp2"), Prop::Y, 10.0, 0.0, 260, Ease::OutCubic);
         let x0 = field.x;
-        // The row the clock sits in, above the field. The greeting rides above it.
-        let row_h = big * 1.2;
-        let row_y = field.y - 70.0 - big * 1.1 + rise1;
-        let row = R::new(x0, row_y, wh + wc + wm + 20.0, row_h);
+        let top = field.y - 18.0 - if lo.clock { self.ntp_head_h() } else { 40.0 };
         if lo.clock {
+            let cf = self.ntp_clock_font(st.w);
+            let big = cf.size10 as f32 / 10.0;
+            let hh = now.hour(lo.clock_24h);
+            let mm = format!("{:02}", now.m);
+            let (wh, wc, wm) = (self.gfx.measure(&hh, cf), self.gfx.measure(":", cf), self.gfx.measure(&mm, cf));
+            let row = R::new(x0 - big * 0.04, top + rise1, wh + wc + wm + 20.0, big * 1.05);
             let mut cx = row.x;
-            self.gfx.text(&hh, R::new(cx, row.y, wh + 4.0, row.h), clock_font, th.text.alpha(t1));
+            self.gfx.text(&hh, R::new(cx, row.y, wh + 6.0, row.h), cf, th.text.alpha(t1));
             cx += wh;
-            self.gfx.text(":", R::new(cx, row.y, wc + 4.0, row.h), clock_font, th.faint.alpha(t1));
+            // The colon is the one live thing on the page: it carries the accent.
+            let colon = if lo.style == theme::Style::Glass { th.text.alpha(0.5) } else { th.accent };
+            self.gfx.text(":", R::new(cx, row.y, wc + 6.0, row.h), cf, colon.alpha(t1));
             cx += wc;
-            self.gfx.text(&mm, R::new(cx, row.y, wm + 8.0, row.h), if lo.clock_display_face { clock_font.italic() } else { clock_font }, th.text.alpha(t1));
+            self.gfx.text(&mm, R::new(cx, row.y, wm + 8.0, row.h), cf, th.text.alpha(t1));
             cx += wm;
             if lo.clock_seconds {
-                // The seconds, smaller and quieter: they are not the time you read.
-                let fs = lo.font(big * 0.34, 500);
+                let fs = lo.mono_at(big * 0.3, 600);
+                let ss = format!("{:02}", now.s);
                 let ws = self.gfx.measure(&ss, fs);
-                self.gfx.text(&ss, R::new(cx + 6.0, row.y + row_h * 0.28, ws + 8.0, row_h * 0.5), fs, th.dim.alpha(t1));
-                cx += ws + 14.0;
+                self.gfx.text(&ss, R::new(cx + 8.0, row.y + row.h * 0.18, ws + 8.0, row.h * 0.4), fs, th.faint.alpha(t1));
+                cx += ws + 16.0;
             }
             if !lo.clock_24h {
-                // am/pm, in either shape: the hour alone does not say.
-                let fs = lo.font(big * 0.28, 500);
-                let wsfx = self.gfx.measure(now.suffix(), fs);
-                self.gfx.text(now.suffix(), R::new(cx + 4.0, row.y + row_h * 0.30, wsfx + 8.0, row_h * 0.5), fs, th.dim.alpha(t1));
+                let fs = lo.mono_at(big * 0.24, 600);
+                let w = self.gfx.measure(now.suffix(), fs);
+                self.gfx.text(now.suffix(), R::new(cx + 6.0, row.y + row.h * 0.5, w + 8.0, row.h * 0.35), fs, th.faint.alpha(t1));
+            }
+            let date = now.date(lo.date_fmt).replace(", ", " · ");
+            if !date.is_empty() {
+                let dated = if matches!(lo.date_fmt, style::DateFmt::Long) { format!("{date} · {}", now.year) } else { date };
+                self.label(&dated, R::new(x0, row.y + big * 0.92 + 10.0, field.w * 0.55, 18.0), th.faint.alpha(t1));
+            }
+            if !lo.greeting.is_empty() {
+                self.gfx.text(&lo.greeting, R::new(x0, row.y - 28.0, field.w, 22.0), lo.font(14.0, 500), th.dim.alpha(t1));
+            }
+            // The two numbers Lumen is proud of, beside the clock.
+            let stats_w = (field.w * 0.44).min(440.0);
+            if field.w >= 640.0 {
+                let ch = 96.0;
+                let sy = top + big * 0.92 + 30.0 - ch + rise2;
+                let cw = (stats_w - 12.0) / 2.0;
+                let blocked = s.privacy_today.unwrap_or_default();
+                let mem = s.mem.map(|(b, _)| b as f64 / 1048576.0);
+                let open = s.tabs.iter().filter(|t| !t.agent).count();
+                let asleep = s.tabs.iter().filter(|t| !t.agent && matches!(t.status, "asleep" | "off")).count();
+                let cards = [
+                    ("Blocked today", group_digits(blocked.blocked()), String::new(), format!("ads and trackers · {} saved", pages::fmt_bytes(blocked.bytes as i64))),
+                    (
+                        "Lumen",
+                        mem.map(|m| format!("{}", m.round())).unwrap_or_else(|| "—".into()),
+                        if mem.is_some() { "MB".into() } else { String::new() },
+                        format!("{open} tabs · {asleep} asleep"),
+                    ),
+                ];
+                for (n, (cap, num, unit, sub)) in cards.iter().enumerate() {
+                    let r = R::new(field.right() - stats_w + n as f32 * (cw + 12.0), sy, cw, ch);
+                    self.card(r, t2);
+                    self.label(cap, R::new(r.x + 16.0, r.y + 12.0, r.w - 32.0, 16.0), th.faint.alpha(t2));
+                    let nf = lo.big_num;
+                    let nw = self.gfx.measure(num, nf);
+                    self.gfx.text(num, R::new(r.x + 16.0, r.y + 30.0, nw + 6.0, 40.0), nf, th.text.alpha(t2));
+                    if !unit.is_empty() {
+                        self.gfx.text(unit, R::new(r.x + 22.0 + nw, r.y + 40.0, 40.0, 26.0), lo.mono_at(13.0, 500), th.faint.alpha(t2));
+                    }
+                    self.gfx.text(sub, R::new(r.x + 16.0, r.y + 70.0, r.w - 32.0, 16.0), lo.font(11.5, 400), th.faint.alpha(t2));
+                }
             }
         }
-        let date = now.date(lo.date_fmt);
-        let below = if lo.clock { row.bottom() + 2.0 } else { row.y + row_h * 0.5 };
-        if !date.is_empty() {
-            self.gfx.text(&date.to_uppercase(), R::new(x0 + 2.0, below, field.w, 20.0), lo.font(12.0, 450), th.faint.alpha(t2));
-        }
-        if !lo.greeting.is_empty() {
-            self.gfx.text(&lo.greeting, R::new(x0 + 2.0, row.y - 26.0, field.w, 22.0), lo.font(14.0, 500), th.dim.alpha(t1));
-        }
-        // A private new tab page says what private means, right under the clock.
+        // A private new tab page says what private means, under the search bar.
         if s.active_tab().is_some_and(|t| t.private) {
             let mark = style::private_mark(th.dark);
-            let y = below + if date.is_empty() { 4.0 } else { 24.0 };
             self.gfx.text(
                 "Private tab. Nothing you do here is saved: no history, no cookies after the last private tab closes.",
-                R::new(x0 + 2.0, y, field.w, 20.0),
+                R::new(x0 + 4.0, field.y - 22.0, field.w, 18.0),
                 lo.font(12.0, 450),
                 mark.alpha(t2),
             );
         }
-        // Search field: the edit box sits on top of this.
+        // The search bar: the edit box sits on top of this.
         if lo.ntp_search {
-            self.gfx.round(field, lo.r_lg + 2.0, th.bg);
+            let fill = ntp_bar_fill(&lo);
+            let rad = lo.round(field.h);
             let focused = unsafe { GetFocus() } == self.ntp_edit;
-            self.gfx.round_stroke(field, lo.r_lg + 2.0, if focused { th.acc_soft } else { th.line }, if focused { 1.5 } else { 1.0 });
-            self.gfx.icon("search", field.x + 16.0, field.y + 15.0, 16.0, th.faint);
-            if wide_text(self.ntp_edit).is_empty() && !focused {
-                self.gfx.text("Search or enter address", R::new(field.x + 42.0, field.y, field.w - 58.0, field.h), lo.font(15.0, 400), th.faint);
+            self.gfx.round(field, rad, fill.alpha(t2));
+            let (ink, faint) = if lo.style == theme::Style::Signal { (th.pill_ink, th.pill_ink.alpha(0.6)) } else { (th.text, th.faint) };
+            if lo.style != theme::Style::Signal {
+                self.gfx.round_stroke(field, rad, if focused { th.accent } else { th.line }, if focused { 1.5 } else { 1.0 });
             }
+            self.gfx.icon("search", field.x + 22.0, field.y + (field.h - 18.0) / 2.0, 18.0, faint.alpha(t2));
+            if wide_text(self.ntp_edit).is_empty() && !focused {
+                self.gfx.text("Search the web or type an address", R::new(field.x + 52.0, field.y, field.w - 140.0, field.h), lo.font(15.0, 400), faint.alpha(t2));
+            }
+            // The key that gets here from anywhere.
+            let k = "Ctrl L";
+            let kf = lo.mono_at(10.5, 500);
+            let kw = self.gfx.measure(k, kf) + 14.0;
+            let kr = R::new(field.right() - 24.0 - kw, field.y + (field.h - 20.0) / 2.0, kw, 20.0);
+            self.gfx.round_stroke(kr, 5.0, faint.alpha(0.6 * t2), 1.0);
+            self.gfx.text(k, kr, kf.align(Align::Center), faint.alpha(t2));
+            let _ = ink;
             self.hit(field, Hit::NtpSearch);
         }
         self.draw_dial(s, t3);
+    }
+
+    /// A card: the look's raised surface, a hairline, and in Glass a frosted pane.
+    fn card(&self, r: R, a: f32) {
+        let lo = &self.look;
+        let th = lo.theme;
+        self.gfx.round(r, lo.r_card, th.raise.alpha(a));
+        self.gfx.round_stroke(r, lo.r_card, th.line.alpha(a), 1.0);
     }
 
     /// The speed dial: a grid of tiles, a favicon in a rounded square with its name under it.
@@ -3415,11 +3566,10 @@ impl Inner {
         let lifted = self.dial_drag.as_ref().filter(|d| d.moved).map(|d| d.from);
         // Where a lifted tile would land, so the target can be marked.
         let target = lifted.and_then(|_| geo.grid.index_at(self.mouse.0, self.mouse.1 - geo.top)).filter(|n| matches!(geo.cells.get(*n), Some(Cell::Tile(_))));
-        let tile_size = lo.dial_tile;
         for (n, cell) in geo.cells.iter().enumerate() {
             let (ox, oy) = geo.grid.origin(n);
             let cr = R::new(ox, top + oy, geo.grid.cell_w(), geo.grid.row_h());
-            let tile = R::new(cr.x + (cr.w - tile_size) / 2.0, cr.y + 4.0, tile_size, tile_size);
+            let tile = R::new(cr.x, cr.y, cr.w, NTP_CARD_H);
             let (hit, name, url, dim) = match *cell {
                 Cell::Tile(i) => {
                     let sc = &s.settings.shortcuts[i];
@@ -3436,20 +3586,17 @@ impl Inner {
             let me = lifted == Some(n) && matches!(cell, Cell::Tile(_));
             let hv = self.motion.hover(Id::Dial(n), if hov && !me { 1.0 } else { 0.0 });
             let a = t3 * if me { 0.3 } else if dim && !hov { 0.6 } else { 1.0 };
+            // The card lifts a little under the pointer.
+            let lift = hv * 2.0;
+            let tile = R::new(tile.x, tile.y - lift, tile.w, tile.h);
             self.draw_dial_tile(tile, &name, &url, matches!(cell, Cell::Add), hv, a);
-            self.gfx.text(
-                &name,
-                R::new(cr.x, tile.bottom() + 8.0, cr.w, 18.0),
-                lo.font(12.0, 450).align(Align::Center),
-                if hov { th.text.alpha(a) } else { th.dim.alpha(a) },
-            );
             if target == Some(n) && !me {
-                self.gfx.round_stroke(tile.inset(-3.0, -3.0), tile_size * 0.28, th.accent, 1.5);
+                self.gfx.round_stroke(tile.inset(-3.0, -3.0), lo.r_card + 3.0, th.accent, 1.5);
             }
-            self.hit(R::new(cr.x, cr.y, cr.w, tile_size + 30.0), hit);
+            self.hit(tile, hit);
             if let (Some(p), true) = (pin, hov) {
                 // "Keep it": a small button on the corner.
-                let b = R::new(tile.right() - 11.0, tile.y - 7.0, 22.0, 22.0);
+                let b = R::new(tile.right() - 30.0, tile.y + 8.0, 22.0, 22.0);
                 let bh = self.is_hover(&p);
                 self.gfx.circle(b.x + 11.0, b.y + 11.0, 11.0, if bh { th.accent } else { th.press });
                 self.gfx.icon("plus", b.x + 4.0, b.y + 4.0, 14.0, if bh { th.bg } else { th.text });
@@ -3469,37 +3616,42 @@ impl Inner {
         if let Some(from) = lifted
             && let Some(sc) = s.settings.shortcuts.get(from)
         {
-            let t = R::new(self.mouse.0 - tile_size / 2.0, self.mouse.1 - tile_size / 2.0, tile_size, tile_size);
+            let w = geo.grid.cell_w();
+            let t = R::new(self.mouse.0 - w / 2.0, self.mouse.1 - NTP_CARD_H / 2.0, w, NTP_CARD_H);
             self.draw_dial_tile(t, &speeddial::label(sc), &sc.url, false, 1.0, 0.95);
         }
     }
 
-    /// The square of a tile: the site's icon when it is known, its first letter on a tint when not.
+    /// A site card: the site's icon at the top, its name and address at the bottom. "+" is an
+    /// empty card that says what it does.
     fn draw_dial_tile(&mut self, r: R, name: &str, url: &str, plus: bool, hov: f32, a: f32) {
         let lo = self.look.clone();
         let th = lo.theme;
-        let radius = (r.w * 0.26).min(18.0);
         if plus {
-            self.gfx.round(r, radius, th.bg.alpha(a));
-            self.gfx.round_stroke(r, radius, th.line.alpha(a), 1.0);
-            self.gfx.icon("plus", r.x + (r.w - 20.0) / 2.0, r.y + (r.h - 20.0) / 2.0, 20.0, if hov > 0.5 { th.text.alpha(a) } else { th.faint.alpha(a) });
+            self.gfx.round(r, lo.r_card, th.hover.alpha(hov * 0.6 * a));
+            self.gfx.round_stroke(r, lo.r_card, th.line.alpha(a), 1.0);
+            let c = if hov > 0.5 { th.text } else { th.faint };
+            self.gfx.icon("plus", r.x + (r.w - 18.0) / 2.0, r.y + r.h / 2.0 - 22.0, 18.0, c.alpha(a));
+            self.gfx.text("Add a site", R::new(r.x, r.y + r.h / 2.0 + 2.0, r.w, 18.0), lo.font(12.0, 500).align(Align::Center), c.alpha(a));
             return;
         }
-        self.gfx.round(r, radius, if hov > 0.01 { th.press.alpha(a) } else { th.bg.alpha(a) });
-        let icon = R::new(r.x + (r.w - 28.0) / 2.0, r.y + (r.h - 28.0) / 2.0, 28.0, 28.0);
+        self.gfx.round(r, lo.r_card, th.raise.mix(th.hover, hov * 0.5).alpha(a));
+        self.gfx.round_stroke(r, lo.r_card, if hov > 0.5 { th.text.alpha(0.35 * a) } else { th.line.alpha(a) }, 1.0);
+        let icon = R::new(r.x + 14.0, r.y + 14.0, 26.0, 26.0);
         let host = speeddial::host_of(url);
         let key = site_key(&host);
         let png = self.site_favs.get(&host).cloned();
         match png.and_then(|p| self.gfx.bitmap(key, &p)) {
             Some(b) => self.gfx.draw_bitmap(&b, icon, a),
             None => {
-                // No icon yet (it arrives when the site has been opened): the first letter, tinted.
-                let tint = th.press.mix(th.accent, 0.3);
-                self.gfx.round(icon, 8.0, tint.alpha(a));
+                // No icon yet (it arrives when the site has been opened): its letter, quietly.
+                self.gfx.round(icon, 8.0, th.hover.alpha(a));
                 let letter = name.chars().next().or_else(|| host.chars().next()).unwrap_or('?').to_uppercase().to_string();
-                self.gfx.text(&letter, icon, lo.font(15.0, 650).align(Align::Center), th.text.alpha(a));
+                self.gfx.text(&letter, icon, lo.font(13.0, 700).align(Align::Center), th.dim.alpha(a));
             }
         }
+        self.gfx.text(name, R::new(r.x + 14.0, r.bottom() - 46.0, r.w - 28.0, 20.0), lo.font(12.5, 600), th.text.alpha(a));
+        self.gfx.text(&host, R::new(r.x + 14.0, r.bottom() - 28.0, r.w - 28.0, 16.0), lo.mono_at(10.5, 450), th.faint.alpha(a));
     }
 
     // ------------------------------------------------------------- input
@@ -4460,7 +4612,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let hdc = HDC(wp.0 as _);
                 // The Bookmarks search sits in a field drawn in the sidebar's color, like the new tab one.
                 let h = HWND(lp.0 as _);
-                let is_ntp = h == i.ntp_edit || h == i.bm_edit || h == i.drive_edit || h == i.say_edit;
+                if h == i.ntp_edit {
+                    let fill = i.theme.solid(ntp_bar_fill(&i.look));
+                    let ink = if i.look.style == theme::Style::Signal { i.theme.pill_ink } else { i.theme.text };
+                    let _ = SetTextColor(hdc, COLORREF(ink.colorref()));
+                    let _ = SetBkColor(hdc, COLORREF(fill.colorref()));
+                    return LRESULT(i.bar_brush.0 as isize);
+                }
+                let is_ntp = h == i.bm_edit || h == i.drive_edit || h == i.say_edit;
                 let _ = SetTextColor(hdc, COLORREF(i.theme.text.colorref()));
                 let bg = if is_ntp { i.theme.bg } else { i.theme.raise };
                 let _ = SetBkColor(hdc, COLORREF(bg.colorref()));

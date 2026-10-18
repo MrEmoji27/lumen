@@ -536,6 +536,26 @@ impl Gfx {
         }
     }
 
+    /// One line with its letters set `track` DIPs apart (the small capital labels), vertically
+    /// centred in r and clipped to it.
+    pub fn text_tracked(&self, s: &str, r: R, f: Font, c: Color, track: f32) {
+        let Some(fmt) = self.format(f) else { return };
+        let w = wide(s);
+        unsafe {
+            let Ok(layout) = self.dw.CreateTextLayout(&w, &fmt, r.w.max(1.0), r.h.max(1.0)) else { return };
+            if let Ok(l1) = layout.cast::<IDWriteTextLayout1>() {
+                let all = DWRITE_TEXT_RANGE { startPosition: 0, length: w.len() as u32 };
+                let _ = l1.SetCharacterSpacing(0.0, track, 0.0, all);
+            }
+            self.t().DrawTextLayout(Vector2 { X: r.x, Y: r.y }, &layout, self.b(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+    }
+
+    /// How wide `text_tracked` sets a line.
+    pub fn measure_tracked(&self, s: &str, f: Font, track: f32) -> f32 {
+        self.measure(s, f) + track * s.chars().count() as f32
+    }
+
     pub fn measure(&self, s: &str, f: Font) -> f32 {
         let Some(fmt) = self.format(f) else { return 0.0 };
         let w = wide(s);
