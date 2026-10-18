@@ -21,6 +21,8 @@ use crate::store::{CLOSE_BTNS, DATE_FORMATS, DENSITIES, LAYOUTS, MOTIONS, Settin
 #[derive(Clone, Debug, PartialEq)]
 pub enum PageHit {
     Seg(&'static str, &'static str),
+    /// The first-run picker's Start.
+    FirstRunDone,
     Toggle(&'static str),
     Slider(&'static str),
     Swatch(&'static str),
@@ -406,11 +408,12 @@ fn set(i: &mut Inner, k: &str, v: Value) {
         return;
     }
     all[k] = v;
+    let dark = st.dark;
     if let Ok(next) = serde_json::from_value::<Settings>(all) {
         st.settings = next.clone();
         // The look follows at once, so a drag previews as it moves: the theme,
         // the fonts, the spacing and the motion all come from the one struct.
-        let look = Look::of(&next, i.theme.dark, super::motion::system_allows());
+        let look = Look::of(&next, dark, super::motion::system_allows());
         i.theme = look.theme;
         i.look = look;
         send(&i.proxy, json!({"t": "settings", "v": next}));
@@ -771,23 +774,17 @@ fn draw_colors(i: &mut Inner, r: R, s: &UiState) -> f32 {
     let th = i.theme;
     let right = r.right();
     let mut y = r.y;
-    row_label(i, R::new(r.x, y, r.w, 54.0), "Palette", "The five preset looks.", 0.0);
-    let cur = s.settings.palette.clone();
-    let mut x = right - PALETTES.len() as f32 * 40.0 + 8.0;
-    for (key, _label) in PALETTES {
-        let (tile, dot) = Theme::swatch(key);
-        let c = (x + 16.0, y + 27.0);
-        if key == cur {
-            i.gfx.ring(c.0, c.1, 18.0, 18.0, th.text, 1.5);
-        }
-        i.gfx.circle(c.0, c.1, 14.0, tile);
-        i.gfx.circle(c.0, c.1, 6.0, dot);
-        i.hit(R::new(x + 2.0, y + 13.0, 28.0, 28.0), Hit::Page(PageHit::Swatch(key)));
-        x += 40.0;
+    let h = row_label(i, R::new(r.x, y, r.w, 70.0), "Look", "Three whole looks. Each sets colours, type, corners and motion together.", 3.0 * 100.0);
+    let mut x = right - 3.0 * 100.0 + 8.0;
+    for (key, name) in crate::store::LOOKS {
+        let t = R::new(x, y + (h - 60.0) / 2.0, 92.0, 60.0);
+        look_thumb(i, t, key, name, s.settings.look == key);
+        i.hit(t, Hit::Page(PageHit::Seg("look", key)));
+        x += 100.0;
     }
-    y += 54.0;
-    // The accent, and the way back to the palette's own.
-    let h = row_label(i, R::new(r.x, y, r.w, 40.0), "Accent", "Focus rings, toggles, the loading ring.", 110.0);
+    y += h.max(70.0);
+    // The accent, and the way back to the look's own.
+    let h = row_label(i, R::new(r.x, y, r.w, 40.0), "Accent", "One colour, for what is live: a working agent, a running download, the clock's colon.", 110.0);
     let cy = y + h / 2.0;
     let sw = R::new(right - 28.0, cy - 14.0, 28.0, 28.0);
     i.gfx.round(sw, i.look.r_md, th.accent);
@@ -829,6 +826,110 @@ fn draw_colors(i: &mut Inner, r: R, s: &UiState) -> f32 {
         y += h;
     }
     y - r.y
+}
+
+/// A look's small picture: its ground, its search bar, its cards, its name.
+pub(super) fn look_thumb(i: &mut Inner, t: R, key: &str, name: &str, on: bool) {
+    let th = i.theme;
+    let hx = |h: &str| super::theme::Color::from_hex(h).unwrap_or(th.text);
+    let (bg, bar, card, ink) = match key {
+        "glass" => (hx("#211a3a"), super::theme::Color(1.0, 1.0, 1.0, 0.16), super::theme::Color(1.0, 1.0, 1.0, 0.10), hx("#ffffff")),
+        "precise" => (hx("#0b0b0d"), hx("#16161a"), hx("#111114"), hx("#ececef")),
+        _ => (hx("#f1efe9"), hx("#141414"), hx("#ffffff"), hx("#141414")),
+    };
+    i.gfx.round(t, 12.0, bg);
+    if key == "glass" {
+        // Its wallpaper, in two soft blooms, kept inside the picture.
+        i.gfx.clip(t.inset(2.0, 2.0));
+        i.gfx.bloom(t.x + t.w * 0.12, t.y, t.w * 0.7, hx("#5a43e6").alpha(0.9));
+        i.gfx.bloom(t.right(), t.bottom(), t.w * 0.6, hx("#d2457e").alpha(0.8));
+        i.gfx.unclip();
+    }
+    let k = (t.w / 92.0).max(1.0);
+    let pad = 8.0 * k;
+    let mut y = t.y + pad;
+    // A big picture shows each look's clock, the thing that tells them apart at a glance.
+    if t.h > 100.0 {
+        let size = 34.0 * k.min(1.6);
+        let (face, colon) = match key {
+            "glass" => (i.look.font(size, 300), ink.alpha(0.55)),
+            "precise" => (super::gfx::Font { face: super::gfx::Face::Mono, ..i.look.font(size * 0.8, 600) }, hx("#8b7bff")),
+            _ => (super::gfx::Font { face: super::gfx::Face::Mono, ..i.look.font(size, 700) }, hx("#e8322b")),
+        };
+        let (hh, mm) = ("08", "23");
+        let wh = i.gfx.measure(hh, face);
+        let wc = i.gfx.measure(":", face);
+        let row = R::new(t.x + pad, y, t.w, size * 1.15);
+        i.gfx.text(hh, row, face, ink);
+        i.gfx.text(":", R::new(row.x + wh, row.y, wc + 4.0, row.h), face, colon);
+        i.gfx.text(mm, R::new(row.x + wh + wc, row.y, t.w, row.h), face, ink);
+        y += size * 1.25;
+    }
+    let bar_h = if t.h > 100.0 { 18.0 } else { 9.0 };
+    i.gfx.round(R::new(t.x + pad, y, t.w - 2.0 * pad, bar_h), bar_h / 2.0, bar);
+    y += bar_h + 5.0 * k;
+    let cw = (t.w - 2.0 * pad) / 3.0;
+    let ch = if t.h > 100.0 { 34.0 } else { 13.0 };
+    for n in 0..3 {
+        i.gfx.round(R::new(t.x + pad + n as f32 * cw, y, cw - 4.0, ch), 4.0 * k.min(2.0), card);
+    }
+    if key == "precise" {
+        i.gfx.round_stroke(t, 12.0, hx("#8b7bff").alpha(0.8), 1.0);
+    }
+    i.gfx.text(name, R::new(t.x + 8.0, t.bottom() - 19.0, t.w - 12.0, 16.0), i.look.font(10.5, 600), ink);
+    if on {
+        i.gfx.round_stroke(t.inset(-3.0, -3.0), 15.0, th.text, 2.0);
+    } else {
+        i.gfx.round_stroke(t, 12.0, th.line, 1.0);
+    }
+}
+
+/// The first thing a new person sees: pick a look. Signal is chosen; Start keeps it.
+pub fn draw_first_run(i: &mut Inner, st: R, s: &UiState) {
+    let th = i.theme;
+    let lo = i.look.clone();
+    i.gfx.fill(st, th.bg);
+    let a = i.motion.enter(super::motion::Id::Named("firstrun"), super::motion::Prop::Opacity, 0.0, 1.0, 260, super::motion::Ease::OutCubic);
+    let w = (st.w - 96.0).clamp(300.0, 980.0);
+    let x0 = st.x + (st.w - w) / 2.0;
+    let card_w = (w - 2.0 * 18.0) / 3.0;
+    let card_h = 250.0;
+    let top = st.y + (st.h - (120.0 + card_h + 80.0)) / 2.0;
+    i.gfx.text("Pick a look", R::new(x0, top, w, 44.0), lo.font(34.0, 700).align(Align::Center), th.text.alpha(a));
+    i.gfx.text(
+        "Each one is a whole Lumen: colours, type, corners and motion. Change it any time in Settings.",
+        R::new(x0, top + 50.0, w, 20.0),
+        lo.font(13.0, 400).align(Align::Center),
+        th.faint.alpha(a),
+    );
+    let blurb = [("signal", "Paper and ink, one red signal. Light and dark."), ("glass", "Frosted, soft, over a colour wallpaper."), ("precise", "Sharp and dense, one violet accent.")];
+    for (n, (key, name)) in crate::store::LOOKS.iter().enumerate() {
+        let r = R::new(x0 + n as f32 * (card_w + 18.0), top + 100.0, card_w, card_h);
+        let on = s.settings.look == *key;
+        let h = Hit::Page(PageHit::Seg("look", key));
+        let hov = i.is_hover(&h);
+        i.gfx.round(r, lo.r_card, th.raise.alpha(a));
+        i.gfx.round_stroke(r, lo.r_card, if on { th.text } else if hov { th.text.alpha(0.4) } else { th.line }, if on { 2.0 } else { 1.0 });
+        look_thumb(i, R::new(r.x + 10.0, r.y + 10.0, r.w - 20.0, 170.0), key, "", false);
+        i.gfx.text(name, R::new(r.x + 16.0, r.y + 190.0, r.w - 32.0, 22.0), lo.font(15.0, 700), th.text.alpha(a));
+        i.gfx.text(blurb[n].1, R::new(r.x + 16.0, r.y + 214.0, r.w - 32.0, 18.0), lo.font(12.0, 400), th.faint.alpha(a));
+        i.hit(r, h);
+    }
+    let name = crate::store::LOOKS.iter().find(|(k, _)| *k == s.settings.look).map_or("Signal", |(_, n)| n);
+    let label = format!("Start with {name}");
+    let f = lo.body_strong.align(Align::Center);
+    let bw = i.gfx.measure(&label, f) + 2.0 * lo.s5;
+    let note = "Lumen follows Windows' light or dark setting";
+    let nf = lo.font(12.0, 400);
+    let nw = i.gfx.measure(note, nf) + 14.0;
+    let by = top + 100.0 + card_h + 30.0;
+    let bx = st.x + (st.w - (nw + bw)) / 2.0 + nw;
+    i.gfx.text(note, R::new(bx - nw, by, nw - 12.0, 34.0), nf.align(Align::Right), th.faint.alpha(a));
+    let b = R::new(bx, by, bw, 34.0);
+    let h = Hit::Page(PageHit::FirstRunDone);
+    i.gfx.round(b, lo.round(34.0), if i.is_hover(&h) { th.pill } else { th.pill.alpha(0.92) });
+    i.gfx.text(&label, b, f, th.pill_ink);
+    i.hit(b, h);
 }
 
 /// A row's hover, for the small text actions.
@@ -2806,6 +2907,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
     let Some(s) = i.state.clone() else { return };
     match p {
         PageHit::Seg(k, v) => set(i, k, json!(v)),
+        PageHit::FirstRunDone => set(i, "first_run_done", json!(true)),
         PageHit::Toggle(k) => {
             let on = get(&s.settings, k).as_bool().unwrap_or(false);
             set(i, k, json!(!on));

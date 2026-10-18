@@ -724,6 +724,10 @@ fn main() {
     // Before WebView2 starts: its processes must be born inside the job.
     let job = monitor::Job::adopt_self();
     let mut settings = store::load_settings();
+    // (Debug shots of the picker keep it with LUMEN_TEST_FIRSTRUN.)
+    if headless() && !(cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_FIRSTRUN").is_some()) {
+        settings.first_run_done = true;
+    }
     let session = store::load_session();
     // Agent profiles whose sessions ended while Lumen was running: their folders are
     // deleted now, before WebView2 touches any profile.

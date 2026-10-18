@@ -1906,6 +1906,8 @@ impl Inner {
                 if a < 1.0 {
                     self.gfx.round(st, lo.page_radius, th.bg.alpha(1.0 - a));
                 }
+            } else if self.ntp_visible() && !s.settings.first_run_done {
+                pages::draw_first_run(self, st, s);
             } else if self.ntp_visible() {
                 self.draw_ntp(st, s);
             }

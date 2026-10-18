@@ -312,6 +312,29 @@ impl Gfx {
         unsafe { self.t().FillEllipse(&e, self.b(c)) };
     }
 
+    /// A soft bloom: `c` at the centre fading to nothing at radius `r`. Glass's wallpaper is
+    /// two of these on its ground; a smooth gradient needs no blur to look frosted.
+    pub fn bloom(&self, cx: f32, cy: f32, r: f32, c: Color) {
+        unsafe {
+            let t = self.t();
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: c.d2d() },
+                D2D1_GRADIENT_STOP { position: 0.55, color: c.alpha(0.45).d2d() },
+                D2D1_GRADIENT_STOP { position: 1.0, color: c.alpha(0.0).d2d() },
+            ];
+            let Ok(coll) = t.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+                center: Vector2 { X: cx, Y: cy },
+                gradientOriginOffset: Vector2 { X: 0.0, Y: 0.0 },
+                radiusX: r,
+                radiusY: r,
+            };
+            let Ok(b) = t.CreateRadialGradientBrush(&props, None, &coll) else { return };
+            let e = D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: r, radiusY: r };
+            t.FillEllipse(&e, &b);
+        }
+    }
+
     pub fn ring(&self, cx: f32, cy: f32, rx: f32, ry: f32, c: Color, w: f32) {
         let e = D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: rx, radiusY: ry };
         unsafe { self.t().DrawEllipse(&e, self.b(c), w, self.round.as_ref()) };

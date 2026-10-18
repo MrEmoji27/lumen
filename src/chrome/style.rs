@@ -267,9 +267,9 @@ pub fn style_of(s: &Settings) -> Style {
     Style::of(look_setting(s))
 }
 
-/// The look setting. Until settings carry one of their own, every Lumen is Signal.
-fn look_setting(_s: &Settings) -> &str {
-    "signal"
+/// The look setting: signal, glass or precise.
+fn look_setting(s: &Settings) -> &str {
+    &s.look
 }
 
 /// The content column of the list pages, and its least side margin. Layout, not
