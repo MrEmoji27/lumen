@@ -4,6 +4,11 @@ version = "0.6.7"
 edition = "2024"
 default-run = "lumen"
 
+# The version people see is 0.6.7.<release>: Cargo wants three numbers, Lumen shows four.
+# Each build that goes out bumps `release`; build.rs makes LUMEN_VERSION from both.
+[package.metadata.lumen]
+release = 1
+
 [dependencies]
 servo = { version = "0.7", optional = true }
 euclid = { version = "0.22", optional = true }

@@ -9,7 +9,9 @@ if ($porcelain) {
 }
 
 # 2. changelog line
-$version = (Get-Content Cargo.toml | Where-Object { $_ -match '^version\s*=' } | Select-Object -First 1) -replace '^version\s*=\s*"','' -replace '"\s*$',''
+$base = (Get-Content Cargo.toml | Where-Object { $_ -match '^version\s*=' } | Select-Object -First 1) -replace '^version\s*=\s*"','' -replace '"\s*$',''
+$rel = (Get-Content Cargo.toml | Where-Object { $_ -match '^release\s*=' } | Select-Object -First 1) -replace '^release\s*=\s*','' -replace '\s*$',''
+$version = if ($rel) { "$base.$rel" } else { $base }
 $changelog = Get-Content docs/changelog.md -Raw
 if (-not ($changelog -match ("## " + [regex]::Escape($version) + "\s*[-—]"))) {
     Write-Error "add a changelog line for $version"

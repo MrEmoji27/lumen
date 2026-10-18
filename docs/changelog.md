@@ -7,6 +7,23 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.7.1 — 2026-10-19
+
+The first side-by-side test against Brave, on the same YouTube video, found Lumen using four
+times the CPU. The cause was Lumen's own: one of its memory savings cost the graphics card's
+video decoding.
+
+- **Video decodes on the graphics card again.** "Graphics in the browser process" saved about
+  55 MB, and it also sent every video to the CPU: on a 30-second YouTube test, 8.3% CPU and 93
+  dropped frames with it, 4.3% and 11 without. It is off now, for everyone who had the old
+  default, and its row in Settings says what it costs.
+- **Menus and cards stay above a playing video.** A video repaints all the time and painted
+  over the chrome's floating cards: the tab menu in the compact sidebar was cut off at the
+  page's edge. Every page window clips its neighbours now.
+- The close, sound and picture-in-picture buttons on the active tab no longer turn into a dark
+  block under the pointer.
+- Versions now have four numbers, 0.6.7.1 and on, while 0.6.7 is the one being shared.
+
 ## 0.6.7 — 2026-10-19
 
 The one to hand to other people. Every piece of the interface is Lumen's own now, it installs

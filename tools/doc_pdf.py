@@ -74,7 +74,9 @@ p:has(+ table) { break-after: avoid; }
 def version():
     """The version, from Cargo.toml: the one number, never typed twice."""
     toml = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
-    return re.search(r'^version\s*=\s*"([^"]+)"', toml, flags=re.M).group(1)
+    base = re.search(r'^version\s*=\s*"([^"]+)"', toml, flags=re.M).group(1)
+    rel = re.search(r'^release\s*=\s*(\d+)', toml, flags=re.M)
+    return f"{base}.{rel.group(1)}" if rel else base
 
 
 def cover():

@@ -4933,7 +4933,7 @@ impl Inner {
     /// After an update, once: a quiet note at the top of the start page that this version is
     /// new, which opens the changelog. Its x puts it away unread.
     fn draw_update_note(&mut self, st: R, s: &UiState) {
-        let now = env!("CARGO_PKG_VERSION");
+        let now = env!("LUMEN_VERSION");
         // Never in a headless run, but for a debug shot of it (LUMEN_TEST_NOTE).
         let shot = cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_NOTE").is_some();
         if crate::headless() && !shot {

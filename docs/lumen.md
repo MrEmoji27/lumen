@@ -1,12 +1,12 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7,
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7.1,
 19 October 2026. Early, in daily use by one person, Windows only.
 
 ## Get it
 
-`lumen-0.6.7-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
-Or take `lumen-0.6.7-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
+`lumen-0.6.7.1-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
+Or take `lumen-0.6.7.1-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
 Windows 10 or 11, 64-bit. Lumen is not signed yet, so the first time Windows may say it protected
 your PC: click **More info**, then **Run anyway**. Lumen needs Microsoft WebView2, which Windows
 nearly always has; the installer fetches it if not, and Lumen says so if it is missing. Your

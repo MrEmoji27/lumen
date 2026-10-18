@@ -169,7 +169,7 @@ mod tests {
     fn the_real_file_parses_into_releases() {
         let all = releases();
         assert!(all.len() >= 10, "{} releases", all.len());
-        assert_eq!(all[0].version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(all[0].version, env!("LUMEN_VERSION"));
         assert!(!all[0].date.is_empty(), "the newest release says when");
         assert!(!all[0].items.is_empty(), "and what changed");
         // A plain heading with no date at all is still a release.

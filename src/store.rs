@@ -264,7 +264,7 @@ impl Default for Settings {
         Self {
             version: SETTINGS_VERSION,
             first_run_done: false,
-            seen_version: env!("CARGO_PKG_VERSION").into(),
+            seen_version: env!("LUMEN_VERSION").into(),
             palette: "graphite".into(),
             accent: String::new(),
             recent_colors: Vec::new(),

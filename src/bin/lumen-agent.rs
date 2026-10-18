@@ -137,7 +137,7 @@ fn start_detached(exe: &std::path::Path) -> Result<(), String> {
 }
 
 /// Which build this is: the version, then the commit it was built from and its date.
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LUMEN_BUILD"), ")");
+const VERSION: &str = concat!(env!("LUMEN_VERSION"), " (", env!("LUMEN_BUILD"), ")");
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -423,7 +423,7 @@ fn saved_session(name: &str) -> String {
 fn open_session(door: &Door, name: &str) -> Result<String, String> {
     let label = if clean_name(name) == "cli" { "cli".to_string() } else { format!("cli-{}", clean_name(name)) };
     let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": env!("CARGO_PKG_VERSION")},
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": env!("LUMEN_VERSION")},
         "_meta": {"lumen": {"profile": clean_name(name), "bridge": VERSION}}}});
     match door.post(&hello, "")? {
         (200, sid, _) if !sid.is_empty() => {

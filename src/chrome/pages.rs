@@ -382,7 +382,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ]),
         ("Keys", vec![Keys]),
         ("About", vec![
-            Button(concat!("Lumen ", env!("CARGO_PKG_VERSION")), "What changed in this version and every one before it, from the changelog built into Lumen.", "What's new", PageHit::Panels("changes")),
+            Button(concat!("Lumen ", env!("LUMEN_VERSION")), "What changed in this version and every one before it, from the changelog built into Lumen.", "What's new", PageHit::Panels("changes")),
             Button("Report a problem", "A plain-text report you read in full before it goes anywhere: version, Windows, your setup, recent crashes and stalls. No addresses, no page titles, nothing typed into pages.", "Make a report…", PageHit::Panels("bugreport")),
         ]),
     ]
@@ -2280,7 +2280,7 @@ fn draw_changes(i: &mut Inner, st: R) {
         let blocks = change_blocks(i, text_w);
         i.page.changes = Some((text_w, blocks));
     }
-    let now = env!("CARGO_PKG_VERSION");
+    let now = env!("LUMEN_VERSION");
     i.gfx.clip(st);
     let mut y = st.y + lo.s5 + 2.0 - i.page.scroll;
     y = title_block(i, col, y, "What's new", &format!("Lumen {now} · the changelog, built in"));
@@ -2490,7 +2490,7 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.text("Settings", R::new(nav.x + 24.0, nav.y + 26.0, nav.w - 32.0, 36.0), lo.font(26.0, 700), th.text);
     // Which build this is, under the title: the question people ask before reporting a bug.
     let build = env!("LUMEN_BUILD").split_whitespace().next().unwrap_or("");
-    i.label(&format!("Lumen {} · {build}", env!("CARGO_PKG_VERSION")), R::new(nav.x + 24.0, nav.y + 64.0, nav.w - 32.0, 16.0), th.faint);
+    i.label(&format!("Lumen {} · {build}", env!("LUMEN_VERSION")), R::new(nav.x + 24.0, nav.y + 64.0, nav.w - 32.0, 16.0), th.faint);
     // The search box: a pill, the box itself is the edit control over it.
     let sr = set_search_rect(st);
     let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.set_edit;
@@ -3282,13 +3282,13 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::PermDefault(kind, v) => send(&i.proxy, json!({"t": "permDefault", "kind": kind, "v": v})),
         PageHit::Panels(which) => {
             // Opening the changelog is reading it: the start page's note goes.
-            if which == "changes" && s.settings.seen_version != env!("CARGO_PKG_VERSION") {
-                set(i, "seen_version", json!(env!("CARGO_PKG_VERSION")));
+            if which == "changes" && s.settings.seen_version != env!("LUMEN_VERSION") {
+                set(i, "seen_version", json!(env!("LUMEN_VERSION")));
             }
             send(&i.proxy, json!({"t": "panel", "open": true, "which": which}));
         }
         PageHit::OpenTab(url) => send(&i.proxy, json!({"t": "openTab", "url": url})),
-        PageHit::SeenVersion => set(i, "seen_version", json!(env!("CARGO_PKG_VERSION"))),
+        PageHit::SeenVersion => set(i, "seen_version", json!(env!("LUMEN_VERSION"))),
         PageHit::BugSend => {
             if !s.bug_sent {
                 send(&i.proxy, json!({"t": "bugSend", "what": super::wide_text(i.bug_edit)}));

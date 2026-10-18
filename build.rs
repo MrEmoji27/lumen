@@ -9,6 +9,25 @@ fn main() {
         .unwrap();
     angle_dlls();
     stamp();
+    version();
+}
+
+/// LUMEN_VERSION: the version people see. Cargo's three numbers, then the release number
+/// from `[package.metadata.lumen]` when it is there: 0.6.7.1.
+fn version() {
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    let toml = fs::read_to_string("Cargo.toml").unwrap_or_default();
+    let base = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let release = toml
+        .split("[package.metadata.lumen]")
+        .nth(1)
+        .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("release").map(|r| r.trim_start_matches([' ', '=']).trim().to_string())))
+        .filter(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()));
+    let v = match release {
+        Some(r) => format!("{base}.{r}"),
+        None => base,
+    };
+    println!("cargo:rustc-env=LUMEN_VERSION={v}");
 }
 
 /// The build stamp every exe carries: the commit it was built from and that commit's

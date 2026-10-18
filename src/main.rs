@@ -807,7 +807,7 @@ fn show_window(w: &tao::window::Window) {
 }
 
 /// Which Lumen this is: the version, then the commit it was built from and its date.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LUMEN_BUILD"), ")");
+pub const VERSION: &str = concat!(env!("LUMEN_VERSION"), " (", env!("LUMEN_BUILD"), ")");
 
 /// When this run began, for the startup lines below.
 static BORN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -3546,7 +3546,7 @@ impl App {
     fn make_bug_report(&self) -> String {
         let webview = self.ctx.env.borrow().as_ref().map(engine::browser_version).unwrap_or_default();
         let facts = bugreport::Facts {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: env!("LUMEN_VERSION").to_string(),
             build: env!("LUMEN_BUILD").to_string(),
             os: bugreport::os_version(),
             webview,
@@ -4997,7 +4997,7 @@ impl App {
                     self.chrome.flash("Sending…".into());
                     self.push();
                     let _ = std::thread::Builder::new().name("lumen-report".into()).spawn(move || {
-                        let r = bugreport::send(&text, kind, env!("CARGO_PKG_VERSION"));
+                        let r = bugreport::send(&text, kind, env!("LUMEN_VERSION"));
                         let msg = json!({"t": "bugSent", "ok": r.is_ok(), "why": r.err().unwrap_or_default()});
                         let _ = proxy.send_event(Ev::Ui(msg.to_string()));
                     });

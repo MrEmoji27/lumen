@@ -659,7 +659,7 @@ pub fn start(settings: &Settings, restored: usize) -> bool {
     journal.write(
         "start",
         &[
-            ("v", s(env!("CARGO_PKG_VERSION"))),
+            ("v", s(env!("LUMEN_VERSION"))),
             ("headless", json!(crate::headless())),
             ("theme", s(&settings.theme)),
             ("compact", json!(settings.compact)),
