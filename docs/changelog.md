@@ -7,6 +7,16 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.4.2 — 2026-10-18
+
+From a test drive on real pages (httpbin, Wikipedia):
+
+- `browser_fill` sets time, date, colour and range inputs; typed keys never reached them.
+- `browser_table` reads tables with header rows that span: each column gets one name
+  (`Urban area / Population`), cells that span rows fill each row, footnote marks are dropped.
+- A batch's step line says which tab an open made: `1 ok browser_open 812 ms: tab 3`.
+- A snapshot cut at its line cap says so and points at `browser_snapshot`.
+
 ## 0.4.1 — 2026-10-18
 
 - The version shows where people look: the Dashboard's header says `Lumen 0.4.1 (commit date)`,

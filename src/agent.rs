@@ -1625,6 +1625,9 @@ fn step_lines(done: &[Done]) -> String {
     let mut out = String::new();
     for (i, d) in done.iter().enumerate() {
         match &d.out {
+            Ok(_) if d.tool == "browser_open" && d.tab.is_some() => {
+                out.push_str(&format!("{} ok {} {} ms: tab {}\n", i + 1, d.tool, d.ms, d.tab.unwrap_or(0)))
+            }
             Ok(_) => out.push_str(&format!("{} ok {} {} ms\n", i + 1, d.tool, d.ms)),
             Err(e) => out.push_str(&format!("{} ERR {}: {}\n", i + 1, d.tool, e.lines().next().unwrap_or(""))),
         }
@@ -1672,6 +1675,9 @@ fn fill(sh: &Arc<Shared>, who: &Who, args: &Value) -> Result<Vec<Value>, String>
                 let now = eval_at(sh, who, tab, &parse_ref(&r), "return !!e.checked;", false)?.as_bool().unwrap_or(false);
                 if now != on { run(sh, who, "browser_click", &json!({"tab": tab, "ref": r})) } else { Ok(Vec::new()) }
             }
+            // A time or date field shows a picker and takes no typed text: set its value the
+            // way a page's own script would, with the events frameworks listen for.
+            "set" => eval_at(sh, who, tab, &parse_ref(&r), &SET_JS.replace("__TEXT__", &json!(want).to_string()), false).map(|_| Vec::new()),
             _ => run(sh, who, "browser_type", &json!({"tab": tab, "ref": r, "text": want})),
         };
         if let Err(e) = step {
@@ -2629,8 +2635,8 @@ fn snapshot_full(sh: &Arc<Shared>, who: &Who, tab: u64, args: &Value, images: bo
         out.push('\n');
         out.push_str(&lines.join("\n"));
     }
-    if args["viewport"].as_bool().unwrap_or(false) && outside > 0 {
-        out.push_str(&format!("\n… {outside} more outside the view: browser_snapshot for all"));
+    if args["viewport"].as_bool().unwrap_or(false) && outside + more > 0 {
+        out.push_str(&format!("\n… {} more: browser_snapshot for all", outside + more));
     } else if more > 0 {
         out.push_str(&format!("\n… {more} more elements; use scope or max_lines"));
     }
@@ -2743,12 +2749,14 @@ return {title:document.title,url:location.href,lines,more,frames,outside,control
 /// A table as columns (th of thead, or of the first row) and rows of cells: the names once,
 /// not once a row. `pick()` finds the table; it is defined by the caller.
 const TABLE_JS: &str = r#"const t=pick();if(!t||t.tagName!=='TABLE')return {error:'no table there'};
-const tx=c=>(c.innerText||'').replace(/\s+/g,' ').trim();const all=[...t.rows];if(!all.length)return {error:'the table is empty'};
-let head=t.tHead&&t.tHead.rows.length?[...t.tHead.rows[0].cells]:null;let body=all;
-if(head){body=all.filter(r=>r.parentElement!==t.tHead)}else if([...all[0].cells].every(c=>c.tagName==='TH')){head=[...all[0].cells];body=all.slice(1)}
-const columns=head?head.map((c,i)=>tx(c)||('col'+(i+1))):[];const rows=[];
-for(const r of body.slice(0,__MAX__)){const cs=[...r.cells].map(tx);if(cs.some(Boolean))rows.push(cs)}
-return {columns,rows,more:Math.max(0,body.length-__MAX__)};"#;
+const tx=c=>(c.innerText||'').replace(/\[[^\]]*\]/g,'').replace(/\s+/g,' ').trim();const all=[...t.rows];if(!all.length)return {error:'the table is empty'};
+const grid=rows=>{const g=[];rows.forEach((r,y)=>{g[y]=g[y]||[];let x=0;for(const c of r.cells){while(g[y][x]!==undefined)x++;
+ const cs=Math.max(1,c.colSpan|0),rs=Math.max(1,c.rowSpan|0),v=tx(c);for(let dy=0;dy<rs;dy++){g[y+dy]=g[y+dy]||[];for(let dx=0;dx<cs;dx++)g[y+dy][x+dx]=v}x+=cs}});return g.slice(0,rows.length)};
+let hn=t.tHead?t.tHead.rows.length:0;if(!hn){while(hn<all.length&&[...all[hn].cells].every(c=>c.tagName==='TH'))hn++}
+const g=grid(all);const head=g.slice(0,hn);const body=g.slice(hn);const w=Math.max(0,...g.map(r=>r.length));
+const columns=[];for(let x=0;x<w;x++){const parts=[];for(const r of head){const v=r[x]||'';if(v&&parts[parts.length-1]!==v)parts.push(v)}columns.push(parts.join(' / ')||('col'+(x+1)))}
+const rows=[];for(const r of body.slice(0,__MAX__)){const cs=[];for(let x=0;x<w;x++)cs.push(r[x]||'');if(cs.some(Boolean))rows.push(cs)}
+return {columns:hn?columns:[],rows,more:Math.max(0,body.length-__MAX__)};"#;
 
 /// The page's links, deduped by URL: `[text](url)`. Only http(s).
 const LINKS_JS: &str = r#"(()=>{const O=__OPT__;const seen=new Set();const out=[];let more=0;
@@ -2760,7 +2768,8 @@ for(const a of document.querySelectorAll('a[href]')){let u;try{u=new URL(a.href,
 return {links:out,more}})()"#;
 
 /// One field as `browser_fill` sets it: what kind it is, and what it holds after.
-const FIELD_KIND_JS: &str = "const t=(e.type||'').toLowerCase();return e.tagName==='SELECT'?'select':(t==='checkbox'||t==='radio')?'check':'text';";
+const FIELD_KIND_JS: &str = "const t=(e.type||'').toLowerCase();return e.tagName==='SELECT'?'select':(t==='checkbox'||t==='radio')?'check':\
+['date','time','datetime-local','month','week','color','range'].includes(t)?'set':'text';";
 const FIELD_VALUE_JS: &str = "if(e.tagName==='SELECT')return e.options[e.selectedIndex]?[e.value,e.options[e.selectedIndex].text]:['',''];\
 const t=(e.type||'').toLowerCase();if(t==='checkbox'||t==='radio')return [String(e.checked),''];return [e.isContentEditable?e.innerText:String(e.value),''];";
 
