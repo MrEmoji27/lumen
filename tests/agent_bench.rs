@@ -55,12 +55,33 @@ for(let i=0;i<50;i++)h+='<tr><td>Kettle '+i+'</td><td>'+(20+i)+'.99</td><td>'+(i
 document.getElementById('t').innerHTML=h+'</tbody></table>'},300)</script>"#
             .into(),
         "/search" => r#"<title>Search</title><h1>Search the shop</h1><form action="/results"><input name="q" aria-label="Search"><button>Search</button></form>"#.into(),
+        "/steps" => {
+            // Forty links and a button that changes its own name: one interaction, one line.
+            let mut b = String::from(
+                "<title>Steps</title><h1>Steps</h1>\
+                 <button data-n=\"0\" onclick=\"this.dataset.n=+this.dataset.n+1;this.textContent='Step '+this.dataset.n\">Step 0</button><ul>",
+            );
+            for i in 0..40 {
+                b += &format!("<li><a href='/item/{i}'>Row {i}</a></li>");
+            }
+            b + "</ul>"
+        }
         "/results" => {
             let mut b = String::from("<title>Results</title><h1>Results</h1><ol>");
             for i in 0..10 {
                 b += &format!("<li><a href='/item/{i}'>Kettle model {i}</a> <span>{}.99</span></li>", 20 + i);
             }
             b + "</ol>"
+        }
+        "/products" => {
+            // Fifty products in a table: what extract, browser_table and browser_read each cost.
+            let mut b = String::from(
+                "<title>Products</title><h1>Products</h1><table><thead><tr><th>Name</th><th>Price</th><th>Link</th></tr></thead><tbody>",
+            );
+            for i in 0..50 {
+                b += &format!("<tr><td class=\"n\">Kettle {i}</td><td class=\"p\">{}.99</td><td><a href=\"/item/{i}\">Kettle {i}</a></td></tr>", 20 + i);
+            }
+            b + "</tbody></table>"
         }
         p if p.starts_with("/item/") => {
             let n = p.trim_start_matches("/item/");
@@ -245,6 +266,36 @@ fn t_two_tabs(d: &mut Door, base: &str) {
     d.close(b);
 }
 
+/// Five interactions on one page, each followed by a whole snapshot.
+fn t_five_full(d: &mut Door, base: &str) {
+    five_steps(d, base, false);
+}
+
+/// The same five, with `diff: true`: only the line a click changed comes back.
+fn t_five_diff(d: &mut Door, base: &str) {
+    five_steps(d, base, true);
+}
+
+fn five_steps(d: &mut Door, base: &str, diff: bool) {
+    let tab = d.open(&format!("{base}/steps"));
+    let snap = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true, "diff": diff}));
+    if diff {
+        // The first look at a tab is the whole page, and says so.
+        assert!(snap.contains("first snapshot"), "{snap}");
+    }
+    let button = find_ref(&snap, &["button \"Step 0\""]);
+    for i in 0..5 {
+        d.tool("browser_click", json!({"tab": tab, "ref": button}));
+        let snap = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true, "diff": diff}));
+        if diff {
+            assert!(snap.contains("1 removed, 1 added"), "click {}: {snap}", i + 1);
+        } else {
+            assert!(snap.contains(&format!("Step {}", i + 1)), "click {}: {snap}", i + 1);
+        }
+    }
+    d.close(tab);
+}
+
 // ------------------------------------------------- the same tasks, with the newer tools
 
 fn t_form_fill(d: &mut Door, base: &str) {
@@ -270,6 +321,33 @@ fn t_table_tool(d: &mut Door, base: &str) {
     d.tool("browser_wait", json!({"tab": tab, "selector": "table tr:nth-child(50)"}));
     let s = d.tool("browser_table", json!({"tab": tab}));
     assert!(s.starts_with("50 rows") && s.contains("\"columns\":[\"Name\",\"Price\",\"Stock\"]") && s.contains("[\"Kettle 49\","), "{s}");
+    d.close(tab);
+}
+
+/// Fifty products as JSON: the fields, the price, the link.
+fn t_extract_products(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/products"));
+    let s = d.tool(
+        "browser_extract",
+        json!({"tab": tab, "items": "tbody tr",
+               "fields": {"name": "td.n", "price": "td.p", "href": {"selector": "a", "attr": "href"}}}),
+    );
+    assert!(s.starts_with("50 items") && s.contains("Kettle 49") && s.contains("/item/49"), "{s}");
+    d.close(tab);
+}
+
+/// The same fifty products through browser_table, and the whole page through browser_read.
+fn t_table_products(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/products"));
+    let s = d.tool("browser_table", json!({"tab": tab}));
+    assert!(s.starts_with("50 rows") && s.contains("Kettle 49"), "{s}");
+    d.close(tab);
+}
+
+fn t_read_products(d: &mut Door, base: &str) {
+    let tab = d.open(&format!("{base}/products"));
+    let s = d.tool("browser_read", json!({"tab": tab, "max_chars": 20000}));
+    assert!(s.contains("Kettle 49"), "{s}");
     d.close(tab);
 }
 
@@ -384,9 +462,14 @@ fn bench() {
         ("table built by JS", t_table),
         ("ten-step workflow", t_workflow),
         ("two tabs, two reads", t_two_tabs),
+        ("five steps, full snapshots", t_five_full),
+        ("five steps, diff snapshots", t_five_diff),
         ("form, browser_fill", t_form_fill),
         ("links, browser_links", t_links_tool),
         ("table, browser_table", t_table_tool),
+        ("extract 50 products", t_extract_products),
+        ("table 50 products", t_table_products),
+        ("read 50 products", t_read_products),
         ("workflow, Luau script", t_workflow_script),
         ("two tabs, browser_batch", t_two_tabs_batch),
         ("first open, fresh session", t_first_open),

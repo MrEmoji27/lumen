@@ -71,7 +71,7 @@ The design was drawn first, as a page of mockups, and approved before a line of 
 | Binaries | `lumen.exe` 16.5 MB, `lumen-agent.exe` 2.1 MB (release, stripped) |
 | Tests | 374 unit tests, plus live suites that drive a real headless Lumen |
 | Content blocker | adblock-rust 0.13, EasyList, EasyPrivacy, uBlock lists; about 1.7 µs a request |
-| Agent interface | MCP: an HTTP endpoint on localhost behind a token, and a stdio bridge; 47 tools |
+| Agent interface | MCP: an HTTP endpoint on localhost behind a token, and a stdio bridge; 48 tools |
 | Scripts | Luau (sandboxed, through mlua), for scripts the person writes and agents run |
 | Data | `%APPDATA%\Lumen`: settings, session, filters, history, the WebView2 profile |
 
@@ -200,6 +200,8 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 - Three looks (Signal, Glass, Precise), in vertical, horizontal or hybrid layouts. Colours,
   fonts, shapes, motion, clock and wallpaper can all be changed, and Settings has a search box.
 - Content blocking for ads, trackers and cookie banners, on by default.
+- Userscripts: `*.user.js` files in Lumen's data folder, with Chrome-style `@match`
+  patterns, run in your own tabs only. See [docs/userscripts.md](userscripts.md).
 - Pop-ups blocked unless you clicked for them. Malware and phishing sites get a warning page.
 - A privacy report: what was blocked and what was counted, with trends.
 - Reader view, dark pages, translation on the PC, read aloud.
@@ -237,8 +239,9 @@ config holds a path, never a secret.
 - Replies say what happened: a failed page's HTTP status, what a click changed or that it changed
   nothing. Page text is fenced, so a page cannot pose as the person.
 - Fewer calls: `browser_batch` (up to 20 calls in one), `browser_fill` (a whole form),
-  `browser_table`, `browser_links`. And Luau scripts: the person puts `.luau` files in a folder,
-  agents list and run them. Every call a script makes is checked as if the agent made it.
+  `browser_table`, `browser_extract` (a repeating list as JSON), `browser_links`. And Luau scripts:
+  the person puts `.luau` files in a folder, agents list and run them. Every call a script makes is
+  checked as if the agent made it.
 
 The first real test, on 18 October, found reading fast and clicking broken: in a background tab a
 click did nothing and still answered "clicked". 0.3.0 fixed that with the stage, 0.4.0 made every
@@ -260,8 +263,8 @@ In order. Each step ships as its own version, with a line in [the changelog](cha
 4. **Talking to an agent.** A text field to steer an agent now, queue its next task, or start a
    new one. *Done in 0.5.0.*
 5. **Speed for agents.** Fewer calls and smaller replies: batches of steps, Luau scripts, and
-   higher-level tools for forms and tables. *Done in 0.4.0.* Snapshots that send only what
-   changed are still to do.
+   higher-level tools for forms and tables. *Done in 0.4.0.* Snapshots send only what changed
+   (`diff`), and a ref keeps working while its element is in the page.
 6. **Headless trims.** Measure first, then cut what an off-screen Lumen still does for nobody.
 7. **The comparison.** Lumen against other Chromium-based programs on the same pages and the same
    machine, published with the method.
@@ -280,8 +283,9 @@ page through Ollama, and an optional PDF editor that starts only when asked.
 ## Limits
 
 - Windows only. WebView2 is the engine.
-- No Chrome or Edge extensions. Ad blocking, dark pages, passwords through KeePass and translation are
-  built in. Anything else is not there.
+- No Chrome or Edge extensions: userscripts cover most of what people install them for,
+  and ad blocking, dark pages, passwords through KeePass and translation are built in.
+  Anything else is not there.
 - Early. Built in five days by one person and Claude, with AI workers writing much of the code and
   every change reviewed before it landed. Expect rough edges.
 

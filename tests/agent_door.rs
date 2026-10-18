@@ -233,6 +233,13 @@ impl Lumen {
         }
         settings["agent_port"] = json!(port);
         std::fs::write(dir.join("settings.json"), settings.to_string()).unwrap();
+        // A userscript the person put in: it marks every test page it matches.
+        std::fs::create_dir_all(dir.join("userscripts")).unwrap();
+        std::fs::write(
+            dir.join("userscripts").join("mark.user.js"),
+            "// ==UserScript==\n// @name Mark\n// @match *://127.0.0.1/*\n// ==/UserScript==\nconst b=document.createElement('button');b.textContent='Userscript ran';document.body.append(b);\n",
+        )
+        .unwrap();
         if !tabs.is_empty() {
             let saved: Vec<Value> = tabs.iter().map(|u| json!({"url": u, "title": "", "favicon": "", "pinned": false})).collect();
             std::fs::write(dir.join("session.json"), json!({"tabs": saved, "active": 0, "width": 1000.0, "height": 700.0}).to_string()).unwrap();
@@ -395,15 +402,35 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
             ("text/html", b"<title>State page</title><script>localStorage.setItem('who','agent')</script>".to_vec())
         }
         "/upload" => ("text/html", b"<title>Upload page</title><input type=file id=f name=f aria-label=Pick><div id=out></div>".to_vec()),
+        // One button that changes its own name, one that adds a button, and a link that
+        // stays: a page for the snapshot-diff checks.
+        "/steps" => (
+            "text/html",
+            b"<title>Steps</title><h1>Steps</h1>\
+              <button data-n=\"0\" onclick=\"this.dataset.n=+this.dataset.n+1;this.textContent='Step '+this.dataset.n\">Step 0</button>\
+              <button onclick=\"const b=document.createElement('button');b.textContent='Extra';document.body.append(b)\">Add</button>\
+              <a href=\"/plain\">Away</a>"
+                .to_vec(),
+        ),
         "/file.bin" => {
             extra += "Content-Disposition: attachment; filename=\"file.bin\"\r\n";
             ("application/octet-stream", vec![7u8; 4096])
         }
+        // Three products in a list: the page browser_extract reads.
+        "/list" => (
+            "text/html",
+            b"<title>Products</title><h1>Products</h1><ul>\
+              <li class=p><a href=\"/item/1\">Kettle One</a><span class=price>20.99</span></li>\
+              <li class=p><a href=\"/item/2\">Kettle Two</a><span class=price>21.99</span></li>\
+              <li class=p><a href=\"/item/3\">Kettle Three</a><span class=price>22.99</span></li>\
+              </ul>"
+                .to_vec(),
+        ),
         _ => ("text/plain", b"not found".to_vec()),
     };
     let code = if matches!(
         path,
-        "/page" | "/probe" | "/plain" | "/upload" | "/file.bin" | "/frames" | "/inner" | "/popup" | "/fetch" | "/api" | "/state"
+        "/page" | "/probe" | "/plain" | "/upload" | "/file.bin" | "/frames" | "/inner" | "/popup" | "/fetch" | "/api" | "/state" | "/steps" | "/list"
     ) {
         "200 OK"
     } else {
@@ -509,6 +536,24 @@ fn the_agent_door() {
         let t = d.rpc(Some(&a), "tools/list", json!({}));
         assert_eq!(t.code, 200);
         assert!(t.json()["result"]["tools"].as_array().is_some_and(|t| t.len() >= 30));
+    }
+
+    head("3b. a userscript the person put in runs in their page, never in an agent's tab");
+    {
+        let state = d.state(&a);
+        let person = state.iter().find(|t| t["agent"] == false && t["url"].as_str().unwrap_or("").contains("role=normal")).expect("the person's tab").clone();
+        let person_tab = person["id"].as_u64().unwrap();
+        d.tool(&a, "browser_test_grant", json!({"tab": person_tab})).unwrap();
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": person_tab})).expect("the person's page");
+        assert!(snap.contains("Userscript ran"), "the userscript did not run in the person's page:\n{snap}");
+        // The same page as an agent's own tab: no userscript there.
+        let mine = d.open(&a, &page(p1, "/page?role=normal"));
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": mine})).unwrap();
+        assert!(!snap.contains("Userscript ran"), "a userscript ran in an agent's tab:\n{snap}");
+        say("the script marked the person's page, and stayed out of the agent's tab");
+        d.tool(&a, "browser_close", json!({"tab": mine})).unwrap();
+        // The grant goes back, as scenario 8 tests it from the start.
+        d.tool(&a, "browser_test_grant", json!({"tab": person_tab})).unwrap();
     }
 
     head("4. one agent cannot reach another's tabs");
@@ -834,6 +879,69 @@ fn the_agent_door() {
         assert!(d.tool(&pz, "browser_snapshot", json!({"tab": pt})).is_ok());
         say("a paused run got drive_paused on everything but browser_handoff, and went on after Done");
         d.tool(&pz, "browser_close", json!({"tab": pt})).unwrap();
+    }
+
+    head("7d. snapshots: a diff says what a click changed, and a ref outlives its snapshot");
+    {
+        let tab = d.open(&a, &page(p1, "/steps"));
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true})).expect("snapshot");
+        let ref_of = |snap: &str, words: &[&str]| -> String {
+            let line = snap.lines().find(|l| words.iter().all(|w| l.contains(w)) && l.contains("[ref=")).unwrap_or_else(|| panic!("no {words:?} in:\n{snap}"));
+            line.split("[ref=").nth(1).unwrap().trim_end_matches(']').to_string()
+        };
+        let step = ref_of(&snap, &["button \"Step 0\""]);
+        let add = ref_of(&snap, &["button \"Add\""]);
+        d.tool(&a, "browser_click", json!({"tab": tab, "ref": step})).expect("click");
+        let diff = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true, "diff": true})).expect("diff");
+        assert!(diff.contains("1 removed, 1 added"), "{diff}");
+        assert!(diff.contains(&format!("- button \"Step 0\" [ref={step}]")), "{diff}");
+        assert!(diff.contains(&format!("+ button \"Step 1\" [ref={step}]")), "the change keeps the same ref: {diff}");
+        assert!(diff.contains("lines unchanged") && !diff.contains("Title:"), "only the change comes back: {diff}");
+        say(&format!("one click, one line: {diff:?}"));
+        // The ref from the snapshot before the click still clicks: it is the same button.
+        d.tool(&a, "browser_click", json!({"tab": tab, "ref": step})).expect("the same ref again");
+        let diff = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true, "diff": true})).expect("diff again");
+        assert!(diff.contains("+ button \"Step 2\""), "{diff}");
+        // A new element gets a number of its own: never the one an older snapshot used.
+        d.tool(&a, "browser_click", json!({"tab": tab, "ref": add})).expect("add a button");
+        let added = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true, "diff": true})).expect("diff after adding");
+        assert!(added.contains("0 removed, 1 added") && added.contains("+ button \"Extra\""), "{added}");
+        assert!(!added.contains(&format!("button \"Extra\" [ref={step}]")), "a new element took an old ref: {added}");
+        say("an added button got a number no snapshot had used");
+        // A page that went somewhere is not a diff: the whole page comes, and says so.
+        d.tool(&a, "browser_navigate", json!({"tab": tab, "url": page(p1, "/plain")})).expect("navigate");
+        let moved = d.tool(&a, "browser_snapshot", json!({"tab": tab, "diff": true})).expect("diff after a navigation");
+        assert!(moved.contains("full snapshot") && moved.contains("Plain page"), "{moved}");
+        say("the page navigated; the diff came back as the whole page and said so");
+        d.tool(&a, "browser_close", json!({"tab": tab})).unwrap();
+    }
+
+    head("7e. browser_extract: a list as JSON, one object without items, refused arguments");
+    {
+        let tab = d.open(&a, &page(p1, "/list"));
+        let out = d.tool(
+            &a,
+            "browser_extract",
+            json!({"tab": tab, "items": "li.p", "fields": {"name": "a", "price": ".price", "href": {"selector": "a", "attr": "href"}}}),
+        )
+        .expect("extract");
+        assert!(out.starts_with("3 items"), "{out}");
+        assert!(out.contains("\"name\":\"Kettle Two\"") && out.contains("\"price\":\"21.99\""), "{out}");
+        assert!(out.contains(&format!("\"href\":\"http://127.0.0.1:{p1}/item/2\"")), "href comes back absolute: {out}");
+        say(&format!("three items as JSON: {}", out.lines().next().unwrap_or("")));
+        // No items: one object, every match listed, a field that finds nothing is null.
+        let one = d.tool(&a, "browser_extract", json!({"tab": tab, "fields": {"heading": "h1", "names": {"selector": "a", "all": true}, "none": ".nope"}})).expect("one object");
+        assert!(one.contains("\"heading\":\"Products\""), "{one}");
+        assert!(one.contains("\"names\":[\"Kettle One\",\"Kettle Two\",\"Kettle Three\"]"), "{one}");
+        assert!(one.contains("\"none\":null"), "{one}");
+        say("without items: one object; all=true lists every match, a miss is null");
+        // The arguments are checked before any page work.
+        for bad in [json!({"tab": tab}), json!({"tab": tab, "fields": {}}), json!({"tab": tab, "fields": {"x": {"attr": "href"}}})] {
+            let e = d.tool(&a, "browser_extract", bad).expect_err("bad extract");
+            assert!(e.contains("fields") || e.contains("selector"), "{e}");
+        }
+        say("no fields, and a field without a selector: refused");
+        d.tool(&a, "browser_close", json!({"tab": tab})).unwrap();
     }
 
     head("8. the person's tab: nothing until granted, then steering but never scripting");

@@ -295,6 +295,9 @@ pub struct Ctx {
     pub https: Rc<RefCell<crate::sites::HttpsPolicy>>,
     /// Send the Global Privacy Control signal to pages (the header lives in the blocker).
     pub gpc: Cell<bool>,
+    /// Run the person's userscripts in the person's own pages. Read when a tab is made,
+    /// never watched: a change applies to tabs opened after it.
+    pub userscripts: Cell<bool>,
     /// Popup requests seen since the last one was handled: (was it a click, the page's site).
     /// A sensor COM handler fills this; wry's own handler reads the front and decides.
     pub popup_info: Rc<RefCell<VecDeque<(bool, String)>>>,
@@ -454,9 +457,12 @@ impl Profile {
 /// own environment and user-data folder.
 /// `private`: WebView2 InPrivate. No cookies outlive the last private page, and
 /// nothing the page does reaches this profile's history.
-pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, profile: Profile, private: bool) -> wry::Result<WebView> {
+/// `agent_tab`: the tab belongs to an agent, whichever profile it is in (a shared
+/// profile makes that the person's own): userscripts and anything else for the person's
+/// pages stay off it.
+pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, profile: Profile, private: bool, agent_tab: bool) -> wry::Result<WebView> {
     let env = ctx.env.borrow().clone();
-    build_tab_in(ctx, id, url, bounds, env, &profile, private)
+    build_tab_in(ctx, id, url, bounds, env, &profile, private, agent_tab)
 }
 
 fn build_tab_in(
@@ -467,6 +473,7 @@ fn build_tab_in(
     opener_env: Option<ICoreWebView2Environment>,
     profile: &Profile,
     private: bool,
+    agent_tab: bool,
 ) -> wry::Result<WebView> {
     let dark = ctx.dark.get();
     // Who this page is: whose tab, private or not, person's or agent's. The
@@ -504,6 +511,9 @@ fn build_tab_in(
         Profile::Shared(key) => base.with_profile_name(format!("agent-{key}")),
         _ => base,
     };
+    // Userscripts: the person's own tabs only, never an agent's and never a private
+    // one. Read here, when the tab is made; the folder is not watched.
+    let user_js = if !agent_tab && !private && ctx.userscripts.get() { crate::userscripts::bootstrap() } else { String::new() };
     let mut b = base
         .with_bounds(bounds)
         .with_visible(false)
@@ -515,6 +525,7 @@ fn build_tab_in(
         // Decided when the page is built; the header follows the setting at once.
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
         .with_initialization_script(WEBRTC_JS)
+        .with_initialization_script(user_js)
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -536,7 +547,7 @@ fn build_tab_in(
             }
             let new_id = ctx.alloc_id();
             let bounds = content_bounds_now(ctx);
-            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), &popup_profile, private) {
+            match build_tab_in(ctx, new_id, None, bounds, Some(features.opener.environment.clone()), &popup_profile, private, agent_tab) {
                 Ok(wv) => {
                     let core = wv.webview();
                     ctx.popups.borrow_mut().push((new_id, wv));

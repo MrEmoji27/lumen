@@ -184,6 +184,7 @@ pub const RULES: &[Rule] = &[
     rule("browser_fill", Scope::Tab, Gate::Nothing),
     // Read the page the way a snapshot does.
     rule("browser_table", Scope::Tab, Gate::Nothing),
+    rule("browser_extract", Scope::Tab, Gate::Nothing),
     rule("browser_links", Scope::Tab, Gate::Nothing),
 ];
 
