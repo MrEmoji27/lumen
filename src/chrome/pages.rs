@@ -384,7 +384,6 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("About", vec![
             Button(concat!("Lumen ", env!("CARGO_PKG_VERSION")), "What changed in this version and every one before it, from the changelog built into Lumen.", "What's new", PageHit::Panels("changes")),
             Button("Report a problem", "A plain-text report you read in full before it goes anywhere: version, Windows, your setup, recent crashes and stalls. No addresses, no page titles, nothing typed into pages.", "Make a report…", PageHit::Panels("bugreport")),
-            Button("Made by zemo", "portfolio.mremoji47.workers.dev", "Visit", PageHit::OpenTab(PORTFOLIO)),
         ]),
     ]
 }
@@ -2518,19 +2517,25 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
         i.hit(r, h);
     }
 
-    // At the foot of the menu, the credit: who made this, and where to find them.
-    let credit = R::new(nav.x + lo.s3, st.bottom() - 44.0, nav.w - 2.0 * lo.s3, 30.0);
+    // At the foot of the menu, the credit: one quiet line. Only the name is a link, to the
+    // portfolio; nothing else about it asks to be clicked.
+    let credit = R::new(nav.x + lo.s3 + 12.0, st.bottom() - 40.0, nav.w - 2.0 * lo.s3 - 12.0, 22.0);
     let last = sr.bottom() + 12.0 + schema.len() as f32 * 34.0;
     if credit.y > last + 8.0 {
+        let f = lo.font(11.0, 450);
+        let lead = "made by ";
+        let lw = i.gfx.measure(lead, f);
+        let nw = i.gfx.measure("zemo", f);
+        i.gfx.text(lead, R::new(credit.x, credit.y, lw + 2.0, credit.h), f, th.faint.alpha(0.8));
+        let name = R::new(credit.x + lw, credit.y, nw + 2.0, credit.h);
         let h = Hit::Page(PageHit::OpenTab(PORTFOLIO));
         let hov = i.is_hover(&h);
+        i.gfx.text("zemo", name, f, if hov { th.text } else { th.faint.alpha(0.8) });
         if hov {
-            i.gfx.round(credit, lo.round(credit.h), th.hover);
+            let y = name.y + name.h / 2.0 + 7.0;
+            i.gfx.line(name.x, y, name.x + nw, y, th.text, 1.0);
         }
-        let c = if hov { th.text } else { th.faint };
-        i.gfx.text("Made by zemo", R::new(credit.x + 12.0, credit.y, credit.w - 40.0, credit.h), lo.font(12.0, 500), c);
-        i.gfx.icon("external", credit.right() - 26.0, credit.y + 8.0, 14.0, c);
-        i.hit(credit, h);
+        i.hit(name, h);
     }
 
     // Right: each section a label and a card of rows, scrolled.
