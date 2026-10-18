@@ -431,3 +431,26 @@ journal's `tabs=3 live=3` at both samples). The after side spread 27 MB between 
 to 182.1); how much Chromium lets go when it is told a page is gone depends on the run. Every
 after run was below every before run; the median is the number to read.
 
+### mimalloc as the allocator
+
+`mimalloc` 0.1.52, default features off, as `#[global_allocator]` in `src/main.rs`. `lumen-agent`
+was left alone: it is a one-shot bridge that lives for one call, and neither measure below is its.
+
+Measured the way "Idle memory" says: a warm idle A/B, first run fetches the filter lists, second
+run measured after 60 s, three samples. Release, headless, a fresh profile per pair under `%TEMP%`,
+no page ever built, so the number is `lumen.exe`'s own private working set. The agent bench's p50
+column rides beside it, before and after.
+
+| build | idle at 60 s | 63 s | 66 s | bench, whole run | `browser_open` |
+|---|---|---|---|---|---|
+| before | 19.5 MB | 19.5 MB | 19.5 MB | 43 s | 718 ms a call |
+| mimalloc | 80.5 MB | 80.5 MB | 80.5 MB | 39 s | 548 ms a call |
+| mimalloc, a second A/B | 80.8 MB | 80.8 MB | 80.8 MB | | |
+| after the revert | 19.7 MB | 19.7 MB | 19.7 MB | | |
+
+**Reverted: idle 19.5 MB to 80.5 MB.** The bench was not slower — a little faster, and every task
+p50 within a few percent of before (the largest moves: 1464 to 1356 ms on the form, 1203 to
+1132 ms on the batch). The criterion is idle, and it grew by 61 MB: mimalloc's own arena is the
+process's private pages too, and the first segment stays resident even with nothing in it Lumen
+asked for. A shell whose whole point is what it does not hold cannot spend 61 MB it is not using.
+The idle number came back to 19.7 MB the moment the dependency left.
