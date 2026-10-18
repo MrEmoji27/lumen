@@ -5419,6 +5419,17 @@ impl App {
                 self.agent_seen = None;
                 self.push();
             }
+            "openMessage" => {
+                let (session, name) = (m["session"].as_str().unwrap_or(""), m["name"].as_str().unwrap_or("agent"));
+                self.chrome.open_message(session, name);
+            }
+            "watchMessage" => {
+                // The pill's Message: the card over the sidebar, for the watched agent.
+                if let Some((owner, name)) = self.active_tab().filter(|t| t.agent).map(|t| (t.owner.clone(), t.owner_name.clone())) {
+                    let name = if name.trim().is_empty() { "agent".to_string() } else { name };
+                    self.chrome.open_message(&owner, &name);
+                }
+            }
             "watchTakeOver" | "watchGiveBack" => {
                 let Some(owner) = self.active_tab().filter(|t| t.agent).map(|t| t.owner.clone()) else { return };
                 let take = m["t"] == "watchTakeOver";

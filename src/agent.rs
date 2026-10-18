@@ -457,11 +457,7 @@ impl Agent {
     /// What the agent of this session did last, as the watch pill says it: `click "Submit order"`.
     pub fn last_step(&self, session: &str) -> String {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.get(session).and_then(|s| s.steps.back()).map(|x| {
-            let tool = x.tool.trim_start_matches("browser_");
-            let note = step_note(&x.args);
-            if note.is_empty() { tool.to_string() } else { format!("{tool} · {note}") }
-        }).unwrap_or_default()
+        state.get(session).and_then(|s| s.steps.back()).map(|x| doing(&x.tool, &x.args)).unwrap_or_default()
     }
 
     /// Paste into a terminal and Claude Code can browse with Lumen. `lumen-agent` (next to
@@ -1932,6 +1928,35 @@ fn run(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value) -> Result<Vec<Valu
 /// The tools that manage a recording, never recorded themselves.
 fn is_record_tool(name: &str) -> bool {
     matches!(name, "browser_record_start" | "browser_record_stop" | "browser_replay")
+}
+
+/// A step as the watch pill says it: what the agent is doing, in a few plain words.
+fn doing(tool: &str, a: &Value) -> String {
+    let r = a["ref"].as_str().or_else(|| a["element"].as_str()).unwrap_or("");
+    let quote = |k: &str| a[k].as_str().map(|t| format!("\u{201C}{}\u{201D}", clip(t.trim(), 28))).unwrap_or_default();
+    let site = a["url"].as_str().map(site_of).unwrap_or_default();
+    match tool {
+        "browser_open" | "browser_navigate" => format!("going to {site}"),
+        "browser_click" => if r.is_empty() { "clicking".into() } else { format!("clicking {r}") },
+        "browser_type" => format!("typing {}", quote("text")),
+        "browser_select" => format!("choosing {}", quote("option")),
+        "browser_fill" => "filling in a form".into(),
+        "browser_press" => format!("pressing {}", a["key"].as_str().unwrap_or("a key")),
+        "browser_hover" => format!("pointing at {r}"),
+        "browser_scroll" => "scrolling".into(),
+        "browser_drag" => "dragging".into(),
+        "browser_wait" => "waiting for the page".into(),
+        "browser_snapshot" | "browser_find" | "browser_links" | "browser_table" => "looking at the page".into(),
+        "browser_read" | "browser_article" => "reading".into(),
+        "browser_back" => "going back".into(),
+        "browser_forward" => "going forward".into(),
+        "browser_reload" => "reloading".into(),
+        "browser_screenshot" => "taking a picture".into(),
+        "browser_handoff" => "waiting for you".into(),
+        "browser_batch" => "running a few steps".into(),
+        "browser_script_run" => "running a script".into(),
+        t => t.trim_start_matches("browser_").replace('_', " "),
+    }
 }
 
 /// What a step shows in the Drive panel's list: the tab, the ref, the url's host. Never

@@ -43,7 +43,7 @@ use windows::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{
                 GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL,
-                VK_DOWN, VK_ESCAPE, VK_F10, VK_MENU, VK_RETURN, VK_SHIFT, VK_UP,
+                VK_DOWN, VK_ESCAPE, VK_F10, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP,
             },
             WindowsAndMessaging::*,
         },
@@ -367,6 +367,11 @@ pub enum Hit {
     TabSearch(usize),
     /// The tab search card itself: clicks on it are not clicks outside it.
     SearchCard,
+    /// The message card itself, its kinds, Send and its close button.
+    SayCard,
+    SayMode(usize),
+    SaySend,
+    SayClose,
 }
 
 #[derive(Clone, Debug)]
@@ -605,6 +610,29 @@ pub(crate) struct Inner {
     search_sel: usize,
     /// What the last tab-search frame listed, so a click knows what it lands on.
     search_rows: Vec<SwitchRow>,
+    /// The message card over the sidebar: to which agent, and which kind (0 steer now,
+    /// 1 queue, 2 new task). Its text box is a real edit window.
+    say: Option<Say>,
+    say_edit: HWND,
+}
+
+/// A message being written to an agent: the card over the sidebar.
+struct Say {
+    session: String,
+    name: String,
+    mode: usize,
+}
+
+/// The three kinds of message, as the card offers them, and what each means.
+const SAY_MODES: [(&str, &str, &str); 3] = [
+    ("Steer now", "now", "It reads this first, on its next call."),
+    ("Queue", "later", "For after its current task."),
+    ("New task", "new", "Starts a new Drive run."),
+];
+
+/// The message card's rectangle: over the sidebar, at its top.
+fn say_card(sb: R) -> R {
+    R::new(sb.x + 8.0, 8.0, (sb.w - 16.0).max(200.0), 168.0)
 }
 
 /// A tab that just closed. The row is drawn once more, collapsing.
@@ -646,6 +674,7 @@ const ID_NTP: usize = 102;
 const ID_BM: usize = 103;
 const ID_DRIVE: usize = 104;
 const ID_SRCH: usize = 105;
+const ID_SAY: usize = 106;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -894,7 +923,22 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit] {
+            let say_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_SAY as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit] {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
@@ -955,6 +999,8 @@ impl Chrome {
                 search_edit,
                 search_sel: 0,
                 search_rows: Vec::new(),
+                say: None,
+                say_edit,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -1126,6 +1172,12 @@ impl Chrome {
             let _ = SetFocus(Some(edit));
             SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
         }
+    }
+
+    /// The message card for one agent, from the watch pill's Message.
+    pub fn open_message(&self, session: &str, name: &str) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        i.open_say(session.to_string(), name.to_string());
     }
 
     /// Ctrl+Shift+A: the quick switcher over the sidebar. A second press closes it.
@@ -1539,6 +1591,10 @@ impl Inner {
             let q = wide_text(self.search_edit).trim().to_lowercase();
             let card = search_card(sb, switch_rows(s, &q).len().min(SEARCH_ROWS));
             place(self.search_edit, R::new(card.x + 40.0, card.y + 10.0, card.w - 52.0, 22.0), self.search_open);
+            let card = say_card(sb);
+            place(self.say_edit, R::new(card.x + 22.0, card.y + 50.0, card.w - 44.0, 22.0), self.say.is_some());
+        } else {
+            place(self.say_edit, R::default(), false);
         }
     }
 
@@ -1548,6 +1604,50 @@ impl Inner {
             let _ = SetFocus(Some(self.ntp_edit));
         }
         self.layout_edits();
+        self.invalidate();
+    }
+
+    /// Open the message card for this agent, the text box empty and focused.
+    fn open_say(&mut self, session: String, name: String) {
+        self.close_search();
+        if self.state.as_ref().is_some_and(|s| s.settings.compact) {
+            send(&self.proxy, json!({"t": "peek", "on": true}));
+        }
+        self.say = Some(Say { session, name, mode: 0 });
+        unsafe {
+            SetWindowTextW(self.say_edit, &HSTRING::from("")).ok();
+        }
+        self.layout_edits();
+        unsafe {
+            let _ = SetFocus(Some(self.say_edit));
+        }
+        self.invalidate();
+    }
+
+    /// Send what is in the card, as the kind picked, and close it. Nothing typed, nothing sent.
+    fn send_say(&mut self) {
+        let text = wide_text(self.say_edit).trim().to_string();
+        let Some(say) = self.say.as_ref() else { return };
+        if text.is_empty() {
+            return;
+        }
+        let kind = SAY_MODES[say.mode.min(2)].1;
+        send(&self.proxy, json!({"t": "agentTell", "session": say.session, "say": kind, "text": text}));
+        self.close_say();
+    }
+
+    fn close_say(&mut self) {
+        if self.say.take().is_none() {
+            return;
+        }
+        if self.state.as_ref().is_some_and(|s| s.settings.compact || s.peek) {
+            send(&self.proxy, json!({"t": "peek", "on": false}));
+        }
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        self.layout_edits();
+        send(&self.proxy, json!({"t": "focusPage"}));
         self.invalidate();
     }
 
@@ -2352,7 +2452,9 @@ impl Inner {
 
     /// The quick switcher sits over everything else in the sidebar; so does the lock's card.
     fn draw_footer_overlays(&mut self, s: &UiState) {
-        if self.search_open {
+        if self.say.is_some() {
+            self.draw_say();
+        } else if self.search_open {
             self.draw_search(s);
         } else if self.site_open {
             self.draw_site_menu(s);
@@ -2447,6 +2549,61 @@ impl Inner {
     }
 
     /// The tab search card: a filter box on top, then the matching tabs of every workspace.
+    /// The message card: who it is for, the text, the kind (steer now, queue, new task), what
+    /// that kind means, and Send.
+    fn draw_say(&mut self) {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let Some(sb) = self.sidebar() else { return };
+        let Some((session, name, mode)) = self.say.as_ref().map(|s| (s.session.clone(), s.name.clone(), s.mode)) else { return };
+        let card = say_card(sb);
+        self.gfx.round(R::new(card.x, card.y + 4.0, card.w, card.h), lo.r_lg + 2.0, th.shade.alpha(0.65));
+        self.gfx.round(card, lo.r_lg + 2.0, th.raise);
+        self.gfx.round_stroke(card, lo.r_lg + 2.0, th.line, 1.0);
+        self.hit(card, Hit::SayCard);
+        // Who it is for.
+        self.gfx.circle(card.x + 18.0, card.y + 22.0, 4.0, agent_color(&session));
+        self.gfx.text(&format!("Message to {name}"), R::new(card.x + 30.0, card.y + 10.0, card.w - 66.0, 24.0), lo.font(12.5, 600), th.text);
+        let x = R::new(card.right() - 32.0, card.y + 8.0, 24.0, 24.0);
+        if self.is_hover(&Hit::SayClose) {
+            self.gfx.round(x, lo.r_sm, th.hover);
+        }
+        self.gfx.icon("close", x.x + 6.0, x.y + 6.0, 12.0, th.dim);
+        self.hit(x, Hit::SayClose);
+        // The text (a real edit window sits over this).
+        let field = R::new(card.x + 12.0, card.y + 42.0, card.w - 24.0, 38.0);
+        self.gfx.round(field, lo.r_md, th.bg);
+        self.gfx.round_stroke(field, lo.r_md, th.accent.alpha(0.55), 1.0);
+        if wide_text(self.say_edit).is_empty() {
+            self.gfx.text("Tell it what to do", R::new(field.x + 10.0, field.y, field.w - 20.0, field.h), lo.font(12.5, 400), th.faint);
+        }
+        // The kind, as one segmented control.
+        let seg = R::new(card.x + 12.0, card.y + 90.0, card.w - 24.0, 28.0);
+        self.gfx.round(seg, lo.r_md, th.bg);
+        let w = seg.w / 3.0;
+        for (n, (label, _, _)) in SAY_MODES.iter().enumerate() {
+            let r = R::new(seg.x + n as f32 * w + 2.0, seg.y + 2.0, w - 4.0, seg.h - 4.0);
+            let h = Hit::SayMode(n);
+            if n == mode {
+                self.gfx.round(r, lo.r_sm, th.raise);
+                self.gfx.round_stroke(r, lo.r_sm, th.line, 1.0);
+            } else if self.is_hover(&h) {
+                self.gfx.round(r, lo.r_sm, th.hover);
+            }
+            self.gfx.text(label, r, lo.font(12.0, if n == mode { 600 } else { 500 }).align(Align::Center), if n == mode { th.text } else { th.dim });
+            self.hit(r, h);
+        }
+        // What that kind does, and Send.
+        let send_w = 64.0;
+        let hint = R::new(card.x + 14.0, card.y + 126.0, card.w - 28.0 - send_w - 8.0, 32.0);
+        self.gfx.text_wrap(SAY_MODES[mode.min(2)].2, hint, lo.font(11.0, 400), th.faint);
+        let b = R::new(card.right() - 12.0 - send_w, card.y + 128.0, send_w, 28.0);
+        let hot = self.is_hover(&Hit::SaySend);
+        self.gfx.round(b, lo.r_md, if hot { th.accent } else { th.accent.alpha(0.88) });
+        self.gfx.text("Send", b, lo.font(12.0, 600).align(Align::Center), th.bg);
+        self.hit(b, Hit::SaySend);
+    }
+
     fn draw_search(&mut self, s: &UiState) {
         let lo = self.look.clone();
         let th = lo.theme;
@@ -3474,6 +3631,10 @@ impl Inner {
         if self.search_open && !matches!(h, Some(Hit::TabSearch(_)) | Some(Hit::SearchCard)) {
             self.close_search();
         }
+        // The same for the message card.
+        if self.say.is_some() && !matches!(h, Some(Hit::SayCard | Hit::SayMode(_) | Hit::SaySend | Hit::SayClose | Hit::AgentMessage(..))) {
+            self.close_say();
+        }
         // The same for the lock's card, which acts through its own hits.
         if self.site_open && !matches!(h, Some(Hit::SiteInfo | Hit::SitePerm(..) | Hit::SiteClear | Hit::SiteSettings)) {
             self.site_open = false;
@@ -3537,16 +3698,19 @@ impl Inner {
             }
             Hit::AgentStop => send(p, json!({"t": "agentStop"})),
             Hit::AgentStopSession(session) => send(p, json!({"t": "agentStopSession", "session": session})),
-            Hit::AgentMessage(session, name) => {
-                let note = "Steer: it reads this with its next call, before anything else. Queue: for after its task. New task: a new Drive run.";
-                if let Some((n, a)) = dialog::ask_with(self.hwnd, &format!("Message to {name}"), &[(note, "")], &["Steer now", "Queue", "New task"]) {
-                    let text = a.first().cloned().unwrap_or_default();
-                    if !text.trim().is_empty() {
-                        let say = ["now", "later", "new"][n.min(2)];
-                        send(p, json!({"t": "agentTell", "session": session, "say": say, "text": text}));
-                    }
+            Hit::AgentMessage(session, name) => self.open_say(session, name),
+            Hit::SayCard => {}
+            Hit::SayMode(n) => {
+                if let Some(say) = self.say.as_mut() {
+                    say.mode = n.min(2);
                 }
+                unsafe {
+                    let _ = SetFocus(Some(self.say_edit));
+                }
+                self.invalidate();
             }
+            Hit::SaySend => self.send_say(),
+            Hit::SayClose => self.close_say(),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => {
@@ -3952,6 +4116,10 @@ impl Inner {
     fn key(&mut self, vk: u32) -> bool {
         let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
         // The tab search and the lock's card sit over the sidebar: Escape puts them away.
+        if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) && self.say.is_some() {
+            self.close_say();
+            return true;
+        }
         if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) && (self.search_open || self.site_open) {
             self.close_search();
             self.site_open = false;
@@ -4265,6 +4433,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         EN_KILLFOCUS => i.end_edit(),
                         _ => {}
                     }
+                } else if id == ID_SAY && code == EN_CHANGE {
+                    // The placeholder goes with the first letter.
+                    i.invalidate();
                 } else if id == ID_NTP && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
                     i.layout_edits();
                     i.invalidate();
@@ -4289,7 +4460,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let hdc = HDC(wp.0 as _);
                 // The Bookmarks search sits in a field drawn in the sidebar's color, like the new tab one.
                 let h = HWND(lp.0 as _);
-                let is_ntp = h == i.ntp_edit || h == i.bm_edit || h == i.drive_edit;
+                let is_ntp = h == i.ntp_edit || h == i.bm_edit || h == i.drive_edit || h == i.say_edit;
                 let _ = SetTextColor(hdc, COLORREF(i.theme.text.colorref()));
                 let bg = if is_ntp { i.theme.bg } else { i.theme.raise };
                 let _ = SetBkColor(hdc, COLORREF(bg.colorref()));
@@ -4412,6 +4583,26 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         SetWindowTextW(hwnd, &HSTRING::new()).ok();
                     }
                     return LRESULT(0);
+                } else if id == ID_SAY {
+                    match vk {
+                        v if v == VK_RETURN.0 => {
+                            i.send_say();
+                            return LRESULT(0);
+                        }
+                        v if v == VK_ESCAPE.0 => {
+                            i.close_say();
+                            return LRESULT(0);
+                        }
+                        v if v == VK_TAB.0 => {
+                            let back = GetKeyState(VK_SHIFT.0 as i32) < 0;
+                            if let Some(say) = i.say.as_mut() {
+                                say.mode = if back { (say.mode + 2) % 3 } else { (say.mode + 1) % 3 };
+                            }
+                            i.invalidate();
+                            return LRESULT(0);
+                        }
+                        _ => {}
+                    }
                 } else if id == ID_DRIVE {
                     // Enter in the task box starts the run; Escape leaves the page.
                     if vk == VK_RETURN.0 {

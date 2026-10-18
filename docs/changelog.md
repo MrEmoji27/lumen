@@ -7,6 +7,18 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.5.1 — 2026-10-18
+
+- The message box is a card in Lumen's own look, over the sidebar: who it is for, the text,
+  Steer now / Queue / New task as one segmented control (Tab switches), and Send (Enter). It
+  replaces a stock Windows dialog that looked twenty years old. The watch pill's **Message** opens
+  it too.
+- The agent's cursor and the pill are drawn with Direct2D in windows with real transparency:
+  smooth edges, a soft shadow, a ring that grows and fades on a click, text in Segoe UI Variable.
+  They were GDI with a colour key: jagged edges and Windows XP buttons.
+- The pill says what the agent is doing in words: `typing "Ada Lovelace"`, `clicking e13`,
+  `going to httpbin.org`.
+
 ## 0.5.0 — 2026-10-18
 
 - Watching: click an agent's tab and a shield goes over its page, so a stray click or scroll

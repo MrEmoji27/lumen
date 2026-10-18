@@ -312,7 +312,8 @@ Click an agent's tab. Its page moves into your window, live, and three things go
 
 ### Talking to an agent
 
-The send button on an agent's row in the sidebar opens a message to it:
+The send button on an agent's row in the sidebar, or **Message** on the watch pill, opens a card over
+the sidebar: type, pick the kind (Tab switches), Enter sends.
 
 - **Steer now**: the agent's next reply starts with `[The person says, now: "use the cheaper
   one"]`. It outranks the task.
