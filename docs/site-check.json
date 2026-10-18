@@ -1,0 +1,678 @@
+[
+ {
+  "site": "youtube",
+  "adblock": true,
+  "load": 1879,
+  "lcp": 2896,
+  "longtasks": 18,
+  "blocked_ms": 2524,
+  "worst": 583,
+  "heap_mb": 168,
+  "probe": {
+   "ok": true,
+   "note": "video at 10.3s"
+  },
+  "mem_mb": 724,
+  "idle_cpu_pct": 2.23,
+  "errors": 6,
+  "blocked": 20,
+  "blocked_hosts": [
+   [
+    "www.youtube.com",
+    16
+   ],
+   [
+    "tpc.googlesyndication.com",
+    1
+   ],
+   [
+    "static.doubleclick.net",
+    1
+   ],
+   [
+    "www.google.com",
+    1
+   ],
+   [
+    "www.google.co.in",
+    1
+   ]
+  ],
+  "error_samples": [
+   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p"
+  ]
+ },
+ {
+  "site": "youtube",
+  "adblock": false,
+  "load": 1870,
+  "lcp": 1644,
+  "longtasks": 15,
+  "blocked_ms": 1935,
+  "worst": 503,
+  "heap_mb": 160,
+  "probe": {
+   "ok": true,
+   "note": "video at 10.4s"
+  },
+  "mem_mb": 739,
+  "idle_cpu_pct": 3.95,
+  "errors": 6,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": [
+   "Failed to load resource: the server responded with a status of 403 ()",
+   "Failed to load resource: the server responded with a status of 403 ()",
+   "Failed to load resource: the server responded with a status of 403 ()",
+   "Failed to load resource: the server responded with a status of 403 ()",
+   "Failed to load resource: the server responded with a status of 403 ()"
+  ]
+ },
+ {
+  "site": "youtube-search",
+  "adblock": true,
+  "load": 1459,
+  "lcp": 2180,
+  "longtasks": 10,
+  "blocked_ms": 1417,
+  "worst": 611,
+  "heap_mb": 99,
+  "probe": {
+   "ok": true,
+   "note": "14 results"
+  },
+  "mem_mb": 588,
+  "idle_cpu_pct": 0.09,
+  "errors": 28,
+  "blocked": 8,
+  "blocked_hosts": [
+   [
+    "www.youtube.com",
+    5
+   ],
+   [
+    "www.google.com",
+    1
+   ],
+   [
+    "www.google.co.in",
+    1
+   ],
+   [
+    "static.doubleclick.net",
+    1
+   ]
+  ],
+  "error_samples": [
+   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to fetch at 'https://rr5---sn-q4fl6nz6.googlevideo.com/videoplayback?expire=7775210569&ei=fGl1XEvvMHgRrDJ2jZ43wwA&ip=6.84.69.87&id=o-",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to fetch at 'https://rr5---sn-q4fl6nz6.googlevideo.com/videoplayback?expire=7775210569&ei=fGl1XEvvMHgRrDJ2jZ43wwA&ip=6.84.69.87&id=o-"
+  ]
+ },
+ {
+  "site": "youtube-search",
+  "adblock": false,
+  "load": 1442,
+  "lcp": 2004,
+  "longtasks": 10,
+  "blocked_ms": 1457,
+  "worst": 643,
+  "heap_mb": 112,
+  "probe": {
+   "ok": true,
+   "note": "13 results"
+  },
+  "mem_mb": 554,
+  "idle_cpu_pct": 0.05,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "ytmusic",
+  "adblock": true,
+  "load": 2272,
+  "lcp": 2224,
+  "longtasks": 7,
+  "blocked_ms": 1047,
+  "worst": 386,
+  "heap_mb": 67,
+  "probe": {
+   "ok": true,
+   "note": "67 items"
+  },
+  "mem_mb": 447,
+  "idle_cpu_pct": 0.04,
+  "errors": 2,
+  "blocked": 4,
+  "blocked_hosts": [
+   [
+    "music.youtube.com",
+    2
+   ],
+   [
+    "www.googletagmanager.com",
+    1
+   ],
+   [
+    "static.doubleclick.net",
+    1
+   ]
+  ],
+  "error_samples": [
+   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://music.youtube.com' has been blocked by CORS",
+   "Failed to load resource: net::ERR_FAILED"
+  ]
+ },
+ {
+  "site": "ytmusic",
+  "adblock": false,
+  "load": 2239,
+  "lcp": 2204,
+  "longtasks": 7,
+  "blocked_ms": 1056,
+  "worst": 407,
+  "heap_mb": 75,
+  "probe": {
+   "ok": true,
+   "note": "67 items"
+  },
+  "mem_mb": 455,
+  "idle_cpu_pct": 0.14,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "google",
+  "adblock": true,
+  "load": 1305,
+  "lcp": 1160,
+  "longtasks": 3,
+  "blocked_ms": 270,
+  "worst": 124,
+  "heap_mb": 37,
+  "probe": {
+   "ok": true,
+   "note": "9 results"
+  },
+  "mem_mb": 265,
+  "idle_cpu_pct": 0.01,
+  "errors": 18,
+  "blocked": 12,
+  "blocked_hosts": [
+   [
+    "www.google.com",
+    11
+   ],
+   [
+    "www.googleadservices.com",
+    1
+   ]
+  ],
+  "error_samples": [
+   "Access to XMLHttpRequest at 'https://ep1.adtrafficquality.google/getconfig/sodar?sv=200&tid=oos&tv=2563&st=cr_env&sjk=tfLUasf9HJSSseMP9p6YyQ",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to XMLHttpRequest at 'https://play.google.com/log?format=json&hasfast=true' from origin 'https://www.google.com' has been blocked by ",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to XMLHttpRequest at 'https://play.google.com/log?format=json&hasfast=true&authuser=0' from origin 'https://www.google.com' has been "
+  ]
+ },
+ {
+  "site": "google",
+  "adblock": false,
+  "load": 736,
+  "lcp": 1792,
+  "longtasks": 21,
+  "blocked_ms": 1187,
+  "worst": 116,
+  "heap_mb": 54,
+  "probe": {
+   "ok": true,
+   "note": "9 results"
+  },
+  "mem_mb": 437,
+  "idle_cpu_pct": 0.02,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "gmail",
+  "adblock": true,
+  "load": 2010,
+  "lcp": 1444,
+  "longtasks": 1,
+  "blocked_ms": 83,
+  "worst": 83,
+  "heap_mb": 19,
+  "probe": {
+   "ok": true,
+   "note": "accounts.google.com"
+  },
+  "mem_mb": 246,
+  "idle_cpu_pct": 0.04,
+  "errors": 2,
+  "blocked": 1,
+  "blocked_hosts": [
+   [
+    "accounts.google.com",
+    1
+   ]
+  ],
+  "error_samples": [
+   "Access to fetch at 'https://play.google.com/log?format=json&hasfast=true&authuser=0' from origin 'https://accounts.google.com' has been bloc",
+   "Failed to load resource: net::ERR_FAILED"
+  ]
+ },
+ {
+  "site": "gmail",
+  "adblock": false,
+  "load": 2427,
+  "lcp": 2016,
+  "longtasks": 1,
+  "blocked_ms": 85,
+  "worst": 85,
+  "heap_mb": 18,
+  "probe": {
+   "ok": true,
+   "note": "accounts.google.com"
+  },
+  "mem_mb": 242,
+  "idle_cpu_pct": 0.0,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "instagram",
+  "adblock": true,
+  "load": 799,
+  "lcp": 764,
+  "longtasks": 1,
+  "blocked_ms": 67,
+  "worst": 67,
+  "heap_mb": 30,
+  "probe": {
+   "ok": true,
+   "note": "login form"
+  },
+  "mem_mb": 233,
+  "idle_cpu_pct": 0.16,
+  "errors": 0,
+  "blocked": 5,
+  "blocked_hosts": [
+   [
+    "www.instagram.com",
+    5
+   ]
+  ],
+  "error_samples": []
+ },
+ {
+  "site": "instagram",
+  "adblock": false,
+  "load": 810,
+  "lcp": 736,
+  "longtasks": 1,
+  "blocked_ms": 70,
+  "worst": 70,
+  "heap_mb": 30,
+  "probe": {
+   "ok": true,
+   "note": "login form"
+  },
+  "mem_mb": 230,
+  "idle_cpu_pct": 0.17,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "discord",
+  "adblock": true,
+  "load": 2429,
+  "lcp": 3932,
+  "longtasks": 4,
+  "blocked_ms": 1229,
+  "worst": 612,
+  "heap_mb": 96,
+  "probe": {
+   "ok": true,
+   "note": "login form"
+  },
+  "mem_mb": 432,
+  "idle_cpu_pct": 0.04,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "discord",
+  "adblock": false,
+  "load": 2161,
+  "lcp": 3320,
+  "longtasks": 3,
+  "blocked_ms": 928,
+  "worst": 480,
+  "heap_mb": 92,
+  "probe": {
+   "ok": true,
+   "note": "login form"
+  },
+  "mem_mb": 452,
+  "idle_cpu_pct": 0.03,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "reddit",
+  "adblock": true,
+  "load": 937,
+  "lcp": 344,
+  "longtasks": 1,
+  "blocked_ms": 60,
+  "worst": 60,
+  "heap_mb": 12,
+  "probe": {
+   "ok": false,
+   "note": "0 posts"
+  },
+  "mem_mb": 271,
+  "idle_cpu_pct": 0.07,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "reddit",
+  "adblock": false,
+  "load": 995,
+  "lcp": 336,
+  "longtasks": 1,
+  "blocked_ms": 67,
+  "worst": 67,
+  "heap_mb": 12,
+  "probe": {
+   "ok": false,
+   "note": "0 posts"
+  },
+  "mem_mb": 288,
+  "idle_cpu_pct": 0.04,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "x",
+  "adblock": true,
+  "load": 823,
+  "lcp": 640,
+  "longtasks": 5,
+  "blocked_ms": 493,
+  "worst": 141,
+  "heap_mb": 21,
+  "probe": {
+   "ok": true,
+   "note": "373 chars"
+  },
+  "mem_mb": 331,
+  "idle_cpu_pct": 5.2,
+  "errors": 2,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": [
+   "Access to fetch at 'https://o30969.ingest.us.sentry.io/api/4511225020219392/envelope/?sentry_version=7&sentry_key=b523016f172e2f101d4f771b02",
+   "Failed to load resource: net::ERR_FAILED"
+  ]
+ },
+ {
+  "site": "x",
+  "adblock": false,
+  "load": 806,
+  "lcp": 620,
+  "longtasks": 5,
+  "blocked_ms": 432,
+  "worst": 132,
+  "heap_mb": 21,
+  "probe": {
+   "ok": true,
+   "note": "373 chars"
+  },
+  "mem_mb": 323,
+  "idle_cpu_pct": 4.03,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "github",
+  "adblock": true,
+  "load": 3072,
+  "lcp": 2796,
+  "longtasks": 1,
+  "blocked_ms": 136,
+  "worst": 136,
+  "heap_mb": 26,
+  "probe": {
+   "ok": true,
+   "note": "readme"
+  },
+  "mem_mb": 272,
+  "idle_cpu_pct": 0.0,
+  "errors": 1,
+  "blocked": 4,
+  "blocked_hosts": [
+   [
+    "collector.github.com",
+    3
+   ],
+   [
+    "api.github.com",
+    1
+   ]
+  ],
+  "error_samples": [
+   "Failed to load resource: the server responded with a status of 404 ()"
+  ]
+ },
+ {
+  "site": "github",
+  "adblock": false,
+  "load": 1654,
+  "lcp": 1344,
+  "longtasks": 3,
+  "blocked_ms": 245,
+  "worst": 135,
+  "heap_mb": 21,
+  "probe": {
+   "ok": true,
+   "note": "readme"
+  },
+  "mem_mb": 254,
+  "idle_cpu_pct": 0.04,
+  "errors": 1,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": [
+   "Failed to load resource: the server responded with a status of 404 ()"
+  ]
+ },
+ {
+  "site": "wikipedia",
+  "adblock": true,
+  "load": 824,
+  "lcp": 660,
+  "longtasks": 0,
+  "blocked_ms": 0,
+  "worst": 0,
+  "heap_mb": 10,
+  "probe": {
+   "ok": true,
+   "note": "119 paragraphs"
+  },
+  "mem_mb": 211,
+  "idle_cpu_pct": 0.02,
+  "errors": 0,
+  "blocked": 1,
+  "blocked_hosts": [
+   [
+    "en.wikipedia.org",
+    1
+   ]
+  ],
+  "error_samples": []
+ },
+ {
+  "site": "wikipedia",
+  "adblock": false,
+  "load": 603,
+  "lcp": 500,
+  "longtasks": 0,
+  "blocked_ms": 0,
+  "worst": 0,
+  "heap_mb": 10,
+  "probe": {
+   "ok": true,
+   "note": "119 paragraphs"
+  },
+  "mem_mb": 210,
+  "idle_cpu_pct": 0.02,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "twitch",
+  "adblock": true,
+  "load": 889,
+  "lcp": 1864,
+  "longtasks": 5,
+  "blocked_ms": 643,
+  "worst": 231,
+  "heap_mb": 74,
+  "probe": {
+   "ok": true,
+   "note": "65 cards"
+  },
+  "mem_mb": 931,
+  "idle_cpu_pct": -0.34,
+  "errors": 4,
+  "blocked": 2,
+  "blocked_hosts": [
+   [
+    "s.amazon-adsystem.com",
+    1
+   ],
+   [
+    "sb.scorecardresearch.com",
+    1
+   ]
+  ],
+  "error_samples": [
+   "Access to fetch at 'https://edge.ads.twitch.tv/ads/format?dur=123&geoc=IN&did=c5cbb22970fb49f791c37685cbafc828&dt=2&afmt=DIRECTORY_BANNER&pi",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to fetch at 'https://edge.ads.twitch.tv/ads?dur=60&geoc=IN&did=c5cbb22970fb49f791c37685cbafc828&dt=2&afmt=OUTSTREAM_BROWSE_PAGE_VIDEO",
+   "Failed to load resource: net::ERR_FAILED"
+  ]
+ },
+ {
+  "site": "twitch",
+  "adblock": false,
+  "load": 830,
+  "lcp": 1744,
+  "longtasks": 3,
+  "blocked_ms": 482,
+  "worst": 217,
+  "heap_mb": 79,
+  "probe": {
+   "ok": true,
+   "note": "65 cards"
+  },
+  "mem_mb": 907,
+  "idle_cpu_pct": -0.39,
+  "errors": 0,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": []
+ },
+ {
+  "site": "spotify",
+  "adblock": true,
+  "load": 4956,
+  "lcp": 4120,
+  "longtasks": 8,
+  "blocked_ms": 1177,
+  "worst": 408,
+  "heap_mb": 53,
+  "probe": {
+   "ok": true,
+   "note": "2451 chars"
+  },
+  "mem_mb": 507,
+  "idle_cpu_pct": 1.01,
+  "errors": 29,
+  "blocked": 3,
+  "blocked_hosts": [
+   [
+    "open.spotifycdn.com",
+    1
+   ],
+   [
+    "www.googletagmanager.com",
+    1
+   ],
+   [
+    "cdn.cookielaw.org",
+    1
+   ]
+  ],
+  "error_samples": [
+   "Access to fetch at 'https://o22381.ingest.sentry.io/api/114855/envelope/?sentry_version=7&sentry_key=de32132fc06e4b28965ecf25332c3a25&sentry",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to fetch at 'https://gae2-spclient.spotify.com/gabo-receiver-service/public/v3/events' from origin 'https://open.spotify.com' has bee",
+   "Failed to load resource: net::ERR_FAILED",
+   "Access to XMLHttpRequest at 'https://geolocation.onetrust.com/cookieconsentpub/v1/geo/location' from origin 'https://open.spotify.com' has b"
+  ]
+ },
+ {
+  "site": "spotify",
+  "adblock": false,
+  "load": 2075,
+  "lcp": 2944,
+  "longtasks": 6,
+  "blocked_ms": 596,
+  "worst": 204,
+  "heap_mb": 56,
+  "probe": {
+   "ok": true,
+   "note": "2702 chars"
+  },
+  "mem_mb": 549,
+  "idle_cpu_pct": 1.04,
+  "errors": 1,
+  "blocked": 0,
+  "blocked_hosts": [],
+  "error_samples": [
+   "Uncaught (in promise) undefined"
+  ]
+ }
+]

@@ -121,6 +121,9 @@ const MIN_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 /// How often a running Lumen looks whether a list has gone stale.
 const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const NET_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest the first page waits for the cached matcher. Reading and baking it takes about
+/// 0.1 s on this laptop; a disk that takes longer gets its first page without.
+const WAIT_FIRST: Duration = Duration::from_millis(1500);
 
 /// A matcher, and the tracker hosts that say what a block it makes was.
 struct Built {
@@ -147,6 +150,8 @@ pub struct Blocker {
     cookies: RefCell<Option<Rc<HashSet<String>>>>,
     /// When the lists are next looked at while Lumen runs. Lists age while it stays open.
     next_check: Cell<std::time::Instant>,
+    /// The first page already waited for the matcher; nobody waits twice.
+    waited: Cell<bool>,
 }
 
 #[allow(dead_code)]
@@ -166,6 +171,7 @@ impl Blocker {
             trackers: RefCell::new(Vec::new()),
             cookies: RefCell::new(None),
             next_check: Cell::new(std::time::Instant::now() + CHECK_EVERY),
+            waited: Cell::new(false),
         })
     }
 
@@ -227,6 +233,25 @@ impl Blocker {
         let slot = self.engine.borrow();
         let Some(engine) = slot.as_ref() else { return String::new() };
         engine.url_cosmetic_resources(url).injected_script
+    }
+
+    /// The first page of a run starts before the matcher is in: a restored tab, a URL given at
+    /// launch. Its scriptlets are asked for once, at navigation start, and a site like YouTube
+    /// never starts a second navigation, so a page that got none keeps its ads until a reload.
+    /// The cached matcher is a file read away: wait for it, once, at most WAIT_FIRST.
+    pub fn wait_ready(&self) {
+        if !self.on.get() || self.waited.replace(true) || self.engine.borrow().is_some() {
+            return;
+        }
+        if !self.dir.join("filters").join(ENGINE_FILE).exists() {
+            return;
+        }
+        let got = self.rx.borrow().recv_timeout(WAIT_FIRST);
+        if let Ok(built) = got {
+            self.install(built);
+        }
+        // A newer one may have come right behind it.
+        self.pump();
     }
 
     /// CSS for one page, and how many elements were hidden, and how many of
@@ -357,6 +382,7 @@ impl Blocker {
                     }
                     nav_time.set(Some(Instant::now()));
                     nav_load.set(0);
+                    b.wait_ready();
                     let js = b.scriptlets(&url);
                     if js.is_empty() {
                         return Ok(());
@@ -500,6 +526,10 @@ impl Blocker {
             latest = Some(built);
         }
         let Some(built) = latest else { return };
+        self.install(built);
+    }
+
+    fn install(&self, built: Built) {
         let mut engine = adblock::Engine::new_with_filter_set(adblock::FilterSet::new(false));
         if engine.deserialize(&built.bytes).is_ok() {
             engine.use_resources(scriptlet_resources());
@@ -1313,6 +1343,7 @@ mod tests {
             cookies: RefCell::new(None),
             gpc: Cell::new(false),
             next_check: Cell::new(std::time::Instant::now()),
+            waited: Cell::new(false),
         };
         assert_eq!(b.check("https://ads.example.com/x.js", "https://site.com", "script"), Some(Cat::Ads));
         assert_eq!(b.check("https://track.example.org/p", "https://site.com", "image"), Some(Cat::Trackers));
@@ -1542,5 +1573,6 @@ mod tests {
         *DANGER_PASS.lock().unwrap() = None;
     }
 }
+
 
 
