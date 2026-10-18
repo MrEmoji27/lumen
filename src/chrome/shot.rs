@@ -325,6 +325,9 @@ pub fn fake(s: &mut UiState) {
         // The Lo-fi tab has sound: the footer's now-playing card follows it.
         s.media = Some(9006);
     }
+    if fake_has("battery") {
+        s.battery = true;
+    }
     if fake_has("page") {
         // The active tab is a secure, bookmarked page: lock, star and the offer chips show.
         let id = s.active;

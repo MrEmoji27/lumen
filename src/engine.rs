@@ -77,6 +77,8 @@ pub enum Ev {
     /// The page is in a call (a live microphone, camera or screen capture, or a connected
     /// peer connection), or no longer.
     Call(u64, bool),
+    /// Windows says memory is low (and says so again every few seconds while it stays low).
+    LowMemory,
     FullScreen(u64, bool),
     CloseMe(u64),
     /// New popup tab, and the tab that opened it.

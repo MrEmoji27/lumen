@@ -292,6 +292,69 @@ struct SleepState {
     pinned: bool,
 }
 
+/// A tab as the unload rules see it: Windows short of memory, or the RAM cap reached.
+struct Unloadable {
+    /// On screen: the active tab or the split's other half.
+    shown: bool,
+    /// It has a page to unload.
+    live: bool,
+    pinned: bool,
+    audio: bool,
+    call: bool,
+    /// An agent tab whose agent is working (its stage view is awake).
+    agent_busy: bool,
+    hidden_at: Option<Instant>,
+}
+
+/// The hidden tab looked at longest ago that may be unloaded: never one on screen, one with
+/// sound or a call, a pinned tab's live page, or a working agent's tab.
+fn unload_victim(tabs: &[Unloadable], now: Instant) -> Option<usize> {
+    tabs.iter()
+        .enumerate()
+        .filter(|(_, t)| t.live && !t.shown && !t.pinned && !t.audio && !t.call && !t.agent_busy)
+        .min_by_key(|(_, t)| t.hidden_at.unwrap_or(now))
+        .map(|(i, _)| i)
+}
+
+/// How often the power state is read. A plug pulled shows within this.
+const POWER_EVERY: Duration = Duration::from_secs(30);
+/// While Windows stays short of memory, one more tab goes every this long.
+const LOW_MEMORY_EVERY: Duration = Duration::from_secs(5);
+
+/// On battery, or with Windows' battery saver on.
+fn on_battery() -> bool {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut p = SYSTEM_POWER_STATUS::default();
+    if unsafe { GetSystemPowerStatus(&mut p) }.is_err() {
+        return false;
+    }
+    // ACLineStatus 0 is battery; SystemStatusFlag 1 is battery saver.
+    p.ACLineStatus == 0 || p.SystemStatusFlag & 1 != 0
+}
+
+/// Windows' low-memory signal, waited on by a thread of its own: while it is set, the loop
+/// hears about it every LOW_MEMORY_EVERY. Nothing polls on the UI thread.
+fn watch_low_memory(proxy: tao::event_loop::EventLoopProxy<Ev>) {
+    use windows::Win32::System::{
+        Memory::{CreateMemoryResourceNotification, LowMemoryResourceNotification},
+        Threading::{INFINITE, WaitForSingleObject},
+    };
+    let Ok(h) = (unsafe { CreateMemoryResourceNotification(LowMemoryResourceNotification) }) else { return };
+    let h = h.0 as isize;
+    let _ = std::thread::Builder::new().name("lumen-lowmem".into()).spawn(move || {
+        let h = windows::Win32::Foundation::HANDLE(h as _);
+        loop {
+            if unsafe { WaitForSingleObject(h, INFINITE) }.0 != 0 {
+                return;
+            }
+            if proxy.send_event(Ev::LowMemory).is_err() {
+                return;
+            }
+            std::thread::sleep(LOW_MEMORY_EVERY);
+        }
+    });
+}
+
 /// One thing the sleep policy does to a hidden tab.
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum SleepStep {
@@ -470,6 +533,9 @@ struct App {
     pal_open: bool,
     /// The last tab that played sound: the media keys and the footer card act on it.
     media_tab: Option<u64>,
+    /// On battery (or Windows' battery saver is on), as last read; read every POWER_EVERY.
+    on_battery: bool,
+    power_at: Instant,
     page_fs: bool,
     user_fs: bool,
     ui_ready: bool,
@@ -870,6 +936,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     let bt_port = settings.ensure_bt_port();
     // Start UPnP mapping for the torrent port if enabled.
     let upnp = upnp::Upnp::start(bt_port, settings.upnp);
+    watch_low_memory(ctx.proxy.clone());
     let mut app = App {
         ctx,
         chrome,
@@ -888,6 +955,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         peek: false,
         pal_open: false,
         media_tab: None,
+        on_battery: false,
+        power_at: Instant::now(),
         page_fs: false,
         user_fs: false,
         ui_ready: true,
@@ -2042,6 +2111,7 @@ impl App {
                 media: self.media_tab.and_then(|id| self.tabs.iter().find(|t| t.id == id && t.audio).map(|t| t.id)),
                 blocked: privacy_stats::tab_blocked(self.active),
                 cpu_cap: self.job.is_some(),
+                battery: self.power_saving(),
                 downloads: self
                     .downloads
                     .iter()
@@ -3900,6 +3970,7 @@ impl App {
                     self.tabs[i].typed = None;
                 }
             }
+            Ev::LowMemory => self.low_memory(),
             Ev::Call(id, on) => {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].call = on;
@@ -6043,8 +6114,7 @@ impl App {
     /// trim at TRIM_AFTER, freeze at sleep_after_min, discard at discard_after_min.
     /// A crashed page is already dead; a page playing audio is only ever trimmed.
     fn next_tab_wake(&self) -> Option<Instant> {
-        let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
-        let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
+        let (sleep, discard) = self.sleep_times();
         self.tabs
             .iter()
             .filter(|t| t.has_page() && !t.crashed && !self.on_stage(t.id))
@@ -6131,8 +6201,16 @@ impl App {
         }
         self.next_tick = now + TICK;
 
-        let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
-        let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
+        // Battery saver follows the plug: read the power state now and then.
+        if now >= self.power_at {
+            self.power_at = now + POWER_EVERY;
+            let on = on_battery();
+            if on != self.on_battery {
+                self.on_battery = on;
+                self.push();
+            }
+        }
+        let (sleep, discard) = self.sleep_times();
         for i in 0..self.tabs.len() {
             if self.on_stage(self.tabs[i].id) {
                 continue;
@@ -7319,16 +7397,56 @@ impl App {
         if used <= self.settings.ram_limit_mb as u64 * 1024 * 1024 {
             return;
         }
-        let victim = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| !self.on_stage(t.id) && t.has_page() && !t.pinned && !t.audio && !t.call)
-            .min_by_key(|(_, t)| t.hidden_at.unwrap_or(now))
-            .map(|(i, _)| i);
-        if let Some(i) = victim {
+        if let Some(i) = unload_victim(&self.unloadable(), now) {
             self.discard(i);
             self.push();
+        }
+    }
+
+    /// Every tab as the unload rules see it, in tab order.
+    fn unloadable(&self) -> Vec<Unloadable> {
+        self.tabs
+            .iter()
+            .map(|t| Unloadable {
+                shown: self.on_stage(t.id),
+                live: t.has_page(),
+                pinned: t.pinned,
+                audio: t.audio,
+                call: t.call,
+                agent_busy: t.agent && !t.stage_idle,
+                hidden_at: t.hidden_at,
+            })
+            .collect()
+    }
+
+    /// Windows is short of memory: one hidden tab goes, the one looked at longest ago.
+    /// The signal comes again every few seconds while it stays short.
+    fn low_memory(&mut self) {
+        let n = match unload_victim(&self.unloadable(), Instant::now()) {
+            Some(i) => {
+                self.discard(i);
+                self.push();
+                1
+            }
+            None => 0,
+        };
+        journal::low_memory(n);
+    }
+
+    /// Battery saver is in force: the setting is on and the PC is on battery.
+    fn power_saving(&self) -> bool {
+        self.settings.battery_saver && self.on_battery
+    }
+
+    /// When a hidden tab freezes and when it unloads. Battery saver shortens both to at
+    /// most 1 and 10 minutes.
+    fn sleep_times(&self) -> (Duration, Duration) {
+        let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
+        let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
+        if self.power_saving() {
+            (sleep.min(Duration::from_secs(60)), discard.min(Duration::from_secs(600)))
+        } else {
+            (sleep, discard)
         }
     }
 
@@ -7400,7 +7518,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{SleepState, SleepStep, TRIM_AFTER, Tab, classify_input, due_sleep_step, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
+    use super::{SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
     #[test]
@@ -7515,6 +7633,29 @@ mod tests {
 
     fn st(audio: bool, trimmed: bool, suspended: bool, pinned: bool) -> SleepState {
         SleepState { audio, call: false, trimmed, suspended, pinned }
+    }
+
+    /// Windows short of memory, or the RAM cap: the hidden tab looked at longest ago goes,
+    /// never one on screen, with sound, in a call, pinned, or a working agent's.
+    #[test]
+    fn unload_takes_the_oldest_hidden_tab_it_may() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let ago = |s: u64| Some(now - Duration::from_secs(s));
+        let t = |hidden: u64| Unloadable { shown: false, live: true, pinned: false, audio: false, call: false, agent_busy: false, hidden_at: ago(hidden) };
+        let tabs = [
+            Unloadable { shown: true, hidden_at: None, ..t(0) },
+            Unloadable { audio: true, ..t(900) },
+            Unloadable { call: true, ..t(800) },
+            Unloadable { pinned: true, ..t(700) },
+            Unloadable { agent_busy: true, ..t(600) },
+            Unloadable { live: false, ..t(500) },
+            t(100),
+            t(300),
+        ];
+        assert_eq!(unload_victim(&tabs, now), Some(7), "the one hidden longest that may go");
+        assert_eq!(unload_victim(&tabs[..7], now), Some(6));
+        assert_eq!(unload_victim(&tabs[..6], now), None, "nothing it may take");
     }
 
     /// A tab in a call is never trimmed, frozen or dropped, however long it is hidden and

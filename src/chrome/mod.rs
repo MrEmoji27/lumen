@@ -142,6 +142,8 @@ pub struct UiState {
     pub media: Option<u64>,
     pub blocked: u64,
     pub cpu_cap: bool,
+    /// Battery saver is in force: hidden tabs sleep sooner, motion is reduced, a leaf shows.
+    pub battery: bool,
     pub downloads: Vec<UiDl>,
     pub agent_busy: bool,
     /// Per agent session: what became of the person's last message to it, in words.
@@ -1959,7 +1961,14 @@ impl Inner {
         shot::fake(&mut s);
         // The whole style of this state, in one place. Reduced-motion is read
         // here too, so a system that turns animations off is felt at once.
-        let look = Look::of(&s.settings, s.dark, motion::system_allows());
+        // Battery saver: the chrome moves less, whatever the motion setting says.
+        let look = if s.battery && s.settings.motion == "full" {
+            let mut quiet = s.settings.clone();
+            quiet.motion = "reduced".into();
+            Look::of(&quiet, s.dark, motion::system_allows())
+        } else {
+            Look::of(&s.settings, s.dark, motion::system_allows())
+        };
         self.gfx.set_families(&s.settings.ui_font, &s.settings.display_font, &s.settings.mono_font);
         if self.gfx.ui_family() != self.edit_face && !self.edit.is_invalid() {
             self.make_fonts();
@@ -3475,7 +3484,12 @@ impl Inner {
             && let Some(id) = s.media
             && let Some(t) = s.tabs.iter().find(|t| t.id == id)
         {
-            let _ = self.draw_now_playing(t, right_edge + 6.0, right, fy);
+            right = self.draw_now_playing(t, right_edge + 6.0, right, fy);
+        }
+        // Battery saver in force: a leaf, so it is plain why tabs sleep sooner. The card
+        // above is worth more; the leaf takes what room is left.
+        if s.battery && right - 20.0 > right_edge + 6.0 {
+            self.gfx.icon("leaf", right - 17.0, fy + 10.0, 14.0, th.faint);
         }
         self.draw_footer_overlays(s);
     }

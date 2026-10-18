@@ -68,6 +68,7 @@ pub static TABLE: &[Entry] = &[
     lucide!("sliders", "sliders-horizontal"),
     lucide!("info", "info"),
     lucide!("mic", "mic"),
+    lucide!("leaf", "leaf"),
     lucide!("external", "external-link"),
     lucide!("sound", "volume-2"),
     lucide!("muted", "volume-x"),

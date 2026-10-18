@@ -127,6 +127,10 @@ pub struct Settings {
     /// Run the person's userscripts: `*.user.js` files in `userscripts\` in the data
     /// folder, in their own tabs only, never an agent's or a private one.
     pub userscripts: bool,
+    /// On battery, or with Windows' battery saver on: hidden tabs freeze after 1 minute
+    /// and unload after 10, and the chrome's motion is reduced.
+    #[serde(default = "yes")]
+    pub battery_saver: bool,
     /// Hide ad leftovers and cookie banners (cosmetic rules).
     pub cosmetic: bool,
     /// Count what the blocker stops, per day and per site, for the report.
@@ -298,6 +302,7 @@ impl Default for Settings {
             adblock: true,
             sponsorblock: true,
             userscripts: true,
+            battery_saver: true,
             show_memory: true,
             gpu_in_process: true,
             share_processes: true,

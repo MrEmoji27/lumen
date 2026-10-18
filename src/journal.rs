@@ -815,6 +815,11 @@ pub fn panic(msg: &str) {
     }
 }
 
+/// Windows said memory was low; `unloaded` hidden tabs were unloaded for it.
+pub fn low_memory(unloaded: usize) {
+    with(|journal| journal.write("low_memory", &[("n", Value::from(unloaded as u64))]));
+}
+
 /// A feature was used. A feature used in a private tab is not written down.
 pub fn feature(name: &str, private: bool) {
     with(|journal| journal.feature(name, private));

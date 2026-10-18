@@ -352,6 +352,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Range("download_limit_kbps", "Download speed limit", "Caps aria2, the download engine. 0 is no limit.", Scale::Steps(DL_SPEEDS), "kbps"),
             Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),
             Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
+            Toggle("battery_saver", "Battery saver", "On battery, or with Windows' battery saver on: hidden tabs freeze after 1 minute and unload after 10, and motion is reduced. A leaf in the footer says so."),
         ]),
         ("Passwords", vec![
             Toggle("save_passwords", "Offer to save passwords", "Saved by WebView2, encrypted by Windows with your sign-in. Fills them in next time."),
