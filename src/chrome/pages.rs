@@ -2276,10 +2276,12 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.line(nav.right(), st.y + i.look.s4, nav.right(), st.bottom() - i.look.s4, th.line, 1.0);
     i.gfx.text("Settings", R::new(nav.x + 22.0, nav.y + 22.0, 160.0, 40.0), i.look.title, th.text);
     // Which build this is, under the title: the question people ask before reporting a bug.
-    i.gfx.text(&format!("Lumen {}", crate::VERSION), R::new(nav.x + 22.0, nav.y + 58.0, nav.w - 30.0, 16.0), i.look.caption, th.faint);
+    // The number on a line of its own, readable; the commit and date under it, quieter.
+    i.gfx.text(&format!("Lumen {}", env!("CARGO_PKG_VERSION")), R::new(nav.x + 22.0, nav.y + 58.0, nav.w - 30.0, 18.0), i.look.small_strong, th.dim);
+    i.gfx.text(env!("LUMEN_BUILD"), R::new(nav.x + 22.0, nav.y + 76.0, nav.w - 30.0, 16.0), i.look.caption, th.faint);
     let current = i.page.sections.iter().rposition(|y| *y <= i.page.scroll + 30.0).unwrap_or(0);
     for (n, (name, _)) in schema.iter().enumerate() {
-        let r = R::new(nav.x + i.look.s3, nav.y + 78.0 + n as f32 * 32.0, nav.w - i.look.s5, 30.0);
+        let r = R::new(nav.x + i.look.s3, nav.y + 100.0 + n as f32 * 32.0, nav.w - i.look.s5, 30.0);
         let h = Hit::Page(PageHit::Nav(n));
         if n == current || i.is_hover(&h) {
             i.gfx.round(r, i.look.r_md, th.hover);

@@ -62,7 +62,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     let col = column(st, 860.0);
     i.gfx.clip(st);
     let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
-    y = title_block(i, col, y, "Dashboard", "Lumen at a glance. Live while this page is open.");
+    y = title_block(i, col, y, "Dashboard", &format!("Lumen {} at a glance. Live while this page is open.", crate::VERSION));
 
     let (open, live, asleep, off) = tab_counts(s);
     let active_dl: Vec<_> = s.downloads.iter().filter(|d| d.state == "progress").collect();

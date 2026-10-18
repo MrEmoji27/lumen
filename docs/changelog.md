@@ -7,6 +7,12 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.4.1 — 2026-10-18
+
+- The version shows where people look: the Dashboard's header says `Lumen 0.4.1 (commit date)`,
+  and Settings puts the number on a line of its own under its title, the commit and date under
+  that. Before, it was one faint line that a long build stamp clipped.
+
 ## 0.4.0 — 2026-10-18
 
 - Agents: every call is faster. The sidebar was redrawn on every agent call, about 35 ms each, and
