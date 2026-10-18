@@ -683,6 +683,8 @@ pub(crate) struct Inner {
     ntp_typed: Typed,
     /// The page question whose card is up, if any.
     page_ask_shown: Option<u64>,
+    /// Where the link under the pointer goes, drawn as a pill at the page's foot.
+    link: String,
     born: Instant,
     spinning: bool,
     /// Every animated value of the chrome.
@@ -1564,6 +1566,7 @@ impl Chrome {
                 omni_typed: Typed::default(),
                 ntp_typed: Typed::default(),
                 page_ask_shown: None,
+                link: String::new(),
                 sel: 0,
                 born: Instant::now(),
                 spinning: false,
@@ -1757,6 +1760,15 @@ impl Chrome {
     }
 
     /// A short-lived note: a failed KeePass unlock, shown where it happened.
+    /// Where the link under the pointer goes; "" takes the pill away.
+    pub fn set_link(&self, text: String) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        if i.link != text {
+            i.link = text;
+            i.invalidate();
+        }
+    }
+
     pub fn flash(&self, msg: String) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         i.page.flash = Some((msg, Instant::now()));
@@ -2912,6 +2924,8 @@ impl Inner {
             let st = R::new(x - 1.0, y - 1.0, w + 2.0, h + 2.0);
             self.gfx.round_stroke(st, lo.page_radius + 1.0, th.line, 1.0);
         }
+        // Where the hovered link goes: a pill at the page's bottom left, under every card.
+        self.draw_link(s);
         // The cards over everything else. Their order is their z-order.
         color::draw(self, s);
         form::draw(self, s);
@@ -4738,6 +4752,23 @@ impl Inner {
 
     /// A card: the look's raised surface, a hairline, and in Glass a frosted pane.
     /// A card that floats over the chrome: a soft shadow under it, then the card.
+    /// The link pill: one line, the address cut to fit, over the page's bottom-left corner.
+    fn draw_link(&mut self, s: &UiState) {
+        if self.link.is_empty() || s.full || s.panel != "none" {
+            return;
+        }
+        let (sx, sy, sw, sh) = s.stage;
+        let f = self.look.font(12.0, 450);
+        let text = self.link.clone();
+        let w = (self.gfx.measure(&text, f) + 20.0).min(sw * 0.6).max(40.0);
+        let r = R::new(sx + 8.0, sy + sh - 8.0 - 26.0, w, 26.0);
+        let th = self.look.theme;
+        self.floats.push((r, 13.0));
+        self.gfx.round(r, 13.0, th.solid(th.raise));
+        self.gfx.round_stroke(r, 13.0, th.line, 1.0);
+        self.gfx.text(&text, R::new(r.x + 10.0, r.y, r.w - 20.0, r.h), f, th.dim);
+    }
+
     fn float_card(&mut self, r: R, a: f32) {
         self.floats.push((r, self.look.r_card));
         let lo = &self.look;

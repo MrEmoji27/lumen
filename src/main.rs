@@ -2458,6 +2458,8 @@ impl App {
 
     fn activate(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
+        // The link pill belonged to the page being left.
+        self.chrome.set_link(String::new());
         // The card covered the page being left; a new page under it means it is done.
         self.drop_glance();
         // A voice follows the tab it was reading; leaving that tab stops it.
@@ -4042,6 +4044,12 @@ impl App {
                 }
             }
             Ev::LowMemory => self.low_memory(),
+            // Straight to the chrome: a pointer crossing links must not rebuild the whole UI.
+            Ev::LinkHover(id, text) => {
+                if id == self.active {
+                    self.chrome.set_link(text);
+                }
+            }
             Ev::PageAsk { aid, tab, origin, ask } => {
                 let Some(i) = self.idx(tab) else {
                     engine::answer_script(&self.ctx, aid, false, None);

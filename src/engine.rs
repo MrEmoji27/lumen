@@ -21,7 +21,7 @@ use webview2_com::{
     IsDocumentPlayingAudioChangedEventHandler, LaunchingExternalUriSchemeEventHandler, Microsoft::Web::WebView2::Win32::*,
     NewWindowRequestedEventHandler, SourceChangedEventHandler, TrySuspendCompletedHandler, WebMessageReceivedEventHandler,
     WindowCloseRequestedEventHandler, BasicAuthenticationRequestedEventHandler, ContextMenuRequestedEventHandler,
-    ScriptDialogOpeningEventHandler,
+    ScriptDialogOpeningEventHandler, StatusBarTextChangedEventHandler,
 };
 use windows::{
     Win32::{
@@ -83,6 +83,8 @@ pub enum Ev {
     /// A right-click on a page: WebView2's own items for that spot (command id, label, enabled;
     /// `i32::MIN` is a separator), what was under the pointer, and where, in page DIPs.
     PageMenu { aid: u64, tab: u64, x: f32, y: f32, items: Vec<(i32, String, bool)>, link: String, selection: String },
+    /// Where the link under the pointer goes, or "" when it left the link.
+    LinkHover(u64, String),
     /// The person's sign-in: user and password, or None for Cancel. The password never leaves
     /// this event.
     SignInAnswer(u64, Option<(String, String)>),
@@ -1777,6 +1779,22 @@ fn hook_page_asks(ctx: &Rc<Ctx>, wv: &WebView, id: u64) {
             let _ = s.SetAreDefaultScriptDialogsEnabled(false);
             // A page that does not load gets Lumen's own error page (main.rs, NavDone).
             let _ = s.SetIsBuiltInErrorPageEnabled(false);
+            // Where a link goes is Lumen's pill, not Chromium's grey bubble.
+            let _ = s.SetIsStatusBarEnabled(false);
+        }
+        if let Ok(c12) = core.cast::<ICoreWebView2_12>() {
+            let p = ctx.proxy.clone();
+            let mut token = 0i64;
+            let _ = c12.add_StatusBarTextChanged(
+                &StatusBarTextChangedEventHandler::create(Box::new(move |w, _| {
+                    let Some(w) = w.and_then(|w| w.cast::<ICoreWebView2_12>().ok()) else { return Ok(()) };
+                    let mut t = PWSTR::null();
+                    w.StatusBarText(&mut t)?;
+                    let _ = p.send_event(Ev::LinkHover(id, take(t)));
+                    Ok(())
+                })),
+                &mut token,
+            );
         }
         let mut token = 0i64;
         let c = ctx.clone();
