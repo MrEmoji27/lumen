@@ -329,6 +329,11 @@ pub fn fake(s: &mut UiState) {
     if fake_has("handoff") {
         s.handoff = Some(("claude-code".into(), "Log in to the shop with your account, then press Done and I carry on.".into()));
     }
+    if fake_has("cardcolor") && s.settings.recent_colors.is_empty() {
+        // A few colours picked before, so the recents row is full. Only once: the
+        // real list, as the picker updates it, must not be overwritten on a state push.
+        s.settings.recent_colors = vec!["#2f6bff".into(), "#13a36b".into(), "#f0a070".into(), "#5a43e6".into(), "#c4241c".into(), "#3c6e71".into()];
+    }
     if fake_has("prompt") {
         s.prompt = Some((1, "https://meet.example.com".into(), "camera"));
     }

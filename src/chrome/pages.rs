@@ -4,10 +4,9 @@
 
 use serde_json::{Value, json};
 use windows::Win32::UI::Controls::Dialogs::{
-    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
+    GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
     OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
-use windows::Win32::Foundation::COLORREF;
 use windows::core::{PCWSTR, PWSTR};
 
 use super::{
@@ -417,7 +416,7 @@ fn get(s: &Settings, k: &str) -> Value {
     serde_json::to_value(s).ok().and_then(|v| v.get(k).cloned()).unwrap_or(Value::Null)
 }
 
-fn set(i: &mut Inner, k: &str, v: Value) {
+pub(super) fn set(i: &mut Inner, k: &str, v: Value) {
     let Some(st) = i.state.as_mut() else { return };
     let mut all = serde_json::to_value(&st.settings).unwrap_or(json!({}));
     if all.get(k) == Some(&v) {
@@ -3318,15 +3317,15 @@ pub fn click(i: &mut Inner, p: PageHit) {
         }
         PageHit::AccentReset => set(i, "accent", json!("")),
         PageHit::Accent => {
-            if let Some(c) = pick_color(i.hwnd_raw(), i.theme.accent) {
-                set(i, "accent", json!(c.hex()));
-            }
+            // The card opens under the swatch that was clicked.
+            let anchor = i.hits.iter().find(|(_, h)| *h == Hit::Page(PageHit::Accent)).map(|(r, _)| *r);
+            super::color::open(i, "accent", s.settings.accent.clone(), i.theme.accent, anchor);
         }
         PageHit::Color(k) => {
             let start = role_color(i, k, &s);
-            if let Some(c) = pick_color(i.hwnd_raw(), start) {
-                set(i, k, json!(c.hex()));
-            }
+            let was = get(&s.settings, k).as_str().unwrap_or("").to_string();
+            let anchor = i.hits.iter().find(|(_, h)| *h == Hit::Page(PageHit::Color(k))).map(|(r, _)| *r);
+            super::color::open(i, k, was, start, anchor);
         }
         PageHit::ColorClear(k) => set(i, k, json!("")),
         PageHit::Text("wallpaper") => {
@@ -3678,25 +3677,6 @@ pub fn pick_char(i: &mut Inner, ch: u32) -> bool {
         i.invalidate();
     }
     true
-}
-
-/// The Windows color dialog. Blocks while open, which is what a picker should do.
-fn pick_color(owner: windows::Win32::Foundation::HWND, start: Color) -> Option<Color> {
-    let mut custom = [COLORREF(0); 16];
-    let mut cc = CHOOSECOLORW {
-        lStructSize: size_of::<CHOOSECOLORW>() as u32,
-        hwndOwner: owner,
-        rgbResult: COLORREF(start.colorref()),
-        lpCustColors: custom.as_mut_ptr(),
-        Flags: CC_FULLOPEN | CC_RGBINIT,
-        ..Default::default()
-    };
-    if unsafe { ChooseColorW(&mut cc) }.as_bool() {
-        let v = cc.rgbResult.0;
-        Some(Color((v & 0xff) as f32 / 255.0, ((v >> 8) & 0xff) as f32 / 255.0, ((v >> 16) & 0xff) as f32 / 255.0, 1.0))
-    } else {
-        None
-    }
 }
 
 impl Inner {

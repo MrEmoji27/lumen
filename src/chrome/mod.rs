@@ -12,6 +12,7 @@ mod motion;
 mod pages;
 mod report;
 mod dashboard;
+mod color;
 #[cfg(debug_assertions)]
 mod shot;
 mod style;
@@ -379,6 +380,13 @@ pub enum Hit {
     SayMode(usize),
     SaySend,
     SayClose,
+    /// The colour picker's card: the card, its square, its strip, its swatches.
+    ColorCard,
+    ColorArea,
+    ColorHue,
+    ColorPreset(usize),
+    ColorRecent(usize),
+    ColorDone,
 }
 
 #[derive(Clone, Debug)]
@@ -667,6 +675,10 @@ pub(crate) struct Inner {
     set_edit: HWND,
     /// The report page's "what happened" box.
     bug_edit: HWND,
+    /// The colour picker's hex box.
+    color_edit: HWND,
+    /// The colour picker's card, open under the swatch it was asked from.
+    color: Option<color::ColorCard>,
 }
 
 /// A message being written to an agent: the card over the sidebar.
@@ -746,6 +758,7 @@ const ID_SRCH: usize = 105;
 const ID_SAY: usize = 106;
 const ID_SET: usize = 107;
 const ID_BUG: usize = 108;
+const ID_COLOR: usize = 109;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
@@ -1040,7 +1053,22 @@ impl Chrome {
                 None,
             )
             .unwrap_or_default();
-            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit] {
+            let color_edit = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("EDIT"),
+                w!(""),
+                edit_style,
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_COLOR as _)),
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            for e in [edit, ntp_edit, bm_edit, drive_edit, search_edit, say_edit, set_edit, bug_edit, color_edit] {
                 let old = SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as isize);
                 SetWindowLongPtrW(e, GWLP_USERDATA, old);
             }
@@ -1110,6 +1138,8 @@ impl Chrome {
                 say_edit,
                 set_edit,
                 bug_edit,
+                color_edit,
+                color: None,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -1379,7 +1409,8 @@ impl Inner {
             SendMessageW(self.drive_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.set_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             SendMessageW(self.bug_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit, self.bug_edit] {
+            SendMessageW(self.color_edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
+            for e in [self.edit, self.ntp_edit, self.bm_edit, self.drive_edit, self.set_edit, self.bug_edit, self.color_edit] {
                 SendMessageW(e, EM_SETMARGINS, Some(WPARAM((EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize)), Some(LPARAM(0)));
             }
         }
@@ -1543,6 +1574,13 @@ impl Inner {
                 _ => "ui_font",
             };
             self.page.font_pick = Some(pages::FontPick { key, filter: filter.to_string(), scroll: 0.0, shown: Vec::new() });
+        }
+        // Debug: LUMEN_TEST_CARD="color" opens the colour picker without a click,
+        // so a screenshot can show it. The anchorless card sits at the right edge.
+        #[cfg(debug_assertions)]
+        if std::env::var("LUMEN_TEST_CARD").is_ok_and(|v| v == "color") && self.color.is_none() {
+            let color = self.theme.accent;
+            color::open(self, "accent", String::new(), color, None);
         }
         self.invalidate();
     }
@@ -1800,6 +1838,11 @@ impl Inner {
         place(self.set_edit, R::new(q.x + 34.0, q.y + (q.h - 20.0) / 2.0, q.w - 46.0, 20.0), s.full && s.panel == "settings" && self.page.font_pick.is_none());
         let b = pages::bug_story_rect(R::new(s.stage.0, s.stage.1, s.stage.2, s.stage.3), self.look.s5);
         place(self.bug_edit, R::new(b.x + 16.0, b.y + (b.h - 22.0) / 2.0, b.w - 32.0, 22.0), s.full && s.panel == "bugreport");
+        // The colour picker's hex box, inside the box the card draws for it.
+        match &self.color {
+            Some(c) => place(self.color_edit, R::new(c.hex_box().x + 8.0, c.hex_box().y + 4.0, c.hex_box().w - 16.0, 18.0), true),
+            None => place(self.color_edit, R::default(), false),
+        }
         // The Drive page takes the cursor once, when it opens.
         if show && std::mem::take(&mut self.drive_focus) {
             unsafe {
@@ -2116,6 +2159,8 @@ impl Inner {
             let st = R::new(x - 1.0, y - 1.0, w + 2.0, h + 2.0);
             self.gfx.round_stroke(st, lo.page_radius + 1.0, th.line, 1.0);
         }
+        // The cards over everything else. Their order is their z-order.
+        color::draw(self, s);
         self.motion.end();
     }
 
@@ -3990,6 +4035,9 @@ impl Inner {
                 return;
             }
         }
+        if color::drag_move(self, x, y) {
+            return;
+        }
         if pages::drag_move(self, x, y) {
             return;
         }
@@ -4041,6 +4089,8 @@ impl Inner {
                 }
             }
             Some(Hit::NtpSearch) => self.focus_ntp(),
+            Some(Hit::ColorArea) => color::press(self, 0, x, y),
+            Some(Hit::ColorHue) => color::press(self, 1, x, y),
             Some(Hit::Page(p)) => pages::press(self, p, x, y),
             _ => {}
         }
@@ -4077,6 +4127,9 @@ impl Inner {
                 return;
             }
         }
+        if color::drag_end(self) {
+            return;
+        }
         if pages::drag_end(self, y) {
             return;
         }
@@ -4097,6 +4150,12 @@ impl Inner {
         // The same for the lock's card, which acts through its own hits.
         if self.site_open && !matches!(h, Some(Hit::SiteInfo | Hit::SitePerm(..) | Hit::SiteClear | Hit::SiteSettings)) {
             self.site_open = false;
+        }
+        // And for the colour picker: a click outside it keeps the colour it shows.
+        if self.color.is_some()
+            && !matches!(h, Some(Hit::ColorCard | Hit::ColorArea | Hit::ColorHue | Hit::ColorPreset(_) | Hit::ColorRecent(_) | Hit::ColorDone))
+        {
+            color::done(self);
         }
         let p = &self.proxy;
         match h.unwrap() {
@@ -4170,6 +4229,10 @@ impl Inner {
             }
             Hit::SaySend => self.send_say(),
             Hit::SayClose => self.close_say(),
+            Hit::ColorCard => {}
+            Hit::ColorPreset(n) => color::pick_preset(self, n),
+            Hit::ColorRecent(n) => color::pick_recent(self, n),
+            Hit::ColorDone => color::done(self),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => {
@@ -4581,6 +4644,10 @@ impl Inner {
 
     fn key(&mut self, vk: u32) -> bool {
         let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
+        // The colour picker: Escape puts the old colour back, Enter is Done.
+        if color::key(self, vk) {
+            return true;
+        }
         // The tab search and the lock's card sit over the sidebar: Escape puts them away.
         if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) && self.say.is_some() {
             self.close_say();
@@ -4939,6 +5006,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         i.search_sel = 0;
                     }
                     i.invalidate();
+                } else if id == ID_COLOR && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE) {
+                    // A whole colour typed into the hex box moves the square with it.
+                    if code == EN_CHANGE {
+                        color::typed(&mut i);
+                    }
+                    i.invalidate();
                 }
                 LRESULT(0)
             }
@@ -5065,6 +5138,24 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                                 i.sel = if v == VK_DOWN.0 { (i.sel + 1) % n } else { (i.sel + n - 1) % n };
                                 i.invalidate();
                             }
+                            return LRESULT(0);
+                        }
+                        _ => {}
+                    }
+                } else if id == ID_COLOR {
+                    // The picker's hex box: Enter is Done, Escape puts the old colour back.
+                    match vk {
+                        v if v == VK_RETURN.0 => {
+                            color::done(&mut i);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_ESCAPE.0 => {
+                            color::cancel(&mut i);
+                            return LRESULT(0);
+                        }
+                        v if v == VK_TAB.0 => {
+                            // Tab leaves the box rather than cycling the hidden children.
+                            let _ = SetFocus(Some(parent));
                             return LRESULT(0);
                         }
                         _ => {}

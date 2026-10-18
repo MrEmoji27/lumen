@@ -296,6 +296,24 @@ impl Gfx {
         unsafe { self.t().DrawRoundedRectangle(&rr, self.b(c), width, None) };
     }
 
+    /// A rounded rectangle filled with a straight gradient: the stops run left to
+    /// right, or top to bottom with `vertical`. Each stop is a position 0..1 and a
+    /// colour, alpha included, so two gradients can be laid over each other.
+    pub fn grad(&self, r: R, radius: f32, stops: &[(f32, Color)], vertical: bool) {
+        unsafe {
+            let t = self.t();
+            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(p, c)| D2D1_GRADIENT_STOP { position: p, color: c.d2d() }).collect();
+            let Ok(coll) = t.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: Vector2 { X: r.x, Y: r.y },
+                endPoint: if vertical { Vector2 { X: r.x, Y: r.bottom() } } else { Vector2 { X: r.right(), Y: r.y } },
+            };
+            let Ok(b) = t.CreateLinearGradientBrush(&props, None, &coll) else { return };
+            let rr = D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: radius, radiusY: radius };
+            t.FillRoundedRectangle(&rr, &b);
+        }
+    }
+
     pub fn line(&self, x1: f32, y1: f32, x2: f32, y2: f32, c: Color, w: f32) {
         unsafe {
             self.t().DrawLine(Vector2 { X: x1, Y: y1 }, Vector2 { X: x2, Y: y2 }, self.b(c), w, self.round.as_ref())
