@@ -393,3 +393,41 @@ What moves is the model's side: one round trip instead of twelve, 580 bytes to r
 Memory: a warm idle Lumen is 19.2 MB, 19.1 MB at 0.3.0. Luau is in the exe (15.5 MB, from
 14.0 MB) and costs nothing until a script runs: each run gets a fresh VM, capped at 32 MB, gone
 when it ends.
+
+## Group A, 18 October
+
+Three changes, measured one at a time on this laptop: release builds into `target/perf-a`,
+headless, a fresh throwaway profile under `%TEMP%` for every run, three tabs at most, muted
+(headless is). "before" is the branch point build; "after" is the same tree with only that change,
+built the same way. A change that did not help was reverted; what follows says what each one did.
+
+### Hidden tabs: the low memory target, at once
+
+WebView2's `SetMemoryUsageTargetLevel` was only ever set 30 seconds into hiding, by the sleep
+policy's trim, and an agent's stage views never got it at all. Now the place that already decides
+a page is on screen, `sync_panes`, tells WebView2 `Low` the moment one goes off screen, and
+`Normal` before a page that comes back paints. The minimize path says the same on restore. An
+agent's stage view goes `Low` when its agent has been idle for `STAGE_IDLE` (30 s) and `Normal`
+when a call wakes it. The 30 s trim still runs; it is no longer the first time WebView2 hears
+about a page that is gone.
+
+Method: release, headless, a fresh profile per run under `%TEMP%`, warmed once first so the
+filter lists are already on disk. Three tabs: a long Wikipedia article as the shown tab (the
+restored active tab), a news front page and another Wikipedia article as agent tabs on the
+off-screen stage. The number is the private working set of `lumen.exe` plus every WebView2 process
+whose command line names this run's data folder, summed at 90 s. The journal's own `sample` line,
+which walks the same tree through `engine::memory`, rides beside it. Three runs each.
+
+| run | before at 90 s | before, journal 60 s / 120 s | after at 90 s | after, journal 60 s / 120 s |
+|---|---|---|---|---|
+| 1 | 215.0 MB | 219.0 / 213.0 MB | 182.0 MB | 180.1 / 180.7 MB |
+| 2 | 214.3 MB | 220.3 / 212.4 MB | 182.1 MB | 185.3 / 185.9 MB |
+| 3 | 214.9 MB | 220.4 / 212.4 MB | 154.9 MB | 158.0 / 154.7 MB |
+| median | 214.9 MB | | 182.0 MB | |
+
+**Kept: 214.9 MB to 182.0 MB, 33 MB less (15%)** for two hidden heavy pages, with the shown tab
+costing what it always did. All three pages loaded in every run (`nav ... ok=True`, and the
+journal's `tabs=3 live=3` at both samples). The after side spread 27 MB between its runs (154.9
+to 182.1); how much Chromium lets go when it is told a page is gone depends on the run. Every
+after run was below every before run; the median is the number to read.
+
