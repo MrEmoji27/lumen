@@ -156,6 +156,7 @@ pub enum Op {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Step {
     pub tool: String,
+    #[serde(default)]
     pub args: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab: Option<u64>,
@@ -873,6 +874,15 @@ pub fn tools() -> Value {
           json!({"url": {"type": "string"}, "tab": tab, "wait": {"type": "boolean"}}), &["url"]),
         t("browser_downloads", "List downloads: state, size, path.", json!({}), &[]),
         t("browser_close", "Close your tab.", json!({"tab": tab}), &["tab"]),
+        t("browser_batch", "Run up to 20 tool calls in one: fewer round trips. Each step is checked and allowed exactly as if it came alone. \"tab\": \"$1\" is the tab step 1 opened. Answers one line per step, then the last step's answer (result=\"all\": every step's). Stops at the first error unless stop_on_error=false, and then shows that tab.",
+          json!({"steps": {"type": "array", "items": {"type": "object", "properties": {"tool": {"type": "string"}, "args": {"type": "object"}}, "required": ["tool"]}},
+                 "stop_on_error": {"type": "boolean"}, "result": {"type": "string", "enum": ["last", "all"]}}), &["steps"]),
+        t("browser_fill", "Fill a form in one call: each field by ref gets its value (text is typed, a select picks the option, a checkbox or radio is set to \"true\"/\"false\"). Every field is read back; the answer names any that did not take. submit=ref clicks that after.",
+          json!({"tab": tab, "fields": {"type": "array", "items": {"type": "object", "properties": {"ref": {"type": "string"}, "value": {"type": "string"}}, "required": ["ref", "value"]}}, "submit": r#ref}), &["tab", "fields"]),
+        t("browser_table", "A table as JSON rows, the header row as keys. ref or a CSS selector picks the table; nothing picks the biggest one. At most 500 rows.",
+          json!({"tab": tab, "ref": r#ref, "selector": {"type": "string"}, "max_rows": {"type": "integer"}}), &["tab"]),
+        t("browser_links", "The page's links as [text](url), deduped. match keeps those whose text or URL has it; same_site keeps this site's.",
+          json!({"tab": tab, "match": {"type": "string"}, "same_site": {"type": "boolean"}, "max": {"type": "integer", "description": "Default 100, at most 1000"}}), &["tab"]),
         t("browser_help", "Short usage and examples. topic optional.", json!({"topic": {"type": "string", "description": "Tool name, e.g. browser_click"}}), &[]),
         t("browser_status", "Session tabs, load state, running calls, pending handoff, downloads.", json!({}), &[]),
         t("browser_whoami", "Who this session is: label, short id, profile, granted tabs, limiting settings.", json!({}), &[]),
@@ -914,21 +924,36 @@ fn cdp(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64, method: &str, params: Va
     call(proxy, who, Op::Cdp { tab, method: method.into(), params })
 }
 
-/// Until the document is complete, or 12 seconds pass. Then a breath for late scripts.
+/// Until the navigation in flight is done and the document complete, or 12 seconds pass.
+/// Lumen knows when a navigation starts and ends (WebView2 says so), so this waits on that
+/// and not on a clock: a page that loads in 40 ms costs 40 ms. Then a breath for late scripts.
 fn wait_load(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) {
-    thread::sleep(Duration::from_millis(250));
-    for _ in 0..60 {
-        // A fresh tab is about:blank and already "complete"; wait for the real page.
-        let js = "document.readyState==='complete'&&location.href!=='about:blank'";
-        match eval(proxy, who, tab, js) {
-            Ok(v) if v.as_bool() == Some(true) => break,
-            // The tab is no longer ours to use (a shared tab left its site): nothing to wait for.
-            Err(e) if e.contains("you may use") => break,
-            _ => {}
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(12) {
+        let pending = call(proxy, who, Op::NavInfo { tab }).ok().is_some_and(|v| v["pending"] == true);
+        if !pending {
+            // A fresh tab is about:blank and already "complete"; wait for the real page.
+            let js = "document.readyState==='complete'&&location.href!=='about:blank'";
+            match eval(proxy, who, tab, js) {
+                Ok(v) if v.as_bool() == Some(true) => break,
+                // The tab is no longer ours to use (a shared tab left its site): nothing to wait for.
+                Err(e) if e.contains("you may use") => break,
+                _ => {}
+            }
         }
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(25));
     }
-    thread::sleep(Duration::from_millis(300));
+    thread::sleep(Duration::from_millis(60));
+}
+
+/// A batch: at most this many steps, and this long in all.
+const MAX_BATCH: usize = 20;
+const RUN_TIME: Duration = Duration::from_secs(60);
+
+/// What an action answers with: the controls in view, about 60 lines. The page may have
+/// changed under the agent; this is enough to see how, and browser_snapshot has the rest.
+fn after_action() -> Value {
+    json!({"viewport": true, "max_lines": 60})
 }
 
 fn tab_arg(args: &Value) -> Result<u64, String> {
@@ -1211,7 +1236,7 @@ fn wait_actionable(sh: &Arc<Shared>, who: &Who, tab: u64, r: &Ref, ms: u64, rr: 
                 w => format!("{show} is {w} after {ms} ms; it cannot be acted on yet"),
             });
         }
-        thread::sleep(Duration::from_millis(80));
+        thread::sleep(Duration::from_millis(40));
     }
 }
 
@@ -1395,12 +1420,19 @@ fn press(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64, chord: &str) -> Result
     Ok(())
 }
 
-/// Wait for a navigation the action may have started; quick when nothing happens.
+/// Wait for a navigation the action may have started. A click that navigates makes the
+/// page start within a few frames: watch for that a short while, and go on the moment it
+/// shows, or when the window passes and nothing came.
 fn settle(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64, before: &str) {
-    thread::sleep(Duration::from_millis(350));
-    let now = eval(proxy, who, tab, "location.href+'|'+document.readyState").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
-    if !now.starts_with(&format!("{before}|")) || !now.ends_with("|complete") {
-        wait_load(proxy, who, tab);
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(120) {
+        thread::sleep(Duration::from_millis(20));
+        let pending = call(proxy, who, Op::NavInfo { tab }).ok().is_some_and(|v| v["pending"] == true);
+        let now = eval(proxy, who, tab, "location.href+'|'+document.readyState").ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        if pending || !now.starts_with(&format!("{before}|")) || !now.ends_with("|complete") {
+            wait_load(proxy, who, tab);
+            return;
+        }
     }
 }
 
@@ -1460,50 +1492,233 @@ fn cap_text(s: &str, max: usize) -> (String, bool) {
     (s.chars().take(max).collect(), true)
 }
 
-/// Run a recorded sequence again: the recorded tabs are mapped onto the ones this
-/// replay opens. The first call that names a tab the recording never opened takes the
-/// `tab` argument, so a recording made on one page can be replayed into one of its own.
-fn replay(sh: &Arc<Shared>, who: &Who, steps: &[Step], tab: Option<u64>) -> Result<Vec<Value>, String> {
-    let mut map: HashMap<u64, u64> = HashMap::new();
-    let mut take_tab = tab;
-    let mut done = 0usize;
-    sh.with_state(&who.session, |st| st.replaying = true);
-    let out = (|| -> Result<usize, String> {
-        for (i, s) in steps.iter().enumerate() {
-            if is_record_tool(&s.tool) {
-                continue;
+/// How a run of steps names its tabs. A replay maps the tab ids its recording saw onto the
+/// ones it opens now; the first tab it never opened is the `tab` the caller gave. A batch
+/// says `"$2"` for the tab its step 2 opened, and a number for a live tab of the caller's.
+pub enum Tabs {
+    Recorded { map: HashMap<u64, u64>, take: Option<u64> },
+    Batch { opened: Vec<Option<u64>> },
+}
+
+/// One step of a run, and how it went.
+pub struct Done {
+    pub tool: String,
+    pub ms: u128,
+    pub tab: Option<u64>,
+    pub out: Result<Vec<Value>, String>,
+}
+
+/// The tools that run other tools, or keep a recording. Never inside a run.
+fn is_run_tool(name: &str) -> bool {
+    is_record_tool(name) || matches!(name, "browser_batch" | "browser_script_run")
+}
+
+/// Steps, one after the other, each through `run`: so each one is authorized, and asks for
+/// consent, exactly as if it had come alone. A run is a convenience, never a permission.
+/// Replay and batch are this loop. A Luau script calls `run_step` the same way.
+fn run_steps(sh: &Arc<Shared>, who: &Who, steps: &[Step], tabs: &mut Tabs, stop_on_error: bool, deadline: Instant) -> Vec<Done> {
+    let mut done = Vec::new();
+    for (i, s) in steps.iter().enumerate() {
+        if let Tabs::Batch { opened } = tabs {
+            opened.push(None);
+        }
+        // A recording's own record calls were never steps of it.
+        if matches!(tabs, Tabs::Recorded { .. }) && is_run_tool(&s.tool) {
+            continue;
+        }
+        let d = if Instant::now() >= deadline {
+            Done { tool: s.tool.clone(), ms: 0, tab: None, out: Err("out of time: the run has a 60 s limit".into()) }
+        } else if cancelled() {
+            Done { tool: s.tool.clone(), ms: 0, tab: None, out: Err("the client went away; the run stopped here".into()) }
+        } else {
+            match step_args(s, i, tabs) {
+                Ok(args) => run_step(sh, who, &s.tool, &args, s.tab, i, tabs),
+                Err(e) => Done { tool: s.tool.clone(), ms: 0, tab: None, out: Err(e) },
             }
-            let mut args = s.args.clone();
+        };
+        let failed = d.out.is_err();
+        done.push(d);
+        if failed && stop_on_error {
+            break;
+        }
+    }
+    done
+}
+
+/// A step's arguments, with its tab turned into a live one.
+fn step_args(s: &Step, i: usize, tabs: &mut Tabs) -> Result<Value, String> {
+    let mut args = if s.args.is_null() { json!({}) } else { s.args.clone() };
+    match tabs {
+        Tabs::Recorded { map, take } => {
             if let Some(t) = args.get("tab").and_then(Value::as_u64) {
-                let live = match map.get(&t).copied().or_else(|| take_tab.take()) {
-                    Some(l) => {
-                        map.entry(t).or_insert(l);
-                        l
-                    }
+                let live = match map.get(&t).copied().or_else(|| take.take()) {
+                    Some(l) => *map.entry(t).or_insert(l),
                     None => {
                         return Err(format!(
-                            "step {} ({}): the recording works on tab {t}, which this replay has not opened. Pass tab=<id> to run it into a tab of this session.",
-                            i + 1,
-                            s.tool
+                            "the recording works on tab {t}, which this replay has not opened. Pass tab=<id> to run it into a tab of this session."
                         ));
                     }
                 };
                 args["tab"] = json!(live);
             }
-            let content = run(sh, who, &s.tool, &args).map_err(|e| format!("step {} ({}): {e}", i + 1, s.tool))?;
-            if s.tool == "browser_open"
-                && let Some(recorded) = s.tab
-                && let Some(live) = opened_tab(&content)
-            {
-                map.insert(recorded, live);
-            }
-            done += 1;
         }
-        Ok(done)
-    })();
+        Tabs::Batch { opened } => {
+            if let Some(r) = args.get("tab").and_then(Value::as_str).map(|r| r.trim().to_string()) {
+                let n: usize = r.strip_prefix('$').and_then(|n| n.parse().ok()).ok_or(format!("tab \"{r}\": a tab id, or \"$N\" for the tab step N opened"))?;
+                let live = (n >= 1 && n <= i).then(|| opened[n - 1]).flatten().ok_or(format!("tab \"{r}\": step {n} opened no tab"))?;
+                args["tab"] = json!(live);
+            }
+        }
+    }
+    Ok(args)
+}
+
+/// One step: the tool through `run`, timed, and the tab it opened remembered.
+fn run_step(sh: &Arc<Shared>, who: &Who, tool: &str, args: &Value, recorded: Option<u64>, i: usize, tabs: &mut Tabs) -> Done {
+    if is_run_tool(tool) {
+        return Done { tool: tool.to_string(), ms: 0, tab: None, out: Err(format!("{tool} cannot run inside a run")) };
+    }
+    let t0 = Instant::now();
+    let out = run(sh, who, tool, args);
+    let mut tab = args["tab"].as_u64();
+    if tool == "browser_open"
+        && let Ok(c) = &out
+        && let Some(live) = opened_tab(c)
+    {
+        tab = Some(live);
+        match tabs {
+            Tabs::Recorded { map, .. } => {
+                if let Some(r) = recorded {
+                    map.insert(r, live);
+                }
+            }
+            Tabs::Batch { opened } => {
+                if let Some(slot) = opened.get_mut(i) {
+                    *slot = Some(live);
+                }
+            }
+        }
+    }
+    Done { tool: tool.to_string(), ms: t0.elapsed().as_millis(), tab, out }
+}
+
+/// The text of a tool's answer, its pictures left out.
+fn content_text(c: &[Value]) -> String {
+    c.iter().filter_map(|v| v["text"].as_str()).collect::<Vec<_>>().join("\n")
+}
+
+/// One line per step: `3 ok browser_click 41 ms` or `4 ERR browser_wait: timeout`.
+fn step_lines(done: &[Done]) -> String {
+    let mut out = String::new();
+    for (i, d) in done.iter().enumerate() {
+        match &d.out {
+            Ok(_) => out.push_str(&format!("{} ok {} {} ms\n", i + 1, d.tool, d.ms)),
+            Err(e) => out.push_str(&format!("{} ERR {}: {}\n", i + 1, d.tool, e.lines().next().unwrap_or(""))),
+        }
+    }
+    out
+}
+
+/// Run a recorded sequence again: the recorded tabs are mapped onto the ones this
+/// replay opens. The first call that names a tab the recording never opened takes the
+/// `tab` argument, so a recording made on one page can be replayed into one of its own.
+fn replay(sh: &Arc<Shared>, who: &Who, steps: &[Step], tab: Option<u64>) -> Result<Vec<Value>, String> {
+    sh.with_state(&who.session, |st| st.replaying = true);
+    let mut tabs = Tabs::Recorded { map: HashMap::new(), take: tab };
+    // A replay is as long as its recording: no batch limit on time.
+    let done = run_steps(sh, who, steps, &mut tabs, true, Instant::now() + Duration::from_secs(24 * 3600));
     sh.with_state(&who.session, |st| st.replaying = false);
+    if let Some((i, d)) = done.iter().enumerate().find(|(_, d)| d.out.is_err()) {
+        return Err(format!("step {} ({}): {}", i + 1, d.tool, d.out.as_ref().err().map_or("", |e| e.as_str())));
+    }
     // The answer is short on purpose: a replay is one call, the run of it is not.
-    out.map(|n| text(format!("replayed {n} steps of the recording")))
+    Ok(text(format!("replayed {} steps of the recording", done.len())))
+}
+
+/// A form in one call. Each field goes through the tool a person-like agent would use for
+/// it (type, select, click), each one authorized on its own; then every field is read back.
+fn fill(sh: &Arc<Shared>, who: &Who, args: &Value) -> Result<Vec<Value>, String> {
+    let tab = tab_arg(args)?;
+    let fields = args["fields"].as_array().filter(|f| !f.is_empty()).ok_or("fields: a list of {\"ref\", \"value\"}")?;
+    if fields.len() > 50 {
+        return Err("at most 50 fields in one fill".into());
+    }
+    let mut bad = Vec::new();
+    for f in fields {
+        let r = ref_arg(&f["ref"]).ok_or("each field needs a ref")?;
+        let want = match &f["value"] {
+            Value::String(v) => v.clone(),
+            Value::Null => String::new(),
+            v => v.to_string(),
+        };
+        let kind = eval_at(sh, who, tab, &parse_ref(&r), FIELD_KIND_JS, false)?;
+        let step = match kind.as_str().unwrap_or("text") {
+            "select" => run(sh, who, "browser_select", &json!({"tab": tab, "ref": r, "option": want})),
+            "check" => {
+                let on = matches!(want.to_lowercase().as_str(), "true" | "on" | "yes" | "1" | "checked");
+                let now = eval_at(sh, who, tab, &parse_ref(&r), "return !!e.checked;", false)?.as_bool().unwrap_or(false);
+                if now != on { run(sh, who, "browser_click", &json!({"tab": tab, "ref": r})) } else { Ok(Vec::new()) }
+            }
+            _ => run(sh, who, "browser_type", &json!({"tab": tab, "ref": r, "text": want})),
+        };
+        if let Err(e) = step {
+            bad.push(format!("{r}: {e}"));
+            continue;
+        }
+        let got = eval_at(sh, who, tab, &parse_ref(&r), FIELD_VALUE_JS, false)?;
+        let (value, label) = (got[0].as_str().unwrap_or(""), got[1].as_str().unwrap_or(""));
+        let took = match kind.as_str().unwrap_or("text") {
+            "select" => value == want || label.trim() == want.trim(),
+            "check" => value == (matches!(want.to_lowercase().as_str(), "true" | "on" | "yes" | "1" | "checked")).to_string(),
+            _ => value == want,
+        };
+        if !took {
+            bad.push(format!("{r} holds {value:?}, not {want:?}"));
+        }
+    }
+    let mut out = if bad.is_empty() { format!("filled {} fields; every one took", fields.len()) } else { format!("filled {} fields; these did not take:\n- {}", fields.len(), bad.join("\n- ")) };
+    if let Some(r) = ref_arg(&args["submit"]) {
+        let c = run(sh, who, "browser_click", &json!({"tab": tab, "ref": r}))?;
+        out.push_str("\n");
+        out.push_str(&content_text(&c));
+    } else {
+        out.push_str("\n\n");
+        out.push_str(&snapshot(sh, who, tab, &after_action())?);
+    }
+    Ok(text(out))
+}
+
+/// Steps in one call. The answer: a line per step, then the last step's whole answer (or
+/// every step's). On an error: which step, why, and a fresh look at that step's tab.
+fn batch(sh: &Arc<Shared>, who: &Who, args: &Value) -> Result<Vec<Value>, String> {
+    let steps: Vec<Step> = serde_json::from_value(args["steps"].clone()).map_err(|_| "steps: a list of {\"tool\": ..., \"args\": {...}}".to_string())?;
+    if steps.is_empty() || steps.len() > MAX_BATCH {
+        return Err(format!("a batch has 1 to {MAX_BATCH} steps"));
+    }
+    let all = args["result"].as_str() == Some("all");
+    let stop = args["stop_on_error"].as_bool().unwrap_or(true);
+    let mut tabs = Tabs::Batch { opened: Vec::new() };
+    let done = run_steps(sh, who, &steps, &mut tabs, stop, Instant::now() + RUN_TIME);
+    let mut out = step_lines(&done);
+    if all {
+        for (i, d) in done.iter().enumerate() {
+            if let Ok(c) = &d.out {
+                out.push_str(&format!("\n--- step {} {} ---\n{}\n", i + 1, d.tool, content_text(c)));
+            }
+        }
+    } else if let Some(Ok(c)) = done.last().map(|d| &d.out) {
+        out.push('\n');
+        out.push_str(&content_text(c));
+    }
+    if let Some((i, d)) = done.iter().enumerate().find(|(_, d)| d.out.is_err()) {
+        out.push_str(&format!("\nstep {} ({}) failed: {}", i + 1, d.tool, d.out.as_ref().err().map_or("", |e| e.as_str())));
+        if let Some(tab) = d.tab.or_else(|| done[..i].iter().rev().find_map(|d| d.tab))
+            && let Ok(s) = snapshot(sh, who, tab, &after_action())
+        {
+            out.push_str(&format!("\n\nTab {tab} now:\n{s}"));
+        }
+    }
+    Ok(text(out))
 }
 
 /// A text cut to `n` characters, with an ellipsis when something was left out.
@@ -1534,8 +1749,8 @@ fn screenshot_content(proxy: &EventLoopProxy<Ev>, who: &Who, tab: u64) -> Result
 fn run(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value) -> Result<Vec<Value>, String> {
     let session = who.session.as_str();
     let recording = sh.with_state(session, |st| {
-        let on = st.recording.is_some() && !st.replaying && !is_record_tool(name);
-        if !is_record_tool(name) {
+        let on = st.recording.is_some() && !st.replaying && !is_run_tool(name);
+        if !is_run_tool(name) {
             let mut step = Step { tool: name.to_string(), args: args.clone(), tab: None };
             step.args = step_note_args(args);
             if st.steps.len() >= 60 {
@@ -1678,7 +1893,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             wait_load(p, who, tab);
             wait_network_idle(p, who, tab, IDLE_WAIT_MS);
             let status = call(p, who, Op::NavInfo { tab }).ok().and_then(|v| nav_status_line(&v));
-            let snap = snapshot(sh, who, tab, &json!({"viewport": true, "max_lines": 60}))?;
+            let snap = snapshot(sh, who, tab, &after_action())?;
             let mut out = format!("tab {tab}");
             if let Some(s) = status { out.push('\n'); out.push_str(&s); }
             out.push('\n');
@@ -1691,7 +1906,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             call(p, who, Op::Navigate { tab, url })?;
             wait_load(p, who, tab);
             let status = call(p, who, Op::NavInfo { tab }).ok().and_then(|v| nav_status_line(&v));
-            let snap = snapshot(sh, who, tab, &json!({"viewport": true, "max_lines": 60}))?;
+            let snap = snapshot(sh, who, tab, &after_action())?;
             let mut out = String::new();
             if let Some(s) = status { out.push_str(&s); out.push('\n'); }
             out.push_str(&snap);
@@ -1707,7 +1922,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             call(p, who, op)?;
             wait_load(p, who, tab);
             let status = call(p, who, Op::NavInfo { tab }).ok().and_then(|v| nav_status_line(&v));
-            let snap = snapshot(sh, who, tab, &json!({}))?;
+            let snap = snapshot(sh, who, tab, &after_action())?;
             let mut out = String::new();
             if let Some(s) = status { out.push_str(&s); out.push('\n'); }
             out.push_str(&snap);
@@ -1798,7 +2013,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
                         let opened = opened_tabs(&tabs_before, p, who);
                         let mark_after = page_mark(sh, who, tab, Some(&r), tab_list(p, who).len(), rr);
                         let outcome = click_outcome(&mark_before, &mark_after);
-                        return Ok(text(format!("clicked {} directly: it was under {covered}{opened}; {outcome}\n\n{}", ref_text(&r), snapshot(sh, who, tab, &json!({}))?)));
+                        return Ok(text(format!("clicked {} directly: it was under {covered}{opened}; {outcome}\n\n{}", ref_text(&r), snapshot(sh, who, tab, &after_action())?)));
                     }
                     (x, y, ref_text(&r))
                 }
@@ -1819,7 +2034,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             let opened = opened_tabs(&tabs_before, p, who);
             let mark_after = page_mark(sh, who, tab, clicked_ref.as_ref(), tab_list(p, who).len(), true);
             let outcome = click_outcome(&mark_before, &mark_after);
-            Ok(text(format!("clicked {note}: {outcome}{opened}\n\n{}", snapshot(sh, who, tab, &json!({}))?)))
+            Ok(text(format!("clicked {note}: {outcome}{opened}\n\n{}", snapshot(sh, who, tab, &after_action())?)))
         }
         "browser_hover" => {
             let tab = tab_arg(args)?;
@@ -1859,7 +2074,7 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
                 settle(p, who, tab, &before);
                 wait_network_idle(p, who, tab, IDLE_WAIT_MS);
                 let opened = opened_tabs(&tabs_before, p, who);
-                return Ok(text(format!("typed into {}, pressed Enter{opened}\n\n{}", ref_text(&r), snapshot(sh, who, tab, &json!({}))?)));
+                return Ok(text(format!("typed into {}, pressed Enter{opened}\n\n{}", ref_text(&r), snapshot(sh, who, tab, &after_action())?)));
             }
             Ok(text(format!("typed into {}; it now holds \"{now}\"", ref_text(&r))))
         }
@@ -2174,6 +2389,45 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
             let n = json["steps"].as_array().map_or(0, Vec::len);
             Ok(text(format!("saved {n} steps to {}. browser_replay runs them again.", path.display())))
         }
+        "browser_batch" => batch(sh, who, args),
+        "browser_fill" => fill(sh, who, args),
+        "browser_table" => {
+            let tab = tab_arg(args)?;
+            let max = args["max_rows"].as_u64().unwrap_or(500).clamp(1, 500);
+            let js = TABLE_JS.replace("__MAX__", &max.to_string());
+            let v = match ref_arg(&args["ref"]) {
+                Some(r) => eval_at(sh, who, tab, &parse_ref(&r), &format!("const pick=()=>e.closest('table')||e.querySelector('table');{js}"), false)?,
+                None => {
+                    let sel = serde_json::to_string(args["selector"].as_str().unwrap_or("")).unwrap_or_default();
+                    eval(p, who, tab, &format!("(()=>{{const S={sel};const pick=()=>S?document.querySelector(S):[...document.querySelectorAll('table')].sort((a,b)=>b.rows.length-a.rows.length)[0];{js}}})()"))?
+                }
+            };
+            if let Some(e) = v["error"].as_str() {
+                return Err(e.to_string());
+            }
+            let rows = v["rows"].as_array().map_or(0, Vec::len);
+            let more = v["more"].as_u64().unwrap_or(0);
+            let mut out = format!("{rows} rows{}\n", if more > 0 { format!(" (and {more} more left out)") } else { String::new() });
+            out.push_str(&fence(&serde_json::to_string(&v["rows"]).unwrap_or_default()));
+            Ok(text(out))
+        }
+        "browser_links" => {
+            let tab = tab_arg(args)?;
+            let opt = json!({
+                "match": args["match"].as_str().unwrap_or("").to_lowercase(),
+                "same": args["same_site"].as_bool().unwrap_or(false),
+                "max": args["max"].as_u64().unwrap_or(100).clamp(1, 1000),
+            });
+            let v = eval(p, who, tab, &LINKS_JS.replace("__OPT__", &opt.to_string()))?;
+            let links: Vec<String> = v["links"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
+            let more = v["more"].as_u64().unwrap_or(0);
+            if links.is_empty() {
+                return Ok(text("no links match".into()));
+            }
+            let mut out = format!("{} links{}\n", links.len(), if more > 0 { format!(" (and {more} more: raise max)") } else { String::new() });
+            out.push_str(&fence(&links.join("\n")));
+            Ok(text(out))
+        }
         "browser_replay" => {
             let name = args["name"].as_str().or_else(|| args["file"].as_str()).unwrap_or("");
             let name = clean_name(name).ok_or("give the recording's name")?;
@@ -2470,6 +2724,31 @@ const walk=(p,d)=>{for(const e of p.children){
 walk(root,0);
 document.querySelectorAll('[data-lumen-ref]').forEach(e=>e.setAttribute('data-lumen-gen',String(window.__lumenGen)));
 return {title:document.title,url:location.href,lines,more,frames,outside,controls,gen:window.__lumenGen};})()"#;
+
+/// A table as rows: header cells as keys (th of thead, or of the first row). `pick()` finds
+/// the table; it is defined by the caller.
+const TABLE_JS: &str = r#"const t=pick();if(!t||t.tagName!=='TABLE')return {error:'no table there'};
+const tx=c=>(c.innerText||'').replace(/\s+/g,' ').trim();const all=[...t.rows];if(!all.length)return {error:'the table is empty'};
+let head=t.tHead&&t.tHead.rows.length?[...t.tHead.rows[0].cells]:null;let body=all;
+if(head){body=all.filter(r=>r.parentElement!==t.tHead)}else if([...all[0].cells].every(c=>c.tagName==='TH')){head=[...all[0].cells];body=all.slice(1)}
+const keys=head?head.map((c,i)=>tx(c)||('col'+(i+1))):null;const rows=[];
+for(const r of body.slice(0,__MAX__)){const cs=[...r.cells].map(tx);if(!cs.some(Boolean))continue;
+ if(keys){const o={};cs.forEach((v,i)=>{o[keys[i]||('col'+(i+1))]=v});rows.push(o)}else rows.push(cs)}
+return {rows,more:Math.max(0,body.length-__MAX__)};"#;
+
+/// The page's links, deduped by URL: `[text](url)`. Only http(s).
+const LINKS_JS: &str = r#"(()=>{const O=__OPT__;const seen=new Set();const out=[];let more=0;
+for(const a of document.querySelectorAll('a[href]')){let u;try{u=new URL(a.href,location.href)}catch(e){continue}
+ if(!/^https?:$/.test(u.protocol))continue;u.hash='';const h=u.href;if(seen.has(h))continue;
+ if(O.same&&u.host!==location.host)continue;const t=(a.innerText||a.getAttribute('aria-label')||a.title||'').replace(/\s+/g,' ').trim().slice(0,120);
+ if(O.match&&!(t.toLowerCase().includes(O.match)||h.toLowerCase().includes(O.match)))continue;seen.add(h);
+ if(out.length>=O.max){more++;continue}out.push('['+t.replace(/[\[\]]/g,'')+']('+h+')')}
+return {links:out,more}})()"#;
+
+/// One field as `browser_fill` sets it: what kind it is, and what it holds after.
+const FIELD_KIND_JS: &str = "const t=(e.type||'').toLowerCase();return e.tagName==='SELECT'?'select':(t==='checkbox'||t==='radio')?'check':'text';";
+const FIELD_VALUE_JS: &str = "if(e.tagName==='SELECT')return e.options[e.selectedIndex]?[e.value,e.options[e.selectedIndex].text]:['',''];\
+const t=(e.type||'').toLowerCase();if(t==='checkbox'||t==='radio')return [String(e.checked),''];return [e.isContentEditable?e.innerText:String(e.value),''];";
 
 const FOCUS_JS: &str = r#"e.scrollIntoView({block:'center'});e.focus();
 if(document.activeElement!==e&&!e.contains(document.activeElement))return {error:R+' cannot take typing (not a field?)'};

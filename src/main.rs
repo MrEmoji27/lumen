@@ -247,6 +247,11 @@ struct Tab {
     last_nav: Option<(bool, i32, i32)>,
     /// An agent tab's stage view, put to sleep by the idle clock: not painting.
     stage_idle: bool,
+    /// A navigation is on its way: since an agent asked for one, or since the page began
+    /// one (a click, a form). Ends at NavigationCompleted. Agents wait on this, not on a clock.
+    nav_pending: Option<Instant>,
+    /// The pending navigation has really started (NavigationStarting came).
+    nav_started: bool,
     /// Its page window is on screen right now.
     visible: bool,
     /// Typed in the address bar as a bare host and not yet answered. See `Typed`.
@@ -363,6 +368,8 @@ impl Tab {
             hidden_at: None,
             last_nav: None,
             stage_idle: false,
+            nav_pending: None,
+            nav_started: false,
             visible: false,
             typed: None,
             zoom: 100,
@@ -1677,6 +1684,12 @@ impl App {
 
     /// A tab that is on screen right now: the active one, or the other half of a split.
     /// Hidden-tab policies (freeze, discard, RAM) leave these alone.
+    /// An agent asked this tab to navigate: it waits for that, from now.
+    fn expect_nav(&mut self, i: usize) {
+        self.tabs[i].nav_pending = Some(Instant::now());
+        self.tabs[i].nav_started = false;
+    }
+
     fn on_stage(&self, id: u64) -> bool {
         id == self.active || self.split == Some(id)
     }
@@ -3650,6 +3663,8 @@ impl App {
             // The journal's timing of a page. A private tab is not in it.
             Ev::NavStart(id, url) => {
                 if let Some(i) = self.idx(id) {
+                    self.tabs[i].nav_pending = Some(Instant::now());
+                    self.tabs[i].nav_started = true;
                     // The page the person typed is the one now loading, or it never will be.
                     match self.tabs[i].typed.as_mut() {
                         Some(t) if same_page(&t.url, &url) => t.started = true,
@@ -3665,6 +3680,13 @@ impl App {
                 self.typed_done(id, ok, err);
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].last_nav = Some((ok, err, http));
+                    // Cancelled (14, OPERATION_CANCELED) is how a redirect, an https upgrade
+                    // or a warning page begins: something else may follow. Expect it a moment.
+                    if !ok && err == 14 {
+                        self.expect_nav(i);
+                    } else {
+                        self.tabs[i].nav_pending = None;
+                    }
                 }
             }
             // The server sent the typed page somewhere else: that is not a typo.
@@ -5896,7 +5918,6 @@ impl App {
     /// rules (what may run where) are `agent_policy::authorize`, applied before this is reached.
     fn on_agent(&mut self, call: agent::Call) {
         use agent::Op;
-        self.agent_seen = Some(Instant::now());
         self.agent_last = Instant::now();
         // A strictly isolated browser made since the last call: its waiting tabs get
         // their page now, so the call below finds the tab it asked for.
@@ -5922,7 +5943,19 @@ impl App {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
-        self.push();
+        // The sidebar is drawn again only when a call can change what it shows: the chip
+        // coming on, a tab opening, closing or moving. The calls in between (scripts,
+        // DevTools, logs, the policy look-up) are nearly every call, and a whole redraw of
+        // the window for each one was most of what a call cost.
+        let reads = matches!(
+            call.op,
+            Op::Eval { .. } | Op::Cdp { .. } | Op::Log { .. } | Op::NetIdle { .. } | Op::Contexts { .. } | Op::CdpForSession { .. }
+                | Op::DragData { .. } | Op::NavInfo { .. } | Op::Policy | Op::List | Op::Status | Op::Downloads | Op::Dialogs { .. }
+        );
+        if !reads || self.agent_seen.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
+            self.push();
+        }
+        self.agent_seen = Some(Instant::now());
         let (reply, who) = (call.reply, call.who);
         // One line per session, not per call. No tab, no page, no content.
         journal::agent_session(&who.session, &who.name);
@@ -6060,10 +6093,11 @@ impl App {
                 // session opens. A kept profile keeps: its own folder holds its cookies.
                 t.own_env = self.settings.agent_strict_isolation;
                 self.tabs.push(t);
+                let i = self.tabs.len() - 1;
+                self.expect_nav(i);
                 if activate {
                     self.activate(id);
                 } else {
-                    let i = self.tabs.len() - 1;
                     self.ensure_view(i);
                 }
                 let _ = reply.send(Ok(json!({"tab": id})));
@@ -6073,11 +6107,15 @@ impl App {
                     let v = self.tabs[i].last_nav;
                     let (ok, err, http) = v.unwrap_or((true, 0, 0));
                     // unknown when no nav yet: return nulls
-                    let resp = if v.is_none() {
+                    let mut resp = if v.is_none() {
                         json!({"ok": Value::Null, "err": Value::Null, "http": Value::Null})
                     } else {
                         json!({"ok": ok, "err": err, "http": http})
                     };
+                    // Asked for and never started (history.back() with no history): after
+                    // a moment it is not coming.
+                    let t = &self.tabs[i];
+                    resp["pending"] = json!(t.nav_pending.is_some_and(|at| t.nav_started || at.elapsed() < Duration::from_millis(1500)));
                     let _ = reply.send(Ok(resp));
                 } else {
                     let _ = reply.send(no_tab(tab));
@@ -6096,6 +6134,7 @@ impl App {
                             self.ensure_view(i);
                         }
                     }
+                    self.expect_nav(i);
                     let _ = reply.send(Ok(Value::Null));
                 }
                 _ => {
@@ -6113,6 +6152,7 @@ impl App {
                     let _ = reply.send(no_tab(tab));
                     return;
                 };
+                self.expect_nav(i);
                 // A dead renderer cannot run a script. Load the page again: that makes a new one.
                 if self.tabs[i].crashed {
                     let url = self.tabs[i].url.clone();
@@ -6222,7 +6262,9 @@ impl App {
                     let _ = reply.send(no_tab(tab));
                     return;
                 }
-                let idle = self.agent_logs.borrow().get(&tab).is_none_or(|log| log.net_idle(Duration::from_millis(400)));
+                // Quiet for 250 ms: long enough for the fetch a script starts when the page
+                // loads, short enough that a page with nothing more to fetch is not waited on.
+                let idle = self.agent_logs.borrow().get(&tab).is_none_or(|log| log.net_idle(Duration::from_millis(250)));
                 let _ = reply.send(Ok(json!(idle)));
             }
             Op::Contexts { tab } => {

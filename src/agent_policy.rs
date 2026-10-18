@@ -177,6 +177,12 @@ pub const RULES: &[Rule] = &[
     rule("browser_status", Scope::Free, Gate::Nothing),
     rule("browser_whoami", Scope::Free, Gate::Nothing),
     rule("browser_consent", Scope::Tab, Gate::Nothing),
+    // Runs of other tools: each step is authorized on its own, so the run itself needs nothing.
+    rule("browser_batch", Scope::Free, Gate::Nothing),
+    rule("browser_fill", Scope::Tab, Gate::Nothing),
+    // Read the page the way a snapshot does.
+    rule("browser_table", Scope::Tab, Gate::Nothing),
+    rule("browser_links", Scope::Tab, Gate::Nothing),
 ];
 
 /// Hooks for the integration tests. Debug builds only; a release build has no such tools.
