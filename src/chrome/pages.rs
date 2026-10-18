@@ -932,6 +932,21 @@ pub fn draw_first_run(i: &mut Inner, st: R, s: &UiState) {
     i.hit(b, h);
 }
 
+/// A site's icon, the one Lumen has kept for it, or its letter on a quiet tile.
+pub(super) fn site_icon(i: &mut Inner, r: R, host: &str) {
+    let th = i.theme;
+    let key = super::site_key(host);
+    let png = i.site_favs.get(host).cloned().or_else(|| crate::favicons::get(host));
+    match png.and_then(|p| i.gfx.bitmap(key, &p)) {
+        Some(b) => i.gfx.draw_bitmap(&b, r, 1.0),
+        None => {
+            i.gfx.round(r, 5.0, th.hover);
+            let letter = host.trim_start_matches("www.").chars().next().unwrap_or('·').to_uppercase().to_string();
+            i.gfx.text(&letter, r, i.look.font(r.h * 0.55, 700).align(Align::Center), th.dim);
+        }
+    }
+}
+
 /// A row's hover, for the small text actions.
 fn self_hover(i: &Inner, h: PageHit) -> bool {
     i.is_hover(&Hit::Page(h))
@@ -2050,13 +2065,20 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
         }
         y += i.look.s3;
         y = group_label(i, col, y, g, rows.len());
+        // The group's card, under its rows.
+        let card = R::new(col.x - 6.0, y, col.w + 12.0, rows.len() as f32 * 74.0 + 6.0 + if s.settings.torrent_note && rows.iter().any(|d| d.kind == "torrent") { 30.0 } else { 0.0 });
+        if card.bottom() >= st.y && card.y <= st.bottom() {
+            i.gfx.round(card, i.look.r_card, th.raise);
+            i.gfx.round_stroke(card, i.look.r_card, th.line, 1.0);
+        }
+        y += 3.0;
         // The firewall note rides under the first header that actually has a torrent.
         if s.settings.torrent_note && rows.iter().any(|d| d.kind == "torrent") {
             let msg = "Windows may ask to let aria2 through the firewall. Allow it for faster torrents. (click to hide)";
             let h = Hit::Page(PageHit::DlNote);
-            i.gfx.text(msg, R::new(col.x, y - 4.0, col.w, 20.0), i.look.small, if i.is_hover(&h) { th.text } else { th.faint });
-            i.hit(R::new(col.x, y - 4.0, col.w, 20.0), h);
-            y += 24.0;
+            i.gfx.text(msg, R::new(col.x + 14.0, y + 4.0, col.w - 28.0, 22.0), i.look.small, if i.is_hover(&h) { th.text } else { th.faint });
+            i.hit(R::new(col.x, y + 4.0, col.w, 22.0), h);
+            y += 30.0;
         }
         for d in rows {
             let r = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, 72.0);
@@ -2064,13 +2086,13 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
                 y += 74.0;
                 continue;
             }
-            row_plate(i, r, d.id);
+            row_plate(i, r.inset(6.0, 3.0), d.id);
             let failed = d.state == "failed";
             // The tile: what the file is, in its own letters.
-            let tile = R::new(col.x, y + 18.0, 36.0, 36.0);
+            let tile = R::new(col.x + 10.0, y + 14.0, 44.0, 44.0);
             i.gfx.round(tile, i.look.r_md, th.bg);
-            let live = matches!(d.state, "progress" | "seeding");
-            i.gfx.text(&tile_label(d), tile, i.look.font(10.0, 700).align(Align::Center), if failed { th.faint.alpha(0.7) } else if live { th.accent } else { th.dim });
+            i.gfx.round_stroke(tile, i.look.r_md, th.line, 1.0);
+            i.gfx.text(&tile_label(d), tile, i.look.mono_at(10.0, 700).align(Align::Center), if failed { th.faint.alpha(0.7) } else { th.text });
             // The actions, right to left; the text takes whatever they leave.
             let acts: &[(&str, &'static str)] = match d.state {
                 "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
@@ -2080,7 +2102,7 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
                 "failed" if d.url.starts_with("http") => &[("Retry", "retry")],
                 _ => &[],
             };
-            let mut right = col.right();
+            let mut right = col.right() - 10.0;
             if d.state == "done" || d.state == "failed" {
                 let xr = R::new(right - 28.0, y + 22.0, 28.0, 28.0);
                 let h = Hit::Page(PageHit::Dl("remove", d.id));
@@ -2101,10 +2123,10 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.text(&status_line(d), R::new(tx, y + 35.0, tw, 18.0), i.look.small, th.faint);
             if d.state == "progress" || d.state == "paused" {
                 let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
-                let bar = R::new(tx, y + 59.0, col.right() - tx, 4.0);
-                i.gfx.round(bar, 2.0, th.press);
+                let bar = R::new(tx, y + 59.0, col.right() - 10.0 - tx, 4.0);
+                i.gfx.round(bar, 2.0, th.line);
                 if pct > 0.0 {
-                    i.gfx.round(R::new(bar.x, bar.y, (bar.w * pct.min(1.0)).max(4.0), 4.0), 2.0, if d.state == "paused" { th.faint } else { th.accent });
+                    i.gfx.round(R::new(bar.x, bar.y, (bar.w * pct.min(1.0)).max(4.0), 4.0), 2.0, if d.state == "paused" { th.faint } else { th.text });
                 }
             }
             y += 74.0;
@@ -2137,47 +2159,63 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
         close_button(i, st);
         return;
     }
-    let mut last_day = String::new();
+    // The days, in order, each its rows in one card.
+    let mut days: Vec<(String, Vec<(String, String, String)>)> = Vec::new();
     for (url, title, day, time) in rows {
-        if history && day != last_day {
-            y += i.look.s2;
-            y = group_label(i, col, y, &day, 0);
-            last_day = day;
+        match days.last_mut() {
+            Some((d, list)) if *d == day => list.push((url, title, time)),
+            _ => days.push((day, vec![(url, title, time)])),
         }
-        let r = R::new(col.x - i.look.s2, y, col.w + 2.0 * i.look.s2, 38.0);
-        if y > st.bottom() || y + 38.0 < st.y {
-            y += 40.0;
-            continue;
+    }
+    let lo = i.look.clone();
+    const ROW: f32 = 46.0;
+    for (day, list) in days {
+        y += lo.s3;
+        y = group_label(i, col, y, &day, 0);
+        let card = R::new(col.x, y, col.w, list.len() as f32 * ROW);
+        if card.bottom() >= st.y && card.y <= st.bottom() {
+            i.gfx.round(card, lo.r_card, th.raise);
+            i.gfx.round_stroke(card, lo.r_card, th.line, 1.0);
         }
-        let open = Hit::Page(PageHit::Open(url.clone()));
-        let rm = Hit::Page(PageHit::Forget(url.clone()));
-        let hov = i.is_hover(&open) || i.is_hover(&rm);
-        if hov {
-            i.gfx.round(r, i.look.r_md, th.hover);
-        }
-        let mut x = col.x;
-        if history {
-            i.gfx.text(&time, R::new(x, y, 44.0, 38.0), i.look.small, th.faint);
-            x += 56.0;
-        }
-        // The host sits at the right, the title takes what is left, cut with an ellipsis.
-        let host = super::host(&url);
-        let hw = (i.gfx.measure(&host, i.look.small) + 4.0).min(220.0);
-        let hx = col.right() - 32.0 - hw;
-        let name = if title.is_empty() { url.clone() } else { title };
-        i.gfx.text(&name, R::new(x, y, (hx - i.look.s4 - x).max(60.0), 38.0), i.look.body, th.text);
-        i.gfx.text(&host, R::new(hx, y, hw, 38.0), i.look.small.align(Align::Right), th.faint);
-        i.hit(r, open);
-        if hov {
-            let xr = R::new(col.right() - 28.0, y + 5.0, 28.0, 28.0);
-            let xh = i.is_hover(&rm);
-            if xh {
-                i.gfx.round(xr, i.look.r_sm, th.press);
+        for (n, (url, title, time)) in list.into_iter().enumerate() {
+            let r = R::new(card.x, y, card.w, ROW);
+            y += ROW;
+            if r.y > st.bottom() || r.bottom() < st.y {
+                continue;
             }
-            i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if xh { th.text } else { th.dim });
-            i.hit(xr, rm);
+            if n > 0 {
+                i.gfx.line(card.x + 1.0, r.y, card.right() - 1.0, r.y, th.line, 1.0);
+            }
+            let open = Hit::Page(PageHit::Open(url.clone()));
+            let rm = Hit::Page(PageHit::Forget(url.clone()));
+            let hov = i.is_hover(&open) || i.is_hover(&rm);
+            if hov {
+                i.gfx.round(r.inset(4.0, 4.0), lo.r_md, th.hover);
+            }
+            let mut x = r.x + 18.0;
+            i.gfx.text(&time, R::new(x, r.y, 48.0, ROW), lo.mono_at(11.5, 450), th.faint);
+            x += 52.0;
+            let host = super::host(&url);
+            site_icon(i, R::new(x, r.y + (ROW - 18.0) / 2.0, 18.0, 18.0), &host);
+            x += 30.0;
+            // The host sits at the right, the title takes what is left, cut with an ellipsis.
+            let hf = lo.mono_at(11.5, 450);
+            let hw = (i.gfx.measure(&host, hf) + 4.0).min(240.0);
+            let hx = r.right() - 18.0 - hw - if hov { 30.0 } else { 0.0 };
+            let name = if title.is_empty() { url.clone() } else { title };
+            i.gfx.text(&name, R::new(x, r.y, (hx - lo.s4 - x).max(60.0), ROW), lo.body, th.text);
+            i.gfx.text(&host, R::new(hx, r.y, hw, ROW), hf.align(Align::Right), th.faint);
+            i.hit(r, open);
+            if hov {
+                let xr = R::new(r.right() - 42.0, r.y + 9.0, 28.0, 28.0);
+                let xh = i.is_hover(&rm);
+                if xh {
+                    i.gfx.round(xr, lo.round(28.0), th.press);
+                }
+                i.gfx.icon("close", xr.x + 7.0, xr.y + 7.0, 14.0, if xh { th.text } else { th.dim });
+                i.hit(xr, rm);
+            }
         }
-        y += 40.0;
     }
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
