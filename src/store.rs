@@ -37,6 +37,11 @@ pub struct Settings {
     /// Settings format. Old files lack it and read as 0, which triggers the migration.
     #[serde(default)]
     pub version: u32,
+    /// Whether the first-run "pick a look" picker has been answered. Missing from a
+    /// file means the file predates the picker: someone who already chose, so it
+    /// reads true. Only a brand-new install, with no file at all, starts false.
+    #[serde(default = "yes")]
+    pub first_run_done: bool,
     /// Named palette from the UI ("graphite", "sand", "slate", "moss", "rose").
     pub palette: String,
     /// Accent color override. Empty means palette default.
@@ -45,6 +50,10 @@ pub struct Settings {
     pub backdrop: String,
     /// "dark" | "light" | "system". Also drives prefers-color-scheme in pages.
     pub theme: String,
+    /// The redesign's look: "signal" (warm paper and ink, the default), "glass"
+    /// (a frosted sidebar over a colour wallpaper) or "precise" (near-black,
+    /// hairlines). Anything else clamps to "signal".
+    pub look: String,
     /// Where the chrome lives: "vertical" (the sidebar), "horizontal" (a top strip
     /// like Chrome), or "hybrid" (a vertical tab sidebar under a top toolbar).
     pub layout: String,
@@ -236,10 +245,12 @@ impl Default for Settings {
         let s = |t: &str, u: &str| Shortcut { title: t.into(), url: u.into() };
         Self {
             version: SETTINGS_VERSION,
+            first_run_done: false,
             palette: "graphite".into(),
             accent: String::new(),
             backdrop: "solid".into(),
             theme: "dark".into(),
+            look: "signal".into(),
             layout: "vertical".into(),
             bm_bar: false,
             bg_color: String::new(),
@@ -405,11 +416,21 @@ pub const DENSITIES: [(&str, &str); 3] = [("compact", "Compact"), ("comfortable"
 pub const CLOSE_BTNS: [(&str, &str); 3] = [("hover", "On hover"), ("always", "Always"), ("off", "Hidden")];
 /// The date line under the clock.
 pub const DATE_FORMATS: [(&str, &str); 4] = [("long", "Thursday, 17 October"), ("short", "17 Oct"), ("iso", "2026-10-17"), ("off", "Hidden")];
+/// The three looks of the redesign: Signal (the default), Glass and Precise.
+/// The first-run picker and the Settings list show them in this order.
+pub const LOOKS: [(&str, &str); 3] = [("signal", "Signal"), ("glass", "Glass"), ("precise", "Precise")];
 
 /// A key a file from before this setting did not have: empty, so the reader can
 /// tell "not there" from "chose the default".
 fn missing() -> String {
     String::new()
+}
+
+/// What a missing `first_run_done` reads as: a settings.json without the key is
+/// someone who already chose, never a brand-new install. A new install has no
+/// file at all, so it gets Settings::default() and the picker shows.
+fn yes() -> bool {
+    true
 }
 
 /// An option list holds one of its keys, or `default` when the file said
@@ -458,6 +479,7 @@ impl Settings {
             self.motion = if self.animations { "full" } else { "off" }.into();
         }
         one_of(&mut self.layout, &LAYOUTS, "vertical");
+        one_of(&mut self.look, &LOOKS, "signal");
         one_of(&mut self.motion, &MOTIONS, "full");
         one_of(&mut self.density, &DENSITIES, "comfortable");
         one_of(&mut self.close_btn, &CLOSE_BTNS, "hover");
@@ -920,5 +942,59 @@ mod tests {
         assert_eq!(s.tab_row_h, 48);
         assert_eq!(s.wallpaper_dim, 80);
         assert_eq!(s.ntp_bg, "plain");
+    }
+
+    /// A brand-new install has no settings.json at all, so it reads the struct
+    /// defaults: the first-run picker has not been answered, and the look is
+    /// Signal, the redesign's default.
+    #[test]
+    fn a_new_install_starts_at_the_first_run_picker() {
+        let s = Settings::default();
+        assert!(!s.first_run_done);
+        assert_eq!(s.look, "signal");
+    }
+
+    /// Anyone who already has a settings.json chose long ago, so they never see
+    /// the picker: the missing key reads as done. A missing look reads as the
+    /// default, Signal.
+    #[test]
+    fn an_old_settings_file_never_sees_the_picker() {
+        let mut v = serde_json::to_value(Settings::default()).expect("settings to json");
+        let obj = v.as_object_mut().expect("an object");
+        obj.remove("first_run_done");
+        obj.remove("look");
+        let s: Settings = serde_json::from_value(v).expect("old file loads");
+        assert!(s.first_run_done);
+        assert_eq!(s.look, "signal");
+    }
+
+    /// A look that is not one of the three is no choice at all: it clamps to
+    /// Signal. The three real ones are the person's and are kept.
+    #[test]
+    fn a_bad_look_clamps_to_signal() {
+        let mut s: Settings = serde_json::from_str(r#"{"look":"neon"}"#).expect("file loads");
+        s.clamp();
+        assert_eq!(s.look, "signal");
+        for look in ["signal", "glass", "precise"] {
+            let mut s: Settings = serde_json::from_str(&format!(r#"{{"look":"{look}"}}"#)).expect("file loads");
+            s.clamp();
+            assert_eq!(s.look, look);
+        }
+    }
+
+    /// The chosen look and the answered first-run flag survive a save and a load.
+    /// A flag that is false is a value, not a missing key: it stays false.
+    #[test]
+    fn the_look_and_first_run_round_trip() {
+        let mut s = Settings::default();
+        s.look = "glass".into();
+        s.first_run_done = true;
+        s.clamp();
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).expect("to json")).expect("from json");
+        assert_eq!(back.look, "glass");
+        assert!(back.first_run_done);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&Settings::default()).expect("to json")).expect("from json");
+        assert!(!back.first_run_done, "an unanswered flag does not read as answered");
+        assert_eq!(back.look, "signal");
     }
 }
