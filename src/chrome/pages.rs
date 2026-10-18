@@ -532,7 +532,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     if i.page.scroll > i.page.max {
         i.page.scroll = i.page.max;
         i.hits.truncate(first);
-        i.gfx.round(st, i.look.page_radius, i.theme.raise);
+        i.gfx.round(st, i.look.page_radius, i.theme.bg);
         draw_page(i, st, s);
     }
     // The font list sits over everything while it is open.
@@ -678,16 +678,20 @@ fn draw_seg(i: &mut Inner, right: f32, cy: f32, key: &'static str, opts: &'stati
     let widths: Vec<f32> = opts.iter().map(|(_, l)| i.gfx.measure(l, f) + 22.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 4.0;
     let pill = R::new(right - total, cy - 15.0, total, 30.0);
-    i.gfx.round(pill, 9.0, th.bg);
+    let lo = i.look.clone();
+    i.gfx.round(pill, lo.round(30.0), th.bg);
+    i.gfx.round_stroke(pill, lo.round(30.0), th.line, 1.0);
     let mut x = pill.x + 2.0;
     for ((v, l), w) in opts.iter().zip(widths) {
         let r = R::new(x, pill.y + 2.0, w, 26.0);
         let on = *v == cur;
         let h = Hit::Page(PageHit::Seg(key, v));
         if on {
-            i.gfx.round(r, 7.0, th.press);
+            i.gfx.round(r, lo.round(26.0), th.pill);
+        } else if i.is_hover(&h) {
+            i.gfx.round(r, lo.round(26.0), th.hover);
         }
-        let c = if on || i.is_hover(&h) { th.text } else { th.dim };
+        let c = if on { th.pill_ink } else if i.is_hover(&h) { th.text } else { th.faint };
         i.gfx.text(l, r, f, c);
         i.hit(r, h);
         x += w;
@@ -696,11 +700,13 @@ fn draw_seg(i: &mut Inner, right: f32, cy: f32, key: &'static str, opts: &'stati
 
 fn draw_toggle(i: &mut Inner, right: f32, cy: f32, key: &'static str, on: bool, enabled: bool) {
     let th = i.theme;
-    let r = R::new(right - 34.0, cy - 10.0, 34.0, 20.0);
+    let r = R::new(right - 38.0, cy - 11.0, 38.0, 22.0);
     let a = if enabled { 1.0 } else { 0.35 };
-    i.gfx.round(r, 10.0, if on { th.accent.alpha(a) } else { th.press.alpha(a) });
-    let kx = if on { r.x + 20.0 } else { r.x + 3.0 };
-    i.gfx.circle(kx + 7.0, r.y + 10.0, 7.0, if on { th.bg } else { th.dim.alpha(a) });
+    let t = i.motion.tween(super::motion::Id::Chip(key), super::motion::Prop::Progress, if on { 1.0 } else { 0.0 }, 160, super::motion::Ease::OutCubic);
+    let on_fill = if i.look.style == super::theme::Style::Signal { th.pill } else { th.accent };
+    i.gfx.round(r, 11.0, th.line.mix(on_fill, t).alpha(a));
+    let kx = r.x + 3.0 + 16.0 * t;
+    i.gfx.circle(kx + 8.0, r.y + 11.0, 8.0, th.raise.mix(th.pill_ink, t).alpha(a));
     if enabled {
         i.hit(r.inset(-4.0, -4.0), Hit::Page(PageHit::Toggle(key)));
     }
@@ -712,9 +718,10 @@ fn draw_slider(i: &mut Inner, right: f32, cy: f32, key: &'static str, scale: Sca
     i.gfx.text(&fmt_value(v, unit), val, i.look.font(12.0, 450).align(Align::Right), if dim { th.faint } else { th.dim });
     let track = R::new(val.x - 12.0 - 160.0, cy - 2.0, 160.0, 4.0);
     let p = ratio(scale, v);
-    i.gfx.round(track, 2.0, th.press);
-    i.gfx.round(R::new(track.x, track.y, track.w * p, 4.0), 2.0, if dim { th.faint } else { th.accent });
-    i.gfx.circle(track.x + track.w * p, cy, 7.0, th.text);
+    i.gfx.round(track, 2.0, th.line);
+    i.gfx.round(R::new(track.x, track.y, track.w * p, 4.0), 2.0, if dim { th.faint } else { th.text });
+    i.gfx.circle(track.x + track.w * p, cy, 8.0, th.raise);
+    i.gfx.ring(track.x + track.w * p, cy, 8.0, 8.0, th.text.alpha(if dim { 0.4 } else { 0.85 }), 1.5);
     let grab = R::new(track.x - 8.0, cy - 12.0, track.w + 16.0, 24.0);
     i.hit(grab, Hit::Page(PageHit::Slider(key)));
     i.page.sliders.push((key, track, scale));
@@ -1091,12 +1098,14 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
                 let chip = R::new(x, y, w, 26.0);
                 let h = Hit::Page(PageHit::Seg(k, v));
                 let on = *v == cur;
+                let cr = i.look.round(26.0);
                 if on {
-                    i.gfx.round(chip, 8.0, th.press);
-                } else if i.is_hover(&h) {
-                    i.gfx.round(chip, 8.0, th.hover);
+                    i.gfx.round(chip, cr, th.pill);
+                } else {
+                    i.gfx.round(chip, cr, if i.is_hover(&h) { th.hover } else { th.bg });
+                    i.gfx.round_stroke(chip, cr, th.line, 1.0);
                 }
-                i.gfx.text(l, chip, f, if on { th.text } else { th.dim });
+                i.gfx.text(l, chip, f, if on { th.pill_ink } else { th.dim });
                 i.hit(chip, h);
                 x += w + 4.0;
             }
@@ -1130,16 +1139,18 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             let total: f32 = widths.iter().sum::<f32>() + 4.0;
             let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), "Search engine", "", total);
             let pill = R::new(right - total, r.y + h / 2.0 - 15.0, total, 30.0);
-            i.gfx.round(pill, 9.0, th.bg);
+            let rad = i.look.round(30.0);
+            i.gfx.round(pill, rad, th.bg);
+            i.gfx.round_stroke(pill, rad, th.line, 1.0);
             let mut x = pill.x + 2.0;
             for (n, ((label, url), w)) in ENGINES.iter().zip(widths).enumerate() {
                 let rr = R::new(x, pill.y + 2.0, w, 26.0);
                 let on = s.settings.search == *url;
                 let h = Hit::Page(PageHit::Engine(n));
                 if on {
-                    i.gfx.round(rr, 7.0, th.press);
+                    i.gfx.round(rr, i.look.round(26.0), th.pill);
                 }
-                i.gfx.text(label, rr, f, if on || i.is_hover(&h) { th.text } else { th.dim });
+                i.gfx.text(label, rr, f, if on { th.pill_ink } else if i.is_hover(&h) { th.text } else { th.faint });
                 i.hit(rr, h);
                 x += w;
             }
@@ -1245,8 +1256,9 @@ fn draw_button(i: &mut Inner, right: f32, cy: f32, label: &str, hit: PageHit) {
     let w = i.gfx.measure(label, f) + 26.0;
     let r = R::new(right - w, cy - 15.0, w, 30.0);
     let h = Hit::Page(hit);
-    i.gfx.round(r, 8.0, if i.is_hover(&h) { th.press } else { th.bg });
-    i.gfx.round_stroke(r, 8.0, th.line, 1.0);
+    let rad = i.look.round(30.0);
+    i.gfx.round(r, rad, if i.is_hover(&h) { th.hover } else { th.raise });
+    i.gfx.round_stroke(r, rad, th.line, 1.0);
     i.gfx.text(label, r, f, th.text);
     i.hit(r, h);
 }
@@ -1768,7 +1780,8 @@ pub(super) fn close_button(i: &mut Inner, st: R) {
     let r = R::new(st.right() - i.look.s4 - 32.0, st.y + i.look.s4, 32.0, 32.0);
     let h = Hit::Page(PageHit::Done);
     let hov = i.is_hover(&h);
-    i.gfx.round(r, i.look.r_md, if hov { th.hover } else { th.raise });
+    i.gfx.round(r, i.look.round(32.0), if hov { th.hover } else { th.raise });
+    i.gfx.round_stroke(r, i.look.round(32.0), th.line, 1.0);
     i.gfx.icon("close", r.x + 8.0, r.y + 8.0, 16.0, if hov { th.text } else { th.dim });
     i.hit(r, h);
 }
@@ -1777,12 +1790,18 @@ pub(super) fn close_button(i: &mut Inner, st: R) {
 /// the content starts at.
 pub(super) fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> f32 {
     let th = i.theme;
-    i.gfx.text(title, R::new(col.x, y, col.w - 48.0, 40.0), i.look.title, th.text);
-    if sub.is_empty() {
-        return y + 52.0;
+    let short = sub.chars().count() <= 64;
+    if !sub.is_empty() && short {
+        i.label(&sub.trim_end_matches('.').replace(". ", " · "), R::new(col.x, y, col.w - 48.0, 18.0), th.faint);
+        i.gfx.text(title, R::new(col.x, y + 18.0, col.w - 48.0, 42.0), i.look.title, th.text);
+        return y + 74.0;
     }
-    i.gfx.text(sub, R::new(col.x, y + 38.0, col.w - 48.0, 20.0), i.look.small, th.faint);
-    y + 68.0
+    i.gfx.text(title, R::new(col.x, y, col.w - 48.0, 42.0), i.look.title, th.text);
+    if sub.is_empty() {
+        return y + 56.0;
+    }
+    i.gfx.text(sub, R::new(col.x, y + 42.0, col.w - 48.0, 20.0), i.look.small, th.faint);
+    y + 74.0
 }
 
 /// A button at (x, y), 30 high. Outlined and quiet, or (primary) filled with the accent.
@@ -1793,15 +1812,15 @@ pub(super) fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: Pa
     let r = R::new(x, y, i.gfx.measure(label, f) + 2.0 * i.look.s4, 30.0);
     let h = Hit::Page(hit);
     let hov = i.is_hover(&h);
+    let rad = i.look.round(30.0);
     if primary {
-        i.gfx.round(r, i.look.r_md, if hov { th.accent } else { th.accent.alpha(0.88) });
-        i.gfx.text(label, r, f, th.bg);
+        let fill = if i.look.style == super::theme::Style::Signal { th.pill } else { th.accent };
+        i.gfx.round(r, rad, if hov { fill } else { fill.alpha(0.9) });
+        i.gfx.text(label, r, f, if i.look.style == super::theme::Style::Signal { th.pill_ink } else { th.bg });
     } else {
-        if hov {
-            i.gfx.round(r, i.look.r_md, th.hover);
-        }
-        i.gfx.round_stroke(r, i.look.r_md, th.line, 1.0);
-        i.gfx.text(label, r, f, if hov { th.text } else { th.dim });
+        i.gfx.round(r, rad, if hov { th.hover } else { th.raise });
+        i.gfx.round_stroke(r, rad, th.line, 1.0);
+        i.gfx.text(label, r, f, th.text);
     }
     i.hit(r, h);
     r
@@ -1816,7 +1835,7 @@ pub(super) fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: Pa
     let h = Hit::Page(hit);
     let hov = i.is_hover(&h);
     if hov {
-        i.gfx.round(r, i.look.r_sm, th.press);
+        i.gfx.round(r, i.look.round(28.0), th.hover);
     }
     i.gfx.text(label, r, f, if hov { th.text } else { th.dim });
     i.hit(r, h);
@@ -1826,9 +1845,9 @@ pub(super) fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: Pa
 /// A small caps label that opens a group of rows. Returns the y after it.
 pub(super) fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -> f32 {
     let th = i.theme;
-    let label = if count > 0 { format!("{}  {count}", text.to_uppercase()) } else { text.to_uppercase() };
-    i.gfx.text(&label, R::new(col.x, y, col.w, 20.0), i.look.caption, th.faint);
-    y + 26.0
+    let label = if count > 0 { format!("{}  {count}", text) } else { text.to_string() };
+    i.label(&label, R::new(col.x + 4.0, y, col.w, 20.0), th.faint);
+    y + 28.0
 }
 
 /// What a page shows when it has nothing to list: a mark, a plain sentence, and what to do
@@ -1836,7 +1855,8 @@ pub(super) fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -
 pub(super) fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint: &str) -> f32 {
     let th = i.theme;
     let cx = area.x + area.w / 2.0;
-    i.gfx.circle(cx, area.y + 28.0, 28.0, th.bg);
+    i.gfx.circle(cx, area.y + 28.0, 28.0, th.raise);
+    i.gfx.ring(cx, area.y + 28.0, 28.0, 28.0, th.line, 1.0);
     i.gfx.icon(icon, cx - 12.0, area.y + 16.0, 24.0, th.faint);
     i.gfx.text(title, R::new(area.x, area.y + 70.0, area.w, 26.0), i.look.font(15.0, 550).align(Align::Center), th.text);
     i.gfx.text_wrap(hint, R::new(cx - 210.0, area.y + 100.0, 420.0, 50.0), i.look.small.align(Align::Center), th.faint);
@@ -2268,47 +2288,93 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
+/// A Settings section's icon in the menu.
+fn section_icon(name: &str) -> &'static str {
+    match name {
+        "General" => "globe",
+        "Appearance" => "palette",
+        "Fonts" => "type",
+        "Layout" => "grid",
+        "Clock and new tab" => "clock",
+        "Sidebar" => "sidebar",
+        "Shape" => "shapes",
+        "Motion" => "wind",
+        "Search" => "search",
+        "Translation" => "languages",
+        "Performance" => "zap",
+        "Passwords" => "key",
+        "Site permissions" => "lock",
+        "AI agent" => "bot",
+        "Privacy" => "shield",
+        "Keys" => "keyboard",
+        _ => "sliders",
+    }
+}
+
 fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
+    let lo = i.look.clone();
     let schema = settings_schema();
-    // Left: title and sections.
-    let nav = R::new(st.x, st.y, 190.0, st.h);
-    i.gfx.line(nav.right(), st.y + i.look.s4, nav.right(), st.bottom() - i.look.s4, th.line, 1.0);
-    i.gfx.text("Settings", R::new(nav.x + 22.0, nav.y + 22.0, 160.0, 40.0), i.look.title, th.text);
+    // Left: the title, the build, and the sections as a menu with icons.
+    let nav = R::new(st.x, st.y, 224.0, st.h);
+    i.gfx.line(nav.right(), st.y + lo.s4, nav.right(), st.bottom() - lo.s4, th.line, 1.0);
+    i.gfx.text("Settings", R::new(nav.x + 24.0, nav.y + 26.0, nav.w - 32.0, 36.0), lo.font(26.0, 700), th.text);
     // Which build this is, under the title: the question people ask before reporting a bug.
-    // The number on a line of its own, readable; the commit and date under it, quieter.
-    i.gfx.text(&format!("Lumen {}", env!("CARGO_PKG_VERSION")), R::new(nav.x + 22.0, nav.y + 58.0, nav.w - 30.0, 18.0), i.look.small_strong, th.dim);
-    i.gfx.text(env!("LUMEN_BUILD"), R::new(nav.x + 22.0, nav.y + 76.0, nav.w - 30.0, 16.0), i.look.caption, th.faint);
+    let build = env!("LUMEN_BUILD").split_whitespace().next().unwrap_or("");
+    i.label(&format!("Lumen {} · {build}", env!("CARGO_PKG_VERSION")), R::new(nav.x + 24.0, nav.y + 64.0, nav.w - 32.0, 16.0), th.faint);
     let current = i.page.sections.iter().rposition(|y| *y <= i.page.scroll + 30.0).unwrap_or(0);
     for (n, (name, _)) in schema.iter().enumerate() {
-        let r = R::new(nav.x + i.look.s3, nav.y + 100.0 + n as f32 * 32.0, nav.w - i.look.s5, 30.0);
+        let r = R::new(nav.x + lo.s3, nav.y + 96.0 + n as f32 * 34.0, nav.w - 2.0 * lo.s3, 32.0);
         let h = Hit::Page(PageHit::Nav(n));
-        if n == current || i.is_hover(&h) {
-            i.gfx.round(r, i.look.r_md, th.hover);
+        let on = n == current;
+        if on {
+            i.gfx.round(r, lo.round(r.h), th.pill);
+        } else if i.is_hover(&h) {
+            i.gfx.round(r, lo.round(r.h), th.hover);
         }
-        i.gfx.text(name, R::new(r.x + 10.0, r.y, r.w - 20.0, r.h), i.look.body, if n == current { th.text } else { th.dim });
+        let ink = if on { th.pill_ink } else { th.dim };
+        i.gfx.icon(section_icon(name), r.x + 12.0, r.y + 8.0, 16.0, ink.alpha(if on { 1.0 } else { 0.85 }));
+        i.gfx.text(name, R::new(r.x + 38.0, r.y, r.w - 44.0, r.h), lo.body, ink);
         i.hit(r, h);
     }
 
-    // Right: the rows, scrolled.
+    // Right: each section a label and a card of rows, scrolled.
     let body = R::new(nav.right() + 1.0, st.y, st.w - nav.w - 1.0, st.h);
-    let col = R::new(body.x + 40.0, body.y, (body.w - 80.0).clamp(160.0, 640.0), body.h);
+    let col = R::new(body.x + 40.0, body.y, (body.w - 96.0).clamp(160.0, 720.0), body.h);
+    let inner = |r: R| R::new(r.x + 18.0, r.y, r.w - 36.0, r.h);
+    // How tall each section's card is: its rows drawn once out of sight, their hits dropped.
+    let mark = i.hits.len();
+    i.gfx.clip(R::new(-10.0, -10.0, 1.0, 1.0));
+    let heights: Vec<Vec<f32>> = schema
+        .iter()
+        .map(|(_, items)| items.iter().map(|it| draw_item(i, it, R::new(inner(col).x, -2000.0, inner(col).w, 54.0), s) + 1.0).collect())
+        .collect();
+    i.gfx.unclip();
+    i.hits.truncate(mark);
     i.gfx.clip(body);
-    let mut y = body.y + 26.0 - i.page.scroll;
+    let mut y = body.y + 34.0 - i.page.scroll;
     let mut sections = Vec::new();
-    for (name, items) in &schema {
-        sections.push(y + i.page.scroll - body.y - 26.0);
-        i.gfx.text(name, R::new(col.x, y, col.w, 30.0), i.look.h2, th.text);
-        y += 40.0;
-        for (n, it) in items.iter().enumerate() {
-            let h = draw_item(i, it, R::new(col.x, y, col.w, 54.0), s);
+    for ((name, items), hs) in schema.iter().zip(heights) {
+        sections.push(y + i.page.scroll - body.y - 34.0);
+        i.label(name, R::new(col.x + 4.0, y, col.w, 18.0), th.faint);
+        y += 26.0;
+        let card_h: f32 = hs.iter().sum::<f32>() + 10.0;
+        let card = R::new(col.x, y, col.w, card_h);
+        if card.bottom() >= body.y && card.y <= body.bottom() {
+            i.gfx.round(card, lo.r_card, th.raise);
+            i.gfx.round_stroke(card, lo.r_card, th.line, 1.0);
+        }
+        y += 5.0;
+        for (n, (it, h)) in items.iter().zip(hs.iter()).enumerate() {
+            if y + h >= body.y && y <= body.bottom() {
+                draw_item(i, it, R::new(inner(col).x, y, inner(col).w, 54.0), s);
+            }
             y += h;
             if n + 1 < items.len() && !matches!(it, Item::Keys) {
-                i.gfx.line(col.x, y, col.right(), y, th.line, 1.0);
+                i.gfx.line(card.x + 1.0, y - 1.0, card.right() - 1.0, y - 1.0, th.line, 1.0);
             }
-            y += 1.0;
         }
-        y += 28.0;
+        y += 5.0 + 30.0;
     }
     i.gfx.unclip();
     i.page.sections = sections;

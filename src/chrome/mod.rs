@@ -1895,7 +1895,8 @@ impl Inner {
         if s.full {
             let (x, y, w, h) = s.stage;
             let st = R::new(x, y, w, h);
-            self.gfx.round(st, lo.page_radius, th.raise);
+            // A page is the look's ground; its blocks are cards on it.
+            self.gfx.round(st, lo.page_radius, th.bg);
             if s.panel != "none" {
                 // Opening: a fade and a slight rise, over the surface underneath.
                 let a = self.motion.enter(Id::Panel(s.panel), Prop::Opacity, 0.0, 1.0, 170, Ease::OutCubic);
@@ -1903,7 +1904,7 @@ impl Inner {
                 let st = R::new(st.x, st.y + rise, st.w, st.h);
                 pages::draw(self, st, s);
                 if a < 1.0 {
-                    self.gfx.round(st, lo.page_radius, th.raise.alpha(1.0 - a));
+                    self.gfx.round(st, lo.page_radius, th.bg.alpha(1.0 - a));
                 }
             } else if self.ntp_visible() {
                 self.draw_ntp(st, s);
