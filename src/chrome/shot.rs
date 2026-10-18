@@ -164,6 +164,11 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             std::thread::sleep(std::time::Duration::from_millis(40));
                             let _ = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), lp);
                         }
+                        if cmd == "rclick" {
+                            let _ = PostMessageW(Some(hwnd), WM_RBUTTONDOWN, WPARAM(0), lp);
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                            let _ = PostMessageW(Some(hwnd), WM_RBUTTONUP, WPARAM(0), lp);
+                        }
                     }
                     "wheel" => {
                         let (x, y) = xy(&args);
@@ -182,6 +187,10 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         if let Ok(edit) = GetDlgItem(Some(hwnd), id) {
                             let _ = PostMessageW(Some(edit), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
                         }
+                    }
+                    "killfocus" => {
+                        // The keyboard left the app, as Alt-Tab takes it: a menu must close.
+                        let _ = PostMessageW(Some(hwnd), WM_KILLFOCUS, WPARAM(0), LPARAM(0));
                     }
                     "focus" => {
                         // Say which window has the keyboard: proof that Tab walked the form.

@@ -14,6 +14,7 @@ mod dashboard;
 mod color;
 mod form;
 mod confirm;
+mod menu;
 #[cfg(debug_assertions)]
 mod shot;
 mod style;
@@ -35,11 +36,11 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, CLEARTYPE_QUALITY, ClientToScreen, CombineRgn, CreateRectRgn, CreateRoundRectRgn, RGN_DIFF, RGN_OR, SetWindowRgn, ScreenToClient, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW,
+            BeginPaint, CLEARTYPE_QUALITY, CombineRgn, CreateRectRgn, CreateRoundRectRgn, RGN_DIFF, RGN_OR, SetWindowRgn, ScreenToClient, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW,
             BLACKNESS, CreateSolidBrush, DEFAULT_CHARSET, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_NORMAL, GetTextFaceW,
             HBRUSH, HDC, HFONT, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PatBlt, SelectObject, SetBkColor, SetTextColor,
         },
-        System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW},
+        System::LibraryLoader::GetModuleHandleW,
         UI::{
             Controls::{EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE},
             HiDpi::GetDpiForWindow,
@@ -50,7 +51,7 @@ use windows::{
             WindowsAndMessaging::*,
         },
     },
-    core::{HSTRING, PCSTR, PCWSTR, w},
+    core::{HSTRING, PCWSTR, w},
 };
 
 use crate::{
@@ -395,6 +396,9 @@ pub enum Hit {
     /// The question card: the card itself, and its buttons.
     ConfirmCard,
     ConfirmButton(usize),
+    /// The menu card: the card itself, and its rows.
+    MenuCard,
+    MenuRow(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -693,6 +697,8 @@ pub(crate) struct Inner {
     form: Option<form::FormCard>,
     /// The question card, open while it waits for a button.
     confirm: Option<confirm::ConfirmCard>,
+    /// The menu card, open at the click point while it waits for a choice.
+    menu: Option<menu::MenuCard>,
 }
 
 /// A message being written to an agent: the card over the sidebar.
@@ -1181,6 +1187,7 @@ impl Chrome {
                 form_edits,
                 form: None,
                 confirm: None,
+                menu: None,
             }));
             // The window proc finds its state through this pointer. The Rc lives as long as App.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
@@ -1517,7 +1524,6 @@ impl Inner {
         if key != self.theme_key {
             self.theme_key = key;
             self.make_brushes();
-            dark_menus(s.dark);
         }
         // The wallpaper file is read once per choice, not per frame.
         let want_wp = s.settings.ntp_bg == "wallpaper" && !s.settings.wallpaper.is_empty();
@@ -2251,17 +2257,21 @@ impl Inner {
         color::draw(self, s);
         form::draw(self, s);
         confirm::draw(self, s);
+        menu::draw(self, s);
         self.motion.end();
     }
 
-    /// One card at a time: opening one puts the others away. A form and a question
-    /// are dropped (their actions never run); a colour keeps what it shows.
+    /// One card at a time: opening one puts the others away. A form, a question and a
+    /// menu are dropped (their actions never run); a colour keeps what it shows.
     fn close_cards(&mut self) {
         if self.form.is_some() {
             form::cancel(self);
         }
         if self.confirm.is_some() {
             confirm::cancel(self);
+        }
+        if self.menu.is_some() {
+            menu::cancel(self);
         }
         if self.color.is_some() {
             color::done(self);
@@ -3671,16 +3681,25 @@ impl Inner {
         .into_iter()
         .map(|(id, label)| (id, label.to_string()))
         .collect();
-        match self.popup(&items, x, y) {
-            1 => send(&self.proxy, json!({"t": "newtab"})),
-            2 => send(&self.proxy, json!({"t": "dashboard"})),
-            3 => send(&self.proxy, json!({"t": "panel", "open": true, "which": "settings"})),
-            4 => send(&self.proxy, json!({"t": "panel", "open": true, "which": "history"})),
-            5 => send(&self.proxy, json!({"t": "panel", "open": true, "which": "bookmarks"})),
-            6 => send(&self.proxy, json!({"t": "panel", "open": true, "which": "downloads"})),
-            7 => send(&self.proxy, json!({"t": "panel", "open": true, "which": "control"})),
-            _ => {}
-        }
+        menu::open(self, &items, x, y, |i, cmd| {
+            let which = match cmd {
+                1 => {
+                    send(&i.proxy, json!({"t": "newtab"}));
+                    return;
+                }
+                2 => {
+                    send(&i.proxy, json!({"t": "dashboard"}));
+                    return;
+                }
+                3 => "settings",
+                4 => "history",
+                5 => "bookmarks",
+                6 => "downloads",
+                7 => "control",
+                _ => return,
+            };
+            send(&i.proxy, json!({"t": "panel", "open": true, "which": which}));
+        });
     }
 
     /// The workspaces chip's popup: switch, or make a new one.
@@ -3694,12 +3713,13 @@ impl Inner {
             .collect();
         items.push((0, String::new()));
         items.push((100, "New workspace".into()));
-        match self.popup(&items, x, y) {
-            0 => {}
-            100 => send(&self.proxy, json!({"t": "workspaceAdd"})),
-            n if n as usize <= s.workspaces.len() => send(&self.proxy, json!({"t": "workspaceSwitch", "to": n - 1})),
-            _ => {}
-        }
+        menu::open(self, &items, x, y, move |i, cmd| {
+            if cmd == 100 {
+                send(&i.proxy, json!({"t": "workspaceAdd"}));
+            } else if cmd as usize <= s.workspaces.len() {
+                send(&i.proxy, json!({"t": "workspaceSwitch", "to": cmd - 1}));
+            }
+        });
     }
 
     // --------------------------------------------------------- new tab page
@@ -4262,9 +4282,10 @@ impl Inner {
             color::done(self);
         }
         // A click outside the form cancels it, as Escape does. So does one outside
-        // a question.
+        // a question, or a menu.
         form::clicked_outside(self, &h);
         confirm::clicked_outside(self, &h);
+        menu::clicked_outside(self, &h);
         let p = &self.proxy;
         match h.unwrap() {
             Hit::Back => send(p, json!({"t": "back"})),
@@ -4346,6 +4367,8 @@ impl Inner {
             Hit::FormCancel => form::cancel(self),
             Hit::ConfirmCard => {}
             Hit::ConfirmButton(n) => confirm::pick(self, n),
+            Hit::MenuCard => {}
+            Hit::MenuRow(n) => menu::click(self, n),
             Hit::PermAllow(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": true})),
             Hit::HandoffDone => send(p, json!({"t": "handoffDone"})),
             Hit::Star => {
@@ -4363,10 +4386,11 @@ impl Inner {
                     Some(s) => s.kdbx.iter().enumerate().map(|(n, l)| (n as u32 + 1, l.clone())).collect(),
                     None => return,
                 };
-                let cmd = self.popup(&items, x, y);
-                if cmd > 0 {
-                    send(p, json!({"t": "kdbxFill", "n": cmd - 1}));
-                }
+                menu::open(self, &items, x, y, |i, cmd| {
+                    if cmd > 0 {
+                        send(&i.proxy, json!({"t": "kdbxFill", "n": cmd - 1}));
+                    }
+                });
             }
             Hit::PermBlock(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": false})),
             Hit::Shortcut(i) => {
@@ -4521,47 +4545,49 @@ impl Inner {
                 items.push((0, String::new()));
                 items.push((5, "Close other tabs".into()));
                 items.push((6, if t.pinned { "Unload, keep the pin\tCtrl+W".into() } else { "Close\tCtrl+W".into() }));
-                let cmd = self.popup(&items, x, y);
-                let msg = match cmd {
-                    1 => "pin",
-                    2 => "duplicate",
-                    3 => "mute",
-                    4 => "sleep",
-                    5 => "closeOthers",
-                    6 => "close",
-                    8 => "reader",
-                    10 => "video",
-                    9 => "darksite",
-                    11 => "newPrivate",
-                    12 => "split",
-                    13 => "translate",
-                    14 => "webview2",
-                    16 => "agentGrant",
-                    17 => "pinBack",
-                    15 => {
-                        send(&self.proxy, json!({"t": "workspaceAdd"}));
-                        return;
-                    }
-                    7 => {
-                        let mut st = s.settings.clone();
-                        let title = if t.title.is_empty() { host(&t.url) } else { t.title.clone() };
-                        if speeddial::add(&mut st.shortcuts, &title, &t.url) {
-                            send(&self.proxy, json!({"t": "settings", "v": st}));
+                // The tile's own name and address, so the menu's action owns no borrow.
+                let (title, url) = (if t.title.is_empty() { host(&t.url) } else { t.title.clone() }, t.url.clone());
+                menu::open(self, &items, x, y, move |i, cmd| {
+                    let msg = match cmd {
+                        1 => "pin",
+                        2 => "duplicate",
+                        3 => "mute",
+                        4 => "sleep",
+                        5 => "closeOthers",
+                        6 => "close",
+                        8 => "reader",
+                        10 => "video",
+                        9 => "darksite",
+                        11 => "newPrivate",
+                        12 => "split",
+                        13 => "translate",
+                        14 => "webview2",
+                        16 => "agentGrant",
+                        17 => "pinBack",
+                        15 => {
+                            send(&i.proxy, json!({"t": "workspaceAdd"}));
+                            return;
                         }
-                        return;
-                    }
-                    20..=23 => {
-                        let wi = (cmd - 20) as usize;
-                        if wi < s.workspaces.len() && wi != s.active_workspace {
-                            send(&self.proxy, json!({"t": "moveTabToWorkspace", "id": id, "to": wi}));
+                        7 => {
+                            let mut st = s.settings.clone();
+                            if speeddial::add(&mut st.shortcuts, &title, &url) {
+                                send(&i.proxy, json!({"t": "settings", "v": st}));
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    _ => return,
-                };
-                send(&self.proxy, json!({"t": msg, "id": id}));
+                        20..=23 => {
+                            let wi = (cmd - 20) as usize;
+                            if wi < s.workspaces.len() && wi != s.active_workspace {
+                                send(&i.proxy, json!({"t": "moveTabToWorkspace", "id": id, "to": wi}));
+                            }
+                            return;
+                        }
+                        _ => return,
+                    };
+                    send(&i.proxy, json!({"t": msg, "id": id}));
+                });
             }
-            Hit::Workspace(i) => {
+            Hit::Workspace(w) => {
                 let mut items: Vec<(u32, String)> = vec![(1, "Rename".into())];
                 if s.workspaces.len() > 1 {
                     items.push((0, String::new()));
@@ -4570,30 +4596,29 @@ impl Inner {
                 }
                 items.push((0, String::new()));
                 items.push((4, "New workspace".into()));
-                let cmd = self.popup(&items, x, y);
-                match cmd {
+                menu::open(self, &items, x, y, move |i, cmd| match cmd {
                     // Rename happens right here in the omnibox edit; Enter sends
                     // the new name back, Escape drops it.
                     1 => {
-                        let name = s.workspaces.get(i).map(|n| n.clone()).unwrap_or_default();
-                        self.begin_workspace_rename(i, &name);
+                        let name = s.workspaces.get(w).map(|n| n.clone()).unwrap_or_default();
+                        i.begin_workspace_rename(w, &name);
                     }
-                    2 => send(&self.proxy, json!({"t": "workspaceDuplicate", "i": i})),
-                    3 => send(&self.proxy, json!({"t": "workspaceClose", "i": i})),
-                    4 => send(&self.proxy, json!({"t": "workspaceAdd"})),
+                    2 => send(&i.proxy, json!({"t": "workspaceDuplicate", "i": w})),
+                    3 => send(&i.proxy, json!({"t": "workspaceClose", "i": w})),
+                    4 => send(&i.proxy, json!({"t": "workspaceAdd"})),
                     _ => {}
-                }
+                });
             }
             Hit::WorkspaceAdd => send(&self.proxy, json!({"t": "workspaceAdd"})),
-            Hit::DialSugg(i) | Hit::DialPin(i) => {
-                if self.popup(&[(1, "Add to speed dial".into())], x, y) == 1
-                    && let Some(sc) = s.suggestions.get(i)
-                {
-                    let mut st = s.settings.clone();
-                    if speeddial::add(&mut st.shortcuts, &sc.title, &sc.url) {
-                        send(&self.proxy, json!({"t": "settings", "v": st}));
+            Hit::DialSugg(n) | Hit::DialPin(n) => {
+                menu::open(self, &[(1, "Add to speed dial".into())], x, y, move |i, cmd| {
+                    if cmd == 1 && let Some(sc) = s.suggestions.get(n) {
+                        let mut st = s.settings.clone();
+                        if speeddial::add(&mut st.shortcuts, &sc.title, &sc.url) {
+                            send(&i.proxy, json!({"t": "settings", "v": st}));
+                        }
                     }
-                }
+                });
             }
             Hit::Page(pages::PageHit::Bm(id) | pages::PageHit::BmDel(id)) => {
                 if let Some(m) = s.bookmarks.iter().find(|m| m.id == id) {
@@ -4601,27 +4626,27 @@ impl Inner {
                 }
             }
             Hit::Page(pages::PageHit::BmFolder(name)) if !name.is_empty() => {
-                match self.popup(&[(1, "Rename…".into()), (2, "Delete folder".into())], x, y) {
-                    1 => form::open(self, "Rename folder", &[("Name", &name)], form::FormAct::RenameFolder { old: name.clone() }),
-                    2 => send(&self.proxy, json!({"t": "bmFolderDelete", "name": name})),
+                menu::open(self, &[(1, "Rename…".into()), (2, "Delete folder".into())], x, y, move |i, cmd| match cmd {
+                    1 => form::open(i, "Rename folder", &[("Name", &name)], form::FormAct::RenameFolder { old: name.clone() }),
+                    2 => send(&i.proxy, json!({"t": "bmFolderDelete", "name": name})),
                     _ => {}
-                }
+                });
             }
-            Hit::Shortcut(i) => {
-                match self.popup(&[(1, "Edit…".into()), (2, "Remove".into())], x, y) {
+            Hit::Shortcut(n) => {
+                menu::open(self, &[(1, "Edit…".into()), (2, "Remove".into())], x, y, move |i, cmd| match cmd {
                     1 => {
-                        let Some(sc) = s.settings.shortcuts.get(i) else { return };
-                        form::open(self, "Edit tile", &[("Address", &sc.url), ("Name (optional)", &sc.title)], form::FormAct::EditTile { i });
+                        let Some(sc) = s.settings.shortcuts.get(n) else { return };
+                        form::open(i, "Edit tile", &[("Address", &sc.url), ("Name (optional)", &sc.title)], form::FormAct::EditTile { i: n });
                     }
                     2 => {
                         let mut st = s.settings.clone();
-                        if i < st.shortcuts.len() {
-                            st.shortcuts.remove(i);
-                            send(&self.proxy, json!({"t": "settings", "v": st}));
+                        if n < st.shortcuts.len() {
+                            st.shortcuts.remove(n);
+                            send(&i.proxy, json!({"t": "settings", "v": st}));
                         }
                     }
                     _ => {}
-                }
+                });
             }
             _ => {}
         }
@@ -4661,7 +4686,7 @@ impl Inner {
     /// and the rows of the Bookmarks page share it. `page` adds the entries that only make
     /// sense in the list (open in a new tab, move up and down).
     fn mark_menu(&mut self, mark: &UiMark, page: bool, x: f32, y: f32) {
-        let Some(s) = &self.state else { return };
+        let Some(s) = self.state.clone() else { return };
         let mut items: Vec<(u32, String)> = vec![(1, "Edit…".into())];
         if page {
             items.push((2, "Open in new tab".into()));
@@ -4683,48 +4708,31 @@ impl Inner {
         }
         items.push((0, String::new()));
         items.push((5, "Remove bookmark".into()));
-        let id = mark.id;
-        let msg = match self.popup(&items, x, y) {
-            1 => {
-                // The form card takes it from here: its Save sends the edit.
-                form::open(self, "Edit bookmark", &[("Title", &mark.title), ("Address", &mark.url)], form::FormAct::EditBookmark { id, folder: mark.folder.clone() });
-                return;
-            }
-            2 => json!({"t": "bmOpen", "url": mark.url, "bg": true}),
-            3 => json!({"t": "bmShift", "id": id, "d": -1}),
-            4 => json!({"t": "bmShift", "id": id, "d": 1}),
-            5 => json!({"t": "bmDelete", "id": id}),
-            30 => json!({"t": "bmMove", "id": id, "folder": ""}),
-            n @ 31..=70 => match s.bm_folders.get(n as usize - 31) {
-                Some(f) => json!({"t": "bmMove", "id": id, "folder": f}),
-                None => return,
-            },
-            _ => return,
-        };
-        send(&self.proxy, msg);
+        let (id, mark) = (mark.id, mark.clone());
+        menu::open(self, &items, x, y, move |i, cmd| {
+            let msg = match cmd {
+                1 => {
+                    // The form card takes it from here: its Save sends the edit.
+                    form::open(i, "Edit bookmark", &[("Title", &mark.title), ("Address", &mark.url)], form::FormAct::EditBookmark { id, folder: mark.folder.clone() });
+                    return;
+                }
+                2 => json!({"t": "bmOpen", "url": mark.url, "bg": true}),
+                3 => json!({"t": "bmShift", "id": id, "d": -1}),
+                4 => json!({"t": "bmShift", "id": id, "d": 1}),
+                5 => json!({"t": "bmDelete", "id": id}),
+                30 => json!({"t": "bmMove", "id": id, "folder": ""}),
+                n @ 31..=70 => match s.bm_folders.get(n as usize - 31) {
+                    Some(f) => json!({"t": "bmMove", "id": id, "folder": f}),
+                    None => return,
+                },
+                _ => return,
+            };
+            send(&i.proxy, msg);
+        });
     }
 
     fn star_menu(&mut self, mark: UiMark, x: f32, y: f32) {
         self.mark_menu(&mark, false, x, y);
-    }
-
-    /// A native popup menu. Returns the chosen id, 0 for none.
-    fn popup(&self, items: &[(u32, String)], x: f32, y: f32) -> u32 {
-        unsafe {
-            let Ok(menu) = CreatePopupMenu() else { return 0 };
-            for (id, label) in items {
-                if *id == 0 {
-                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-                } else {
-                    let _ = AppendMenuW(menu, MF_STRING, *id as usize, &HSTRING::from(label.as_str()));
-                }
-            }
-            let mut pt = POINT { x: (x * self.k()) as i32, y: (y * self.k()) as i32 };
-            let _ = ClientToScreen(self.hwnd, &mut pt);
-            let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, self.hwnd, None);
-            let _ = DestroyMenu(menu);
-            cmd.0 as u32
-        }
     }
 
     fn wheel(&mut self, delta: i32) {
@@ -4740,6 +4748,10 @@ impl Inner {
 
     fn key(&mut self, vk: u32) -> bool {
         let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
+        // A menu: Up and Down walk it, Enter chooses, Escape puts it away.
+        if menu::key(self, vk) {
+            return true;
+        }
         // The colour picker: Escape puts the old colour back, Enter is Done.
         if color::key(self, vk) {
             return true;
@@ -4901,24 +4913,6 @@ fn wallpaper_key(path: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut h);
     (h.finish() | (1 << 62)) & !(1 << 63)
-}
-
-/// Win32 menus follow the app theme only through two undocumented uxtheme calls.
-/// Every Windows 10 1903+ app that has dark menus uses them.
-fn dark_menus(dark: bool) {
-    unsafe {
-        let Ok(ux) = LoadLibraryW(w!("uxtheme.dll")) else { return };
-        // 135: SetPreferredAppMode(mode). 2 = force dark, 3 = force light.
-        if let Some(f) = GetProcAddress(ux, PCSTR(135 as *const u8)) {
-            let f: extern "system" fn(i32) -> i32 = std::mem::transmute(f);
-            f(if dark { 2 } else { 3 });
-        }
-        // 136: FlushMenuThemes().
-        if let Some(f) = GetProcAddress(ux, PCSTR(136 as *const u8)) {
-            let f: extern "system" fn() = std::mem::transmute(f);
-            f();
-        }
-    }
 }
 
 // ----------------------------------------------------------- window procs
@@ -5147,6 +5141,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             #[cfg(debug_assertions)]
             shot::WM_SHOT => {
                 shot::requested(&i);
+                LRESULT(0)
+            }
+            WM_KILLFOCUS => {
+                // A menu closes when the keyboard leaves the chrome (Alt-Tab, another
+                // app). Focus moving to one of the chrome's own edit boxes is not
+                // leaving: the menu stays.
+                let gain = HWND(lp.0 as _);
+                if i.menu.is_some() && gain != hwnd && !IsChild(hwnd, gain).as_bool() {
+                    menu::blur(&mut i);
+                }
                 LRESULT(0)
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),

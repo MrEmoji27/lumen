@@ -494,23 +494,29 @@ fn local_offset() -> i64 {
     wall - unix_now() as i64
 }
 
-/// The slice of history to clear: Some(None) = everything, Some(Some(t)) = from
-/// unix `t` on, None = the menu was dismissed.
-fn ask_range(i: &Inner) -> Option<Option<u64>> {
+/// The slice of history to clear: None = everything, Some(t) = from unix `t` on.
+/// The menu asks, and `done` runs with the answer once a row is chosen.
+fn ask_range(i: &mut Inner, done: impl FnOnce(&mut Inner, Option<u64>) + 'static) {
     let now = unix_now();
     let items: Vec<(u32, String)> = [(1u32, "Last hour"), (2, "Today"), (3, "Last 7 days"), (4, "Last 4 weeks"), (5, "Everything")]
         .into_iter()
         .map(|(id, label)| (id, label.to_string()))
         .collect();
     let (x, y) = i.mouse;
-    match i.popup(&items, x, y) {
-        1 => Some(Some(now - 3600)),
-        2 => Some(Some(midnight())),
-        3 => Some(Some(now - 7 * 86_400)),
-        4 => Some(Some(now - 28 * 86_400)),
-        5 => Some(None),
-        _ => None,
-    }
+    super::menu::open(i, &items, x, y, move |i, cmd| {
+        let since = match cmd {
+            1 => now - 3600,
+            2 => midnight(),
+            3 => now - 7 * 86_400,
+            4 => now - 28 * 86_400,
+            5 => {
+                done(i, None);
+                return;
+            }
+            _ => return,
+        };
+        done(i, Some(since));
+    });
 }
 
 fn ratio(scale: Scale, v: f32) -> f32 {
@@ -3456,20 +3462,24 @@ pub fn click(i: &mut Inner, p: PageHit) {
             }
         }
         PageHit::DlLimit => {
-            // The native menu of speeds aria2 accepts as max-overall-download-limit.
+            // The drawn menu of speeds aria2 accepts as max-overall-download-limit.
             let (x, y) = i.mouse;
-            let kbps = match i.popup(
+            super::menu::open(
+                i,
                 &[(1, "No limit".into()), (2, "1 MB/s".into()), (3, "5 MB/s".into()), (4, "10 MB/s".into())],
                 x,
                 y,
-            ) {
-                1 => 0,
-                2 => 1024,
-                3 => 5120,
-                4 => 10240,
-                _ => return,
-            };
-            send(&i.proxy, json!({"t": "dl", "a": "limit", "kbps": kbps}));
+                |i, cmd| {
+                    let kbps = match cmd {
+                        1 => 0,
+                        2 => 1024,
+                        3 => 5120,
+                        4 => 10240,
+                        _ => return,
+                    };
+                    send(&i.proxy, json!({"t": "dl", "a": "limit", "kbps": kbps}));
+                },
+            );
         }
         PageHit::DlNote => {
             // The firewall line is dismissed for good; it never comes back.
@@ -3506,37 +3516,38 @@ pub fn click(i: &mut Inner, p: PageHit) {
                 items.push((50, "All of them".into()));
             }
             let (x, y) = i.mouse;
-            let pick = i.popup(&items, x, y);
-            let browser = match pick {
-                0 => return,
-                50 => "all".to_string(),
-                n => match found.get(n as usize - 1) {
-                    Some(f) => f.browser.to_string(),
-                    None => return,
-                },
-            };
-            send(&i.proxy, json!({"t": "bmImport", "browser": browser}));
+            super::menu::open(i, &items, x, y, move |i, cmd| {
+                let browser = match cmd {
+                    0 => return,
+                    50 => "all".to_string(),
+                    n => match found.get(n as usize - 1) {
+                        Some(f) => f.browser.to_string(),
+                        None => return,
+                    },
+                };
+                send(&i.proxy, json!({"t": "bmImport", "browser": browser}));
+            });
         }
         PageHit::DriveStart => send(&i.proxy, json!({"t": "driveStart"})),
         PageHit::DriveStop => send(&i.proxy, json!({"t": "driveStop"})),
         PageHit::DrivePause => send(&i.proxy, json!({"t": "drivePause"})),
         PageHit::ClearHistory => {
-            // One native menu of time ranges first, then the wipe.
-            if let Some(since) = ask_range(i) {
-                send(&i.proxy, json!({"t": "clearHistory", "since": since}));
-            }
+            // One drawn menu of time ranges first, then the wipe.
+            ask_range(i, |i, since| send(&i.proxy, json!({"t": "clearHistory", "since": since})));
         }
         PageHit::ClearData => {
-            if let Some(since) = ask_range(i) {
+            ask_range(i, |i, since| {
                 let (x, y) = i.mouse;
                 // Second choice: history only, or the cookies and cache with it.
-                let more = match i.popup(&[(1, "History only".into()), (2, "History, cookies and cache".into())], x, y) {
-                    1 => false,
-                    2 => true,
-                    _ => return,
-                };
-                send(&i.proxy, json!({"t": "clearData", "since": since, "more": more}));
-            }
+                super::menu::open(i, &[(1, "History only".into()), (2, "History, cookies and cache".into())], x, y, move |i, cmd| {
+                    let more = match cmd {
+                        1 => false,
+                        2 => true,
+                        _ => return,
+                    };
+                    send(&i.proxy, json!({"t": "clearData", "since": since, "more": more}));
+                });
+            });
         }
         PageHit::DefaultMake => {
             let note = crate::defaultapp::make_default();
