@@ -1126,6 +1126,10 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                         }
                     } else {
                         app.minimized = false;
+                        // Shown again: the active page back to a full memory target.
+                        if let Some(v) = app.active_tab().and_then(|t| t.view.as_ref()) {
+                            let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
+                        }
                         app.layout();
                         let max = app.ctx.window.is_maximized();
                         if max != app.was_max {
@@ -1783,6 +1787,10 @@ impl App {
             }
             if let Some(v) = &t.view {
                 let _ = v.set_visible(want);
+                // Off screen: a low memory target at once, not 30 s later at the trim.
+                // On screen again: normal before the return's first paint.
+                let level = if want { MemoryUsageLevel::Normal } else { MemoryUsageLevel::Low };
+                let _ = v.set_memory_usage_level(level);
                 t.visible = want;
             } else {
                 t.visible = false;
@@ -2379,12 +2387,12 @@ impl App {
         let t = &mut self.tabs[i];
         t.hidden_at = None;
         t.suspended = false;
-        if let Some(v) = &t.view
-            && t.trimmed
-        {
+        // Shown again: the full memory target before the return's first paint,
+        // whatever the sleep policy did while it was away.
+        if let Some(v) = &t.view {
             let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
-            t.trimmed = false;
         }
+        t.trimmed = false;
     }
 
     /// Two pages in one stage, `left` focused. Replaces any split there was.
@@ -6038,6 +6046,8 @@ impl App {
                 && let Some(v) = t.view.as_ref()
             {
                 let _ = v.set_visible(false);
+                // The agent is idle: the page gives up its memory target too, not only its paint.
+                let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
                 self.tabs[i].stage_idle = true;
             }
         }
@@ -6226,6 +6236,8 @@ impl App {
             self.tabs[i].stage_idle = false;
             if let Some(v) = self.tabs[i].view.as_ref() {
                 let _ = v.set_visible(true);
+                // Awake for a call: the full memory target before the call runs.
+                let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
                 // A moment for Chromium to mark the page visible again, or the first
                 // mouse event after a long quiet is dropped.
                 std::thread::sleep(Duration::from_millis(50));

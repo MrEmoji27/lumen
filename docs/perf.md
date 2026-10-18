@@ -393,3 +393,110 @@ What moves is the model's side: one round trip instead of twelve, 580 bytes to r
 Memory: a warm idle Lumen is 19.2 MB, 19.1 MB at 0.3.0. Luau is in the exe (15.5 MB, from
 14.0 MB) and costs nothing until a script runs: each run gets a fresh VM, capped at 32 MB, gone
 when it ends.
+
+## Group A, 18 October
+
+Three changes, measured one at a time on this laptop: release builds into `target/perf-a`,
+headless, a fresh throwaway profile under `%TEMP%` for every run, three tabs at most, muted
+(headless is). "before" is the tree as that change found it; "after" is that tree plus the one
+change, built the same way. A change that did not help was reverted; what follows says what each
+one did.
+
+### Hidden tabs: the low memory target, at once
+
+WebView2's `SetMemoryUsageTargetLevel` was only ever set 30 seconds into hiding, by the sleep
+policy's trim, and an agent's stage views never got it at all. Now the place that already decides
+a page is on screen, `sync_panes`, tells WebView2 `Low` the moment one goes off screen, and
+`Normal` before a page that comes back paints. The minimize path says the same on restore. An
+agent's stage view goes `Low` when its agent has been idle for `STAGE_IDLE` (30 s) and `Normal`
+when a call wakes it. The 30 s trim still runs; it is no longer the first time WebView2 hears
+about a page that is gone.
+
+Method: release, headless, a fresh profile per run under `%TEMP%`, warmed once first so the
+filter lists are already on disk. Three tabs: a long Wikipedia article as the shown tab (the
+restored active tab), a news front page and another Wikipedia article as agent tabs on the
+off-screen stage. The number is the private working set of `lumen.exe` plus every WebView2 process
+whose command line names this run's data folder, summed at 90 s. The journal's own `sample` line,
+which walks the same tree through `engine::memory`, rides beside it. Three runs each.
+
+| run | before at 90 s | before, journal 60 s / 120 s | after at 90 s | after, journal 60 s / 120 s |
+|---|---|---|---|---|
+| 1 | 215.0 MB | 219.0 / 213.0 MB | 182.0 MB | 180.1 / 180.7 MB |
+| 2 | 214.3 MB | 220.3 / 212.4 MB | 182.1 MB | 185.3 / 185.9 MB |
+| 3 | 214.9 MB | 220.4 / 212.4 MB | 154.9 MB | 158.0 / 154.7 MB |
+| median | 214.9 MB | | 182.0 MB | |
+
+**Kept: 214.9 MB to 182.0 MB, 33 MB less (15%)** for two hidden heavy pages, with the shown tab
+costing what it always did. All three pages loaded in every run (`nav ... ok=True`, and the
+journal's `tabs=3 live=3` at both samples). The after side spread 27 MB between its runs (154.9
+to 182.1); how much Chromium lets go when it is told a page is gone depends on the run. Every
+after run was below every before run; the median is the number to read.
+
+### mimalloc as the allocator
+
+`mimalloc` 0.1.52, default features off, as `#[global_allocator]` in `src/main.rs`. `lumen-agent`
+was left alone: it is a one-shot bridge that lives for one call, and neither measure below is its.
+
+Measured the way "Idle memory" says: a warm idle A/B, first run fetches the filter lists, second
+run measured after 60 s, three samples. Release, headless, a fresh profile per pair under `%TEMP%`,
+no page ever built, so the number is `lumen.exe`'s own private working set. The agent bench's p50
+column rides beside it, before and after.
+
+| build | idle at 60 s | 63 s | 66 s | bench, whole run | `browser_open` |
+|---|---|---|---|---|---|
+| before | 19.5 MB | 19.5 MB | 19.5 MB | 43 s | 718 ms a call |
+| mimalloc | 80.5 MB | 80.5 MB | 80.5 MB | 39 s | 548 ms a call |
+| mimalloc, a second A/B | 80.8 MB | 80.8 MB | 80.8 MB | | |
+| after the revert | 19.7 MB | 19.7 MB | 19.7 MB | | |
+
+The whole p50 column, one bench run each side:
+
+| task | before | mimalloc |
+|---|---|---|
+| read title and URL | 604 ms | 600 ms |
+| extract 100 links | 548 ms | 515 ms |
+| fill and send a form | 1464 ms | 1356 ms |
+| table built by JS | 584 ms | 534 ms |
+| ten-step workflow | 2010 ms | 2050 ms |
+| two tabs, two reads | 1177 ms | 1086 ms |
+| form, `browser_fill` | 1410 ms | 1389 ms |
+| links, `browser_links` | 564 ms | 571 ms |
+| table, `browser_table` | 652 ms | 640 ms |
+| workflow, Luau script | 2204 ms | 2201 ms |
+| two tabs, `browser_batch` | 1203 ms | 1132 ms |
+| floor, ping / help / tabs | 0.5 / 0.8 / 0.9 ms | 0.6 / 1.0 / 1.3 ms |
+
+**Reverted: idle 19.5 MB to 80.5 MB.** The bench was not slower — a little faster, and every task
+p50 within a few percent of before (the largest moves: 1464 to 1356 ms on the form, 1203 to
+1132 ms on the batch). The criterion is idle, and it grew by 61 MB: mimalloc's own arena is the
+process's private pages too, and the first segment stays resident even with nothing in it Lumen
+asked for. A shell whose whole point is what it does not hold cannot spend 61 MB it is not using.
+The idle number came back to 19.7 MB the moment the dependency left.
+
+### Pre-warming an agent session's profile
+
+At `initialize` the session's WebView2 profile is made ready off the request path: a hidden page of
+that profile in the shared environment (dropped at once, the profile stays), or the whole
+environment for `agent_strict_isolation`. An op whose answer nobody waits for; the door replies
+without it.
+
+Measured with the new bench line `first open, fresh session`: initialize, then one `browser_open`
+of the bench's local page, timed from initialize's reply, five fresh sessions a run, three runs,
+p50.
+
+| run | before | after |
+|---|---|---|
+| 1 | 626 ms | 764 ms |
+| 2 | 623 ms | 743 ms |
+| 3 | 624 ms | 722 ms |
+
+**Reverted: 624 ms to 743 ms, and that number is a finding.** In a Lumen that has already built a
+page, a fresh session's profile costs about 70 ms — the bench says a fresh session's first open is
+about 0.6 s, not the 2.6 s the Agents section names. Pre-making the profile spends a whole hidden
+page instead (the docs' own `view` figure is 100 to 180 ms), on the UI thread, inside the same
+window: the window grew by about 120 ms, which is the hidden page minus the profile it made, and
+one session initialize stalled the UI (in that run the bench's own `browser_help` floor read
+266 ms a call instead of 0.8). The 2.6 s belongs to the first session of a fresh Lumen, where the
+environment is made as well as the profile; that case was not measured here, so nothing is claimed
+for it and the pre-warm is not kept on faith. The bench line stays: it is the measurement, and it
+is the first number this repo has for a fresh session's first open.
