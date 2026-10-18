@@ -7,6 +7,40 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.7 — 2026-10-19
+
+The one to hand to other people. Every piece of the interface is Lumen's own now, it installs
+like a program, and it tells you when it cannot run.
+
+- **All of it drawn by Lumen.** The colour picker, every form (add a tile, edit a bookmark, name
+  a folder, save a look), every yes-or-no question, every right-click menu and every file picker
+  are Lumen's own cards, in Lumen's look, light or dark. No grey Windows boxes left. A web page's
+  right-click menu is Lumen's too, with WebView2's own items in it and two more: open the link in
+  a private tab, search for what you selected.
+- **Pages ask in Lumen's cards.** A page's alert, confirm, prompt and "leave this site?" come up
+  over that page, naming the site. A page that keeps asking gets "Stop this page asking". A site
+  that wants a user name and password gets a sign-in card. A page that cannot load gets Lumen's
+  own error page that says why in plain words, with Try again. Where a link goes shows in a small
+  pill at the foot of the page.
+- **The address bar finishes the name.** Type `yout` and it fills in `youtube.com`, the site you
+  go to most; Enter goes there. Backspace takes it away. The start page's box does the same.
+- **Calls stay up.** A tab in a call (a live microphone, camera or screen share, or a call link
+  that is up) is never put to sleep, talking or not. Discord froze when nobody spoke; it does not
+  now. The tab shows a microphone.
+- **Ads on YouTube's first page.** A YouTube tab that loaded the moment Lumen started (a restored
+  tab, a link that opened Lumen) got its ads. The first page now waits for the blocker, at most
+  1.5 s, about 0.1 s.
+- **Less memory when it counts.** Hidden tabs get a low memory target the moment they hide. When
+  Windows runs short of memory, the hidden tab you looked at longest ago is unloaded first, never
+  one with sound, a call, a pin or a working agent. On battery, battery saver puts hidden tabs to
+  sleep sooner and calms the motion; a leaf in the footer says so.
+- **New:** a command palette on Ctrl+K; turning blocking off for one site from the lock; picture
+  in picture, a now-playing card in the footer, and the media keys; userscripts (`*.user.js`);
+  for agents, snapshots that send only what changed and `browser_extract`.
+- **Shipping.** An installer (`lumen-0.6.7-setup.exe`, for your user, no admin; it fetches
+  WebView2 if the PC has none) and a zip with a README. Without WebView2, Lumen says so in a
+  window of its own and opens Microsoft's download page.
+
 ## 0.6.6 — 2026-10-18
 
 The real YouTube fix.

@@ -1,14 +1,23 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.6,
-18 October 2026. Early, in daily use by one person, Windows only.
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7,
+19 October 2026. Early, in daily use by one person, Windows only.
+
+## Get it
+
+`lumen-0.6.7-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
+Or take `lumen-0.6.7-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
+Windows 10 or 11, 64-bit. Lumen is not signed yet, so the first time Windows may say it protected
+your PC: click **More info**, then **Run anyway**. Lumen needs Microsoft WebView2, which Windows
+nearly always has; the installer fetches it if not, and Lumen says so if it is missing. Your
+things live in `%APPDATA%\Lumen`. Something wrong: Settings > About > Report a problem.
 
 ## What it is
 
 Lumen is a Windows program that shows web pages. It does not draw them. Pages are drawn by
 Microsoft WebView2, the Chromium-based engine already installed on every Windows 11 machine.
 Everything around the page is Lumen's own code: the window, the tabs, the sidebar, the content
-blocker, the downloads and the memory policy. That part is about 45,000 lines of Rust.
+blocker, the downloads and the memory policy. That part is about 51,000 lines of Rust.
 
 A page in Lumen costs about what the same page costs in any Chromium-based program, because it is
 the same engine. What Lumen controls is the rest: how heavy the shell is, how many renderer
@@ -67,9 +76,9 @@ The design was drawn first, as a page of mockups, and approved before a line of 
 | Runs on | Windows 10 and 11, x64 |
 | Page engine | Microsoft WebView2 (Chromium), through wry 0.57 and webview2-com 0.39 |
 | Window and interface | tao 0.37; every pixel drawn natively with Direct2D and DirectWrite, no HTML |
-| Code | about 45,300 lines of Rust, one process for the shell |
-| Binaries | `lumen.exe` 16.5 MB, `lumen-agent.exe` 2.1 MB (release, stripped) |
-| Tests | 374 unit tests, plus live suites that drive a real headless Lumen |
+| Code | about 51,300 lines of Rust, one process for the shell |
+| Binaries | `lumen.exe` 16.8 MB, `lumen-agent.exe` 2.1 MB (release, stripped); installer 7.6 MB |
+| Tests | 400 unit tests, plus live suites that drive a real headless Lumen |
 | Content blocker | adblock-rust 0.13, EasyList, EasyPrivacy, uBlock lists; about 1.7 µs a request |
 | Agent interface | MCP: an HTTP endpoint on localhost behind a token, and a stdio bridge; 48 tools |
 | Scripts | Luau (sandboxed, through mlua), for scripts the person writes and agents run |
@@ -197,6 +206,9 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 
 ## What it does
 
+- Every piece of the interface is Lumen's own drawing, no stock Windows boxes: menus, forms,
+  questions, the colour picker, file pickers, and a page's alerts, sign-ins, right-click menu and
+  error page.
 - Three looks (Signal, Glass, Precise), in vertical, horizontal or hybrid layouts. Colours,
   fonts, shapes, motion, clock and wallpaper can all be changed, and Settings has a search box.
 - Content blocking for ads, trackers and cookie banners, on by default. The lock in the top bar
@@ -258,8 +270,6 @@ The first real test, on 18 October, found reading fast and clicking broken: in a
 click did nothing and still answered "clicked". 0.3.0 fixed that with the stage, 0.4.0 made every
 call faster.
 
-The design for that work is in [the agent-side spec](superpowers/specs/2026-10-18-agent-side-design.md).
-
 ## The plan
 
 In order. Each step ships as its own version, with a line in [the changelog](changelog.md).
@@ -279,10 +289,11 @@ In order. Each step ships as its own version, with a line in [the changelog](cha
 6. **Headless trims.** Measure first, then cut what an off-screen Lumen still does for nobody.
 7. **The comparison.** Lumen against other Chromium-based programs on the same pages and the same
    machine, published with the method.
-8. **Source.** The code is meant to be published. Its license follows from what it bundles:
-   uBlock's scriptlets are GPL-3.0.
-9. **An installer.** Signed, so Windows does not warn about an unknown publisher, with updates
-   that arrive by themselves.
+8. **An installer.** *Done in 0.6.7*: per user, no admin, WebView2 fetched when missing. Still
+   to come: signed, so Windows does not warn about an unknown publisher, and updates that arrive
+   by themselves.
+9. **Source.** The code is meant to be published, later. Its license follows from what it
+   bundles: uBlock's scriptlets are GPL-3.0.
 
 Next to think through with the person, before anything is built: a scraping tool baked into
 Lumen, with room for the scraping tools people already use, and agents at scale, many of them
@@ -297,7 +308,7 @@ page through Ollama, and an optional PDF editor that starts only when asked.
 - No Chrome or Edge extensions: userscripts cover most of what people install them for,
   and ad blocking, dark pages, passwords through KeePass and translation are built in.
   Anything else is not there.
-- Early. Built in five days by one person and Claude, with AI workers writing much of the code and
+- Early. Built in six days by one person and Claude, with AI workers writing much of the code and
   every change reviewed before it landed. Expect rough edges.
 
 The rule does not change: if a feature costs memory while you are not using it, it had better be
