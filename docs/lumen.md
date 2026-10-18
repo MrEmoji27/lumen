@@ -200,6 +200,8 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 - Three looks (Signal, Glass, Precise), in vertical, horizontal or hybrid layouts. Colours,
   fonts, shapes, motion, clock and wallpaper can all be changed, and Settings has a search box.
 - Content blocking for ads, trackers and cookie banners, on by default.
+- Userscripts: `*.user.js` files in Lumen's data folder, with Chrome-style `@match`
+  patterns, run in your own tabs only. See [docs/userscripts.md](userscripts.md).
 - Pop-ups blocked unless you clicked for them. Malware and phishing sites get a warning page.
 - A privacy report: what was blocked and what was counted, with trends.
 - Reader view, dark pages, translation on the PC, read aloud.
@@ -280,8 +282,9 @@ page through Ollama, and an optional PDF editor that starts only when asked.
 ## Limits
 
 - Windows only. WebView2 is the engine.
-- No Chrome or Edge extensions. Ad blocking, dark pages, passwords through KeePass and translation are
-  built in. Anything else is not there.
+- No Chrome or Edge extensions: userscripts cover most of what people install them for,
+  and ad blocking, dark pages, passwords through KeePass and translation are built in.
+  Anything else is not there.
 - Early. Built in five days by one person and Claude, with AI workers writing much of the code and
   every change reviewed before it landed. Expect rough edges.
 

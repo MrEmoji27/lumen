@@ -42,6 +42,7 @@ mod stage;
 mod watch;
 mod translate;
 mod upnp;
+mod userscripts;
 mod video;
 mod workspaces;
 mod store;
@@ -807,6 +808,7 @@ fn main() {
         profiles: RefCell::new(HashMap::new()),
         https: Rc::new(RefCell::new(https_policy(&settings))),
         gpc: Cell::new(settings.gpc),
+        userscripts: Cell::new(settings.userscripts),
         popup_info: Rc::new(RefCell::new(std::collections::VecDeque::new())),
     });
 
@@ -2235,7 +2237,7 @@ impl App {
         let t = &mut self.tabs[i];
         // An agent's page starts blank, so the recording is on before the first request.
         let first = if t.agent { None } else { Some(t.url.as_str()) };
-        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), profile.clone(), t.private) {
+        if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), profile.clone(), t.private, t.agent) {
             if t.muted {
                 engine::set_muted(&v, true);
             }
@@ -2758,7 +2760,7 @@ impl App {
         let (x, y, w, h) = self.stage();
         // The card is 80% of the stage, centred; layout sizes the dim to match.
         let rect = logical_rect(x + w * 0.1, y + h * 0.1, w * 0.8, h * 0.8);
-        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, engine::Profile::Main, false) else { return };
+        let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, engine::Profile::Main, false, false) else { return };
         // The card takes Escape and Enter itself while it has focus.
         glance::hook_keys(&v, self.ctx.proxy.clone());
         if !headless() {
@@ -3606,6 +3608,11 @@ impl App {
         if old.gpc != self.settings.gpc {
             self.blocker.set_gpc(self.settings.gpc);
             self.ctx.gpc.set(self.settings.gpc);
+        }
+        if old.userscripts != self.settings.userscripts {
+            // Read when a tab is made: this reaches the next tab, and every page a
+            // reload of one of those tabs asks for.
+            self.ctx.userscripts.set(self.settings.userscripts);
         }
         if old.perm_defaults != self.settings.perm_defaults {
         }

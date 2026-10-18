@@ -121,6 +121,9 @@ pub struct Settings {
     pub adblock: bool,
     /// Skip sponsor segments on YouTube (SponsorBlock).
     pub sponsorblock: bool,
+    /// Run the person's userscripts: `*.user.js` files in `userscripts\` in the data
+    /// folder, in their own tabs only, never an agent's or a private one.
+    pub userscripts: bool,
     /// Hide ad leftovers and cookie banners (cosmetic rules).
     pub cosmetic: bool,
     /// Count what the blocker stops, per day and per site, for the report.
@@ -287,6 +290,7 @@ impl Default for Settings {
             tracking: "balanced".into(),
             adblock: true,
             sponsorblock: true,
+            userscripts: true,
             show_memory: true,
             gpu_in_process: true,
             share_processes: true,
@@ -712,6 +716,16 @@ mod tests {
     #[test]
     fn clear_on_exit_is_off_by_default() {
         assert!(!Settings::default().clear_on_exit);
+    }
+
+    /// A settings.json from before userscripts still loads, and reads as on: the field
+    /// is new, not a choice the person made.
+    #[test]
+    fn an_old_settings_file_has_userscripts_on() {
+        let mut v = serde_json::to_value(Settings::default()).expect("settings to json");
+        v.as_object_mut().expect("an object").remove("userscripts");
+        let s: Settings = serde_json::from_value(v).expect("old file loads");
+        assert!(s.userscripts);
     }
 
     /// A settings.json from before the speed dial switch still loads, with the speed dial on

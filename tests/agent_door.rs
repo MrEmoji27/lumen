@@ -233,6 +233,13 @@ impl Lumen {
         }
         settings["agent_port"] = json!(port);
         std::fs::write(dir.join("settings.json"), settings.to_string()).unwrap();
+        // A userscript the person put in: it marks every test page it matches.
+        std::fs::create_dir_all(dir.join("userscripts")).unwrap();
+        std::fs::write(
+            dir.join("userscripts").join("mark.user.js"),
+            "// ==UserScript==\n// @name Mark\n// @match *://127.0.0.1/*\n// ==/UserScript==\nconst b=document.createElement('button');b.textContent='Userscript ran';document.body.append(b);\n",
+        )
+        .unwrap();
         if !tabs.is_empty() {
             let saved: Vec<Value> = tabs.iter().map(|u| json!({"url": u, "title": "", "favicon": "", "pinned": false})).collect();
             std::fs::write(dir.join("session.json"), json!({"tabs": saved, "active": 0, "width": 1000.0, "height": 700.0}).to_string()).unwrap();
@@ -509,6 +516,24 @@ fn the_agent_door() {
         let t = d.rpc(Some(&a), "tools/list", json!({}));
         assert_eq!(t.code, 200);
         assert!(t.json()["result"]["tools"].as_array().is_some_and(|t| t.len() >= 30));
+    }
+
+    head("3b. a userscript the person put in runs in their page, never in an agent's tab");
+    {
+        let state = d.state(&a);
+        let person = state.iter().find(|t| t["agent"] == false && t["url"].as_str().unwrap_or("").contains("role=normal")).expect("the person's tab").clone();
+        let person_tab = person["id"].as_u64().unwrap();
+        d.tool(&a, "browser_test_grant", json!({"tab": person_tab})).unwrap();
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": person_tab})).expect("the person's page");
+        assert!(snap.contains("Userscript ran"), "the userscript did not run in the person's page:\n{snap}");
+        // The same page as an agent's own tab: no userscript there.
+        let mine = d.open(&a, &page(p1, "/page?role=normal"));
+        let snap = d.tool(&a, "browser_snapshot", json!({"tab": mine})).unwrap();
+        assert!(!snap.contains("Userscript ran"), "a userscript ran in an agent's tab:\n{snap}");
+        say("the script marked the person's page, and stayed out of the agent's tab");
+        d.tool(&a, "browser_close", json!({"tab": mine})).unwrap();
+        // The grant goes back, as scenario 8 tests it from the start.
+        d.tool(&a, "browser_test_grant", json!({"tab": person_tab})).unwrap();
     }
 
     head("4. one agent cannot reach another's tabs");
