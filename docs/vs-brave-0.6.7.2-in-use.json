@@ -1,0 +1,54 @@
+[
+ {
+  "mb": 37,
+  "procs": 3,
+  "browser": "Lumen",
+  "scenario": "idle"
+ },
+ {
+  "mb": 156,
+  "procs": 7,
+  "browser": "Brave",
+  "scenario": "idle"
+ },
+ {
+  "mb": 218,
+  "procs": 9,
+  "browser": "Lumen",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 193,
+  "procs": 7,
+  "browser": "Brave",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 653,
+  "procs": 10,
+  "browser": "Lumen",
+  "scenario": "youtube"
+ },
+ {
+  "mb": 553,
+  "procs": 10,
+  "browser": "Brave",
+  "scenario": "youtube"
+ },
+ {
+  "mb": 706,
+  "procs": 20,
+  "mb_later": 311,
+  "procs_later": 20,
+  "browser": "Lumen",
+  "scenario": "tabs"
+ },
+ {
+  "mb": 1069,
+  "procs": 20,
+  "mb_later": 1057,
+  "procs_later": 20,
+  "browser": "Brave",
+  "scenario": "tabs"
+ }
+]

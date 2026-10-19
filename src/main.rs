@@ -86,7 +86,8 @@ const TRIM_AFTER: Duration = Duration::from_secs(30);
 /// The person away from mouse and keyboard this long, and the page on screen
 /// goes to the low memory target. `GetLastInputInfo`'s clock, Windows-wide.
 const WATCH_TRIM_AWAY: Duration = Duration::from_secs(15);
-/// That check's own cadence: one input read a second, and only while it applies.
+/// That check's cadence while the page is trimmed: one input read a second. At the keys,
+/// the next read waits until the 15 s could be up.
 const WATCH_POLL: Duration = Duration::from_secs(1);
 /// Nothing waits: the loop sleeps this long instead of waking every TICK forever.
 const IDLE_TICK: Duration = Duration::from_secs(30);
@@ -6576,17 +6577,18 @@ impl App {
         if self.next_trim.is_some_and(|at| at > now) {
             return;
         }
-        let level = if input_idle() >= WATCH_TRIM_AWAY {
-            MemoryUsageLevel::Low
-        } else {
-            MemoryUsageLevel::Normal
-        };
+        let idle = input_idle();
+        let away = idle >= WATCH_TRIM_AWAY;
+        let level = if away { MemoryUsageLevel::Low } else { MemoryUsageLevel::Normal };
         for t in self.tabs.iter().filter(|t| t.visible && t.has_page() && !t.loading && !t.call) {
             if let Some(v) = &t.view {
                 let _ = v.set_memory_usage_level(level);
             }
         }
-        self.next_trim = Some(now + WATCH_POLL);
+        // Trimmed: a read a second, so the next input brings the page back at once. At the
+        // keys: nothing can change before the 15 s are up, so the next read waits for them.
+        let next = if away { WATCH_POLL } else { (WATCH_TRIM_AWAY - idle).max(WATCH_POLL) };
+        self.next_trim = Some(now + next);
     }
 
     /// The blocker's running total, for a page's share of it. None when blocking

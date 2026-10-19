@@ -88,7 +88,7 @@ def cover():
         '<p class="meta">What it is so far, what it measures, and where it goes next.</p></div>'
         f'<div><div class="figs">{figs}</div>'
         '<p class="note">Measured on one laptop, release builds, private working set. '
-        'Lumen compared with earlier versions of itself; no comparison with other programs yet.</p></div></section>'
+        'Against Brave on the same pages: see the Performance section.</p></div></section>'
     )
 
 

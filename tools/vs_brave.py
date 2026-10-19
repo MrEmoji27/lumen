@@ -86,7 +86,7 @@ def stop(root, exe):
 
 
 class Lumen:
-    def __init__(self, exe):
+    def __init__(self, exe, extra=None):
         self.tmp = Path(tempfile.mkdtemp(prefix="lumen-vs-"))
         self.exe = str(self.tmp / "lumen.exe")
         shutil.copy2(exe, self.exe)
@@ -96,7 +96,7 @@ class Lumen:
         if own.is_dir():
             # A warm start, as a person has: the lists already on disk.
             shutil.copytree(own, self.data / "filters")
-        (self.data / "settings.json").write_text(json.dumps({"first_run_done": True}), encoding="utf-8")
+        (self.data / "settings.json").write_text(json.dumps({"first_run_done": True, **(extra or {})}), encoding="utf-8")
         self.env = dict(os.environ, LUMEN_DATA=str(self.data), LUMEN_HEADLESS="1")
         self.root = None
 
@@ -172,11 +172,13 @@ def main():
     ap.add_argument("--only", default="idle,wiki,youtube,tabs")
     ap.add_argument("--lumen", default=str(ROOT / "target" / "release" / "lumen.exe"))
     ap.add_argument("--out", default="vs-brave")
+    ap.add_argument("--lumen-settings", default="", help='JSON laid over the settings of the Lumen under test, e.g. {"trim_watched": false}')
     a = ap.parse_args()
     which = [s for s in a.only.split(",") if s]
     rows = []
     for s in which:
-        for name, make in (("Lumen", lambda: Lumen(a.lumen)), ("Brave", Brave)):
+        extra = json.loads(a.lumen_settings) if a.lumen_settings else None
+        for name, make in (("Lumen", lambda: Lumen(a.lumen, extra)), ("Brave", Brave)):
             r = scenario(s, make)
             r.update(browser=name, scenario=s)
             print(json.dumps(r), flush=True)

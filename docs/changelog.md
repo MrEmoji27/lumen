@@ -7,6 +7,25 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.7.2 — 2026-10-19
+
+Measured against Brave, on the same machine and the same pages, and made to win.
+
+- **The page you are watching gives memory back.** Fifteen seconds after your last click or key,
+  the page on screen is told to keep only what it needs (WebView2's low memory target); the next
+  click or key gives it everything back within a second. Pages still load at full memory, video
+  plays at full frame rate, and scrolling a trimmed page did not drop a frame in testing. Settings >
+  Performance turns it off.
+- **YouTube on hardware without AV1 decoding gets VP9.** This GPU decodes VP9 but not AV1, so AV1
+  was decoded on the CPU, in the page's own memory. Lumen now tells YouTube AV1 is not on offer
+  when the engine says it would not be efficient: about 50 MB less and half the CPU on a video.
+- Against Brave (tools/vs_brave.py, fresh profiles, the whole process tree, private working set):
+  nothing open 36 MB to Brave's 151; one Wikipedia article 49 to 192; one YouTube video 327 to
+  600; ten sites 331 to 1169, and 124 to 1111 after six and a half minutes. Those are with you
+  away from the keyboard for 15 s. While you scroll and click, a single heavy page costs about
+  what it costs in Brave (YouTube 653 to 553, Wikipedia 218 to 193); the start page and many
+  tabs still win (37 to 156, 706 to 1069, and 311 to 1057 after six and a half minutes).
+
 ## 0.6.7.1 — 2026-10-19
 
 The first side-by-side test against Brave, on the same YouTube video, found Lumen using four

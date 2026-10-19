@@ -1,12 +1,12 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7.1,
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7.2,
 19 October 2026. Early, in daily use by one person, Windows only.
 
 ## Get it
 
-`lumen-0.6.7.1-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
-Or take `lumen-0.6.7.1-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
+`lumen-0.6.7.2-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
+Or take `lumen-0.6.7.2-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
 Windows 10 or 11, 64-bit. Lumen is not signed yet, so the first time Windows may say it protected
 your PC: click **More info**, then **Run anyway**. Lumen needs Microsoft WebView2, which Windows
 nearly always has; the installer fetches it if not, and Lumen says so if it is missing. Your
@@ -102,9 +102,29 @@ What it is built from, all pinned, anything that runs checked by SHA-256 before 
 ## Performance
 
 All numbers are measurements on one laptop: release builds, a throwaway profile, and Task
-Manager's "Memory" figure (private working set) unless a chart says otherwise. They compare
-Lumen with earlier versions of itself. A side-by-side run against other programs on the same
-pages has not been done yet, so there is no such claim here.
+Manager's "Memory" figure (private working set) unless a chart says otherwise.
+
+### Against Brave
+
+Same laptop, same pages, both browsers fresh (a throwaway profile each), muted, each with its own
+blocking on (Brave's Shields, Lumen's blocker), and the number is the whole process tree of each:
+every renderer, the GPU process, the rest. Made by `tools/vs_brave.py`, which anyone can run.
+
+| What is open | Lumen, you away 15 s | Lumen, you using it | Brave |
+|---|---|---|---|
+| Nothing (each browser's own start page) | 36 MB | 37 MB | 151 MB |
+| One Wikipedia article | 49 MB | 218 MB | 192 MB |
+| One YouTube video, playing | 327 MB | 653 MB | 600 MB |
+| Ten common sites, 90 s after opening | 331 MB | 706 MB | 1,169 MB |
+| The same ten, six and a half minutes later | 124 MB | 311 MB | 1,111 MB |
+
+The honest reading. Lumen's own part is small: with nothing open it is a quarter of Brave, because
+its interface is drawn natively and its start page needs no web engine at all. Many tabs is where it
+wins most, because tabs you are not looking at are trimmed at once, frozen after five minutes and
+unloaded after thirty. A single heavy page is a single heavy page: the engine is the same Chromium,
+and while you scroll and click it costs about what it costs in Brave. Fifteen seconds after your
+last click or key, the page on screen is told to keep only what it needs, and that is where the
+first column comes from; the next click or key gives it all back within a second.
 
 ### The shell
 
@@ -287,8 +307,8 @@ In order. Each step ships as its own version, with a line in [the changelog](cha
    higher-level tools for forms and tables. *Done in 0.4.0.* Snapshots send only what changed
    (`diff`), and a ref keeps working while its element is in the page.
 6. **Headless trims.** Measure first, then cut what an off-screen Lumen still does for nobody.
-7. **The comparison.** Lumen against other Chromium-based programs on the same pages and the same
-   machine, published with the method.
+7. **The comparison.** *Started in 0.6.7.2*: Lumen against Brave, above, with the method in
+   `tools/vs_brave.py`. Chrome and Edge next.
 8. **An installer.** *Done in 0.6.7*: per user, no admin, WebView2 fetched when missing. Still
    to come: signed, so Windows does not warn about an unknown publisher, and updates that arrive
    by themselves.
