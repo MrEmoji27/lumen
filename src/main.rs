@@ -2456,7 +2456,7 @@ impl App {
                         })
                     })
                     .collect(),
-                workspaces: self.workspaces.iter().map(|w| w.name.clone()).collect(),
+                workspaces: self.workspaces.iter().map(|w| chrome::UiWorkspace { name: w.name.clone(), colour: w.colour.clone() }).collect(),
                 active_workspace: self.active_workspace,
                 glance: self.glance.is_some(),
             };
@@ -2480,6 +2480,12 @@ impl App {
         let (workspaces, active_ws) = workspaces::build_from_session(&session);
         self.workspaces = workspaces;
         self.active_workspace = active_ws.min(self.workspaces.len().saturating_sub(1));
+        // A workspace with no colour yet gets the next one in the palette.
+        for (i, w) in self.workspaces.iter_mut().enumerate() {
+            if w.colour.is_empty() {
+                w.colour = (i % 8).to_string();
+            }
+        }
         // The essentials are the same in every workspace.
         self.essentials = session.essentials.iter().filter(|e| !e.url.is_empty()).cloned().collect();
         // Load the active workspace's saved tabs into memory.
@@ -5624,8 +5630,21 @@ impl App {
                 let n = self.workspaces.len();
                 if n < workspaces::MAX_WORKSPACES {
                     journal::feature("workspace_add", false);
-                    self.workspaces.push(workspaces::WorkspaceData::new(&format!("Workspace {}", n + 1)));
+                    let mut ws = workspaces::WorkspaceData::new(&format!("Workspace {}", n + 1));
+                    // The colours are handed out in turn.
+                    ws.colour = (n % 8).to_string();
+                    self.workspaces.push(ws);
                     self.switch_workspace(n);
+                }
+            }
+            "workspaceColour" => {
+                // The colour a workspace wears: a number in the palette.
+                let i = m["i"].as_u64().unwrap_or(0) as usize;
+                let c = m["c"].as_str().unwrap_or("").to_string();
+                if let Some(ws) = self.workspaces.get_mut(i) {
+                    ws.colour = c;
+                    self.dirty = true;
+                    self.push();
                 }
             }
             "workspaceRename" => {

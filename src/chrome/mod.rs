@@ -139,6 +139,37 @@ pub struct UiEssential {
     pub tab: u64,
 }
 
+/// A workspace as the chrome sees it: its name and the colour it wears.
+#[derive(Clone, Debug)]
+pub struct UiWorkspace {
+    pub name: String,
+    /// The colour's number in the palette, empty for none.
+    pub colour: String,
+}
+
+/// The colours a workspace can wear: eight, each readable in light and dark.
+pub const WORKSPACE_COLOURS: [(&str, f32); 8] = [
+    ("Red", 25.0),
+    ("Orange", 60.0),
+    ("Green", 145.0),
+    ("Teal", 185.0),
+    ("Blue", 250.0),
+    ("Violet", 300.0),
+    ("Pink", 350.0),
+    ("Brown", 75.0),
+];
+
+/// The colour a workspace wears: its number in the palette, in the look's own
+/// lightness, so it reads in light and in dark.
+pub fn workspace_colour(dark: bool, colour: &str) -> Option<theme::Color> {
+    let n: usize = colour.parse().ok()?;
+    if n >= WORKSPACE_COLOURS.len() {
+        return None;
+    }
+    let (_, h) = WORKSPACE_COLOURS[n];
+    Some(theme::oklch(if dark { 0.72 } else { 0.55 }, 0.13, h))
+}
+
 #[derive(Clone, Debug)]
 pub struct UiDl {
     pub id: u64,
@@ -193,7 +224,7 @@ pub struct UiState {
     /// Remembered answers: (origin, what, allowed).
     pub rules: Vec<(String, String, bool)>,
     /// Workspace names, for the switcher at the top of the sidebar.
-    pub workspaces: Vec<String>,
+    pub workspaces: Vec<UiWorkspace>,
     /// The essentials: the sites kept open in every workspace, in a row above
     /// the tabs.
     pub essentials: Vec<UiEssential>,
@@ -1000,7 +1031,7 @@ const SEARCH_ROWS: usize = 9;
 /// order, so an empty query lists the tabs as they are.
 fn switch_rows(s: &UiState, q: &str) -> Vec<SwitchRow> {
     let mut all = switch_candidates(&s.tabs, &s.other_tabs);
-    let ws_name = s.workspaces.get(s.active_workspace).cloned().unwrap_or_default();
+    let ws_name = s.workspaces.get(s.active_workspace).map(|w| w.name.clone()).unwrap_or_default();
     for row in &mut all {
         if row.other.is_none() {
             row.ws_name = ws_name.clone();
@@ -3412,6 +3443,10 @@ impl Inner {
             let x = if s.settings.sidebar_side == "right" { sb.x + 0.5 } else { sb.right() - 0.5 };
             self.gfx.line(x, sb.y, x, sb.bottom(), th.line, 1.0);
         }
+        // A thin line at the top of the sidebar, in the colour the workspace wears.
+        if let Some(c) = s.workspaces.get(s.active_workspace).and_then(|w| workspace_colour(th.dark, &w.colour)) {
+            self.gfx.round(R::new(sb.x, sb.y, sb.w, 2.0), 0.0, c);
+        }
         let compact = s.compact();
         let top = sb.y;
         // Top bar: navigation and window buttons. The empty rest drags the window.
@@ -3481,7 +3516,8 @@ impl Inner {
         let room = (sb.w - 16.0 - 28.0 - glance_w - gaps).max(44.0 * n as f32);
         let cap = room / n.max(1) as f32;
         let mut wx = sb.x + 8.0;
-        for (i, name) in s.workspaces.iter().enumerate() {
+        for (i, w) in s.workspaces.iter().enumerate() {
+            let name = &w.name;
             let active = i == s.active_workspace;
             let tw = (self.gfx.measure(name, lo.font(12.0, 500)) + 20.0).min(cap).max(44.0);
             let r = R::new(wx, ws_y, tw, ws_h);
@@ -3497,6 +3533,10 @@ impl Inner {
                     self.gfx.round(r, lo.r_sm + 1.0, th.hover.alpha(a));
                 }
                 self.gfx.text(name, label, lo.font(12.0, 500).align(Align::Center), if hov { th.text } else { th.dim });
+            }
+            // The colour it wears: a small dot at the left of the name.
+            if let Some(c) = workspace_colour(th.dark, &w.colour) {
+                self.gfx.circle(r.x + 7.0, r.y + r.h / 2.0, 3.0, c);
             }
             self.hit(r, hit);
             wx += tw + 6.0;
@@ -3682,7 +3722,7 @@ impl Inner {
         // are drawn at their animated place: an added, closed or reordered tab makes
         // the ones around it glide instead of jump.
         if !compact {
-            let name = s.workspaces.get(s.active_workspace).filter(|_| s.workspaces.len() > 1).cloned().unwrap_or_else(|| "Tabs".into());
+            let name = s.workspaces.get(s.active_workspace).filter(|_| s.workspaces.len() > 1).map(|w| w.name.clone()).unwrap_or_else(|| "Tabs".into());
             let lr = R::new(sb.x + pad + 8.0, y + 2.0, sb.w - 2.0 * pad - 44.0, 20.0);
             self.label(&name, lr, th.faint.alpha(wf));
             let plus = R::new(sb.right() - pad - 26.0, y, 24.0, 24.0);
@@ -4667,7 +4707,7 @@ impl Inner {
             if a > 0.01 {
                 self.gfx.round(r, lo.r_sm, th.hover.alpha(a.min(1.0)));
             }
-            let name = s.workspaces.get(s.active_workspace).map(String::as_str).unwrap_or("");
+            let name = s.workspaces.get(s.active_workspace).map(|w| w.name.as_str()).unwrap_or("");
             let mut short: String = name.chars().take(if compact { 2 } else { 10 }).collect();
             if name.chars().count() > (if compact { 2 } else { 10 }) {
                 short.push('…');
@@ -4922,7 +4962,7 @@ impl Inner {
             .workspaces
             .iter()
             .enumerate()
-            .map(|(n, name)| (n as u32 + 1, if n == s.active_workspace { format!("· {name}") } else { name.clone() }))
+            .map(|(n, w)| (n as u32 + 1, if n == s.active_workspace { format!("· {}", w.name) } else { w.name.clone() }))
             .collect();
         items.push((0, String::new()));
         items.push((100, "New workspace".into()));
@@ -5839,9 +5879,9 @@ impl Inner {
                 }
                 // Move to another workspace (skip the active one).
                 if s.workspaces.len() > 1 {
-                    for (wi, name) in s.workspaces.iter().enumerate() {
+                    for (wi, w) in s.workspaces.iter().enumerate() {
                         if wi != s.active_workspace {
-                            items.push((20 + wi as u32, format!("Move to {name}")));
+                            items.push((20 + wi as u32, format!("Move to {}", w.name)));
                         }
                     }
                 } else {
@@ -5959,17 +5999,31 @@ impl Inner {
                     items.push((3, "Close".into()));
                 }
                 items.push((0, String::new()));
+                items.push((5, "Colour".into()));
                 items.push((4, "New workspace".into()));
                 menu::open(self, &items, x, y, move |i, cmd| match cmd {
                     // Rename happens right here in the omnibox edit; Enter sends
                     // the new name back, Escape drops it.
                     1 => {
-                        let name = s.workspaces.get(w).map(|n| n.clone()).unwrap_or_default();
+                        let name = s.workspaces.get(w).map(|n| n.name.clone()).unwrap_or_default();
                         i.begin_workspace_rename(w, &name);
                     }
                     2 => send(&i.proxy, json!({"t": "workspaceDuplicate", "i": w})),
                     3 => send(&i.proxy, json!({"t": "workspaceClose", "i": w})),
                     4 => send(&i.proxy, json!({"t": "workspaceAdd"})),
+                    5 => {
+                        // The palette: the colours a workspace can wear.
+                        let pal: Vec<(u32, String)> = WORKSPACE_COLOURS
+                            .iter()
+                            .enumerate()
+                            .map(|(n, (name, _))| (100 + n as u32, name.to_string()))
+                            .collect();
+                        menu::open(i, &pal, x, y, move |i, cmd| {
+                            if cmd >= 100 {
+                                send(&i.proxy, json!({"t": "workspaceColour", "i": w, "c": (cmd - 100).to_string()}));
+                            }
+                        });
+                    }
                     _ => {}
                 });
             }

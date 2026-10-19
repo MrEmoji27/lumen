@@ -621,6 +621,8 @@ pub struct Workspace {
     pub tabs: Vec<SavedTab>,
     /// Index into `tabs` of the active tab in this workspace.
     pub active: usize,
+    /// The colour this workspace wears: a number in the palette, empty for none.
+    pub colour: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
