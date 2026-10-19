@@ -20,12 +20,12 @@ DOCS = ROOT / "docs"
 EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 
 # The cover's figures: each one is a measurement the doc itself states.
-# The cover's numbers are the Brave table's, in-use column: the whole process tree while the
-# person scrolls and clicks. One of them is a loss, and it stays on the cover.
+# The cover says what Lumen is, not how it compares: the comparison waits inside, with its
+# method and its losses. The one number here is the whole process tree, in use.
 FIGURES = [
-    ("37 MB", "nothing open · Brave 156"),
-    ("311 MB", "ten sites, in use · Brave 1,057"),
-    ("218 MB", "one Wikipedia page, in use · Brave 193"),
+    ("37 MB", "the whole browser, nothing open"),
+    ("51,000", "lines of Rust"),
+    ("3", "looks, every pixel drawn natively"),
     ("48", "tools for AI agents"),
 ]
 
@@ -90,8 +90,8 @@ def cover():
         '<p class="meta">What it is so far, what it measures, and where it goes next.</p>'
         '<p class="meta">Made by zemo · portfolio.mremoji47.workers.dev</p></div>'
         f'<div><div class="figs">{figs}</div>'
-        '<p class="note">Measured on one laptop, fresh profiles, each browser’s own blocking on, the '
-        'whole process tree, private working set. The full table, both ways: the Performance section.</p></div></section>'
+        '<p class="note">Measured on one laptop, a fresh profile, the content blocker on, the '
+        'whole process tree, private working set. More numbers, and how they were made: the Performance section.</p></div></section>'
     )
 
 
