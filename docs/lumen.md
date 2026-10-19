@@ -1,12 +1,12 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7.2,
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7.3,
 19 October 2026. Early, in daily use by one person, Windows only.
 
 ## Get it
 
-`lumen-0.6.7.2-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
-Or take `lumen-0.6.7.2-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
+`lumen-0.6.7.3-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
+Or take `lumen-0.6.7.3-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
 Windows 10 or 11, 64-bit. Lumen is not signed yet, so the first time Windows may say it protected
 your PC: click **More info**, then **Run anyway**. Lumen needs Microsoft WebView2, which Windows
 nearly always has; the installer fetches it if not, and Lumen says so if it is missing. Your
@@ -223,6 +223,7 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
 | Network cap set to 2048 KB/s | about 1,990 KB/s measured |
 | A 100 MB download, before and after tuning aria2 | 17.8 s to 15.5 s mean (runs of the same build swung by 46%) |
 | Servo, an experimental engine behind a build flag | renders Hacker News in 38 MB |
+| Control's total against an outside measurement of the same moment | 269 MB to 269 |
 
 ## What it does
 
@@ -247,6 +248,14 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
   memory, the hidden tab looked at longest ago goes first. On battery, battery saver makes them
   sleep sooner and the chrome move less; a leaf in the footer says so.
 - The address bar fills in the site you go to most as you type: `yout`, Enter, YouTube.
+- Control (Shift+Esc) says what each tab costs right now: memory, CPU and network, and below
+  them Lumen's own drawing, the shared browser processes and the download helper. The total is
+  every process under Lumen, the number Task Manager gives and the one in the Brave comparison;
+  the readout in the sidebar is the same walk. The tab you came from keeps its full memory
+  while you look, so it is measured as it is in use, not shrunk by the looking. Network is
+  averaged over five seconds, because pages fetch in bursts. Caps for RAM, CPU and bandwidth
+  sit under the table. The dashboard puts the same live numbers on tiles, with tabs, downloads
+  and what was blocked today.
 - History you can search by what a page said.
 - Pins, bookmarks with folders and import, a speed dial, workspaces, split view, tab search.
 - Ctrl+K opens a command palette over the sidebar: type and pick a command, a setting, an open
