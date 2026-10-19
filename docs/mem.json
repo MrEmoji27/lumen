@@ -128,5 +128,24 @@
   "procs": 3,
   "tag": "master2b",
   "scenario": "idle"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "master2c",
+  "scenario": "idle"
+ },
+ {
+  "mb": 34,
+  "procs": 3,
+  "tag": "job4",
+  "scenario": "idle"
+ },
+ {
+  "mb": 89,
+  "procs": 9,
+  "trimmed": true,
+  "tag": "job4w",
+  "scenario": "wiki"
  }
 ]

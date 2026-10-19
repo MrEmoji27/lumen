@@ -35,6 +35,8 @@ pub enum Id {
     Workspace(usize),
     /// A speed-dial cell, by index.
     Dial(usize),
+    /// An essential's icon, by index.
+    Essential(usize),
     /// A chip in the offer row under the address bar.
     Chip(&'static str),
     /// A bookmark chip on the bookmarks bar, by position.

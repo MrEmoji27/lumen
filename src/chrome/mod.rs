@@ -101,6 +101,8 @@ pub struct UiTab {
     pub pinned: bool,
     /// A pin that is not on the page it was pinned on: the menu offers the way back.
     pub pin_away: bool,
+    /// An Essential: it keeps the site in the row above the tabs.
+    pub essential: bool,
     pub audio: bool,
     pub muted: bool,
     /// In a call; drawn as a microphone where the sound mark goes.
@@ -124,6 +126,13 @@ pub struct UiTab {
     /// The sidebar groups agent tabs by owner and puts a Stop on each group.
     pub owner: String,
     pub owner_name: String,
+}
+
+/// An Essential: a site kept open in every workspace, shown as an icon only.
+#[derive(Clone, Debug)]
+pub struct UiEssential {
+    pub url: String,
+    pub title: String,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +190,9 @@ pub struct UiState {
     pub rules: Vec<(String, String, bool)>,
     /// Workspace names, for the switcher at the top of the sidebar.
     pub workspaces: Vec<String>,
+    /// The essentials: the sites kept open in every workspace, in a row above
+    /// the tabs.
+    pub essentials: Vec<UiEssential>,
     /// Index into `workspaces` of the active one.
     pub active_workspace: usize,
     /// A glance card is open over the page.
@@ -376,6 +388,8 @@ pub enum Hit {
     KdbxFill,
     Sugg(usize),
     Shortcut(usize),
+    /// An essential's icon, by index: the site kept open in every workspace.
+    Essential(usize),
     /// A suggested site on the speed dial, and its "keep it" button.
     DialSugg(usize),
     DialPin(usize),
@@ -3211,6 +3225,61 @@ impl Inner {
         if self.look.ws_row { s.ws_h() } else { 0.0 }
     }
 
+    /// The essentials row's height: the icons in rows of four, or one per row in
+    /// the compact column.
+    fn essentials_h(&self, s: &UiState, compact: bool) -> f32 {
+        let n = s.essentials.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let per = if compact { 1 } else { 4 };
+        let rows = (n + per - 1) / per;
+        rows as f32 * 32.0 + 8.0
+    }
+
+    /// The essentials: the sites the person keeps open all day, as icons in a
+    /// row above the tabs. The same row in every workspace.
+    fn draw_essentials(&mut self, s: &UiState, sb: R, compact: bool, y: f32) {
+        if s.essentials.is_empty() {
+            return;
+        }
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let per = if compact { 1 } else { 4 };
+        let pad = if compact { 6.0 } else { 8.0 };
+        let gap = if compact { 0.0 } else { 6.0 };
+        let cell = if compact { 30.0 } else { ((sb.w - 2.0 * pad - 3.0 * gap) / 4.0).max(28.0) };
+        let active = s.active_tab().map(|t| t.url.clone()).unwrap_or_default();
+        for (n, e) in s.essentials.iter().enumerate() {
+            let col = n % per;
+            let row = n / per;
+            let r = R::new(sb.x + pad + col as f32 * (cell + gap), y + row as f32 * 32.0, cell, 28.0);
+            let h = Hit::Essential(n);
+            let hov = self.is_hover(&h);
+            let a = self.motion.hover(Id::Essential(n), if hov { 1.0 } else { 0.0 }).min(1.0);
+            if a > 0.01 {
+                self.gfx.round(r, lo.r_sm, th.hover.alpha(a));
+            }
+            let host = host(&e.url);
+            let icon = R::new(r.x + (r.w - 20.0) / 2.0, r.y + 4.0, 20.0, 20.0);
+            let png = self.fav_png(&host, true);
+            match png.as_ref().and_then(|p| self.gfx.bitmap(site_key(&host), p)) {
+                Some(b) => self.gfx.draw_bitmap(&b, icon, 1.0),
+                None => {
+                    let letter = e.title.chars().next().or_else(|| host.chars().next()).unwrap_or('·').to_uppercase().to_string();
+                    self.gfx.round(icon, 6.0, th.raise);
+                    self.gfx.round_stroke(icon, 6.0, th.line, 1.0);
+                    self.gfx.text(&letter, icon, lo.font(11.0, 700).align(Align::Center), th.dim);
+                }
+            }
+            // The one on screen is the marked one.
+            if e.url == active {
+                self.gfx.round_stroke(icon, 6.0, th.accent, 2.0);
+            }
+            self.hit(r, h);
+        }
+    }
+
     /// The sidebar is hidden until the mouse reaches the edge of the window:
     /// the page has the whole width and the sidebar slides in over it.
     fn hidden_sidebar(&self, s: &UiState) -> bool {
@@ -3547,7 +3616,12 @@ impl Inner {
             90.0
         };
         let list_top = sb.y + base + self.ws_h(s);
+        // The essentials sit between the chips and the tabs: the same row in
+        // every workspace.
+        let ess_y = list_top;
+        let list_top = list_top + self.essentials_h(s, compact);
         let list = R::new(sb.x, list_top, sb.w, (sb.h - base - self.ws_h(s) - self.footer_h(compact)).max(1.0));
+        self.draw_essentials(s, sb, compact, ess_y);
         self.gfx.clip(list);
         // A workspace switch cross-fades the list.
         let wf = self.motion.enter(Id::Workspace(s.active_workspace), Prop::Opacity, 1.0, 1.0, 150, Ease::OutCubic).min(1.0);
@@ -3555,8 +3629,8 @@ impl Inner {
         // Agent tabs are grouped per agent: their own section, under a header with the
         // agent's name, its colour and a Stop that ends that agent alone.
         let groups = agent_groups(s);
-        let pins: Vec<UiTab> = s.tabs.iter().filter(|t| t.pinned && !t.agent).cloned().collect();
-        let rests: Vec<UiTab> = s.tabs.iter().filter(|t| !t.pinned && !t.agent).cloned().collect();
+        let pins: Vec<UiTab> = s.tabs.iter().filter(|t| t.pinned && !t.agent && !t.essential).cloned().collect();
+        let rests: Vec<UiTab> = s.tabs.iter().filter(|t| !t.pinned && !t.agent && !t.essential).cloned().collect();
         if !pins.is_empty() {
             let cols = if compact { 1 } else { (((sb.w - 2.0 * pad) + 4.0) / 44.0).floor().max(1.0) as usize };
             let tw = ((sb.w - 2.0 * pad) - 4.0 * (cols as f32 - 1.0)) / cols as f32;
@@ -5577,6 +5651,13 @@ impl Inner {
                 });
             }
             Hit::PermBlock(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": false})),
+            Hit::Essential(n) => {
+                // The icon of an essential: show its tab, in this workspace.
+                if let Some(e) = self.state.as_ref().and_then(|s| s.essentials.get(n)) {
+                    let url = e.url.clone();
+                    send(p, json!({"t": "essential", "url": url}));
+                }
+            }
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {
                     send(p, json!({"t": "nav", "url": sc.url}));
@@ -5702,6 +5783,10 @@ impl Inner {
                 if t.pin_away {
                     items.push((17, "Back to pinned page".into()));
                 }
+                // An essential: the site stays open in every workspace.
+                if !t.essential && !t.private && !t.agent && t.url.starts_with("http") && s.essentials.len() < 12 {
+                    items.push((19, "Add to Essentials".into()));
+                }
                 // Never offer to copy a private URL anywhere it would be written down.
                 if !t.url.is_empty() && !t.private {
                     items.push((2, "Duplicate".into()));
@@ -5777,6 +5862,7 @@ impl Inner {
                         16 => "agentGrant",
                         17 => "pinBack",
                         18 => "pip",
+                        19 => "essentialAdd",
                         15 => {
                             send(&i.proxy, json!({"t": "workspaceAdd"}));
                             return;
@@ -5798,6 +5884,16 @@ impl Inner {
                         _ => return,
                     };
                     send(&i.proxy, json!({"t": msg, "id": id}));
+                });
+            }
+            Hit::Essential(n) => {
+                // An essential's own menu: take it out of the row, or open it.
+                let Some(e) = s.essentials.get(n) else { return };
+                let url = e.url.clone();
+                menu::open(self, &[(1, "Remove from Essentials".into()), (0, String::new()), (2, "Open in a new tab".into())], x, y, move |i, cmd| match cmd {
+                    1 => send(&i.proxy, json!({"t": "essentialRemove", "url": url})),
+                    2 => send(&i.proxy, json!({"t": "essential", "url": url, "new": true})),
+                    _ => {}
                 });
             }
             Hit::Workspace(w) => {
@@ -6692,6 +6788,7 @@ mod tests {
             fwd: false,
             pinned: false,
             pin_away: false,
+            essential: false,
             audio: false,
             muted: false,
             call: false,

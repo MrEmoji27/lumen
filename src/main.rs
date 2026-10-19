@@ -95,6 +95,8 @@ const IDLE_TICK: Duration = Duration::from_secs(30);
 /// WebView2 process, so it does not run on the tick.
 const MEM_TICK: Duration = Duration::from_secs(5);
 const MAX_CLOSED: usize = 25;
+/// How many sites may be kept in the essentials row.
+const MAX_ESSENTIALS: usize = 12;
 const COMPACT_W: f64 = 56.0;
 /// Control page refresh. Only runs while the page is open.
 const SAMPLE: Duration = Duration::from_millis(1000);
@@ -238,6 +240,8 @@ struct Tab {
     /// The page a pin was pinned on. Closing the tab unloads it back to this; the current
     /// `url` may have wandered. Empty when not pinned.
     pin_url: String,
+    /// An Essential: the site stays in the row above the tabs, in every workspace.
+    essential: bool,
     audio: bool,
     muted: bool,
     /// Lumen's error page is up: the tab keeps the address that failed until a real page comes.
@@ -476,6 +480,7 @@ impl Tab {
             fwd: false,
             pinned: false,
             pin_url: String::new(),
+            essential: false,
             audio: false,
             error_shown: false,
             asks_n: 0,
@@ -517,7 +522,14 @@ impl Tab {
 
     /// The session's record of this tab.
     fn saved(&self) -> SavedTab {
-        SavedTab { url: self.url.clone(), title: self.title.clone(), favicon: self.favicon.clone(), pinned: self.pinned, pin_url: self.pin_url.clone() }
+        SavedTab {
+            url: self.url.clone(),
+            title: self.title.clone(),
+            favicon: self.favicon.clone(),
+            pinned: self.pinned,
+            pin_url: self.pin_url.clone(),
+            essential: self.essential,
+        }
     }
 
     /// What the sleep policy looks at.
@@ -571,6 +583,9 @@ struct App {
     /// there instead of to the neighbour in the row. See mru.rs.
     mru: mru::Mru,
     closed: Vec<SavedTab>,
+    /// The essentials: the sites kept open in every workspace, the same row in
+    /// all of them.
+    essentials: Vec<SavedTab>,
     settings: Settings,
     panel: Panel,
     /// The report page's range tile: "today" | "7" | "30" | "all".
@@ -1037,6 +1052,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         active: 0,
         mru: mru::Mru::new(),
         closed: Vec::new(),
+        essentials: Vec::new(),
         settings,
         panel: Panel::None,
         report_range: "today".into(),
@@ -1848,6 +1864,57 @@ impl App {
         self.tabs.iter().filter(|t| t.pinned).count()
     }
 
+    /// Keep a site in the row above the tabs: it stays open in every
+    /// workspace. A private or an agent's tab never does.
+    fn add_essential(&mut self, id: u64) {
+        if self.essentials.len() >= MAX_ESSENTIALS {
+            return;
+        }
+        let Some(i) = self.idx(id) else { return };
+        let t = &self.tabs[i];
+        if t.private || t.agent || t.essential || !t.url.starts_with("http") {
+            return;
+        }
+        let url = t.url.clone();
+        if self.essentials.iter().any(|e| e.url == url) {
+            return;
+        }
+        let title = t.title.clone();
+        let favicon = t.favicon.clone();
+        self.essentials.push(SavedTab { url, title, favicon, ..Default::default() });
+        self.tabs[i].essential = true;
+        self.dirty = true;
+        self.push();
+    }
+
+    /// Take a site out of the essentials. The tab stays a tab.
+    fn remove_essential(&mut self, url: &str) {
+        self.essentials.retain(|e| e.url != url);
+        for t in self.tabs.iter_mut() {
+            if t.essential && t.url == url {
+                t.essential = false;
+            }
+        }
+        self.dirty = true;
+        self.push();
+    }
+
+    /// Show an essential's tab, in whichever workspace is open: the one that is
+    /// already open, or a new one here.
+    fn show_essential(&mut self, url: &str) {
+        if let Some(i) = self.tabs.iter().position(|t| t.url == url && !t.agent && !t.private) {
+            let id = self.tabs[i].id;
+            self.activate(id);
+            return;
+        }
+        let id = self.new_tab(Some(url.to_string()), None);
+        if let Some(i) = self.idx(id) {
+            self.tabs[i].essential = true;
+        }
+        self.dirty = true;
+        self.push();
+    }
+
     /// The sidebar's width right now: folded, peeked open, or the person's own.
     /// The value glides (Compact, Ctrl+B, a peek) instead of jumping.
     fn sidebar_w(&self) -> f64 {
@@ -2212,6 +2279,12 @@ impl App {
             let (cx, _, _, _) = chrome::Chrome::bounds_for(self.layout_kind(), logical_size(&self.ctx).0, logical_size(&self.ctx).1);
             let off = cx;
             let bar_bookmarks = self.settings.bm_bar && self.layout_kind().top_toolbar();
+            // The essentials: the sites kept open in every workspace.
+            let essentials: Vec<chrome::UiEssential> = self
+                .essentials
+                .iter()
+                .map(|e| chrome::UiEssential { url: e.url.clone(), title: e.title.clone() })
+                .collect();
             let state = chrome::UiState {
                 tabs: self
                     .tabs
@@ -2225,6 +2298,7 @@ impl App {
                         fwd: t.fwd,
                         pinned: t.pinned,
                         pin_away: pins::offers_back(t.pinned, &t.pin_url, &t.url),
+                        essential: t.essential,
                         audio: t.audio,
                         muted: t.muted,
                         call: t.call,
@@ -2348,6 +2422,7 @@ impl App {
                     .flat_map(|(o, r)| r.iter().map(move |(k, a)| (o.clone(), k.clone(), *a)))
                     .collect(),
                 drive: self.drive_view(),
+                essentials,
                 bug_report: (self.panel == Panel::Bug).then(|| self.bug_report.clone()).flatten(),
                 bug_sent: self.bug_sent,
                 unclean_last: self.unclean_last && !headless(),
@@ -2394,6 +2469,8 @@ impl App {
         let (workspaces, active_ws) = workspaces::build_from_session(&session);
         self.workspaces = workspaces;
         self.active_workspace = active_ws.min(self.workspaces.len().saturating_sub(1));
+        // The essentials are the same in every workspace.
+        self.essentials = session.essentials.iter().filter(|e| !e.url.is_empty()).cloned().collect();
         // Load the active workspace's saved tabs into memory.
         let ws = self.workspaces[self.active_workspace].clone();
         let saved = ws.saved;
@@ -2405,6 +2482,7 @@ impl App {
             t.favicon = saved.favicon;
             t.pinned = saved.pinned;
             t.pin_url = pins::restored_pin_url(saved.pinned, &saved.pin_url, &t.url);
+            t.essential = saved.essential;
             t.workspace = self.active_workspace;
             if i == ws_active {
                 active = Some(t.id);
@@ -2843,7 +2921,7 @@ impl App {
             monitor::unwatch(None, w, true);
         }
         if !t.url.is_empty() && !t.private {
-            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned, pin_url: t.pin_url });
+            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned, pin_url: t.pin_url, essential: t.essential });
             if self.closed.len() > MAX_CLOSED {
                 self.closed.remove(0);
             }
@@ -5265,6 +5343,18 @@ impl App {
                         self.dirty = true;
                         self.push();
                     }
+                }
+            }
+            "essentialAdd" => self.add_essential(id),
+            "essentialRemove" => {
+                let url = m["url"].as_str().unwrap_or("").to_string();
+                self.remove_essential(&url);
+            }
+            "essential" => {
+                // An essential's site: show its tab, in whichever workspace is open.
+                let url = m["url"].as_str().unwrap_or("").to_string();
+                if !url.is_empty() {
+                    self.show_essential(&url);
                 }
             }
             "reader" => {
@@ -7900,7 +7990,7 @@ impl App {
             .collect();
         let active_tab_idx = keep.iter().position(|t| t.id == self.active).unwrap_or(0);
         // to_session stamps the live tabs into the active workspace's slot.
-        let s = workspaces::to_session(
+        let mut s = workspaces::to_session(
             &self.workspaces,
             self.active_workspace,
             &saved,
@@ -7909,6 +7999,8 @@ impl App {
             if maximized || self.fullscreen() { 0.0 } else { height },
             maximized,
         );
+        // The essentials are the same in every workspace, so they sit beside them.
+        s.essentials = self.essentials.clone();
         // Remember it for the panic hook: a panic must not lose these tabs.
         if let Ok(mut g) = LAST_SESSION.lock() {
             *g = Some(s.clone());

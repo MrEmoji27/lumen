@@ -83,6 +83,7 @@ pub fn to_session(
         maximized,
         workspaces: ws_list,
         active_workspace: a,
+        essentials: Vec::new(),
     }
 }
 
@@ -181,6 +182,7 @@ mod tests {
             favicon: String::new(),
             pinned,
             pin_url: if pinned { url.to_string() } else { String::new() },
+            essential: false,
         }
     }
 
@@ -197,6 +199,7 @@ mod tests {
             maximized: false,
             workspaces: Vec::new(),
             active_workspace: 0,
+            essentials: Vec::new(),
         };
         let (ws, active) = build_from_session(&session);
         assert_eq!(ws.len(), 1);

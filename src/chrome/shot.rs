@@ -16,7 +16,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{GetClientRect, KillTimer, SetTimer},
 };
 
-use super::{Inner, TIMER_SHOT, UiDl, UiMark, UiState, UiTab, UiVisit};
+use super::{Inner, TIMER_SHOT, UiDl, UiEssential, UiMark, UiState, UiTab, UiVisit};
 
 fn dir() -> Option<PathBuf> {
     std::env::var_os("LUMEN_TEST_SHOT").map(PathBuf::from)
@@ -300,6 +300,7 @@ pub fn fake(s: &mut UiState) {
         fwd: false,
         pinned: false,
         pin_away: false,
+        essential: false,
         audio: false,
         muted: false,
         call: false,
@@ -319,6 +320,12 @@ pub fn fake(s: &mut UiState) {
     if let Some(n) = fake_count("tabs") {
         for i in 0..n {
             s.tabs.push(t(9500 + i as u64, &format!("Tab {}", i + 1), &format!("https://site{}.example/", i + 1)));
+        }
+    }
+    // A known number of essentials: the sites kept open in every workspace.
+    if let Some(n) = fake_count("essentials") {
+        for i in 0..n {
+            s.essentials.push(UiEssential { url: format!("https://site{}.example/", i + 1), title: format!("Site {}", i + 1) });
         }
     }
     // And a known number of pinned ones.

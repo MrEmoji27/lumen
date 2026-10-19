@@ -609,6 +609,8 @@ pub struct SavedTab {
     pub pinned: bool,
     /// The page a pin was pinned on. Empty in files from before pins remembered it.
     pub pin_url: String,
+    /// The tab is an Essential: it keeps the site open in every workspace.
+    pub essential: bool,
 }
 
 /// A named set of tabs. Saved in session.json so workspaces survive a restart.
@@ -634,6 +636,9 @@ pub struct Session {
     /// New format: one entry per workspace. Empty when the file predates workspaces.
     pub workspaces: Vec<Workspace>,
     pub active_workspace: usize,
+    /// The sites kept open in every workspace: the essentials. The same row in
+    /// every workspace, whichever one is open.
+    pub essentials: Vec<SavedTab>,
 }
 
 fn load<T: Default + for<'de> Deserialize<'de>>(name: &str) -> T {
