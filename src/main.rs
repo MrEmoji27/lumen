@@ -98,6 +98,11 @@ const MAX_CLOSED: usize = 25;
 const COMPACT_W: f64 = 56.0;
 /// Control page refresh. Only runs while the page is open.
 const SAMPLE: Duration = Duration::from_millis(1000);
+/// A CPU figure is the difference of two readings. The second comes this soon after the
+/// page opens, so it does not sit on a dash for a whole second.
+const SAMPLE_FIRST: Duration = Duration::from_millis(400);
+/// Readings the network rate is taken over: about five seconds.
+const NET_WINDOW: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
@@ -632,6 +637,10 @@ struct App {
     prev_cpu: HashMap<u32, u64>,
     prev_at: Instant,
     net: monitor::NetBytes,
+    /// The last few readings of bytes per tab, and the seconds each covered. Pages fetch
+    /// in bursts (a video takes a few seconds of it at a time), so a one-second rate
+    /// jumps between nothing and a lot; the rate shown is over these.
+    net_hist: std::collections::VecDeque<(HashMap<u64, u64>, f64)>,
     watches: HashMap<u64, monitor::NetWatch>,
     cores: f64,
     /// Newest first. Kept for this session.
@@ -1058,6 +1067,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         prev_cpu: HashMap::new(),
         prev_at: Instant::now(),
         net: Rc::new(RefCell::new(HashMap::new())),
+        net_hist: Default::default(),
         watches: HashMap::new(),
         cores: std::thread::available_parallelism().map_or(1.0, |n| n.get() as f64),
         downloads: Vec::new(),
@@ -1927,6 +1937,9 @@ impl App {
     /// covers the stage, so nothing is.
     fn sync_panes(&mut self) {
         let on = self.panel == Panel::None && !self.ui_full();
+        // Control and the dashboard measure the pages under them. A low target the moment
+        // one opens would make the tab just left read a fraction of what it costs in use.
+        let measuring = self.panel.live();
         let split = self.split;
         let active = self.active;
         for i in 0..self.tabs.len() {
@@ -1936,8 +1949,10 @@ impl App {
             if t.agent && t.id != active && split != Some(t.id) {
                 continue;
             }
-            let want = on && (t.id == active || split == Some(t.id)) && t.has_page();
-            if want == t.visible {
+            let stage = t.id == active || split == Some(t.id);
+            let want = on && stage && t.has_page();
+            // A hidden stage page is looked at again: its target follows the panel over it.
+            if want == t.visible && (want || !stage) {
                 continue;
             }
             #[cfg(feature = "servo")]
@@ -1956,7 +1971,7 @@ impl App {
                 // On screen: full memory now — the watch rule trims it 15 s after
                 // the person stops touching mouse and keyboard. A call keeps its
                 // full target either way: it is still being listened to.
-                let level = if t.call || want { MemoryUsageLevel::Normal } else { MemoryUsageLevel::Low };
+                let level = if t.call || want || (stage && measuring) { MemoryUsageLevel::Normal } else { MemoryUsageLevel::Low };
                 let _ = v.set_memory_usage_level(level);
                 t.visible = want;
             } else {
@@ -2484,11 +2499,13 @@ impl App {
         let t = &self.tabs[i];
         let Some(v) = &t.view else { return };
         if self.settings.net_limit {
-            monitor::throttle(v, Some(self.settings.net_limit_kbps));
+            monitor::throttle(v, Some(self.settings.net_limit_kbps), t.agent);
         }
+        // A frozen page fetches nothing, and a DevTools call could wake it.
         if self.panel.live()
+            && !t.suspended
             && !self.watches.contains_key(&t.id)
-            && let Some(w) = monitor::watch(v, t.id, self.net.clone())
+            && let Some(w) = monitor::watch(v, t.id, self.net.clone(), t.agent)
         {
             self.watches.insert(t.id, w);
         }
@@ -3614,7 +3631,10 @@ impl App {
 
     fn start_monitor(&mut self) {
         self.net.borrow_mut().clear();
+        self.net_hist.clear();
         self.prev_cpu.clear();
+        // Bytes count from now: the first rate is over the time since now.
+        self.prev_at = Instant::now();
         for i in 0..self.tabs.len() {
             self.limit_tab(i);
         }
@@ -3625,17 +3645,21 @@ impl App {
         self.next_sample = None;
         let keep = self.settings.net_limit;
         for (id, w) in std::mem::take(&mut self.watches) {
-            let v = self.idx(id).and_then(|i| self.tabs[i].view.as_ref());
-            monitor::unwatch(v, w, keep);
+            let t = self.idx(id).map(|i| &self.tabs[i]);
+            // An agent's page keeps the Network domain: its own tools read it.
+            let agent = t.is_some_and(|t| t.agent);
+            monitor::unwatch(t.and_then(|t| t.view.as_ref()), w, keep || agent);
         }
     }
 
     fn sample(&mut self) {
-        self.next_sample = Some(Instant::now() + SAMPLE);
-        match self.ctx.env.borrow().as_ref() {
-            Some(env) => monitor::sample(env, self.ctx.proxy.clone()),
-            None => monitor::sample_host(self.ctx.proxy.clone()),
-        }
+        let gap = if self.prev_cpu.is_empty() { SAMPLE_FIRST } else { SAMPLE };
+        self.next_sample = Some(Instant::now() + gap);
+        // The person's browser and every strictly isolated agent's: each is a process tree
+        // of its own, and its pages are tabs here too.
+        let mut envs: Vec<_> = self.ctx.env.borrow().iter().map(|e| (String::new(), e.clone())).collect();
+        envs.extend(self.ctx.own_envs.borrow().iter().map(|(k, e)| (k.clone(), e.clone())));
+        monitor::sample(envs, self.ctx.proxy.clone());
     }
 
     /// Raw process numbers in; per-tab memory, CPU and network out, straight to the UI.
@@ -3646,16 +3670,19 @@ impl App {
         let now = Instant::now();
         let secs = (now - self.prev_at).as_secs_f64().max(0.001);
         self.prev_at = now;
+        // The first reading has nothing to take CPU time from: no CPU figure yet, not 0%.
         let first = self.prev_cpu.is_empty();
-        // Main-frame id -> tab.
-        let mut owner: HashMap<u32, u64> = HashMap::new();
+        let pct = |c: f64| if first { Value::Null } else { json!(c) };
+        // (environment, main-frame id) -> tab. Frame ids are only unique inside one environment.
+        let mut owner: HashMap<(String, u32), u64> = HashMap::new();
         for t in &self.tabs {
             if let Some(f) = t.view.as_ref().and_then(monitor::frame_id) {
-                owner.insert(f, t.id);
+                let env = if t.own_env { engine::own_env_key(&t.profile) } else { String::new() };
+                owner.insert((env, f), t.id);
             }
         }
         let mut tabs: HashMap<u64, (f64, f64)> = HashMap::new();
-        let (mut ui, mut core, mut total) = ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
+        let (mut ui, mut core, mut helpers, mut total) = ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
         let mut next_cpu = HashMap::new();
         let mut parts: Vec<Value> = Vec::new();
         for p in &procs {
@@ -3666,7 +3693,7 @@ impl App {
             let mem = p.mem as f64;
             total.0 += mem;
             total.1 += cpu;
-            let mine: Vec<u64> = p.frames.iter().filter_map(|f| owner.get(f).copied()).collect();
+            let mine: Vec<u64> = p.frames.iter().filter_map(|f| owner.get(&(p.env.clone(), *f)).copied()).collect();
             if !mine.is_empty() {
                 // A process shared by several tabs: split it evenly. Honest enough.
                 let n = mine.len() as f64;
@@ -3678,28 +3705,40 @@ impl App {
             } else if p.kind == "host" {
                 // Lumen itself: the native chrome lives here.
                 ui = (ui.0 + mem, ui.1 + cpu);
+            } else if p.kind == "helper" {
+                // Not a browser process: the download helper and its console.
+                helpers = (helpers.0 + mem, helpers.1 + cpu);
             } else {
                 core = (core.0 + mem, core.1 + cpu);
                 parts.push(json!({"kind": p.kind, "mem": mem, "cpu": cpu}));
             }
         }
         self.prev_cpu = next_cpu;
-        let net: HashMap<u64, u64> = std::mem::take(&mut *self.net.borrow_mut());
+        self.net_hist.push_back((std::mem::take(&mut *self.net.borrow_mut()), secs));
+        while self.net_hist.len() > NET_WINDOW {
+            self.net_hist.pop_front();
+        }
+        let span: f64 = self.net_hist.iter().map(|h| h.1).sum();
+        let mut net: HashMap<u64, u64> = HashMap::new();
+        for (id, b) in self.net_hist.iter().flat_map(|h| h.0.iter()) {
+            *net.entry(*id).or_default() += b;
+        }
         let net_total: u64 = net.values().sum();
         let per_tab: serde_json::Map<String, Value> = self
             .tabs
             .iter()
             .map(|t| {
                 let (m, c) = tabs.get(&t.id).copied().unwrap_or_default();
-                let n = net.get(&t.id).copied().unwrap_or(0) as f64 / secs;
-                (t.id.to_string(), json!({"mem": m, "cpu": c, "net": n}))
+                let n = net.get(&t.id).copied().unwrap_or(0) as f64 / span;
+                (t.id.to_string(), json!({"mem": m, "cpu": pct(c), "net": n}))
             })
             .collect();
         let report = json!({
             "tabs": per_tab,
-            "ui": {"mem": ui.0, "cpu": ui.1},
-            "core": {"mem": core.0, "cpu": core.1, "parts": parts},
-            "total": {"mem": total.0, "cpu": total.1, "net": net_total as f64 / secs, "procs": procs.len()},
+            "ui": {"mem": ui.0, "cpu": pct(ui.1)},
+            "core": {"mem": core.0, "cpu": pct(core.1), "parts": parts},
+            "helpers": {"mem": helpers.0, "cpu": pct(helpers.1)},
+            "total": {"mem": total.0, "cpu": pct(total.1), "net": net_total as f64 / span, "procs": procs.len()},
         });
         self.chrome.usage(report);
     }
@@ -3714,8 +3753,10 @@ impl App {
         let net_changed = old.is_some_and(|o| (o.net_limit, o.net_limit_kbps) != (s.net_limit, s.net_limit_kbps));
         if net_changed {
             let cap = s.net_limit.then_some(s.net_limit_kbps);
-            for v in self.tabs.iter().filter_map(|t| t.view.as_ref()) {
-                monitor::throttle(v, cap);
+            for t in &self.tabs {
+                if let Some(v) = &t.view {
+                    monitor::throttle(v, cap, t.agent);
+                }
             }
         }
     }

@@ -7,6 +7,30 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.7.3 — 2026-10-19
+
+Control and the dashboard tell the truth, and keep up.
+
+- **The total is the whole tree.** Memory, CPU and the process count now add up every process
+  under Lumen, as Task Manager and `tools/vs_brave.py` do. WebView2's own list, which they used
+  before, leaves out the crash reporter, the download helper and the browsers of strictly
+  isolated agents. Checked against an outside measurement of the same moment: 269 MB to 269.
+  The sidebar readout walks the same tree.
+- **The tab you came from is not shrunk by looking.** Opening any page over the tabs gave the
+  tab under it a low memory target at once, so Control showed a page in use at a tenth of its
+  cost (GitHub: 12 MB, really 125). Under Control and the dashboard it now keeps its full target.
+- **Agents' tabs in a browser of their own** are counted against their tabs, not lost.
+- **Network counts every byte.** Chromium reports most chunks of a download as 0 bytes and the
+  real size at the end; Control added the chunks only, about half the truth (Wikipedia: 417 KB
+  of 876). It now adds what the chunks missed when a request finishes, and websocket frames.
+  The rate is over the last five seconds: a video fetches in bursts and a one-second rate sat
+  at nothing between them.
+- **The dashboard is live.** Its tiles waited for some other repaint and showed old numbers.
+- **CPU shows a dash, not 0%, until it has two readings**, and the second comes 0.4 s after the
+  page opens instead of a full second.
+- Opening Control no longer resets the agent kit's Network settings on an agent's tab, and
+  closing it no longer turns the agent's Network domain off.
+
 ## 0.6.7.2 — 2026-10-19
 
 Measured against Brave, on the same machine and the same pages, and made to win.

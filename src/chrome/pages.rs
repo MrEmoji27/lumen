@@ -2826,7 +2826,8 @@ struct UsageRow {
     name: String,
     state: &'static str,
     mem: f64,
-    cpu: f64,
+    /// None until the second reading: a CPU figure is the difference of two.
+    cpu: Option<f64>,
     /// Bytes per second, or None for rows that have no network figure of their own.
     net: Option<f64>,
     live: bool,
@@ -2899,16 +2900,21 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
             name,
             state,
             mem: x["mem"].as_f64().unwrap_or(0.0),
-            cpu: x["cpu"].as_f64().unwrap_or(0.0),
+            cpu: x["cpu"].as_f64(),
             net: Some(x["net"].as_f64().unwrap_or(0.0)),
             live,
             unload: live && tab.id != s.active,
         });
     }
     rows.sort_by(|a, b| b.mem.total_cmp(&a.mem));
-    let (ui, core) = (&u["ui"], &u["core"]);
-    for (name, state, v) in [("Lumen", "interface", ui), ("Browser core", "shared", core)] {
-        rows.push(UsageRow { id: 0, name: name.into(), state, mem: v["mem"].as_f64().unwrap_or(0.0), cpu: v["cpu"].as_f64().unwrap_or(0.0), net: None, live: true, unload: false });
+    let (ui, core, helpers) = (&u["ui"], &u["core"], &u["helpers"]);
+    for (name, state, v) in [("Lumen", "interface", ui), ("Browser core", "shared", core), ("Helpers", "downloads", helpers)] {
+        let m = v["mem"].as_f64().unwrap_or(0.0);
+        // The download helper only runs when it is on: no row for nothing.
+        if name == "Helpers" && m <= 0.0 {
+            continue;
+        }
+        rows.push(UsageRow { id: 0, name: name.into(), state, mem: m, cpu: v["cpu"].as_f64(), net: None, live: true, unload: false });
     }
     for (n, row) in rows.iter().enumerate() {
         let r = R::new(col.x - i.look.s2, y + 2.0, col.w + 2.0 * i.look.s2, ROW_H - 4.0);
@@ -2940,7 +2946,10 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
         }
         let vals = [
             if known { mem(row.mem) } else { "—".into() },
-            if known { cpu(row.cpu) } else { "—".into() },
+            match row.cpu {
+                Some(c) if known => cpu(c),
+                _ => "—".into(),
+            },
             match row.net {
                 Some(b) if known => net(b),
                 _ => "—".into(),

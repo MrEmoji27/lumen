@@ -1836,7 +1836,9 @@ impl Chrome {
     pub fn usage(&self, v: Value) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         i.page.usage = Some(v);
-        if i.state.as_ref().is_some_and(|s| s.panel == "control") {
+        // Both pages show these numbers. The dashboard used to wait for some other
+        // repaint, so its tiles sat on an old reading.
+        if i.state.as_ref().is_some_and(|s| s.panel == "control" || s.panel == "dashboard") {
             i.invalidate();
         }
     }

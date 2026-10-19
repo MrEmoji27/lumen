@@ -2472,10 +2472,10 @@ pub fn raise(wv: &WebView) {
     }
 }
 
-/// Private working set of this app plus every WebView2 process it owns.
-/// Same number Task Manager shows as "Memory".
-pub fn memory(env: &ICoreWebView2Environment) -> (u64, u32) {
-    let (_, total, count, _) = memory_with_cpu(Some(env), false);
+/// Private working set of Lumen's whole process tree: the number Task Manager shows as
+/// "Memory" on the Lumen group, and what tools/vs_brave.py adds up.
+pub fn memory(_env: &ICoreWebView2Environment) -> (u64, u32) {
+    let (_, total, count, _) = memory_with_cpu(None, false);
     (total, count)
 }
 
@@ -2483,29 +2483,22 @@ pub fn memory(env: &ICoreWebView2Environment) -> (u64, u32) {
 /// (this process alone, the whole tree, process count, the tree's CPU time in
 /// 100 ns units). `cpu` costs a `GetProcessTimes` per process, so the callers
 /// that do not need it do not ask: there is no second walk for the journal.
-pub fn memory_with_cpu(env: Option<&ICoreWebView2Environment>, cpu: bool) -> (u64, u64, u32, u64) {
-    use crate::monitor::{cpu_time, private_ws};
+/// The tree, not WebView2's list: that list leaves out the crash reporter, the
+/// strictly isolated agents' browsers and the download helper.
+pub fn memory_with_cpu(_env: Option<&ICoreWebView2Environment>, cpu: bool) -> (u64, u64, u32, u64) {
+    use crate::monitor::{cpu_time, private_ws, tree};
     let me = unsafe { GetCurrentProcess() };
     let own = private_ws(me);
     let mut total = own;
     let mut ticks = if cpu { cpu_time(me) } else { 0 };
     let mut count = 1u32;
-    // No page has been made yet (the start page is Lumen's own drawing): no WebView2
-    // processes exist, and Lumen alone is the whole figure.
-    let Some(env) = env else { return (own, total, count, ticks) };
-    unsafe {
-        let Ok(list) = env.cast::<ICoreWebView2Environment8>().and_then(|e| e.GetProcessInfos()) else {
-            return (own, total, count, ticks);
-        };
-        let mut n = 0u32;
-        let _ = list.Count(&mut n);
-        for i in 0..n {
-            let Ok(info) = list.GetValueAtIndex(i) else { continue };
-            let mut pid = 0i32;
-            if info.ProcessId(&mut pid).is_err() {
-                continue;
-            }
-            if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32) {
+    let mine = std::process::id();
+    for (pid, _) in tree() {
+        if pid == mine {
+            continue;
+        }
+        unsafe {
+            if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
                 total += private_ws(h);
                 if cpu {
                     ticks += cpu_time(h);
@@ -2516,4 +2509,9 @@ pub fn memory_with_cpu(env: Option<&ICoreWebView2Environment>, cpu: bool) -> (u6
         }
     }
     (own, total, count, ticks)
+}
+
+/// The key a strictly isolated agent's environment is kept under in `Ctx::own_envs`.
+pub fn own_env_key(key: &str) -> String {
+    safe_key(key)
 }
