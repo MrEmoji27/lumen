@@ -33,6 +33,7 @@ mod mru;
 mod pacing;
 mod pagekit;
 mod privacy_stats;
+mod popup;
 mod pins;
 mod recall;
 #[cfg(feature = "servo")]
@@ -727,6 +728,9 @@ struct App {
     aria_page: HashSet<String>,
     /// Why a page-started row waits: gid -> the note its paused row shows.
     aria_hold: HashMap<String, String>,
+    /// A pop-up Lumen stopped, by tab: the host it wanted, the host that asked,
+    /// and when. One notice per tab: the newest replaces the old.
+    popup_notes: HashMap<u64, (String, String, Instant)>,
     /// The translator page is open. Only alive while a translation is in the air.
     translator: Option<translate::Page>,
     /// Servo, when the feature is compiled in and a Servo tab has been opened.
@@ -958,6 +962,7 @@ fn main() {
         env: RefCell::new(None),
         next_id: Cell::new(1),
         popups: RefCell::new(Vec::new()),
+        popup_policy: RefCell::new(popup::Policy { block: settings.block_popups, trusted: settings.popup_sites.clone() }),
         dark: Cell::new(dark),
         on_built: RefCell::new(None),
         web_context: RefCell::new(wry::WebContext::new(Some(store::data_dir().join("WebView2")))),
@@ -980,6 +985,7 @@ fn main() {
         gpc: Cell::new(settings.gpc),
         userscripts: Cell::new(settings.userscripts),
         popup_info: Rc::new(RefCell::new(std::collections::VecDeque::new())),
+        clicks: Rc::new(RefCell::new(HashMap::new())),
     });
 
     {
@@ -1118,6 +1124,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         aria_person: HashSet::new(),
         aria_page: HashSet::new(),
         aria_hold: HashMap::new(),
+        popup_notes: HashMap::new(),
         translator: None,
         #[cfg(feature = "servo")]
         servo: None,
@@ -2256,6 +2263,11 @@ impl App {
                         ask: ask.clone(),
                         many: self.idx(*tab).is_some_and(|i| self.tabs[i].asks_n >= 2),
                     }),
+                popup_note: self.popup_notes.get(&self.active).map(|(target, site, _)| chrome::UiPopup {
+                    tab: self.active,
+                    target: target.clone(),
+                    site: site.clone(),
+                }),
                 battery: self.power_saving(),
                 downloads: self
                     .downloads
@@ -3880,6 +3892,8 @@ impl App {
         if old.adblock_off_sites != self.settings.adblock_off_sites {
             self.blocker.set_off_sites(&self.settings.adblock_off_sites);
         }
+        // The pop-up rules the engine reads at every new-window request.
+        self.ctx.popup_policy.replace(popup::Policy { block: self.settings.block_popups, trusted: self.settings.popup_sites.clone() });
         if old.perm_defaults != self.settings.perm_defaults {
         }
         if old.default_zoom != self.settings.default_zoom {
@@ -4147,6 +4161,11 @@ impl App {
             }
             // The journal's timing of a page. A private tab is not in it.
             Ev::NavStart(id, url) => {
+                // A page that goes somewhere else has said what it wanted: the
+                // note about a pop-up it did not get is gone with it.
+                if self.popup_notes.remove(&id).is_some() {
+                    self.push();
+                }
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].nav_pending = Some(Instant::now());
                     self.tabs[i].nav_started = true;
@@ -4932,6 +4951,15 @@ impl App {
                 let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
                 self.add_magnet(&url, private, Some(magnet_hold(&page)));
             }
+            Ev::PopupBlocked(tab, target, site) => {
+                // A pop-up the person did not ask for. The chrome says so over the
+                // page, with the way back: allow this site, or let it go.
+                // An agent's tab gets no note: nobody is watching it.
+                if self.idx(tab).is_some_and(|i| !self.tabs[i].agent) {
+                    self.popup_notes.insert(tab, (target, site, Instant::now()));
+                    self.push();
+                }
+            }
             Ev::Popup(id, parent) => {
                 let private = self.idx(parent).is_some_and(|i| self.tabs[i].private);
                 let agent = self.idx(parent).is_some_and(|i| self.tabs[i].agent);
@@ -5160,6 +5188,25 @@ impl App {
             }
             "crashSeen" => {
                 self.unclean_last = false;
+                self.push();
+            }
+            "popupAllow" => {
+                // The person said this site may open pop-ups. It is remembered,
+                // and the note has done its work.
+                let id = m["id"].as_u64().unwrap_or(0);
+                let site = m["site"].as_str().unwrap_or("").trim().to_string();
+                let host = blocker::site_key(&site);
+                if !host.is_empty() && !self.settings.popup_sites.contains(&host) {
+                    let mut s = self.settings.clone();
+                    s.popup_sites.push(host);
+                    self.apply_settings(s);
+                }
+                self.popup_notes.remove(&id);
+                self.push();
+            }
+            "popupDismiss" => {
+                let id = m["id"].as_u64().unwrap_or(0);
+                self.popup_notes.remove(&id);
                 self.push();
             }
             "bugSave" => {
@@ -6598,6 +6645,21 @@ impl App {
         // KeePass: ten minutes untouched and the database leaves memory.
         if self.vault.is_some() && now - self.vault_seen > Duration::from_secs(600) {
             self.vault = None;
+            self.push();
+        }
+
+        // A note about a stopped pop-up does not stay for long: the person has
+        // seen it, or has not.
+        let old: Vec<u64> = self
+            .popup_notes
+            .iter()
+            .filter(|(_, (_, _, at))| now.duration_since(*at) > Duration::from_secs(6))
+            .map(|(id, _)| *id)
+            .collect();
+        if !old.is_empty() {
+            for id in old {
+                self.popup_notes.remove(&id);
+            }
             self.push();
         }
 

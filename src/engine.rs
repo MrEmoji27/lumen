@@ -94,6 +94,9 @@ pub enum Ev {
     CloseMe(u64),
     /// New popup tab, and the tab that opened it.
     Popup(u64, u64),
+    /// A pop-up Lumen stopped: the tab that asked, the host it wanted, and the
+    /// host that asked.
+    PopupBlocked(u64, String, String),
     Download(Dl),
     /// A site asks for a permission. Answer with `answer_permission(pid, ..)`.
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
@@ -321,9 +324,16 @@ pub struct Ctx {
     /// Run the person's userscripts in the person's own pages. Read when a tab is made,
     /// never watched: a change applies to tabs opened after it.
     pub userscripts: Cell<bool>,
-    /// Popup requests seen since the last one was handled: (was it a click, the page's site).
-    /// A sensor COM handler fills this; wry's own handler reads the front and decides.
-    pub popup_info: Rc<RefCell<VecDeque<(bool, String)>>>,
+    /// Popup requests seen since the last one was handled: (was it a click, the page's site,
+    /// the tab that asked). A sensor COM handler fills this; wry's own handler reads the
+    /// front and decides.
+    pub popup_info: Rc<RefCell<VecDeque<(bool, String, u64)>>>,
+    /// Pop-up protection: the setting, and the sites whose pop-ups are allowed.
+    pub popup_policy: RefCell<crate::popup::Policy>,
+    /// What each page did last: the click it saw, and the window a script opened.
+    /// A new document starts with nothing; the last click of the old one says
+    /// nothing about this one.
+    pub clicks: Rc<RefCell<HashMap<u64, crate::popup::Page>>>,
 }
 
 /// A strict-isolation environment on its way. See `start_own_env` / `poll_own_envs`.
@@ -569,6 +579,7 @@ fn build_tab_in(
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
         .with_initialization_script(if init_on("WEBRTC") { WEBRTC_JS } else { "" })
         .with_initialization_script(if init_on("CALL") { CALL_JS } else { "" })
+        .with_initialization_script(if init_on("POPUP") { POPUP_JS } else { "" })
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -578,14 +589,29 @@ fn build_tab_in(
         })
         .with_new_window_req_handler(move |uri, features| {
             // window.open / target=_blank. The sensor above already saw whether a
-            // click or key asked for this. No gesture, or a popup-host match, is a
-            // popup: block it and count it. A missing queue entry also blocks.
+            // click or key asked for this, and the page told us what that click
+            // was on. A pop-up the person did not ask for is stopped and said
+            // out loud; a link they clicked opens as before.
             let ctx = &popup_ctx;
-            let (gesture, site) = ctx.popup_info.borrow_mut().pop_front().unwrap_or((false, String::new()));
-            if !gesture || crate::blocker::popup_rule(&uri) {
+            let (gesture, site, tab) = ctx.popup_info.borrow_mut().pop_front().unwrap_or((false, String::new(), 0));
+            let target = crate::privacy_stats::host(&uri);
+            let page = ctx.clicks.borrow().get(&tab).cloned().unwrap_or_default();
+            let ask = crate::popup::Ask {
+                gesture,
+                link: crate::popup::link_click(&page, &target),
+                opener: site.clone(),
+                target: target.clone(),
+                popup_rule: crate::blocker::popup_rule(&uri),
+            };
+            let (block, trusted) = {
+                let p = ctx.popup_policy.borrow();
+                (p.block, p.trusted.clone())
+            };
+            if crate::popup::decide(&ask, block, &trusted) == crate::popup::Verdict::Deny {
                 if !site.is_empty() {
                     crate::privacy_stats::popup(&site, who);
                 }
+                let _ = ctx.proxy.send_event(Ev::PopupBlocked(tab, target, site));
                 return NewWindowResponse::Deny;
             }
             let new_id = ctx.alloc_id();
@@ -622,7 +648,7 @@ fn build_tab_in(
     // Tracking prevention is a setting of the profile, and InPrivate pages and the agent's
     // pages each have a profile of their own. Every page says it again; it costs nothing.
     set_tracking(&wv, &ctx.tracking.borrow());
-    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone(), who);
+    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone(), ctx.clicks.clone(), who);
     hook_zoom(&wv, id, ctx.proxy.clone());
     crate::glance::hook(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv, id, private);
@@ -632,7 +658,8 @@ fn build_tab_in(
         hook_page_asks(ctx, &wv, id);
     }
     hook_external(&wv, id, ctx.proxy.clone(), agent_page);
-    hook_popup_sensor(&wv, ctx.popup_info.clone());
+    hook_popup_sensor(&wv, ctx.popup_info.clone(), id);
+    hook_popup_page(&wv, id, ctx);
     hook_rtc(&wv, who);
     hook_call(&wv, id, ctx.proxy.clone());
     // Password saving is per profile. An agent's profile never saves passwords,
@@ -985,6 +1012,7 @@ fn hook_page(
     proxy: EventLoopProxy<Ev>,
     rewrite: Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>,
     https: Rc<RefCell<crate::sites::HttpsPolicy>>,
+    clicks: Rc<RefCell<HashMap<u64, crate::popup::Page>>>,
     who: crate::privacy_stats::Who,
 ) {
     let core = wv.webview();
@@ -999,9 +1027,13 @@ fn hook_page(
                 let mut redirected = Default::default();
                 let _ = args.IsRedirected(&mut redirected);
                 if redirected.as_bool() {
+                    // A new document: the clicks of the old one say nothing about this one.
+                    clicks.borrow_mut().remove(&id);
                     let _ = p.send_event(Ev::NavRedirected(id));
                     return Ok(());
                 }
+                // A new document: the clicks of the old one say nothing about this one.
+                clicks.borrow_mut().remove(&id);
                 let mut u = PWSTR::null();
                 args.Uri(&mut u)?;
                 let u = take(u);
@@ -1953,7 +1985,7 @@ pub fn answer_permission(ctx: &Ctx, pid: u64, allow: Option<bool>) {
 /// new window; wry's own handler does not. This runs first (registered after
 /// build, and wry's callback is dispatched later on the message loop), so the
 /// flag is in the queue when the wry handler asks for it.
-fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String)>>>) {
+fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String, u64)>>>, id: u64) {
     let core = wv.webview();
     let mut token = 0i64;
     unsafe {
@@ -1972,7 +2004,69 @@ fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String)>>>)
                 let mut q = queue.borrow_mut();
                 // Bound: a page that spams window.open must not grow this forever.
                 if q.len() < 32 {
-                    q.push_back((user.as_bool(), site));
+                    q.push_back((user.as_bool(), site, id));
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+/// In every page, in every frame: what the last click was on, and when a script
+/// opened a window. The page cannot be trusted, but it can be watched, and it
+/// says so before the window is asked for.
+///
+/// The click is caught in the capture phase, so it is seen before the page's
+/// own handlers run: a page that opens a window on the first click has already
+/// said what that click was on. The report is a message to the host, and the
+/// host reads it when the window is asked for. Measured on 2026-10-19: the
+/// message arrives first, because the page sends it before the browser asks
+/// for the window and the host reads the queue in the order it was filled.
+const POPUP_JS: &str = r#"try{(()=>{const W=window.chrome&&window.chrome.webview;if(!W)return;
+const say=m=>{try{W.postMessage(m)}catch(_){}};
+const opens=t=>!!t&&t!=='_self'&&t!=='_top'&&t!=='_parent';
+const onClick=e=>{let el=e.target,link=0,url='';
+ while(el&&el.nodeType===1){const tag=el.tagName;
+  if(tag==='A'||tag==='AREA'){if(opens(el.getAttribute('target'))){link=1;url=el.href?String(el.href):''}break}
+  if(tag==='FORM'){if(opens(el.getAttribute('target')))link=1;break}
+  if(tag==='BUTTON'||tag==='INPUT'){if(opens(el.getAttribute('formtarget')))link=1;break}
+  el=el.parentElement}
+ say({lumen:'click',link:link,url:url})};
+document.addEventListener('click',onClick,true);
+document.addEventListener('auxclick',onClick,true);
+const O=window.open;
+if(typeof O==='function')window.open=function(u){say({lumen:'open',url:String(u||'')});return O.apply(this,arguments)};
+})()}catch(e){}"#;
+
+/// The page's own report of what it did: the last click, and a window a script
+/// opened. Lumen needs both to tell a link the person clicked from a pop-up a
+/// page pushed.
+fn hook_popup_page(wv: &WebView, id: u64, ctx: &Rc<Ctx>) {
+    let core = wv.webview();
+    let mut token = 0i64;
+    let clicks = ctx.clicks.clone();
+    unsafe {
+        let _ = core.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut j = PWSTR::null();
+                if args.WebMessageAsJson(&mut j).is_err() {
+                    return Ok(());
+                }
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(&take(j)) else { return Ok(()) };
+                let mut m = clicks.borrow_mut();
+                let p = m.entry(id).or_default();
+                match msg["lumen"].as_str().unwrap_or("") {
+                    "click" => {
+                        p.link = msg["link"].as_u64().unwrap_or(0) == 1;
+                        p.url = msg["url"].as_str().unwrap_or("").to_string();
+                        p.at = Instant::now();
+                    }
+                    "open" => {
+                        p.opened = Some((msg["url"].as_str().unwrap_or("").to_string(), Instant::now()));
+                    }
+                    _ => {}
                 }
                 Ok(())
             })),
