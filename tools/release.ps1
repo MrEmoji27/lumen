@@ -26,19 +26,21 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 cargo test -j 2 --test agent_smoke -- --ignored
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# 5. rename release exes
+# 5. keep the old exes, named by the version they carry: lumen-0.6.7.2.exe, lumen-agent-0.6.7.2.exe.
+#    The version is read from the stamp inside the exe ("0.6.7.2 (8e9c131 2026-10-19)", "+dev" if
+#    it was built from uncommitted work). An exe from before the stamp is named by its date.
+#    A running exe can be renamed on Windows, so a running Lumen or agent door is no obstacle.
 foreach ($name in @("lumen.exe","lumen-agent.exe")) {
     $p = Join-Path "target\release" $name
     if (Test-Path $p) {
-        $prev = Join-Path "target\release" ($name -replace '\.exe$','.prev.exe')
-        if (Test-Path $prev) { Remove-Item $prev -Force -ErrorAction SilentlyContinue }
-        try {
-            Rename-Item $p ($name -replace '\.exe$','.prev.exe') -ErrorAction Stop
-        } catch {
-            $stamp = Get-Date -Format "HHmm"
-            $alt = Join-Path "target\release" ($name -replace '\.exe$',"") + ".prev-$stamp.exe"
-            Rename-Item $p (Split-Path $alt -Leaf)
-        }
+        $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes((Resolve-Path $p)))
+        $m = [regex]::Match($text, '(\d+\.\d+\.\d+(?:\.\d+)?) \([0-9a-f]{7}[^)]*?( \+dev)?\)')
+        $old = if ($m.Success) { $m.Groups[1].Value + $(if ($m.Groups[2].Success) { "-dev" } else { "" }) } else { (Get-Item $p).LastWriteTime.ToString("yyyy-MM-dd-HHmm") }
+        $stem = $name -replace '\.exe$',''
+        $dest = "$stem-$old.exe"
+        if (Test-Path (Join-Path "target\release" $dest)) { $dest = "$stem-$old-" + (Get-Date -Format "HHmm") + ".exe" }
+        Rename-Item $p $dest
+        Write-Host "kept the old $name as $dest"
     }
 }
 
