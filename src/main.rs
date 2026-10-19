@@ -1913,8 +1913,17 @@ impl App {
         if self.fullscreen_view() {
             return (0.0, 0.0, w, h);
         }
-        let side = self.sidebar_w();
+        // With the sidebar hidden until the mouse reaches the edge, the page
+        // takes the whole width: the sidebar slides in over it, so the page is
+        // never resized.
+        let hidden = self.settings.hide_sidebar && self.layout_kind().sidebar();
+        let side = if hidden { 0.0 } else { self.sidebar_w() };
         let right = self.settings.sidebar_side == "right";
+        let gap = if hidden {
+            self.settings.gap.max(chrome::layout::EDGE_BAND as u32)
+        } else {
+            self.settings.gap
+        };
         let (x, y, sw, sh) = chrome::layout::stage(
             self.layout_kind(),
             w as f32,
@@ -1922,7 +1931,7 @@ impl App {
             side as f32,
             right,
             self.top_h() as f32,
-            if self.settings.look == "glass" { self.settings.gap.max(10) } else { self.settings.gap } as f32,
+            if self.settings.look == "glass" { self.settings.gap.max(10) } else { gap } as f32,
         );
         (x as f64, y as f64, sw as f64, sh as f64)
     }
@@ -5040,6 +5049,12 @@ impl App {
                 }
             }
             Action::Sidebar => {
+                // With the sidebar hidden until the mouse reaches the edge, the
+                // key brings it in over the page instead of folding it.
+                if self.settings.hide_sidebar && self.layout_kind().sidebar() {
+                    self.chrome.show_sidebar();
+                    return;
+                }
                 let mut s = self.settings.clone();
                 s.compact = !s.compact;
                 self.apply_settings(s);

@@ -118,6 +118,10 @@ pub fn tab_width(avail: f32, n: usize, compact: bool) -> f32 {
 /// The gap that keeps the strip's fixed parts from touching each other.
 const GAP: f32 = 4.0;
 
+/// The band of chrome left at the edge of the window when the sidebar is
+/// hidden until the mouse reaches the edge: enough for the mouse to find it.
+pub const EDGE_BAND: f32 = 8.0;
+
 /// What the strip's fixed parts take on the right, so the tabs know what is left:
 /// the window buttons, the "+", the workspaces chip and the gap between them.
 pub fn strip_fixed(compact: bool, ws: bool) -> f32 {

@@ -97,5 +97,36 @@
   "trimmed": true,
   "tag": "job2",
   "scenario": "wiki"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "job3",
+  "scenario": "idle"
+ },
+ {
+  "mb": 195,
+  "procs": 9,
+  "trimmed": false,
+  "tag": "job3",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "job3b",
+  "scenario": "idle"
+ },
+ {
+  "mb": 27,
+  "procs": 3,
+  "tag": "job3c",
+  "scenario": "idle"
+ },
+ {
+  "mb": 28,
+  "procs": 3,
+  "tag": "master2b",
+  "scenario": "idle"
  }
 ]

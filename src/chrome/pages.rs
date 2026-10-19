@@ -319,6 +319,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("show_memory", "Memory readout", "The figure in the footer, above the buttons."),
             Toggle("footer_btns", "Footer buttons", "Downloads, bookmarks and settings."),
             Toggle("ws_row", "Workspace row", "The switcher at the top of the sidebar."),
+            Toggle("hide_sidebar", "Hide sidebar until the mouse reaches the edge", "The page takes the whole width. The sidebar slides in over it when the mouse reaches the edge, and goes again when it leaves. The vertical and hybrid layouts."),
             Reset("sidebar", "Reset the sidebar"),
         ]),
         ("Shape", vec![
@@ -1633,7 +1634,7 @@ fn group_keys(group: &str) -> &'static [&'static str] {
             "clock", "clock_24h", "clock_seconds", "date_format", "clock_font", "clock_size", "greeting", "ntp_bg", "wallpaper",
             "wallpaper_blur", "wallpaper_dim", "speed_dial", "dial_cols", "dial_tile", "ntp_search",
         ],
-        "sidebar" => &["tab_row_h", "show_favicons", "close_btn", "show_memory", "footer_btns", "ws_row"],
+        "sidebar" => &["tab_row_h", "show_favicons", "close_btn", "show_memory", "footer_btns", "ws_row", "hide_sidebar"],
         "shape" => &["density", "gap", "radius", "page_border"],
         "motion" => &["motion", "motion_speed", "motion_system"],
         _ => &[],

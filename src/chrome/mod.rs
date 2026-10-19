@@ -711,6 +711,16 @@ pub(crate) struct Inner {
     /// The memory glow's timer is armed: the number is over the hard line and
     /// the glow breathes.
     mem_pulse: bool,
+    /// The hidden sidebar: is it out, and when may it come in.
+    side_shown: bool,
+    /// The mouse is at the edge of the window: the sidebar waits there.
+    side_at_edge: bool,
+    /// The mouse is on the sidebar: it stays.
+    side_over: bool,
+    /// The key brought it in: it waits for the mouse.
+    side_forced: bool,
+    /// The hidden sidebar's slide: 0 is away, 1 is in.
+    side_slide: f32,
     /// Every animated value of the chrome.
     motion: Motion,
     animating: bool,
@@ -1597,6 +1607,11 @@ impl Chrome {
                 born: Instant::now(),
                 spinning: false,
                 mem_pulse: false,
+                side_shown: false,
+                side_at_edge: false,
+                side_over: false,
+                side_forced: false,
+                side_slide: 0.0,
                 motion: Motion::default(),
                 animating: false,
                 page: pages::Page::default(),
@@ -1970,6 +1985,15 @@ impl Chrome {
         unsafe {
             let _ = SetFocus(Some(i.palette_edit));
         }
+        i.invalidate();
+    }
+
+    /// The sidebar toggle key, with the sidebar hidden until the mouse reaches
+    /// the edge: the sidebar comes in over the page.
+    pub fn show_sidebar(&self) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        i.side_forced = true;
+        i.side_shown = true;
         i.invalidate();
     }
 }
@@ -2418,7 +2442,8 @@ impl Inner {
 
     /// The sidebar's rectangle, in chrome coordinates. None for a layout with no
     /// sidebar. The chrome covers the whole window, so this is always the edge
-    /// strip, with or without a panel open.
+    /// strip, with or without a panel open. A hidden sidebar waits off the edge
+    /// and slides in over the page.
     fn sidebar(&self) -> Option<R> {
         let s = self.state.as_ref()?;
         if !self.look.kind.sidebar() {
@@ -2427,7 +2452,11 @@ impl Inner {
         let (w, h) = self.size_dip();
         let sw = s.sidebar_w();
         let right = s.settings.sidebar_side == "right";
-        let x = if right { (w - sw).max(0.0) } else { 0.0 };
+        let mut x = if right { (w - sw).max(0.0) } else { 0.0 };
+        if self.side_slide < 1.0 {
+            let away = if right { w } else { -sw };
+            x = away + (x - away) * self.side_slide;
+        }
         match self.look.kind {
             Kind::Hybrid => {
                 let top = self.metrics().top();
@@ -2916,6 +2945,8 @@ impl Inner {
         }
         self.motion.set_config(lo.motion);
         self.motion.begin();
+        // The hidden sidebar slides in over the page, or out of the way.
+        self.slide_sidebar(s);
         // The workspace changed: the tab list cross-fades in its place.
         if self.last_ws != s.active_workspace {
             self.last_ws = s.active_workspace;
@@ -3180,10 +3211,91 @@ impl Inner {
         if self.look.ws_row { s.ws_h() } else { 0.0 }
     }
 
+    /// The sidebar is hidden until the mouse reaches the edge of the window:
+    /// the page has the whole width and the sidebar slides in over it.
+    fn hidden_sidebar(&self, s: &UiState) -> bool {
+        s.settings.hide_sidebar && self.look.kind.sidebar()
+    }
+
+    /// The hidden sidebar's slide: it comes in over the page and goes out
+    /// again. The page is never resized.
+    fn slide_sidebar(&mut self, s: &UiState) {
+        if !self.hidden_sidebar(s) {
+            self.side_slide = 1.0;
+            self.side_shown = true;
+            return;
+        }
+        // The dwell: a moment at the edge, so passing the mouse there does not
+        // bring the sidebar in.
+        let dwell = self.motion.enter(Id::Named("side-dwell"), Prop::Progress, 0.0, if self.side_at_edge { 1.0 } else { 0.0 }, 250, Ease::OutCubic);
+        // The mouse over the sidebar keeps it there, and so does the key. A
+        // menu, the address field or a drag keeps it too.
+        let hold = self.side_over || self.side_forced || self.side_busy();
+        let want = if dwell >= 1.0 || hold { 1.0 } else { 0.0 };
+        self.side_shown = want > 0.5;
+        self.side_slide = self.motion.enter(Id::Named("sidebar"), Prop::X, 0.0, want, 200, Ease::OutCubic);
+    }
+
+    /// The hidden sidebar follows the mouse: at the edge of the window it
+    /// waits a moment and then slides in; when the mouse leaves, it slides
+    /// away again.
+    fn side_mouse(&mut self, s: &UiState, x: f32, y: f32) {
+        if !self.hidden_sidebar(s) {
+            return;
+        }
+        let (w, h) = self.size_dip();
+        let right = s.settings.sidebar_side == "right";
+        let band = if right { w - x } else { x };
+        let at_edge = band <= layout::EDGE_BAND && y >= 0.0 && y <= h;
+        // On the sidebar as it is drawn: a hidden one waits off the edge, so
+        // the edge and the sidebar are two different places.
+        let over = self.sidebar().is_some_and(|sb| x >= sb.x && x <= sb.right() && y >= sb.y && y <= sb.bottom());
+        if self.side_at_edge != at_edge || self.side_over != over {
+            self.side_at_edge = at_edge;
+            self.side_over = over;
+            // The dwell starts on the next frame, and the frame has to come.
+            self.invalidate();
+        }
+        if !at_edge && !over {
+            // The mouse is elsewhere: the key's hold is over.
+            self.side_forced = false;
+        }
+    }
+
+    /// The mouse has left the sidebar: it goes away again, unless a menu, the
+    /// address field or a drag is in use.
+    fn side_leave(&mut self) {
+        self.side_at_edge = false;
+        self.side_over = false;
+        self.side_forced = false;
+        self.invalidate();
+    }
+
+    /// Something in the sidebar is in use: the sidebar stays where it is.
+    fn side_busy(&self) -> bool {
+        self.menu.is_some() || self.editing || self.drag.is_some()
+    }
+
+    /// The hidden sidebar is over the page: a shadow on the page's side, and
+    /// the chrome's window region is cut for it, so the sidebar shows on top
+    /// of the page without the page moving.
+    fn side_over_page(&mut self, s: &UiState, sb: R) {
+        let th = self.look.theme;
+        let right = s.settings.sidebar_side == "right";
+        let sh = if right { -8.0 } else { 8.0 };
+        self.gfx.round(R::new(sb.x + sh, sb.y, sb.w, sb.h), 0.0, th.shade.alpha(0.4));
+        let area = if right { R::new(sb.x - 8.0, sb.y, sb.w + 8.0, sb.h) } else { R::new(sb.x, sb.y, sb.w + 8.0, sb.h) };
+        self.floats.push((area, 0.0));
+    }
+
     fn draw_sidebar(&mut self, s: &UiState) {
         let Some(sb) = self.sidebar() else { return };
         let lo = self.look.clone();
         let th = lo.theme;
+        // Over the page: the shadow, and the region the chrome keeps for it.
+        if self.hidden_sidebar(s) && self.side_slide > 0.01 {
+            self.side_over_page(s, sb);
+        }
         // The sidebar's own colour; the page gaps behind the window keep `bg`. Glass draws a
         // frosted pane over its wallpaper instead.
         if lo.style == theme::Style::Glass {
@@ -3232,6 +3344,10 @@ impl Inner {
     fn draw_side_body(&mut self, s: &UiState) {
         let Some(sb) = self.sidebar() else { return };
         let lo = self.look.clone();
+        // Over the page: the shadow, and the region the chrome keeps for it.
+        if self.hidden_sidebar(s) && self.side_slide > 0.01 {
+            self.side_over_page(s, sb);
+        }
         self.gfx.fill(sb, lo.theme.side);
         let compact = s.compact();
         // A slim drag strip at the very top of the sidebar.
@@ -5153,6 +5269,10 @@ impl Inner {
 
     fn mouse_move(&mut self, x: f32, y: f32) {
         self.mouse = (x, y);
+        // The hidden sidebar follows the mouse.
+        if let Some(s) = self.state.clone() {
+            self.side_mouse(&s, x, y);
+        }
         if let Some(d) = &mut self.drag {
             d.dx = x - d.x0;
             d.dy = y - d.y0;
@@ -5331,6 +5451,16 @@ impl Inner {
             Hit::MediaTitle(id) => send(p, json!({"t": "activate", "id": id})),
             Hit::NewTab => send(p, json!({"t": "newtab"})),
             Hit::Sidebar => {
+                // With the sidebar hidden until the mouse reaches the edge, the
+                // button brings it in instead of folding it.
+                if let Some(s) = &self.state
+                    && self.hidden_sidebar(s)
+                {
+                    self.side_forced = true;
+                    self.side_shown = true;
+                    self.invalidate();
+                    return;
+                }
                 // The same change Ctrl+B makes: through the settings, so it is saved.
                 if let Some(s) = &self.state {
                     let mut st = s.settings.clone();
@@ -6064,6 +6194,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if i.hover.take().is_some() {
                     i.invalidate();
                 }
+                // The hidden sidebar: the mouse has left it.
+                i.side_leave();
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {

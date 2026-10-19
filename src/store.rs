@@ -79,6 +79,9 @@ pub struct Settings {
     pub sidebar_side: String,
     pub sidebar_width: u32,
     pub compact: bool,
+    /// Hide the sidebar until the mouse reaches the edge of the window. The
+    /// page takes the whole width; the sidebar slides in over it.
+    pub hide_sidebar: bool,
     /// Height of one tab row in the sidebar, in px.
     pub tab_row_h: u32,
     /// Draw the site's icon in a tab row (off: the letter tile only).
@@ -286,6 +289,7 @@ impl Default for Settings {
             sidebar_side: "left".into(),
             sidebar_width: 240,
             compact: false,
+            hide_sidebar: false,
             tab_row_h: 32,
             show_favicons: true,
             close_btn: "hover".into(),
