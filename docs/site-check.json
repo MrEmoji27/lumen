@@ -2,28 +2,31 @@
  {
   "site": "youtube",
   "adblock": true,
-  "load": 1879,
-  "lcp": 2896,
-  "longtasks": 18,
-  "blocked_ms": 2524,
-  "worst": 583,
-  "heap_mb": 168,
+  "load": 2192,
+  "lcp": 3088,
+  "longtasks": 10,
+  "blocked_ms": 1726,
+  "worst": 464,
+  "heap_mb": 112,
   "probe": {
    "ok": true,
-   "note": "video at 10.3s"
+   "note": "video at 9.0s"
   },
-  "mem_mb": 724,
-  "idle_cpu_pct": 2.23,
-  "errors": 6,
+  "mem_mb": 823,
+  "idle_cpu_pct": 2.5,
+  "idle_cpu_by": {
+   "lumen": 0.02,
+   "browser": 0.12,
+   "gpu": 0.91,
+   "utility": 0.08,
+   "renderer": 1.38
+  },
+  "errors": 30,
   "blocked": 20,
   "blocked_hosts": [
    [
     "www.youtube.com",
-    16
-   ],
-   [
-    "tpc.googlesyndication.com",
-    1
+    17
    ],
    [
     "static.doubleclick.net",
@@ -38,56 +41,79 @@
     1
    ]
   ],
+  "blocked_urls": [
+   "https://static.doubleclick.net/instream/ad_status.js",
+   "https://www.google.co.in/pagead/lvz?evtid=ACd6KtwF7Pi31mks1lqYWztKtbp6YZb-lK9A0kutQXugToaWYuWV8kX5xLGAeMj166fAgaMsTJSOHRL7U75B6f6u03v3tdzrBw&req_ts=1792385231&p",
+   "https://www.google.com/pagead/lvz?evtid=ACd6KtwF7Pi31mks1lqYWztKtbp6YZb-lK9A0kutQXugToaWYuWV8kX5xLGAeMj166fAgaMsTJSOHRL7U75B6f6u03v3tdzrBw&req_ts=1792385231&pg=",
+   "https://www.youtube.com/api/stats/qoe?cpn=6neQ0o28gOYA5rPb&el=detailpage&ns=yt&fexp=v1%2C100673025%2C-76668381%2C494890%2C14826320%2C11737789%2C31835%2C2821%2C1",
+   "https://www.youtube.com/api/stats/qoe?cpn=VLVB3uI-XBw7itEx&el=detailpage&ns=yt&fexp=v1%2C100673025%2C-76668381%2C494890%2C14826320%2C11737789%2C31835%2C2821%2C1",
+   "https://www.youtube.com/api/stats/qoe?fmt=244&afmt=251&cpn=a_DylELSCD5KOlXS&el=detailpage&ns=yt&fexp=v1%2C100673025%2C-76668381%2C494890%2C14826320%2C11737789%2",
+   "https://www.youtube.com/api/stats/qoe?fmt=244&afmt=251&cpn=sb2PNZQCFpj6i0r0&el=detailpage&ns=yt&fexp=v1%2C100673025%2C-76668381%2C494890%2C14826320%2C11737789%2",
+   "https://www.youtube.com/api/stats/qoe?fmt=302&afmt=251&cpn=a_DylELSCD5KOlXS&el=detailpage&ns=yt&fexp=v1%2C100673025%2C-76668381%2C494890%2C14826320%2C11737789%2",
+   "https://www.youtube.com/generate_204?17daaA",
+   "https://www.youtube.com/generate_204?g_9MQA",
+   "https://www.youtube.com/pagead/viewthroughconversion/962985656/?backend=innertube&cname=1&cver=2_20261016&foc_id=L2XnlScO9KV_el38fDdVYA&label=followon_view&ptyp",
+   "https://www.youtube.com/ptracking?html5=1&video_id=k5IzbrzH6x8&cpn=a_DylELSCD5KOlXS&ei=0KDVarKINM7d3LUPp4TNmAg&ptk=youtube_single&oid=F8w3XIe3TnhnUnCu9EW5sw&ptc",
+   "https://www.youtube.com/ptracking?html5=1&video_id=k5IzbrzH6x8&cpn=sb2PNZQCFpj6i0r0&ei=zKDVap3jN-CQssUPutXpyAg&ptk=youtube_single&oid=F8w3XIe3TnhnUnCu9EW5sw&ptc",
+   "https://www.youtube.com/youtubei/v1/log_event?alt=json"
+  ],
   "error_samples": [
    "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p",
    "Failed to load resource: net::ERR_FAILED",
-   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p",
+   "Access to fetch at 'https://rr1---sn-q4fl6nsl.googlevideo.com/videoplayback?expire=9908412313&ei=64fJluaFZErvmnnElT6NDHI&ip=61.95.34.19&id=o",
    "Failed to load resource: net::ERR_FAILED",
-   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p"
-  ]
+   "Access to fetch at 'https://rr1---sn-q4fl6nsl.googlevideo.com/videoplayback?expire=9908412313&ei=64fJluaFZErvmnnElT6NDHI&ip=61.95.34.19&id=o"
+  ],
+  "run": 1
  },
  {
   "site": "youtube",
   "adblock": false,
-  "load": 1870,
-  "lcp": 1644,
-  "longtasks": 15,
-  "blocked_ms": 1935,
-  "worst": 503,
-  "heap_mb": 160,
+  "load": 1732,
+  "lcp": 1564,
+  "longtasks": 10,
+  "blocked_ms": 1506,
+  "worst": 447,
+  "heap_mb": 152,
   "probe": {
    "ok": true,
-   "note": "video at 10.4s"
+   "note": "video at 8.3s"
   },
-  "mem_mb": 739,
-  "idle_cpu_pct": 3.95,
-  "errors": 6,
+  "mem_mb": 904,
+  "idle_cpu_pct": 0.75,
+  "idle_cpu_by": {
+   "browser": 0.02,
+   "gpu": 0.37,
+   "utility": 0.01,
+   "renderer": 0.35
+  },
+  "errors": 0,
   "blocked": 0,
   "blocked_hosts": [],
-  "error_samples": [
-   "Failed to load resource: the server responded with a status of 403 ()",
-   "Failed to load resource: the server responded with a status of 403 ()",
-   "Failed to load resource: the server responded with a status of 403 ()",
-   "Failed to load resource: the server responded with a status of 403 ()",
-   "Failed to load resource: the server responded with a status of 403 ()"
-  ]
+  "blocked_urls": [],
+  "error_samples": [],
+  "run": 1
  },
  {
   "site": "youtube-search",
   "adblock": true,
-  "load": 1459,
-  "lcp": 2180,
-  "longtasks": 10,
-  "blocked_ms": 1417,
-  "worst": 611,
-  "heap_mb": 99,
+  "load": 1393,
+  "lcp": 1956,
+  "longtasks": 9,
+  "blocked_ms": 1298,
+  "worst": 519,
+  "heap_mb": 112,
   "probe": {
    "ok": true,
    "note": "14 results"
   },
-  "mem_mb": 588,
-  "idle_cpu_pct": 0.09,
-  "errors": 28,
+  "mem_mb": 738,
+  "idle_cpu_pct": 0.12,
+  "idle_cpu_by": {
+   "lumen": 0.02,
+   "renderer": 0.1
+  },
+  "errors": 4,
   "blocked": 8,
   "blocked_hosts": [
    [
@@ -107,106 +133,67 @@
     1
    ]
   ],
+  "blocked_urls": [
+   "https://static.doubleclick.net/instream/ad_status.js",
+   "https://www.google.co.in/pagead/lvz?evtid=ACd6KtwjYQ8EzerqFtsdS2oQrlc94hajTx-36eZDJc6qnp2zYBVNuYfTRcSpPhsW3Smbux4DOKjnrZltHBKNjAhC75PmhUMRwA&req_ts=1792385287&p",
+   "https://www.google.com/pagead/lvz?evtid=ACd6KtwjYQ8EzerqFtsdS2oQrlc94hajTx-36eZDJc6qnp2zYBVNuYfTRcSpPhsW3Smbux4DOKjnrZltHBKNjAhC75PmhUMRwA&req_ts=1792385287&pg=",
+   "https://www.youtube.com/generate_204?CTVk4w",
+   "https://www.youtube.com/pagead/adview?ai=CkttQBqHVatHUNOPE3LUPg4jIyQOXqMuZigGKsurpsxOwkB8QASAAYOXq4wOCARdjYS1wdWItNjIxOTgxMTc0NzA0OTM3MaABlLfwyz2pApmmjUt-nUY-qA",
+   "https://www.youtube.com/pcs/activeview?xai=AKAOjsvtmfHQhCZ6-hHpP_KL1shstaFLCulczCRz3l3iDrAGpGr9TpTl5QidrpHmsvd5cYcsBG1GvzrSw3oQqi4orHM4RhpQFlzsny0UJcqt9t9H92dBp",
+   "https://www.youtube.com/youtubei/v1/log_event?alt=json"
+  ],
   "error_samples": [
    "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p",
    "Failed to load resource: net::ERR_FAILED",
-   "Access to fetch at 'https://rr5---sn-q4fl6nz6.googlevideo.com/videoplayback?expire=7775210569&ei=fGl1XEvvMHgRrDJ2jZ43wwA&ip=6.84.69.87&id=o-",
-   "Failed to load resource: net::ERR_FAILED",
-   "Access to fetch at 'https://rr5---sn-q4fl6nz6.googlevideo.com/videoplayback?expire=7775210569&ei=fGl1XEvvMHgRrDJ2jZ43wwA&ip=6.84.69.87&id=o-"
-  ]
+   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://www.youtube.com' has been blocked by CORS p",
+   "Failed to load resource: net::ERR_FAILED"
+  ],
+  "run": 1
  },
  {
   "site": "youtube-search",
   "adblock": false,
-  "load": 1442,
-  "lcp": 2004,
-  "longtasks": 10,
-  "blocked_ms": 1457,
-  "worst": 643,
-  "heap_mb": 112,
+  "load": 2661,
+  "lcp": 2072,
+  "longtasks": 9,
+  "blocked_ms": 1340,
+  "worst": 547,
+  "heap_mb": 136,
   "probe": {
    "ok": true,
-   "note": "13 results"
+   "note": "17 results"
   },
-  "mem_mb": 554,
-  "idle_cpu_pct": 0.05,
+  "mem_mb": 699,
+  "idle_cpu_pct": 0.36,
+  "idle_cpu_by": {
+   "browser": 0.04,
+   "utility": 0.01,
+   "renderer": 0.31
+  },
   "errors": 0,
   "blocked": 0,
   "blocked_hosts": [],
-  "error_samples": []
- },
- {
-  "site": "ytmusic",
-  "adblock": true,
-  "load": 2272,
-  "lcp": 2224,
-  "longtasks": 7,
-  "blocked_ms": 1047,
-  "worst": 386,
-  "heap_mb": 67,
-  "probe": {
-   "ok": true,
-   "note": "67 items"
-  },
-  "mem_mb": 447,
-  "idle_cpu_pct": 0.04,
-  "errors": 2,
-  "blocked": 4,
-  "blocked_hosts": [
-   [
-    "music.youtube.com",
-    2
-   ],
-   [
-    "www.googletagmanager.com",
-    1
-   ],
-   [
-    "static.doubleclick.net",
-    1
-   ]
-  ],
-  "error_samples": [
-   "Access to XMLHttpRequest at 'https://googleads.g.doubleclick.net/pagead/id' from origin 'https://music.youtube.com' has been blocked by CORS",
-   "Failed to load resource: net::ERR_FAILED"
-  ]
- },
- {
-  "site": "ytmusic",
-  "adblock": false,
-  "load": 2239,
-  "lcp": 2204,
-  "longtasks": 7,
-  "blocked_ms": 1056,
-  "worst": 407,
-  "heap_mb": 75,
-  "probe": {
-   "ok": true,
-   "note": "67 items"
-  },
-  "mem_mb": 455,
-  "idle_cpu_pct": 0.14,
-  "errors": 0,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": []
+  "blocked_urls": [],
+  "error_samples": [],
+  "run": 1
  },
  {
   "site": "google",
   "adblock": true,
-  "load": 1305,
-  "lcp": 1160,
+  "load": 1146,
+  "lcp": 1456,
   "longtasks": 3,
-  "blocked_ms": 270,
-  "worst": 124,
+  "blocked_ms": 262,
+  "worst": 114,
   "heap_mb": 37,
   "probe": {
    "ok": true,
    "note": "9 results"
   },
-  "mem_mb": 265,
-  "idle_cpu_pct": 0.01,
-  "errors": 18,
+  "mem_mb": 338,
+  "idle_cpu_pct": 0.0,
+  "idle_cpu_by": {},
+  "errors": 16,
   "blocked": 12,
   "blocked_hosts": [
    [
@@ -218,265 +205,128 @@
     1
    ]
   ],
+  "blocked_urls": [
+   "https://www.google.com/client_204?atyp=i&biw=1112&bih=815&dpr=1.25&ei=PqHVaoHiCeagnesPnee2yQg&opi=89978449",
+   "https://www.google.com/gen_204?atyp=csi&scifi=W1tbMTc5MjM4NTM0MjE2MDAwMSwxMjQyMTEzMDIsMjMwMTQ3MzY5M10sdHJ1ZSwwLDMsMF1d&ei=PqHVaoHiCeagnesPnee2yQg&s=web&t=all&sg",
+   "https://www.google.com/gen_204?atyp=i&ct=psnt&cad=&nt=navigate&ei=PqHVaoHiCeagnesPnee2yQg&zx=1792385343337&opi=89978449",
+   "https://www.google.com/gen_204?atyp=i&scifi=W1tbMTc5MjM4NTM0MjE2MDAwMSwxMjQyMTEzMDIsMjMwMTQ3MzY5M10sdHJ1ZSwwLDMsMF1d&ei=PqHVaoHiCeagnesPnee2yQg&errsrp-init=init",
+   "https://www.google.com/gen_204?atyp=i&scifi=W1tbMTc5MjM4NTM0MjE2MDAwMSwxMjQyMTEzMDIsMjMwMTQ3MzY5M10sdHJ1ZSwwLDMsMF1d&ei=PqHVaoHiCeagnesPnee2yQg&pcon=0&dt19=3&pr",
+   "https://www.google.com/gen_204?atyp=i&scifi=W1tbMTc5MjM4NTM0MjE2MDAwMSwxMjQyMTEzMDIsMjMwMTQ3MzY5M10sdHJ1ZSwwLDMsMF1d&ei=PqHVaoHiCeagnesPnee2yQg&vet=12ahUKEwiB-f",
+   "https://www.google.com/gen_204?atyp=i&scifi=W1tbMTc5MjM4NTM0MjE2MDAwMSwxMjQyMTEzMDIsMjMwMTQ3MzY5M10sdHJ1ZSwwLDMsMF1d&ei=PqHVaoHiCeagnesPnee2yQg&vet=12ahUKEwjQkI",
+   "https://www.google.com/gen_204?s=async&astyp=folsrch&t=all&atyp=csi&ei=PqHVatD5GsSTseMP8sGZ8Q4&rt=ipf.-361,ipfr.1,ttfb.1,st.10,sirt-mul.18,irfi.18,irli.778,sirt",
+   "https://www.google.com/gen_204?s=async&astyp=folsrch&t=sirt-mfl&atyp=csi&ei=PqHVatD5GsSTseMP8sGZ8Q4&rt=ipf.-361,ipfr.1,ttfb.1,st.10,sirt-mul.18,irfi.18,sirt-aim",
+   "https://www.google.com/gen_204?s=web&t=aft&atyp=csi&ei=PqHVaoHiCeagnesPnee2yQg&rt=wsrt.109,hst.14,sgsrt.194,sgl.379,sct.167,frts.177,frvt.177,prt.209,afts.182,a",
+   "https://www.google.com/pagead/1p-conversion/16521530460/?gad_source=1&adview_type=4&adview_query_id=CMLTgN2jxZcDFYYzgwMd12ccnQ",
+   "https://www.googleadservices.com/pagead/conversion/16521530460/?gad_source=1&adview_type=1&adview_query_id=CMLTgN2jxZcDFYYzgwMd12ccnQ"
+  ],
   "error_samples": [
-   "Access to XMLHttpRequest at 'https://ep1.adtrafficquality.google/getconfig/sodar?sv=200&tid=oos&tv=2563&st=cr_env&sjk=tfLUasf9HJSSseMP9p6YyQ",
+   "Access to XMLHttpRequest at 'https://ep1.adtrafficquality.google/getconfig/sodar?sv=200&tid=oos&tv=2563&st=cr_env&sjk=PqHVaoHiCeagnesPnee2yQ",
    "Failed to load resource: net::ERR_FAILED",
    "Access to XMLHttpRequest at 'https://play.google.com/log?format=json&hasfast=true' from origin 'https://www.google.com' has been blocked by ",
    "Failed to load resource: net::ERR_FAILED",
    "Access to XMLHttpRequest at 'https://play.google.com/log?format=json&hasfast=true&authuser=0' from origin 'https://www.google.com' has been "
-  ]
+  ],
+  "run": 1
  },
  {
   "site": "google",
   "adblock": false,
-  "load": 736,
-  "lcp": 1792,
-  "longtasks": 21,
-  "blocked_ms": 1187,
-  "worst": 116,
-  "heap_mb": 54,
+  "load": 1391,
+  "lcp": 1500,
+  "longtasks": 4,
+  "blocked_ms": 305,
+  "worst": 112,
+  "heap_mb": 36,
   "probe": {
    "ok": true,
    "note": "9 results"
   },
-  "mem_mb": 437,
-  "idle_cpu_pct": 0.02,
+  "mem_mb": 351,
+  "idle_cpu_pct": 0.01,
+  "idle_cpu_by": {
+   "browser": 0.01
+  },
   "errors": 0,
   "blocked": 0,
   "blocked_hosts": [],
-  "error_samples": []
+  "blocked_urls": [],
+  "error_samples": [],
+  "run": 1
  },
  {
-  "site": "gmail",
+  "site": "reddit",
   "adblock": true,
-  "load": 2010,
-  "lcp": 1444,
+  "load": 1056,
+  "lcp": 600,
   "longtasks": 1,
-  "blocked_ms": 83,
-  "worst": 83,
-  "heap_mb": 19,
+  "blocked_ms": 64,
+  "worst": 64,
+  "heap_mb": 10,
   "probe": {
-   "ok": true,
-   "note": "accounts.google.com"
+   "ok": false,
+   "note": "0 posts, 0 ad bits"
   },
-  "mem_mb": 246,
-  "idle_cpu_pct": 0.04,
-  "errors": 2,
-  "blocked": 1,
-  "blocked_hosts": [
-   [
-    "accounts.google.com",
-    1
-   ]
-  ],
-  "error_samples": [
-   "Access to fetch at 'https://play.google.com/log?format=json&hasfast=true&authuser=0' from origin 'https://accounts.google.com' has been bloc",
-   "Failed to load resource: net::ERR_FAILED"
-  ]
- },
- {
-  "site": "gmail",
-  "adblock": false,
-  "load": 2427,
-  "lcp": 2016,
-  "longtasks": 1,
-  "blocked_ms": 85,
-  "worst": 85,
-  "heap_mb": 18,
-  "probe": {
-   "ok": true,
-   "note": "accounts.google.com"
+  "mem_mb": 339,
+  "idle_cpu_pct": 0.11,
+  "idle_cpu_by": {
+   "lumen": 0.01,
+   "browser": 0.03,
+   "renderer": 0.07
   },
-  "mem_mb": 242,
-  "idle_cpu_pct": 0.0,
   "errors": 0,
   "blocked": 0,
   "blocked_hosts": [],
-  "error_samples": []
+  "blocked_urls": [],
+  "error_samples": [],
+  "run": 1
  },
  {
-  "site": "instagram",
-  "adblock": true,
-  "load": 799,
-  "lcp": 764,
-  "longtasks": 1,
-  "blocked_ms": 67,
-  "worst": 67,
-  "heap_mb": 30,
-  "probe": {
-   "ok": true,
-   "note": "login form"
-  },
-  "mem_mb": 233,
-  "idle_cpu_pct": 0.16,
-  "errors": 0,
-  "blocked": 5,
-  "blocked_hosts": [
-   [
-    "www.instagram.com",
-    5
-   ]
-  ],
-  "error_samples": []
- },
- {
-  "site": "instagram",
+  "site": "reddit",
   "adblock": false,
-  "load": 810,
-  "lcp": 736,
+  "load": 965,
+  "lcp": 480,
   "longtasks": 1,
-  "blocked_ms": 70,
-  "worst": 70,
-  "heap_mb": 30,
+  "blocked_ms": 61,
+  "worst": 61,
+  "heap_mb": 10,
   "probe": {
-   "ok": true,
-   "note": "login form"
+   "ok": false,
+   "note": "0 posts, 0 ad bits"
   },
-  "mem_mb": 230,
+  "mem_mb": 328,
   "idle_cpu_pct": 0.17,
+  "idle_cpu_by": {
+   "lumen": 0.05,
+   "browser": 0.01,
+   "renderer": 0.11
+  },
   "errors": 0,
   "blocked": 0,
   "blocked_hosts": [],
-  "error_samples": []
- },
- {
-  "site": "discord",
-  "adblock": true,
-  "load": 2429,
-  "lcp": 3932,
-  "longtasks": 4,
-  "blocked_ms": 1229,
-  "worst": 612,
-  "heap_mb": 96,
-  "probe": {
-   "ok": true,
-   "note": "login form"
-  },
-  "mem_mb": 432,
-  "idle_cpu_pct": 0.04,
-  "errors": 0,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": []
- },
- {
-  "site": "discord",
-  "adblock": false,
-  "load": 2161,
-  "lcp": 3320,
-  "longtasks": 3,
-  "blocked_ms": 928,
-  "worst": 480,
-  "heap_mb": 92,
-  "probe": {
-   "ok": true,
-   "note": "login form"
-  },
-  "mem_mb": 452,
-  "idle_cpu_pct": 0.03,
-  "errors": 0,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": []
- },
- {
-  "site": "reddit",
-  "adblock": true,
-  "load": 937,
-  "lcp": 344,
-  "longtasks": 1,
-  "blocked_ms": 60,
-  "worst": 60,
-  "heap_mb": 12,
-  "probe": {
-   "ok": false,
-   "note": "0 posts"
-  },
-  "mem_mb": 271,
-  "idle_cpu_pct": 0.07,
-  "errors": 0,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": []
- },
- {
-  "site": "reddit",
-  "adblock": false,
-  "load": 995,
-  "lcp": 336,
-  "longtasks": 1,
-  "blocked_ms": 67,
-  "worst": 67,
-  "heap_mb": 12,
-  "probe": {
-   "ok": false,
-   "note": "0 posts"
-  },
-  "mem_mb": 288,
-  "idle_cpu_pct": 0.04,
-  "errors": 0,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": []
- },
- {
-  "site": "x",
-  "adblock": true,
-  "load": 823,
-  "lcp": 640,
-  "longtasks": 5,
-  "blocked_ms": 493,
-  "worst": 141,
-  "heap_mb": 21,
-  "probe": {
-   "ok": true,
-   "note": "373 chars"
-  },
-  "mem_mb": 331,
-  "idle_cpu_pct": 5.2,
-  "errors": 2,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": [
-   "Access to fetch at 'https://o30969.ingest.us.sentry.io/api/4511225020219392/envelope/?sentry_version=7&sentry_key=b523016f172e2f101d4f771b02",
-   "Failed to load resource: net::ERR_FAILED"
-  ]
- },
- {
-  "site": "x",
-  "adblock": false,
-  "load": 806,
-  "lcp": 620,
-  "longtasks": 5,
-  "blocked_ms": 432,
-  "worst": 132,
-  "heap_mb": 21,
-  "probe": {
-   "ok": true,
-   "note": "373 chars"
-  },
-  "mem_mb": 323,
-  "idle_cpu_pct": 4.03,
-  "errors": 0,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": []
+  "blocked_urls": [],
+  "error_samples": [],
+  "run": 1
  },
  {
   "site": "github",
   "adblock": true,
-  "load": 3072,
-  "lcp": 2796,
-  "longtasks": 1,
-  "blocked_ms": 136,
-  "worst": 136,
-  "heap_mb": 26,
+  "load": 1261,
+  "lcp": 1308,
+  "longtasks": 2,
+  "blocked_ms": 216,
+  "worst": 164,
+  "heap_mb": 24,
   "probe": {
    "ok": true,
    "note": "readme"
   },
-  "mem_mb": 272,
-  "idle_cpu_pct": 0.0,
+  "mem_mb": 353,
+  "idle_cpu_pct": 0.05,
+  "idle_cpu_by": {
+   "lumen": 0.02,
+   "browser": 0.02,
+   "renderer": 0.01
+  },
   "errors": 1,
   "blocked": 4,
   "blocked_hosts": [
@@ -489,37 +339,45 @@
     1
    ]
   ],
+  "blocked_urls": [
+   "https://api.github.com/_private/browser/stats",
+   "https://collector.github.com/github/collect"
+  ],
   "error_samples": [
    "Failed to load resource: the server responded with a status of 404 ()"
-  ]
+  ],
+  "run": 1
  },
  {
   "site": "github",
   "adblock": false,
-  "load": 1654,
-  "lcp": 1344,
-  "longtasks": 3,
-  "blocked_ms": 245,
-  "worst": 135,
-  "heap_mb": 21,
+  "load": 728,
+  "lcp": 828,
+  "longtasks": 4,
+  "blocked_ms": 343,
+  "worst": 154,
+  "heap_mb": 22,
   "probe": {
    "ok": true,
    "note": "readme"
   },
-  "mem_mb": 254,
-  "idle_cpu_pct": 0.04,
+  "mem_mb": 355,
+  "idle_cpu_pct": 0.0,
+  "idle_cpu_by": {},
   "errors": 1,
   "blocked": 0,
   "blocked_hosts": [],
+  "blocked_urls": [],
   "error_samples": [
    "Failed to load resource: the server responded with a status of 404 ()"
-  ]
+  ],
+  "run": 1
  },
  {
   "site": "wikipedia",
   "adblock": true,
-  "load": 824,
-  "lcp": 660,
+  "load": 817,
+  "lcp": 684,
   "longtasks": 0,
   "blocked_ms": 0,
   "worst": 0,
@@ -528,8 +386,9 @@
    "ok": true,
    "note": "119 paragraphs"
   },
-  "mem_mb": 211,
-  "idle_cpu_pct": 0.02,
+  "mem_mb": 277,
+  "idle_cpu_pct": 0.0,
+  "idle_cpu_by": {},
   "errors": 0,
   "blocked": 1,
   "blocked_hosts": [
@@ -538,13 +397,17 @@
     1
    ]
   ],
-  "error_samples": []
+  "blocked_urls": [
+   "https://en.wikipedia.org/ins-502b/v2/events?hasty=true"
+  ],
+  "error_samples": [],
+  "run": 1
  },
  {
   "site": "wikipedia",
   "adblock": false,
-  "load": 603,
-  "lcp": 500,
+  "load": 561,
+  "lcp": 604,
   "longtasks": 0,
   "blocked_ms": 0,
   "worst": 0,
@@ -553,126 +416,14 @@
    "ok": true,
    "note": "119 paragraphs"
   },
-  "mem_mb": 210,
-  "idle_cpu_pct": 0.02,
+  "mem_mb": 269,
+  "idle_cpu_pct": 0.0,
+  "idle_cpu_by": {},
   "errors": 0,
   "blocked": 0,
   "blocked_hosts": [],
-  "error_samples": []
- },
- {
-  "site": "twitch",
-  "adblock": true,
-  "load": 889,
-  "lcp": 1864,
-  "longtasks": 5,
-  "blocked_ms": 643,
-  "worst": 231,
-  "heap_mb": 74,
-  "probe": {
-   "ok": true,
-   "note": "65 cards"
-  },
-  "mem_mb": 931,
-  "idle_cpu_pct": -0.34,
-  "errors": 4,
-  "blocked": 2,
-  "blocked_hosts": [
-   [
-    "s.amazon-adsystem.com",
-    1
-   ],
-   [
-    "sb.scorecardresearch.com",
-    1
-   ]
-  ],
-  "error_samples": [
-   "Access to fetch at 'https://edge.ads.twitch.tv/ads/format?dur=123&geoc=IN&did=c5cbb22970fb49f791c37685cbafc828&dt=2&afmt=DIRECTORY_BANNER&pi",
-   "Failed to load resource: net::ERR_FAILED",
-   "Access to fetch at 'https://edge.ads.twitch.tv/ads?dur=60&geoc=IN&did=c5cbb22970fb49f791c37685cbafc828&dt=2&afmt=OUTSTREAM_BROWSE_PAGE_VIDEO",
-   "Failed to load resource: net::ERR_FAILED"
-  ]
- },
- {
-  "site": "twitch",
-  "adblock": false,
-  "load": 830,
-  "lcp": 1744,
-  "longtasks": 3,
-  "blocked_ms": 482,
-  "worst": 217,
-  "heap_mb": 79,
-  "probe": {
-   "ok": true,
-   "note": "65 cards"
-  },
-  "mem_mb": 907,
-  "idle_cpu_pct": -0.39,
-  "errors": 0,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": []
- },
- {
-  "site": "spotify",
-  "adblock": true,
-  "load": 4956,
-  "lcp": 4120,
-  "longtasks": 8,
-  "blocked_ms": 1177,
-  "worst": 408,
-  "heap_mb": 53,
-  "probe": {
-   "ok": true,
-   "note": "2451 chars"
-  },
-  "mem_mb": 507,
-  "idle_cpu_pct": 1.01,
-  "errors": 29,
-  "blocked": 3,
-  "blocked_hosts": [
-   [
-    "open.spotifycdn.com",
-    1
-   ],
-   [
-    "www.googletagmanager.com",
-    1
-   ],
-   [
-    "cdn.cookielaw.org",
-    1
-   ]
-  ],
-  "error_samples": [
-   "Access to fetch at 'https://o22381.ingest.sentry.io/api/114855/envelope/?sentry_version=7&sentry_key=de32132fc06e4b28965ecf25332c3a25&sentry",
-   "Failed to load resource: net::ERR_FAILED",
-   "Access to fetch at 'https://gae2-spclient.spotify.com/gabo-receiver-service/public/v3/events' from origin 'https://open.spotify.com' has bee",
-   "Failed to load resource: net::ERR_FAILED",
-   "Access to XMLHttpRequest at 'https://geolocation.onetrust.com/cookieconsentpub/v1/geo/location' from origin 'https://open.spotify.com' has b"
-  ]
- },
- {
-  "site": "spotify",
-  "adblock": false,
-  "load": 2075,
-  "lcp": 2944,
-  "longtasks": 6,
-  "blocked_ms": 596,
-  "worst": 204,
-  "heap_mb": 56,
-  "probe": {
-   "ok": true,
-   "note": "2702 chars"
-  },
-  "mem_mb": 549,
-  "idle_cpu_pct": 1.04,
-  "errors": 1,
-  "blocked": 0,
-  "blocked_hosts": [],
-  "error_samples": [
-   "Uncaught (in promise) undefined"
-  ]
+  "blocked_urls": [],
+  "error_samples": [],
+  "run": 1
  }
 ]

@@ -350,6 +350,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("accelerate_downloads", "Accelerate downloads", "aria2 splits files into up to 16 connections, resumes, and queues. Falls back to the built-in downloader when a site refuses it."),
             Toggle("keep_seeding", "Share torrents back after they finish", "Until ratio 1.0 or one hour, whichever first. Applies on next start."),
             Range("download_limit_kbps", "Download speed limit", "Caps aria2, the download engine. 0 is no limit.", Scale::Steps(DL_SPEEDS), "kbps"),
+            Toggle("trim_watched", "Trim the page you are watching when you are away from the mouse and keyboard", "Measured on YouTube: 638 MB to about 400. The page comes back from disk when you touch mouse or keyboard again: a brief stutter, then as it was."),
             Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),
             Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
             Toggle("battery_saver", "Battery saver", "On battery, or with Windows' battery saver on: hidden tabs freeze after 1 minute and unload after 10, and motion is reduced. A leaf in the footer says so."),
