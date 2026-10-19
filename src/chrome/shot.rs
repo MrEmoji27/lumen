@@ -26,6 +26,17 @@ fn fake_has(what: &str) -> bool {
     std::env::var("LUMEN_TEST_FAKE").is_ok_and(|v| v.split(',').any(|x| x.trim() == what))
 }
 
+/// A count in the fake data: `LUMEN_TEST_FAKE=tabs:8` asks for eight plain tabs,
+/// `pins:3` for three pinned ones. A layout can then be looked at with a known
+/// number of tabs in it.
+fn fake_count(what: &str) -> Option<usize> {
+    let v = std::env::var("LUMEN_TEST_FAKE").ok()?;
+    v.split(',')
+        .filter_map(|x| x.trim().split_once(':'))
+        .find(|(k, _)| *k == what)
+        .and_then(|(_, n)| n.trim().parse().ok())
+}
+
 /// After a real paint: if nothing is moving, arm the one-shot timer. Every paint resets it,
 /// so the file always holds the last settled frame.
 pub fn after_paint(i: &Inner) {
@@ -280,31 +291,43 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
 
 /// Sample data, appended to what the browser really has.
 pub fn fake(s: &mut UiState) {
+    let t = |id: u64, title: &str, url: &str| UiTab {
+        id,
+        title: title.into(),
+        url: url.into(),
+        loading: false,
+        back: false,
+        fwd: false,
+        pinned: false,
+        pin_away: false,
+        audio: false,
+        muted: false,
+        call: false,
+        status: "live",
+        agent: false,
+        agent_ok: false,
+        reader: false,
+        private: false,
+        split: false,
+        translated: false,
+        translating: false,
+        servo: false,
+        owner: String::new(),
+        owner_name: String::new(),
+    };
+    // A known number of plain tabs, for a layout that has to hold them.
+    if let Some(n) = fake_count("tabs") {
+        for i in 0..n {
+            s.tabs.push(t(9500 + i as u64, &format!("Tab {}", i + 1), &format!("https://site{}.example/", i + 1)));
+        }
+    }
+    // And a known number of pinned ones.
+    if let Some(n) = fake_count("pins") {
+        for i in 0..n {
+            s.tabs.push(UiTab { pinned: true, ..t(9600 + i as u64, &format!("Pin {}", i + 1), &format!("https://pin{}.example/", i + 1)) });
+        }
+    }
     if fake_has("tabs") {
-        let t = |id: u64, title: &str, url: &str| UiTab {
-            id,
-            title: title.into(),
-            url: url.into(),
-            loading: false,
-            back: false,
-            fwd: false,
-            pinned: false,
-            pin_away: false,
-            audio: false,
-            muted: false,
-            call: false,
-            status: "live",
-            agent: false,
-            agent_ok: false,
-            reader: false,
-            private: false,
-            split: false,
-            translated: false,
-            translating: false,
-            servo: false,
-            owner: String::new(),
-            owner_name: String::new(),
-        };
         let mut v = vec![
             UiTab { pinned: true, ..t(9001, "Mail", "https://mail.example.com/") },
             UiTab { pinned: true, audio: true, ..t(9002, "Music", "https://music.example.com/") },

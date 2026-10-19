@@ -115,16 +115,20 @@ pub fn tab_width(avail: f32, n: usize, compact: bool) -> f32 {
     (avail / n as f32).clamp(min, max)
 }
 
-/// What the strip's fixed parts take, so the tabs know what is left.
+/// The gap that keeps the strip's fixed parts from touching each other.
+const GAP: f32 = 4.0;
+
+/// What the strip's fixed parts take on the right, so the tabs know what is left:
+/// the window buttons, the "+", the workspaces chip and the gap between them.
 pub fn strip_fixed(compact: bool, ws: bool) -> f32 {
-    let wins = if compact { 3.0 * 32.0 } else { 3.0 * 40.0 };
+    let win = if compact { 26.0 } else { 30.0 };
     let plus = if compact { 30.0 } else { 34.0 };
     let chip = if ws { if compact { 34.0 } else { 40.0 } } else { 0.0 };
-    wins + plus + chip + 8.0
+    3.0 * (win + 1.0) + plus + chip + GAP
 }
 
 /// The horizontal strip's rectangles: pinned tabs (icon only), the tabs, the
-/// "+", the workspaces chip, then the window buttons, right to left.
+/// "+", the workspaces chip, then the window buttons, left to right.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Strip {
     /// One rectangle per pinned tab, in order.
@@ -141,34 +145,43 @@ pub struct Strip {
 /// (unpinned), `pins` the pinned count. Tabs never overlap and never leave the
 /// strip; the window buttons always get their room.
 pub fn strip(area: R, pins: usize, tabs: usize, compact: bool, ws: bool) -> Strip {
-    let (win_btn, pad) = if compact { (30.0, 2.0) } else { (38.0, 4.0) };
-    let wins = R::new(area.right() - pad - 3.0 * win_btn, area.y, 3.0 * win_btn, area.h);
-    let mut x = area.x + pad;
+    let pad = if compact { 2.0 } else { 4.0 };
+    let win = if compact { 26.0 } else { 30.0 };
+    let wins_w = 3.0 * (win + 1.0);
+    let wins = R::new(area.right() - pad - wins_w, area.y, wins_w, area.h);
     let pin_w = if compact { 32.0 } else { 38.0 };
+    let plus_w = if compact { 30.0 } else { 34.0 };
+    let chip_w = if compact { 34.0 } else { 40.0 };
+    // Pinned tabs first, as small icon cells. The ones that do not fit are left
+    // out: the strip has no second row to give them.
+    let mut x = area.x + pad;
     let mut pinned = Vec::new();
     for _ in 0..pins {
-        let r = R::new(x, area.y + 1.0, pin_w - 2.0, area.h - 2.0);
-        pinned.push(r);
-        x += pin_w;
         if x + pin_w > wins.x {
             break;
         }
+        pinned.push(R::new(x, area.y + 1.0, pin_w - 2.0, area.h - 2.0));
+        x += pin_w;
     }
-    let fixed = strip_fixed(compact, ws) + pins as f32 * pin_w;
-    let avail = (wins.x - area.x - fixed).max(0.0);
+    // The workspaces chip stands at the far right, by the window buttons, and the
+    // "+" follows the tabs. The tabs get the room between the pins and the "+",
+    // so neither the chip nor the button can land on top of one of them.
+    let plus_x = area.right() - pad - strip_fixed(compact, ws);
+    let chip_x = plus_x + GAP + plus_w;
+    let avail = (plus_x - x).max(0.0);
     let tw = tab_width(avail, tabs, compact);
     let mut tabs_r = Vec::new();
     for _ in 0..tabs {
-        if x + (if compact { 20.0 } else { 28.0 }) > wins.x {
+        // A tab that does not fit whole is not drawn at all: half a tab is worse
+        // than no tab.
+        if x + tw > plus_x + 0.01 {
             break;
         }
-        let w = tw.min(wins.x - x);
-        tabs_r.push(R::new(x, area.y + 1.0, w, area.h - 2.0));
-        x += w;
+        tabs_r.push(R::new(x, area.y + 1.0, tw, area.h - 2.0));
+        x += tw;
     }
-    let plus_w = if compact { 30.0 } else { 34.0 };
-    let plus = R::new(x.min(wins.x - plus_w), area.y, plus_w, area.h);
-    let ws_r = ws.then(|| R::new((plus.x - if compact { 34.0 } else { 40.0 }).max(area.x), area.y, if compact { 34.0 } else { 40.0 }, area.h));
+    let plus = R::new(x.min(plus_x), area.y, plus_w, area.h);
+    let ws_r = ws.then(|| R::new(chip_x, area.y, chip_w, area.h));
     Strip { pinned, tabs: tabs_r, plus, ws: ws_r, wins }
 }
 
@@ -243,7 +256,9 @@ mod tests {
         // The pinned tabs are icon-sized, the + and the chip follow the tabs.
         assert!(s.pinned[0].w < s.tabs[0].w);
         assert!(s.plus.x >= last_right - 0.5);
-        assert!(s.ws.is_some_and(|w| w.x < s.plus.x));
+        // The chip stands at the far right, by the window buttons: it never lands
+        // on a tab.
+        assert!(s.ws.is_some_and(|w| w.x >= s.plus.right()));
         assert!(s.plus.right() <= s.wins.x + 0.01);
         // The window buttons are the rightmost thing in the strip.
         assert!(s.wins.right() <= area.right());
@@ -273,7 +288,46 @@ mod tests {
         }
         // The + button and the chip do not overlap.
         if let Some(ws) = s.ws {
-            assert!(ws.right() <= s.plus.x, "the workspace chip overlaps the + button");
+            assert!(ws.x >= s.plus.right(), "the workspace chip overlaps the + button");
+            assert!(ws.right() <= s.wins.x + 0.01, "the workspace chip runs into the window buttons");
         }
+    }
+
+    #[test]
+    fn the_strip_gives_the_tabs_the_room_they_need() {
+        // Eight tabs in a 1280 wide window: they fill the room between the pins
+        // and the "+", with no gap and no overlap.
+        let area = R::new(0.0, 0.0, 1280.0, 38.0);
+        let s = strip(area, 0, 8, false, true);
+        assert_eq!(s.tabs.len(), 8);
+        let last = s.tabs.last().expect("tabs");
+        assert!((last.right() - s.plus.x).abs() < 0.5, "the tabs do not fill the strip: {last:?} plus {:?}", s.plus);
+        // The chip is at the far right, by the window buttons, and clear of the "+".
+        let ws = s.ws.expect("a chip");
+        assert_eq!(ws.right(), s.wins.x, "the chip does not stand by the window buttons");
+        assert!(ws.x >= s.plus.right(), "the chip sits on the + button");
+        // The same strip without workspaces: the "+" takes the chip's place.
+        let s = strip(area, 0, 8, false, false);
+        assert!(s.ws.is_none());
+        assert!(s.plus.right() <= s.wins.x);
+        // Compact: the same shape, smaller.
+        let s = strip(area, 0, 8, true, true);
+        assert_eq!(s.tabs.len(), 8);
+        assert!(s.ws.is_some_and(|w| w.x >= s.plus.right()));
+    }
+
+    #[test]
+    fn a_tab_is_never_cut_in_half() {
+        // Forty tabs in 1280 pixels do not fit: the ones that fit keep their
+        // width, and the last one is not sliced.
+        let area = R::new(0.0, 0.0, 1280.0, 38.0);
+        let s = strip(area, 0, 40, false, false);
+        assert!(s.tabs.len() < 40, "all forty fit? the room is wrong");
+        assert!(s.tabs.iter().all(|r| r.w >= 56.0 - 0.01), "a tab fell below the floor");
+        // Every tab is the same width: a strip of even cells, not a ragged end.
+        let w = s.tabs[0].w;
+        assert!(s.tabs.iter().all(|r| (r.w - w).abs() < 0.01), "the tabs are not even");
+        // And the "+" and the chip are still clear of them.
+        assert!(s.tabs.last().expect("tabs").right() <= s.plus.x + 0.01);
     }
 }
