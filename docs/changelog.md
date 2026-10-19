@@ -26,9 +26,10 @@ digit. A batch of new features bumps the middle one.
   every workspace.
 - **A pin remembers its page.** Wander off and one click takes it back home.
 - **A colour for each workspace.** Right-click a workspace, "Colour".
-- **Tabs you have not opened for 12 hours close themselves into an archive**, under History.
-  Ten heavy sites went from 709 MB to 237 MB. Pins, Essentials, playing tabs, private tabs and
-  agent tabs are never archived. Settings > Performance sets the time, or Off.
+- **Tabs you have not opened for a while can close themselves into an archive**, under History.
+  Off at first: turn it on in Settings > Performance (12 hours, 1 day, 1 week). Ten heavy sites
+  went from 709 MB to 237 MB. Pins, Essentials, playing tabs, private tabs and agent tabs are
+  never archived. A half-filled form is not noticed yet, so what you typed there goes with it.
 
 ## 0.6.7.4 — 2026-10-19
 

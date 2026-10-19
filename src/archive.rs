@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 /// The settings' choices: "off" | "12h" | "1d" | "1w".
 pub const CHOICES: [(&str, &str); 4] = [("off", "Off"), ("12h", "12 hours"), ("1d", "1 day"), ("1w", "1 week")];
 
-/// The default: twelve hours.
-pub const DEFAULT: &str = "12h";
+/// The default: off. Lumen cannot yet tell a tab with a half-filled form, and archiving
+/// one loses what was typed; the person turns it on knowing that.
+pub const DEFAULT: &str = "off";
 
 /// How long a tab may go unseen before it is archived. None: never.
 pub fn after(setting: &str) -> Option<Duration> {
