@@ -1,12 +1,12 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7.3,
-19 October 2026. Early, in daily use by one person, Windows only.
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.8,
+20 October 2026. Early, in daily use by one person, Windows only.
 
 ## Get it
 
-`lumen-0.6.7.3-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
-Or take `lumen-0.6.7.3-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
+`lumen-0.6.8-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
+Or take `lumen-0.6.8-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
 Windows 10 or 11, 64-bit. Lumen is not signed yet, so the first time Windows may say it protected
 your PC: click **More info**, then **Run anyway**. Lumen needs Microsoft WebView2, which Windows
 nearly always has; the installer fetches it if not, and Lumen says so if it is missing. Your
@@ -17,7 +17,7 @@ things live in `%APPDATA%\Lumen`. Something wrong: Settings > About > Report a p
 Lumen is a Windows program that shows web pages. It does not draw them. Pages are drawn by
 Microsoft WebView2, the Chromium-based engine already installed on every Windows 11 machine.
 Everything around the page is Lumen's own code: the window, the tabs, the sidebar, the content
-blocker, the downloads and the memory policy. That part is about 51,000 lines of Rust.
+blocker, the downloads and the memory policy. That part is about 54,000 lines of Rust.
 
 A page in Lumen costs about what the same page costs in any Chromium-based program, because it is
 the same engine. What Lumen controls is the rest: how heavy the shell is, how many renderer
@@ -240,10 +240,12 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
   Site permissions lists every such site with a Reset on its row.
 - Userscripts: `*.user.js` files in Lumen's data folder, with Chrome-style `@match`
   patterns, run in your own tabs only.
-- Pop-ups blocked unless you clicked for them. Malware and phishing sites get a warning page.
+- Pop-ups blocked unless you clicked for them. A note says so, with **Allow** for that site;
+  Settings > Privacy lists the sites you allow. Malware and phishing sites get a warning page.
 - A privacy report: what was blocked and what was counted, with trends.
 - Reader view, dark pages, translation on the PC, read aloud.
-- Downloads through aria2, torrents, saving the video on a page.
+- Downloads through aria2, torrents, saving the video on a page. A magnet you click starts at
+  once; one a page starts on its own waits for you to press Resume.
 - A PiP button on a tab that has sound, a now-playing card in the footer with pause and
   next, and the keyboard's media keys acting on the tab that is playing.
 - Hidden tabs sleep: trimmed, then frozen, then unloaded, never one with sound or in a call
@@ -261,6 +263,13 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
   and what was blocked today.
 - History you can search by what a page said.
 - Pins, bookmarks with folders and import, a speed dial, workspaces, split view, tab search.
+  A pin remembers the page it was made on: wander off and one click takes it home. Essentials
+  are icons above the tabs, the same in every workspace. Each workspace can have its own colour.
+- The sidebar can hide until the mouse reaches the edge, and slide in over the page. The compact
+  sidebar shows the memory number; past 1 GB it warms to red.
+- Tabs nobody opened for a while can close themselves into an archive, under History. Off at
+  first (Settings > Performance), because a half-filled form is not noticed yet. Ten heavy sites
+  went from 709 MB to 237 MB. Pins, Essentials, playing, private and agent tabs are never archived.
 - Ctrl+K opens a command palette over the sidebar: type and pick a command, a setting, an open
   tab, a bookmark or a page from history. Esc or a second Ctrl+K puts it away.
 - KeePass logins filled from a `.kdbx` file, kept in memory only, locked after 10 minutes.
@@ -279,7 +288,8 @@ config holds a path, never a secret.
 - An agent sees a page as a snapshot: every heading and control, each with a short ref like `e5`.
   It clicks and types by ref, with real input events.
 - Every agent gets its own tabs and its own profile, with its own cookies and storage. One agent
-  cannot see another's tabs, and none can see yours unless you lend one.
+  cannot see another's tabs, and none can see yours unless you lend one. In a tab you lent, you
+  see the agent's cursor glide to each click with its name, and a pill with **Stop**.
 - When a login, a captcha or a payment needs a person, the agent hands the tab over and waits.
 - `lumen.exe --headless` runs Lumen off-screen: no focus, no taskbar button, no sound.
 - Drive: type a task, press Run, and Lumen starts an agent CLI on it. The page shows the steps in
@@ -340,7 +350,7 @@ page through Ollama, and an optional PDF editor that starts only when asked.
 - No Chrome or Edge extensions: userscripts cover most of what people install them for,
   and ad blocking, dark pages, passwords through KeePass and translation are built in.
   Anything else is not there.
-- Early. Built in six days by one person and Claude, with AI workers writing much of the code and
+- Early. Built in a week by one person and Claude, with AI workers writing much of the code and
   every change reviewed before it landed. Expect rough edges.
 
 The rule does not change: if a feature costs memory while you are not using it, it had better be

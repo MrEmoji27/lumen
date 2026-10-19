@@ -310,6 +310,9 @@ you: that tab comes to the front with a message and a Done button.
 - **A tab you lent stays yours.** It is not on the stage, so while it sits in the background a
   click in it lands nowhere, and the reply says nothing changed. Keep it in front while an agent
   works in it.
+- **You see the agent in a tab you lent.** Its cursor glides to each click and key, with its
+  name, and the pill says what it did last. No shield: it is your tab and your mouse stays yours.
+  The pill's **Stop** takes the tab back from every agent.
 - **Idle tabs stop painting.** A stage view whose agent has made no call for 30 s is set invisible:
   no painting, throttled timers. Its next call makes it visible again before the call runs.
 
