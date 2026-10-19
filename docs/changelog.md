@@ -7,6 +7,29 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.8 — 2026-10-20
+
+- **Pop-ups a page pushes on you stop.** A site that opens an ad window on your first click
+  anywhere gets nothing; a link you click still opens its window. A note says "Pop-up blocked"
+  with **Allow on <site>**. Settings > Privacy has the switch and the list of sites you allow.
+- **A magnet you click starts at once.** One a page starts on its own still waits for you. The
+  row has the torrent's name from the start and says "Finding peers for torrent info" instead
+  of "0 B of 0 B". aria2 now shuts down properly, so it remembers the swarm: the next start
+  finds peers in seconds instead of minutes.
+- **The horizontal layout works.** The workspace chip no longer sits on the last tab, tabs get
+  the room they have, and no half tab hangs off the end.
+- **Memory in the compact sidebar.** Above downloads and settings. Past 1 GB it warms to red;
+  past 2 GB it breathes.
+- **Hide the sidebar until the mouse reaches the edge.** Settings > Sidebar. The page keeps its
+  width; the sidebar slides in over it.
+- **Essentials.** Right-click a tab, "Add to Essentials": an icon above the tabs, the same in
+  every workspace.
+- **A pin remembers its page.** Wander off and one click takes it back home.
+- **A colour for each workspace.** Right-click a workspace, "Colour".
+- **Tabs you have not opened for 12 hours close themselves into an archive**, under History.
+  Ten heavy sites went from 709 MB to 237 MB. Pins, Essentials, playing tabs, private tabs and
+  agent tabs are never archived. Settings > Performance sets the time, or Off.
+
 ## 0.6.7.4 — 2026-10-19
 
 - **You see an agent at work in a tab you lent it.** "Let agents use this tab" used to hand the
