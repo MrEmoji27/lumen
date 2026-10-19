@@ -161,6 +161,28 @@ if(e.ended)continue;const s=(e.paused?0:1e9)+(e.videoWidth||0)*(e.videoHeight||0
 if(s>bs){best=e;bs=s;}}return best;}
 }catch(e){}})();"#;
 
+/// Runs at document creation, top frame, youtube.com only. YouTube offers AV1 before
+/// everything else; this machine decodes it in software (powerEfficient false) — in the
+/// renderer, at the cost of a core. The shim asks mediaCapabilities once whether AV1
+/// for this source type is power efficient, and from then on refuses av01 to
+/// MediaSource.isTypeSupported when it is not: YouTube falls to VP9, decoded on the
+/// GPU. While the check is still pending every type passes through untouched, and if
+/// a machine does decode AV1 efficiently the gate never closes.
+pub const AV1_GATE: &str = r#"(()=>{if(window!==window.top)return;
+const h=location.hostname;
+if(!(h==='youtube.com'||h.endsWith('.youtube.com')))return;
+try{
+const MS=window.MediaSource,M=navigator.mediaCapabilities;
+if(!MS||!M||typeof M.decodingInfo!=='function'||!MS.isTypeSupported)return;
+const orig=MS.isTypeSupported;
+let checked=false,hw=false;
+try{M.decodingInfo({type:'media-source',video:{contentType:'video/mp4; codecs="av01.0.04M.08"',width:1280,height:720,framerate:30,bitrate:3000000}})
+.then(r=>{hw=!!(r&&r.powerEfficient);checked=true;},()=>{checked=true;});}catch(e){checked=true;}
+MS.isTypeSupported=function(t){
+if(checked&&!hw&&typeof t==='string'&&/av01/i.test(t))return false;
+return orig.apply(MS,arguments);};
+}catch(e){}})();"#;
+
 /// Picture-in-picture: the biggest video playing, else the biggest one there is.
 pub const PIP_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m){m.pip();return;}
 const vs=[...document.querySelectorAll('video')].filter(v=>!v.ended&&v.videoWidth)

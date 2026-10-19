@@ -1175,6 +1175,12 @@ fn hook_page(
             &HSTRING::from(crate::pagekit::MEDIA_SHIM),
             &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(()))),
         );
+        // YouTube's AV1 first: on hardware without AV1 decode the gate hands VP9 to
+        // the page instead, so the GPU decodes and the renderer keeps its cores.
+        let _ = core.AddScriptToExecuteOnDocumentCreated(
+            &HSTRING::from(crate::pagekit::AV1_GATE),
+            &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(()))),
+        );
     }
 }
 
