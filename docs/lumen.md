@@ -65,8 +65,7 @@ The rules all three keep:
 
 <img class="shot" alt="The horizontal layout: a tab strip with the current tab as a black pill, the toolbar under it" src="img/look-horizontal.png">
 
-The design was drawn first, as a page of mockups, and approved before a line of it was built:
-[docs/design/lumen-ui.html](design/lumen-ui.html).
+The design was drawn first, as a page of mockups, and approved before a line of it was built.
 
 ## Spec
 
@@ -108,7 +107,7 @@ Manager's "Memory" figure (private working set) unless a chart says otherwise.
 
 Same laptop, same pages, both browsers fresh (a throwaway profile each), muted, each with its own
 blocking on (Brave's Shields, Lumen's blocker), and the number is the whole process tree of each:
-every renderer, the GPU process, the rest. Made by `tools/vs_brave.py`, which anyone can run.
+every renderer, the GPU process, the rest. Made by a script, `tools/vs_brave.py`, which comes with the source.
 
 | What is open | Lumen, you away 15 s | Lumen, you using it | Brave |
 |---|---|---|---|
@@ -117,6 +116,10 @@ every renderer, the GPU process, the rest. Made by `tools/vs_brave.py`, which an
 | One YouTube video, playing | 327 MB | 653 MB | 600 MB |
 | Ten common sites, 90 s after opening | 331 MB | 706 MB | 1,169 MB |
 | The same ten, six and a half minutes later | 124 MB | 311 MB | 1,111 MB |
+
+Brave was measured again beside each Lumen run, and its two runs differed by up to 10% (YouTube
+553 MB and 600, ten sites 1,069 and 1,169). The table shows the run beside the first column; the
+cover pairs the in-use column with the run beside it.
 
 The honest reading. Lumen's own part is small: with nothing open it is a quarter of Brave, because
 its interface is drawn natively and its start page needs no web engine at all. Many tabs is where it
@@ -236,7 +239,7 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
   opens the site card, with one switch that turns blocking off for that site alone; Settings >
   Site permissions lists every such site with a Reset on its row.
 - Userscripts: `*.user.js` files in Lumen's data folder, with Chrome-style `@match`
-  patterns, run in your own tabs only. See [docs/userscripts.md](userscripts.md).
+  patterns, run in your own tabs only.
 - Pop-ups blocked unless you clicked for them. Malware and phishing sites get a warning page.
 - A privacy report: what was blocked and what was counted, with trends.
 - Reader view, dark pages, translation on the PC, read aloud.
@@ -301,7 +304,7 @@ call faster.
 
 ## The plan
 
-In order. Each step ships as its own version, with a line in [the changelog](changelog.md).
+In order. Each step ships as its own version, with a line in the changelog (Settings > About > What's new).
 
 1. **Honest replies and a smoke test.** A failed page says its HTTP status. A click says what it
    changed, or that nothing changed. Page text is marked as page text, so a page cannot pose as

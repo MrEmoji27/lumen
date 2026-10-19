@@ -20,10 +20,12 @@ DOCS = ROOT / "docs"
 EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 
 # The cover's figures: each one is a measurement the doc itself states.
+# The cover's numbers are the Brave table's, in-use column: the whole process tree while the
+# person scrolls and clicks. One of them is a loss, and it stays on the cover.
 FIGURES = [
-    ("19.9 MB", "idle, Lumen itself"),
-    ("91 MB", "one Wikipedia tab"),
-    ("1.1 GB", "forty heavy tabs, asleep"),
+    ("37 MB", "nothing open · Brave 156"),
+    ("311 MB", "ten sites, in use · Brave 1,057"),
+    ("218 MB", "one Wikipedia page, in use · Brave 193"),
     ("48", "tools for AI agents"),
 ]
 
@@ -85,10 +87,11 @@ def cover():
         f'<section class="cover"><div><div class="mark">Version {version()} · 19 October 2026</div>'
         '<h1>Lumen</h1>'
         '<p class="lede">A native Windows shell around WebView2, written in Rust, built to keep memory low.</p>'
-        '<p class="meta">What it is so far, what it measures, and where it goes next.</p></div>'
+        '<p class="meta">What it is so far, what it measures, and where it goes next.</p>'
+        '<p class="meta">Made by zemo · portfolio.mremoji47.workers.dev</p></div>'
         f'<div><div class="figs">{figs}</div>'
-        '<p class="note">Measured on one laptop, release builds, private working set. '
-        'Against Brave on the same pages: see the Performance section.</p></div></section>'
+        '<p class="note">Measured on one laptop, fresh profiles, each browser’s own blocking on, the '
+        'whole process tree, private working set. The full table, both ways: the Performance section.</p></div></section>'
     )
 
 
