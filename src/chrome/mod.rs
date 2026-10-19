@@ -133,6 +133,10 @@ pub struct UiTab {
 pub struct UiEssential {
     pub url: String,
     pub title: String,
+    /// The tab has wandered from the address it was kept at.
+    pub away: bool,
+    /// The tab that is the essential, when there is one here.
+    pub tab: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -390,6 +394,8 @@ pub enum Hit {
     Shortcut(usize),
     /// An essential's icon, by index: the site kept open in every workspace.
     Essential(usize),
+    /// The "back home" mark on a pin that wandered, by tab.
+    PinHome(u64),
     /// A suggested site on the speed dial, and its "keep it" button.
     DialSugg(usize),
     DialPin(usize),
@@ -3237,6 +3243,24 @@ impl Inner {
         rows as f32 * 32.0 + 8.0
     }
 
+    /// The mark on a pin that wandered: the way back to the page it was made
+    /// on. It shows while the pointer is on the tile.
+    fn draw_pin_home(&mut self, t: &UiTab, r: R) {
+        if !t.pin_away {
+            return;
+        }
+        let th = self.look.theme;
+        let b = R::new(r.right() - 16.0, r.bottom() - 16.0, 13.0, 13.0);
+        let mh = Hit::PinHome(t.id);
+        self.hit(b, mh.clone());
+        let hov = self.is_hover(&Hit::Tab(t.id)) || self.is_hover(&mh);
+        if !hov {
+            return;
+        }
+        self.gfx.round(b, 4.0, th.side);
+        self.gfx.icon("home", b.x + 1.0, b.y + 1.0, 11.0, if self.is_hover(&mh) { th.text } else { th.dim });
+    }
+
     /// The essentials: the sites the person keeps open all day, as icons in a
     /// row above the tabs. The same row in every workspace.
     fn draw_essentials(&mut self, s: &UiState, sb: R, compact: bool, y: f32) {
@@ -3275,6 +3299,16 @@ impl Inner {
             // The one on screen is the marked one.
             if e.url == active {
                 self.gfx.round_stroke(icon, 6.0, th.accent, 2.0);
+            }
+            // An essential that wandered from the address it was kept at.
+            if e.away {
+                let b = R::new(r.right() - 12.0, r.y + 1.0, 11.0, 11.0);
+                let mh = Hit::PinHome(e.tab);
+                self.hit(b, mh.clone());
+                if hov || self.is_hover(&mh) {
+                    self.gfx.round(b, 3.0, th.side);
+                    self.gfx.icon("home", b.x + 1.0, b.y + 1.0, 9.0, if self.is_hover(&mh) { th.text } else { th.dim });
+                }
             }
             self.hit(r, h);
         }
@@ -4476,6 +4510,10 @@ impl Inner {
             self.gfx.icon(sound_icon(t), b.x + 2.0, b.y + 2.0, 10.0, th.dim);
             self.hit(b, Hit::TabSnd(t.id));
         }
+        if pinned {
+            // A pin that wandered: the mark that takes it back home.
+            self.draw_pin_home(t, r);
+        }
         if pinned || compact {
             return;
         }
@@ -4712,6 +4750,8 @@ impl Inner {
                 self.gfx.icon(sound_icon(t), b.x + 1.0, b.y + 1.0, 10.0, th.dim);
                 self.hit(b, Hit::TabSnd(t.id));
             }
+            // A pin that wandered: the mark that takes it back home.
+            self.draw_pin_home(t, r);
             return;
         }
         // Right to left: close, sound, split, translate.
@@ -5658,6 +5698,10 @@ impl Inner {
                     send(p, json!({"t": "essential", "url": url}));
                 }
             }
+            Hit::PinHome(id) => {
+                // The mark on a pin that wandered: back to the page it was made on.
+                send(p, json!({"t": "pinBack", "id": id}));
+            }
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {
                     send(p, json!({"t": "nav", "url": sc.url}));
@@ -5782,6 +5826,7 @@ impl Inner {
                 let mut items: Vec<(u32, String)> = vec![(1, if t.pinned { "Unpin".into() } else { "Pin".into() })];
                 if t.pin_away {
                     items.push((17, "Back to pinned page".into()));
+                    items.push((24, "Pin this page instead".into()));
                 }
                 // An essential: the site stays open in every workspace.
                 if !t.essential && !t.private && !t.agent && t.url.starts_with("http") && s.essentials.len() < 12 {
@@ -5863,6 +5908,7 @@ impl Inner {
                         17 => "pinBack",
                         18 => "pip",
                         19 => "essentialAdd",
+                        24 => "pinHome",
                         15 => {
                             send(&i.proxy, json!({"t": "workspaceAdd"}));
                             return;
@@ -5887,12 +5933,21 @@ impl Inner {
                 });
             }
             Hit::Essential(n) => {
-                // An essential's own menu: take it out of the row, or open it.
+                // An essential's own menu: take it out of the row, or make this
+                // page its home.
                 let Some(e) = s.essentials.get(n) else { return };
                 let url = e.url.clone();
-                menu::open(self, &[(1, "Remove from Essentials".into()), (0, String::new()), (2, "Open in a new tab".into())], x, y, move |i, cmd| match cmd {
+                let away = e.away;
+                let mut items: Vec<(u32, String)> = vec![(1, "Remove from Essentials".into())];
+                if away {
+                    items.push((0, String::new()));
+                    items.push((2, "Back to the address it was kept at".into()));
+                    items.push((3, "Keep this page instead".into()));
+                }
+                menu::open(self, &items, x, y, move |i, cmd| match cmd {
                     1 => send(&i.proxy, json!({"t": "essentialRemove", "url": url})),
-                    2 => send(&i.proxy, json!({"t": "essential", "url": url, "new": true})),
+                    2 => send(&i.proxy, json!({"t": "essentialBack", "url": url})),
+                    3 => send(&i.proxy, json!({"t": "essentialHome", "url": url})),
                     _ => {}
                 });
             }

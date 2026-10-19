@@ -325,13 +325,19 @@ pub fn fake(s: &mut UiState) {
     // A known number of essentials: the sites kept open in every workspace.
     if let Some(n) = fake_count("essentials") {
         for i in 0..n {
-            s.essentials.push(UiEssential { url: format!("https://site{}.example/", i + 1), title: format!("Site {}", i + 1) });
+            s.essentials.push(UiEssential { url: format!("https://site{}.example/", i + 1), title: format!("Site {}", i + 1), away: false, tab: 0 });
         }
     }
     // And a known number of pinned ones.
     if let Some(n) = fake_count("pins") {
         for i in 0..n {
             s.tabs.push(UiTab { pinned: true, ..t(9600 + i as u64, &format!("Pin {}", i + 1), &format!("https://pin{}.example/", i + 1)) });
+        }
+    }
+    // Pins that wandered from the page they were made on.
+    if let Some(n) = fake_count("pinaway") {
+        for i in 0..n {
+            s.tabs.push(UiTab { pinned: true, pin_away: true, ..t(9700 + i as u64, &format!("Away {}", i + 1), &format!("https://elsewhere{}.example/", i + 1)) });
         }
     }
     if fake_has("tabs") {

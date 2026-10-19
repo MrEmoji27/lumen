@@ -841,6 +841,11 @@ impl Gfx {
                 l(p(8.0, 10.0), p(8.0, 14.0));
                 self.polyline(&[p(5.0, 10.0), p(11.0, 10.0), p(10.0, 7.0), p(10.0, 3.0), p(6.0, 3.0), p(6.0, 7.0)], c, w, true);
             }
+            "home" => {
+                // A little house: the page a pin was made on.
+                self.polyline(&[p(3.0, 7.5), p(8.0, 3.5), p(13.0, 7.5)], c, w, false);
+                self.polyline(&[p(4.5, 6.8), p(4.5, 12.5), p(11.5, 12.5), p(11.5, 6.8)], c, w, false);
+            }
             "play" => self.polyline(&[p(5.5, 3.5), p(12.5, 8.0), p(5.5, 12.5)], c, w, true),
             "pause" => {
                 l(p(6.0, 3.5), p(6.0, 12.5));

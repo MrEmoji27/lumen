@@ -1881,8 +1881,10 @@ impl App {
         }
         let title = t.title.clone();
         let favicon = t.favicon.clone();
-        self.essentials.push(SavedTab { url, title, favicon, ..Default::default() });
+        // The address it is kept at: the home it goes back to.
+        self.essentials.push(SavedTab { url: url.clone(), title, favicon, pin_url: url.clone(), ..Default::default() });
         self.tabs[i].essential = true;
+        self.tabs[i].pin_url = url;
         self.dirty = true;
         self.push();
     }
@@ -2279,11 +2281,20 @@ impl App {
             let (cx, _, _, _) = chrome::Chrome::bounds_for(self.layout_kind(), logical_size(&self.ctx).0, logical_size(&self.ctx).1);
             let off = cx;
             let bar_bookmarks = self.settings.bm_bar && self.layout_kind().top_toolbar();
-            // The essentials: the sites kept open in every workspace.
+            // The essentials: the sites kept open in every workspace, and the tab
+            // that is each one here: it may have wandered from its address.
             let essentials: Vec<chrome::UiEssential> = self
                 .essentials
                 .iter()
-                .map(|e| chrome::UiEssential { url: e.url.clone(), title: e.title.clone() })
+                .map(|e| {
+                    let tab = self.tabs.iter().find(|t| t.essential && t.pin_url == e.url);
+                    chrome::UiEssential {
+                        url: e.url.clone(),
+                        title: e.title.clone(),
+                        away: tab.is_some_and(|t| t.url != t.pin_url),
+                        tab: tab.map_or(0, |t| t.id),
+                    }
+                })
                 .collect();
             let state = chrome::UiState {
                 tabs: self
@@ -2481,7 +2492,7 @@ impl App {
             t.title = saved.title;
             t.favicon = saved.favicon;
             t.pinned = saved.pinned;
-            t.pin_url = pins::restored_pin_url(saved.pinned, &saved.pin_url, &t.url);
+            t.pin_url = pins::restored_pin_url(saved.pinned || saved.essential, &saved.pin_url, &t.url);
             t.essential = saved.essential;
             t.workspace = self.active_workspace;
             if i == ws_active {
@@ -5335,7 +5346,7 @@ impl App {
                 if let Some(i) = self.idx(id) {
                     let t = &mut self.tabs[i];
                     let url = t.pin_url.clone();
-                    if t.pinned && !url.is_empty() {
+                    if (t.pinned || t.essential) && !url.is_empty() {
                         t.url = url.clone();
                         if let Some(v) = &t.view {
                             let _ = v.load_url(&url);
@@ -5343,6 +5354,45 @@ impl App {
                         self.dirty = true;
                         self.push();
                     }
+                }
+            }
+            "pinHome" => {
+                // The page the tab is on now becomes the page it was pinned on.
+                if let Some(i) = self.idx(id) {
+                    let url = self.tabs[i].url.clone();
+                    if self.tabs[i].pinned && !url.is_empty() {
+                        self.tabs[i].pin_url = url;
+                        self.dirty = true;
+                        self.push();
+                    }
+                }
+            }
+            "essentialBack" => {
+                // An essential that wandered goes back to the address it was kept at.
+                let home = m["url"].as_str().unwrap_or("").to_string();
+                if let Some(i) = self.tabs.iter().position(|t| t.essential && t.pin_url == home) {
+                    let url = self.tabs[i].pin_url.clone();
+                    self.tabs[i].url = url.clone();
+                    if let Some(v) = &self.tabs[i].view {
+                        let _ = v.load_url(&url);
+                    }
+                    self.dirty = true;
+                    self.push();
+                }
+            }
+            "essentialHome" => {
+                // The page an essential is on now becomes the address it is kept at.
+                let home = m["url"].as_str().unwrap_or("").to_string();
+                if let Some(i) = self.tabs.iter().position(|t| t.essential && t.pin_url == home) {
+                    let url = self.tabs[i].url.clone();
+                    self.tabs[i].pin_url = url.clone();
+                    for e in self.essentials.iter_mut() {
+                        if e.url == home {
+                            e.url = url.clone();
+                        }
+                    }
+                    self.dirty = true;
+                    self.push();
                 }
             }
             "essentialAdd" => self.add_essential(id),
