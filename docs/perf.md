@@ -520,3 +520,60 @@ page were done, counted from the top of `main`.
 Run 1 is a cold disk. The nine WOFF2 fonts cost 9 ms, under the 10 ms the plan set for making
 them lazy, so they stay as they are: half a millisecond of win is not worth a second code path.
 The 0.6 s before the first frame is somewhere else, and the next lines to add go there.
+
+## Against Brave, 19 October
+
+The brief's question: does Lumen beat Brave on memory in every scenario of
+`tools/vs_brave.py`, without losing sites, video or CPU. Before is
+`docs/vs-brave-0.6.7.1.md`. After is `docs/vs-low-{a,b}.md`, two runs each
+browser, lower of the two kept, and `docs/vs-brave-after.md` is the final
+run asked for by the brief. Private working set of the whole tree, same
+machine, fresh profiles, muted, off-screen.
+
+| Scenario | Lumen before | Lumen after | Brave after | Lumen saves |
+|---|---|---|---|---|
+| idle | 36 MB (3 procs) | 36 MB (3 procs) | 151 MB (7 procs) | 76% |
+| wiki | 140 MB (9 procs) | 76 MB (9 procs) | 183 MB (7 procs) | 58% |
+| youtube | 657 MB (10 procs) | 318 MB (10 procs) | 551 MB (10 procs) | 42% |
+| tabs | 811 MB (20 procs) | 214 MB (20 procs) | 1115 MB (20 procs) | 81% |
+| tabs, 6.5 min | 271 MB (20 procs) | 130 MB (20 procs) | 933 MB (20 procs) | 86% |
+
+The final run agrees: 37 / 102 / 325 / 423 then 128 against Brave's 151 /
+194 / 582 / 1180 then 1130. Same process counts as before, so the memory left
+the pages, not the architecture. Youtube was the one scenario Lumen lost
+(-18% in the before table); it now wins it by 42%.
+
+One line per change:
+
+- **No hardware AV1, so the page gets VP9 first** - KEPT (`76f1141`). Youtube
+  638 to 557 at a Normal memory target, two runs each side the same day; the
+  AV1 software decode is 45-53 MB of the renderer (gate off: 506, on: 440),
+  CPU 62% to 33% of a core, 60 fps, 0 dropped, `decodingInfo` vp09 + avc1
+  powerEfficient.
+- **The watched page trims 15 s after the last input** - KEPT (`2c2fa9d`).
+  Full memory while it loads, `MemoryUsageLevel::Low` 15 s after
+  `GetLastInputInfo` goes quiet, back to Normal within a second of the next
+  click or key, one input read a second only while an on-screen page is
+  trimmable and no timer otherwise. Probe: 361 MB total (renderer 289), CPU
+  32% of a core against 62% at Normal, video untouched. Settings >
+  Performance, `trim_watched`, on by default, says what it saves and costs.
+- **The page add-ons, measured one at a time** - KEPT AS TOOLING, nothing to
+  change (`c68921e`). Dark Reader +86 MB and it defaults off; cosmetic CSS
+  into youtube measures 0 bytes; the six page scripts each land inside the
+  noise band; process-per-site is free in a single site. Nothing Lumen puts
+  in the page is fat.
+- **Always-Low while on screen** - DROPPED. It put the swap on first paint:
+  youtube-search loads grew about 800 ms. Superseded by the input rule,
+  which holds load at Normal and reaches the same trim.
+- **`LUMEN_TEST_MEMLOW` environment override** - DROPPED, replaced by the
+  setting above.
+- **Lazy aria2c/conhost start (-3.4 MB) and `--js-flags=--optimize-for-size`
+  (-12 MB)** - NOT DONE. Hand-measured only; neither got its load-time and
+  CPU check, so neither was committed.
+
+Site work for the trim change: `site_check` on youtube, youtube-search,
+wikipedia, github, google, reddit, every probe passing (reddit's "0 posts"
+is the baseline tool's own miss), memory down on every row. One load flag,
+youtube-search adblock-off +1390 ms, is the network and not the change: a
+control build at HEAD with none of this code reads 2366 ms on that row
+against the old day's 1271 ms, and this build reads 1387 ms on the same row.

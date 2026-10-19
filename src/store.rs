@@ -147,6 +147,11 @@ pub struct Settings {
     /// Tabs of the same site share one renderer process. Fewer processes, less memory.
     /// Applies on restart.
     pub share_processes: bool,
+    /// Trim the page you are watching when you are away from the mouse and keyboard:
+    /// full memory while it loads, then 15 s after the last input the on-screen page
+    /// goes to WebView2's low memory target, and back the moment you touch either again.
+    #[serde(default = "yes")]
+    pub trim_watched: bool,
     /// Offer to save passwords and fill them in (WebView2's own, encrypted by Windows).
     pub save_passwords: bool,
     /// Hand http(s) downloads to aria2: many connections per file, resume, queue.
@@ -306,6 +311,7 @@ impl Default for Settings {
             show_memory: true,
             gpu_in_process: false,
             share_processes: true,
+            trim_watched: true,
             save_passwords: true,
             accelerate_downloads: true,
             download_limit_kbps: 0,

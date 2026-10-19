@@ -83,6 +83,11 @@ const TICK: Duration = Duration::from_secs(3);
 const STAGE_IDLE: Duration = Duration::from_secs(30);
 /// A hidden tab keeps its caches this long, so flipping back is instant.
 const TRIM_AFTER: Duration = Duration::from_secs(30);
+/// The person away from mouse and keyboard this long, and the page on screen
+/// goes to the low memory target. `GetLastInputInfo`'s clock, Windows-wide.
+const WATCH_TRIM_AWAY: Duration = Duration::from_secs(15);
+/// That check's own cadence: one input read a second, and only while it applies.
+const WATCH_POLL: Duration = Duration::from_secs(1);
 /// Nothing waits: the loop sleeps this long instead of waking every TICK forever.
 const IDLE_TICK: Duration = Duration::from_secs(30);
 /// The sidebar memory readout, on its own slow clock. Reading it walks every
@@ -393,6 +398,25 @@ fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Dura
     }
 }
 
+/// How long since the last mouse click or key press, anywhere in Windows.
+/// `GetLastInputInfo` keeps that clock for the whole session; the tick count
+/// wraps every 49 days and subtracting wrapped is still the right gap.
+fn input_idle() -> Duration {
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    unsafe {
+        let mut last = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        if GetLastInputInfo(&mut last).as_bool() {
+            Duration::from_millis(GetTickCount().wrapping_sub(last.dwTime) as u64)
+        } else {
+            Duration::ZERO
+        }
+    }
+}
+
 /// How long after hiding the tab's next step comes, for the loop's next wake.
 fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> Option<Duration> {
     if t.call {
@@ -600,6 +624,10 @@ struct App {
     job: Option<monitor::Job>,
     /// Control page bookkeeping.
     next_sample: Option<Instant>,
+    /// The watch on mouse and keyboard: when the input check next runs. Armed
+    /// only while an on-screen page is load-done and trimmable; None otherwise,
+    /// so the loop keeps sleeping.
+    next_trim: Option<Instant>,
     prev_cpu: HashMap<u32, u64>,
     prev_at: Instant,
     net: monitor::NetBytes,
@@ -1025,6 +1053,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         exit: false,
         job,
         next_sample: None,
+        next_trim: None,
         prev_cpu: HashMap::new(),
         prev_at: Instant::now(),
         net: Rc::new(RefCell::new(HashMap::new())),
@@ -1241,6 +1270,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 if app.tick_due(now) {
                     app.tick();
                 }
+                // The person away from mouse and keyboard: one input read a
+                // second while an on-screen page is trimmable, nothing otherwise.
+                app.trim_poll(now);
             }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::Moved(_) => app.sync_watch(),
@@ -1254,8 +1286,12 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                         }
                     } else {
                         app.minimized = false;
-                        // Shown again: the active page back to a full memory target.
-                        if let Some(v) = app.active_tab().and_then(|t| t.view.as_ref()) {
+                        // Shown again: full memory — the person just touched the
+                        // machine to bring the window back. The watch rule trims it
+                        // again 15 s after they stop.
+                        if let Some(t) = app.active_tab()
+                            && let Some(v) = t.view.as_ref()
+                        {
                             let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
                         }
                         app.layout();
@@ -1916,9 +1952,10 @@ impl App {
             if let Some(v) = &t.view {
                 let _ = v.set_visible(want);
                 // Off screen: a low memory target at once, not 30 s later at the trim.
-                // On screen again: normal before the return's first paint. A call keeps
-                // its full target: it is still being listened to.
-                let level = if want || t.call { MemoryUsageLevel::Normal } else { MemoryUsageLevel::Low };
+                // On screen: full memory now — the watch rule trims it 15 s after
+                // the person stops touching mouse and keyboard. A call keeps its
+                // full target either way: it is still being listened to.
+                let level = if t.call || want { MemoryUsageLevel::Normal } else { MemoryUsageLevel::Low };
                 let _ = v.set_memory_usage_level(level);
                 t.visible = want;
             } else {
@@ -2531,8 +2568,9 @@ impl App {
         let t = &mut self.tabs[i];
         t.hidden_at = None;
         t.suspended = false;
-        // Shown again: the full memory target before the return's first paint,
-        // whatever the sleep policy did while it was away.
+        // Shown again: full memory before the return's first paint, whatever the
+        // sleep policy did while it was away. The watch rule trims it again only
+        // 15 s after the person leaves mouse and keyboard.
         if let Some(v) = &t.view {
             let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
         }
@@ -3745,6 +3783,14 @@ impl App {
             // reload of one of those tabs asks for.
             self.ctx.userscripts.set(self.settings.userscripts);
         }
+        if old.trim_watched != self.settings.trim_watched && !self.settings.trim_watched {
+            // Off: every page this rule was holding down comes straight back.
+            for t in self.tabs.iter().filter(|t| t.visible && !t.call) {
+                if let Some(v) = &t.view {
+                    let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
+                }
+            }
+        }
         if old.adblock_off_sites != self.settings.adblock_off_sites {
             self.blocker.set_off_sites(&self.settings.adblock_off_sites);
         }
@@ -3913,6 +3959,17 @@ impl App {
                     if self.tabs[i].loading != on {
                         self.tabs[i].loading = on;
                         self.push();
+                        // A page loading on screen keeps full memory: the swap
+                        // waits for the load, so the first paint is never a
+                        // fault-in from disk. The watch rule comes after it.
+                        if on
+                            && !self.minimized
+                            && self.tabs[i].visible
+                            && !self.tabs[i].call
+                            && let Some(v) = &self.tabs[i].view
+                        {
+                            let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
+                        }
                         // The document is here: a skip script that was waiting
                         // for it can go in now.
                         if !on && let Some(script) = self.spb.remove(&id) {
@@ -6243,6 +6300,13 @@ impl App {
                 at = t;
             }
         }
+        // The watch on mouse and keyboard: armed only while an on-screen page is
+        // load-done and trimmable. Unarmed means due now, so the wake that just
+        // made a page trimmable (load finished, tab shown, setting flipped on)
+        // gets the check on its way out of the event.
+        if self.trim_watchable() {
+            at = at.min(self.next_trim.unwrap_or(now));
+        }
         if self.tick_waiting(now) {
             if self.next_tick < at {
                 at = self.next_tick;
@@ -6487,6 +6551,42 @@ impl App {
     /// journal needs the numbers behind it.
     fn watches_memory(&self) -> bool {
         self.settings.show_memory || (journal::on() && self.journal_busy())
+    }
+
+    /// Is there an on-screen page the mouse-and-keyboard watch could trim right
+    /// now: the setting on, the window up, a page finished loading and not in a
+    /// call. The loop's wake includes the check only while this holds, so a
+    /// window nobody is looking at, or a page still loading, adds no timer.
+    fn trim_watchable(&self) -> bool {
+        self.settings.trim_watched
+            && !self.minimized
+            && self.tabs.iter().any(|t| t.visible && t.has_page() && !t.loading && !t.call)
+    }
+
+    /// One `GetLastInputInfo` read: full memory while the person is at mouse or
+    /// keyboard, the low target 15 s after the last click or key, and back again
+    /// within a second of the next one. Armed by `next_wake` while something is
+    /// trimmable; disarms itself the moment nothing is, so the timer dies with
+    /// the reason it existed.
+    fn trim_poll(&mut self, now: Instant) {
+        if !self.trim_watchable() {
+            self.next_trim = None;
+            return;
+        }
+        if self.next_trim.is_some_and(|at| at > now) {
+            return;
+        }
+        let level = if input_idle() >= WATCH_TRIM_AWAY {
+            MemoryUsageLevel::Low
+        } else {
+            MemoryUsageLevel::Normal
+        };
+        for t in self.tabs.iter().filter(|t| t.visible && t.has_page() && !t.loading && !t.call) {
+            if let Some(v) = &t.view {
+                let _ = v.set_memory_usage_level(level);
+            }
+        }
+        self.next_trim = Some(now + WATCH_POLL);
     }
 
     /// The blocker's running total, for a page's share of it. None when blocking

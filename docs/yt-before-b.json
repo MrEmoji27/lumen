@@ -1,0 +1,14 @@
+[
+ {
+  "mb": 639,
+  "procs": 10,
+  "browser": "Lumen",
+  "scenario": "youtube"
+ },
+ {
+  "mb": 587,
+  "procs": 10,
+  "browser": "Brave",
+  "scenario": "youtube"
+ }
+]

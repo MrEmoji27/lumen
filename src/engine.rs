@@ -417,6 +417,15 @@ const UNNEEDED: &[&str] = &[
     "msEdgeWallet",
 ];
 
+/// LUMEN_TEST_NOINIT=COSMETIC,GLANCE,...: leave those page scripts out, to measure
+/// what each one costs the page. Unset: every script runs, as always.
+fn init_on(name: &str) -> bool {
+    match std::env::var("LUMEN_TEST_NOINIT") {
+        Ok(list) => !list.split(',').any(|s| s.trim().eq_ignore_ascii_case(name)),
+        Err(_) => true,
+    }
+}
+
 /// Chromium switches for the whole browser. Set once, when the environment is born.
 /// LUMEN_ARGS appends more, for measuring without a rebuild.
 pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
@@ -553,13 +562,13 @@ fn build_tab_in(
         .with_visible(false)
         .with_devtools(true)
         .with_hotkeys_zoom(true)
-        .with_initialization_script(crate::blocker::COSMETIC_JS)
-        .with_initialization_script(crate::glance::GLANCE_JS)
+        .with_initialization_script(if init_on("COSMETIC") { crate::blocker::COSMETIC_JS } else { "" })
+        .with_initialization_script(if init_on("GLANCE") { crate::glance::GLANCE_JS } else { "" })
         // Pages can ask whether the person said no to being sold: navigator.globalPrivacyControl.
         // Decided when the page is built; the header follows the setting at once.
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
-        .with_initialization_script(WEBRTC_JS)
-        .with_initialization_script(CALL_JS)
+        .with_initialization_script(if init_on("WEBRTC") { WEBRTC_JS } else { "" })
+        .with_initialization_script(if init_on("CALL") { CALL_JS } else { "" })
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -1171,10 +1180,20 @@ fn hook_page(
         // runs at document creation, keeping a reference to the page's own Media Session
         // action handlers so Lumen can press them. It passes the registration through
         // untouched, so the page's behavior is unchanged.
-        let _ = core.AddScriptToExecuteOnDocumentCreated(
-            &HSTRING::from(crate::pagekit::MEDIA_SHIM),
-            &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(()))),
-        );
+        if init_on("MEDIA") {
+            let _ = core.AddScriptToExecuteOnDocumentCreated(
+                &HSTRING::from(crate::pagekit::MEDIA_SHIM),
+                &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(()))),
+            );
+        }
+        // YouTube's AV1 first: on hardware without AV1 decode the gate hands VP9 to
+        // the page instead, so the GPU decodes and the renderer keeps its cores.
+        if init_on("GATE") {
+            let _ = core.AddScriptToExecuteOnDocumentCreated(
+                &HSTRING::from(crate::pagekit::AV1_GATE),
+                &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(()))),
+            );
+        }
     }
 }
 
