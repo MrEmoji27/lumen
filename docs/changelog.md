@@ -7,6 +7,15 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.7.4 — 2026-10-19
+
+- **You see an agent at work in a tab you lent it.** "Let agents use this tab" used to hand the
+  tab over blind: the agent clicked and typed and nothing showed. Now its cursor glides to each
+  click and key, with its name, and the pill at the bottom says what it did last, as on an
+  agent's own tab. No shield: it is your tab and your mouse stays yours. The pill's **Stop**
+  takes the tab back from every agent. Eight seconds after the agent's last click or key, the
+  cursor and the pill go.
+
 ## 0.6.7.3 — 2026-10-19
 
 Control and the dashboard tell the truth, and keep up.

@@ -8,6 +8,10 @@
 //! - the **pill**: at the bottom of the page, the agent's name and last step, **Message**,
 //!   and **Take over**, which hands the tab to the person until they press **Give back**.
 //!
+//! A tab the person lent to agents ("Let agents use this tab") gets the cursor and the pill
+//! too, while an agent works in it, but no shield: it is the person's tab, their mouse stays
+//! theirs. Its pill's button is **Stop**, which takes the tab back from every agent.
+//!
 //! The cursor and the pill are drawn with Direct2D into windows with per-pixel alpha
 //! (UpdateLayeredWindow): smooth edges, soft shadows, real text. They are popups owned by
 //! the main window, not children: they sit above it and the page, never take focus, and
@@ -307,6 +311,8 @@ struct Pill {
     name: String,
     step: String,
     taken: bool,
+    /// Over a tab the person lent: Stop in place of Take over, and no shield.
+    lent: bool,
     proxy: EventLoopProxy<Ev>,
     scale: f32,
     /// Where it is on screen (pixels), and where its two buttons are in it (DIPs).
@@ -321,7 +327,7 @@ struct Pill {
 fn layout_pill(p: &mut Pill, page: RECT) {
     let Some(k) = kit() else { return };
     let s = p.scale;
-    let take_label = if p.taken { "Give back" } else { "Take over" };
+    let take_label = take_label(p);
     let (mw, tw) = (measure(&k, "Message", 12.5, 600) + 26.0, measure(&k, take_label, 12.5, 600) + 26.0);
     let name_w = measure(&k, &p.name, 13.0, 600);
     let step_w = measure(&k, &pill_says(p), 13.0, 400).min(260.0);
@@ -379,10 +385,21 @@ fn paint_pill(kit: &Kit, p: &Pill, width: f32) {
         };
         chip(p.message, "Message", rgba(1.0, 1.0, 1.0, 0.10), rgba(0.96, 0.95, 0.93, 1.0), p.hover == Some(0));
         if p.taken {
-            chip(p.take, "Give back", rgba(0.96, 0.95, 0.93, 1.0), rgba(0.08, 0.08, 0.09, 1.0), p.hover == Some(1));
+            chip(p.take, take_label(p), rgba(0.96, 0.95, 0.93, 1.0), rgba(0.08, 0.08, 0.09, 1.0), p.hover == Some(1));
         } else {
-            chip(p.take, "Take over", p.color.d2d(1.0), rgba(0.08, 0.08, 0.09, 1.0), p.hover == Some(1));
+            chip(p.take, take_label(p), p.color.d2d(1.0), rgba(0.08, 0.08, 0.09, 1.0), p.hover == Some(1));
         }
+    }
+}
+
+/// The pill's second button.
+fn take_label(p: &Pill) -> &'static str {
+    if p.lent {
+        "Stop"
+    } else if p.taken {
+        "Give back"
+    } else {
+        "Take over"
     }
 }
 
@@ -486,6 +503,7 @@ impl Watch {
             name: String::new(),
             step: String::new(),
             taken: false,
+            lent: false,
             proxy,
             scale,
             at: (0, 0, 1, 1),
@@ -499,8 +517,9 @@ impl Watch {
     }
 
     /// Over this page area (client coordinates of the main window, logical pixels), for this
-    /// agent: its name, its colour (r, g, b), its last step, and whether the person has it.
-    pub fn show(&self, page: (f64, f64, f64, f64), name: &str, rgb: (u8, u8, u8), step: &str, taken: bool) {
+    /// agent: its name, its colour (r, g, b), its last step, whether the person has it, and
+    /// whether the tab is the person's own, lent (no shield, a Stop button).
+    pub fn show(&self, page: (f64, f64, f64, f64), name: &str, rgb: (u8, u8, u8), step: &str, taken: bool, lent: bool) {
         let scale = unsafe { GetDpiForWindow(self.owner) }.max(96) as f32 / 96.0;
         let mut o = POINT::default();
         unsafe {
@@ -518,11 +537,12 @@ impl Watch {
         self.page.set(r);
         {
             let mut p = self.pill.borrow_mut();
-            let changed = moved || p.name != name || p.step != step || p.taken != taken || p.color != color || p.scale != scale;
+            let changed = moved || p.name != name || p.step != step || p.taken != taken || p.lent != lent || p.color != color || p.scale != scale;
             if changed {
                 p.name = name.to_string();
                 p.step = step.to_string();
                 p.taken = taken;
+                p.lent = lent;
                 p.color = color;
                 p.scale = scale;
                 layout_pill(&mut p, r);
@@ -551,7 +571,7 @@ impl Watch {
             }
         }
         unsafe {
-            if taken {
+            if taken || lent {
                 let _ = ShowWindow(self.shield, SW_HIDE);
             } else if moved || !IsWindowVisible(self.shield).as_bool() {
                 let _ = SetWindowPos(self.shield, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -703,6 +723,7 @@ unsafe extern "system" fn pill_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LR
                         let (x, y) = at();
                         let t = match pill_hit(&p, x, y) {
                             Some(0) => "watchMessage",
+                            Some(_) if p.lent => "watchStop",
                             Some(_) if p.taken => "watchGiveBack",
                             Some(_) => "watchTakeOver",
                             None => return,
@@ -732,7 +753,7 @@ mod tests {
     fn sample() {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            let (w, h, k) = (1200u32, 520u32, 1.25f32);
+            let (w, h, k) = (1200u32, 640u32, 1.25f32);
             let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
             let bmp = wic.CreateBitmap(w, h, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad).unwrap();
             let d2d: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).unwrap();
@@ -780,13 +801,14 @@ mod tests {
                 paint_cursor(&kit, &c, Some(0.35), None);
                 rt.SetTransform(&windows_numerics::Matrix3x2::translation(x0 + 240.0 - TIP, 70.0 - TIP));
                 paint_cursor(&kit, &c, None, Some(0.2));
-                for (row, taken) in [(0usize, false), (1, true)] {
+                for (row, taken, lent) in [(0usize, false, false), (1, true, false), (2, false, true)] {
                     let mut p = Pill {
                         hwnd: HWND::default(),
                         color: *color,
                         name: "claude-code".into(),
                         step: "typing \u{201C}Ada Lovelace\u{201D}".into(),
                         taken,
+                        lent,
                         proxy: proxy.clone(),
                         scale: k,
                         at: (0, 0, 1, 1),

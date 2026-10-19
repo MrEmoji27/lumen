@@ -103,6 +103,17 @@ const SAMPLE: Duration = Duration::from_millis(1000);
 const SAMPLE_FIRST: Duration = Duration::from_millis(400);
 /// Readings the network rate is taken over: about five seconds.
 const NET_WINDOW: usize = 5;
+/// How long the agent's cursor and pill stay over a lent tab after the agent's last click
+/// or key there. An agent that has moved on leaves the person's own tab bare again.
+const LENT_SHOW: Duration = Duration::from_secs(8);
+
+/// The last agent that clicked or typed in a tab the person lent it.
+struct Lent {
+    tab: u64,
+    session: String,
+    name: String,
+    at: Instant,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
@@ -659,6 +670,9 @@ struct App {
     /// Agent sessions whose tab the person took over from the watch pill: the shield is
     /// off and the agent may only ask for the tab back until the person gives it back.
     taken: std::collections::HashSet<String>,
+    /// An agent at work in one of the person's own tabs, lent to agents: it gets the cursor
+    /// and the pill like an agent tab, for LENT_SHOW after its last click or key.
+    lent: Option<Lent>,
     /// Modifier keys as the main window last saw them.
     mods: ModifiersState,
     /// Remembered permission answers, and requests waiting for the user.
@@ -1077,6 +1091,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         stage: None,
         watch: None,
         taken: Default::default(),
+        lent: None,
         mods: ModifiersState::empty(),
         rules: store::load_rules(),
         zooms: store::load_zooms(),
@@ -1274,6 +1289,10 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 }
                 if app.next_sample.is_some_and(|t| t <= now) {
                     app.sample();
+                }
+                if app.lent.as_ref().is_some_and(|l| l.at + LENT_SHOW <= now) {
+                    app.lent = None;
+                    app.sync_watch();
                 }
                 if app.next_mem <= now && app.watches_memory() {
                     app.read_memory(now);
@@ -2074,22 +2093,47 @@ impl App {
     /// (no panel over it, not full-screen UI), off otherwise. Its pill says the last step.
     fn sync_watch(&mut self) {
         let t = self.active_tab().filter(|t| t.agent && t.view.is_some() && !t.owner.is_empty());
-        let on = t.is_some() && self.panel == Panel::None && !self.ui_full() && !self.minimized && !headless();
+        let lent = self.lent_shown();
+        let on = (t.is_some() || lent.is_some()) && self.panel == Panel::None && !self.ui_full() && !self.minimized && !headless();
         if !on {
             if let Some(w) = &self.watch {
                 w.hide();
             }
             return;
         }
-        let (owner, name) = t.map(|t| (t.owner.clone(), t.owner_name.clone())).unwrap_or_default();
+        let is_lent = t.is_none();
+        let (owner, name) = match (t, lent) {
+            (Some(t), _) => (t.owner.clone(), t.owner_name.clone()),
+            (None, Some((session, name))) => (session, name),
+            (None, None) => return,
+        };
         let (act, _, _) = self.panes();
         let step = self.agent.last_step(&owner);
-        let taken = self.taken.contains(&owner);
+        let taken = !is_lent && self.taken.contains(&owner);
         let c = chrome::agent_color(&owner);
         let rgb = ((c.0 * 255.0) as u8, (c.1 * 255.0) as u8, (c.2 * 255.0) as u8);
         let name = if name.trim().is_empty() { "agent".to_string() } else { name.trim().to_string() };
         let w = self.watch.get_or_insert_with(|| watch::Watch::new(self.ctx.window.hwnd() as isize, self.ctx.proxy.clone()));
-        w.show(act, &name, rgb, &step, taken);
+        w.show(act, &name, rgb, &step, taken, is_lent);
+    }
+
+    /// The agent at work in the person's tab on screen, if one clicked or typed there in the
+    /// last LENT_SHOW and the tab is still lent: (session, name).
+    fn lent_shown(&self) -> Option<(String, String)> {
+        let l = self.lent.as_ref().filter(|l| l.tab == self.active && l.at.elapsed() < LENT_SHOW)?;
+        let t = self.active_tab().filter(|t| !t.agent && t.view.is_some() && self.agent_granted(t))?;
+        (t.id == l.tab).then(|| (l.session.clone(), l.name.clone()))
+    }
+
+    /// An agent clicked, moved or typed in tab `tab`. If it is one of the person's, lent to
+    /// agents, the person sees who and where, as on an agent's own tab.
+    fn lent_touch(&mut self, tab: u64, who: &agent::Who) {
+        let Some(i) = self.idx(tab) else { return };
+        if self.tabs[i].agent || !self.agent_granted(&self.tabs[i]) {
+            return;
+        }
+        self.lent = Some(Lent { tab, session: who.session.clone(), name: who.name.clone(), at: Instant::now() });
+        self.sync_watch();
     }
 
     /// For each agent session, what became of the person's last message to it, in words.
@@ -2109,7 +2153,7 @@ impl App {
 
     /// The watched tab, if this is it: (zoom percent).
     fn watched_zoom(&self, tab: u64) -> Option<u32> {
-        let t = self.active_tab().filter(|t| t.id == tab && t.agent)?;
+        let t = self.active_tab().filter(|t| t.id == tab && (t.agent || self.lent.as_ref().is_some_and(|l| l.tab == tab)))?;
         self.watch.as_ref().filter(|w| w.shown()).map(|_| t.zoom)
     }
 
@@ -5995,9 +6039,21 @@ impl App {
                 let (session, name) = (m["session"].as_str().unwrap_or(""), m["name"].as_str().unwrap_or("agent"));
                 self.chrome.open_message(session, name);
             }
+            "watchStop" => {
+                // The pill over a lent tab: the tab is taken back from every agent.
+                if let Some(l) = self.lent.take()
+                    && let Some(i) = self.idx(l.tab)
+                {
+                    self.tabs[i].agent_ok = None;
+                    self.chrome.flash("Agents can no longer use this tab".into());
+                }
+                self.sync_watch();
+                self.push();
+            }
             "watchMessage" => {
                 // The pill's Message: the card over the sidebar, for the watched agent.
-                if let Some((owner, name)) = self.active_tab().filter(|t| t.agent).map(|t| (t.owner.clone(), t.owner_name.clone())) {
+                let lent = self.lent_shown();
+                if let Some((owner, name)) = self.active_tab().filter(|t| t.agent).map(|t| (t.owner.clone(), t.owner_name.clone())).or(lent) {
                     let name = if name.trim().is_empty() { "agent".to_string() } else { name };
                     self.chrome.open_message(&owner, &name);
                 }
@@ -6337,7 +6393,9 @@ impl App {
         // so the journal never wakes an idle Lumen.
         let watch = self.settings.show_memory || (journal::on() && self.journal_busy());
         let mem = watch.then_some(self.next_mem);
-        for t in [self.next_sample, mem].into_iter().flatten() {
+        // The cursor over a lent tab goes when the agent has been still a while.
+        let lent = self.lent.as_ref().map(|l| l.at + LENT_SHOW);
+        for t in [self.next_sample, mem, lent].into_iter().flatten() {
             if t < at {
                 at = t;
             }
@@ -6887,6 +6945,7 @@ impl App {
                 let _ = reply.send(Ok(json!({"tab": id})));
             }
             Op::Pointer { tab, x, y } => {
+                self.lent_touch(tab, &who);
                 if let Some(zoom) = self.watched_zoom(tab)
                     && let Some(w) = &self.watch
                 {
@@ -7012,6 +7071,9 @@ impl App {
                     self.ensure_view(i);
                 }
                 // Watched: the agent's cursor goes where its mouse goes.
+                if method.starts_with("Input.") {
+                    self.lent_touch(tab, &who);
+                }
                 if method == "Input.dispatchMouseEvent"
                     && let Some(zoom) = self.watched_zoom(tab)
                     && let Some(w) = &self.watch
