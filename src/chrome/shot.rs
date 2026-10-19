@@ -136,6 +136,7 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                             "history" => Action::History,
                             "settings" => Action::Settings,
                             "newtab" => Action::NewTab,
+                            "newprivate" => Action::NewPrivate,
                             "fullscreen" => Action::Fullscreen,
                             "tabsearch" => Action::TabSearch,
                             "palette" => Action::Palette,

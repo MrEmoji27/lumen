@@ -93,6 +93,10 @@ pub enum PageHit {
     PermDefault(&'static str, &'static str),
     /// A settings button that opens another page ("sites").
     Panels(&'static str),
+    /// Settings: let this site open pop-ups of its own.
+    PopupSiteAdd,
+    /// Settings: take this site off the list.
+    PopupSiteDel(String),
     /// A link that opens in a tab of its own.
     OpenTab(&'static str),
     /// The problem report: to zemo, onto the clipboard, or into Downloads as a file.
@@ -216,6 +220,8 @@ pub(super) enum Item {
     AgentSetup,
     SitePerms,
     DefaultBrowser,
+    /// The sites whose pop-ups are allowed: a list, with a way in and a way out.
+    PopupSites,
 }
 
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
@@ -377,6 +383,8 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Seg("tracking", "Tracking prevention", "WebView2's own tracker blocking. Balanced blocks known trackers; Strict blocks most trackers, including ones a site loads at the top level. Applies to pages as they load.", &[("off", "Off"), ("basic", "Basic"), ("balanced", "Balanced"), ("strict", "Strict")]),
             Toggle("https_first", "Try https first", "A plain http address is tried over https first. When a site has no https at all, Lumen says so and lets you continue for this once or for good. Never happens for localhost, IP addresses or home-network names."),
             Toggle("gpc", "Tell sites not to sell or share my data", "Sends the Global Privacy Control signal (Sec-GPC: 1) and Do Not Track with every request, and tells the page itself through navigator.globalPrivacyControl. Sites that honour it must treat you as opted out."),
+            Toggle("block_popups", "Block pop-ups", "A window a page opens on its own is stopped. A link you clicked still opens one, and a site you trust may open as many as it likes."),
+            PopupSites,
             Button("Site settings", "What each site may do, the zoom it is read at, the data it left behind, and the http addresses you let through.", "Open…", PageHit::Panels("sites")),
             Button("Clear browsing data", "Lumen history, page text and WebView2's own browsing history and downloads. Passwords and bookmarks are never touched.", "Clear…", PageHit::ClearData),
             Toggle("clear_on_exit", "Clear history when Lumen closes", "Lumen history, the words of pages and WebView2's own browsing history go when the browser closes. Private tabs leave nothing anyway."),
@@ -1451,6 +1459,38 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             }
             y - r.y
         }
+        Item::PopupSites => {
+            // The sites whose pop-ups are allowed, and the way in and out.
+            let mut y = r.y;
+            i.gfx.text("Sites allowed to open pop-ups", R::new(r.x, y, r.w, 20.0), i.look.font(13.0, 500), th.text);
+            y += 22.0;
+            i.gfx.text(
+                "These sites may open windows of their own. Every other site needs a link you clicked.",
+                R::new(r.x, y, r.w, 18.0),
+                i.look.small,
+                th.faint,
+            );
+            y += 24.0;
+            if s.settings.popup_sites.is_empty() {
+                i.gfx.text("No site yet.", R::new(r.x, y, r.w * 0.5, 26.0), i.look.font(12.5, 400), th.faint);
+            }
+            for host in &s.settings.popup_sites {
+                site_icon(i, R::new(r.x, y + 4.0, 18.0, 18.0), host);
+                i.gfx.text(host, R::new(r.x + 28.0, y, r.w - 60.0, 26.0), i.look.font(12.5, 500), th.text);
+                // The x: this site is not trusted after all.
+                let x = R::new(right - 26.0, y + 1.0, 24.0, 24.0);
+                let h = Hit::Page(PageHit::PopupSiteDel(host.clone()));
+                if i.is_hover(&h) {
+                    i.gfx.round(x, 12.0, th.press);
+                }
+                i.gfx.icon("close", x.x + 6.0, x.y + 6.0, 12.0, th.dim);
+                i.hit(x, h);
+                y += 30.0;
+            }
+            draw_button(i, right, y + 13.0, "Add a site…", PageHit::PopupSiteAdd);
+            y += 30.0;
+            y - r.y
+        }
         Item::Keys => {
             let mut y = r.y;
             for (what, keys) in KEYS {
@@ -1551,7 +1591,12 @@ fn status_line(d: &UiDl) -> String {
             s
         }
         "paused" => {
-            let mut s = format!("Paused · {} of {}", fmt_bytes(d.received), fmt_bytes(d.total));
+            // A row with no total yet has nothing to show in bytes: the note
+            // says what it is waiting for instead.
+            let mut s = format!("Paused · {}", fmt_bytes(d.received));
+            if d.total > 0 {
+                s.push_str(&format!(" of {}", fmt_bytes(d.total)));
+            }
             if !d.note.is_empty() {
                 s.push_str(&format!(" · {}", d.note));
             }
@@ -2447,6 +2492,7 @@ fn item_words(it: &Item) -> String {
         AgentSetup => "agent mcp setup lumen-agent claude".into(),
         SitePerms => "site permissions camera microphone location notifications".into(),
         DefaultBrowser => "default browser windows".into(),
+        PopupSites => "pop-ups popups popup sites allowed trusted window".into(),
     }
 }
 
@@ -2473,6 +2519,7 @@ pub(super) fn pal_label(it: &Item) -> String {
         AgentSetup => "Agent setup".into(),
         SitePerms => "Site permissions".into(),
         DefaultBrowser => "Default browser".into(),
+        PopupSites => "Sites allowed to open pop-ups".into(),
     }
 }
 
@@ -3138,8 +3185,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::ThemeImport => {
             super::files::open(i, super::files::FileWhat::ThemeOpen);
         }
-        PageHit::ResetGroup(group) => reset_group(i, group),
-        PageHit::Engine(n) => set(i, "search", json!(ENGINES[n].1)),
+        PageHit::ResetGroup(group) => reset_group(i, group),        PageHit::Engine(n) => set(i, "search", json!(ENGINES[n].1)),
         PageHit::Nav(n) => {
             if let Some(y) = i.page.sections.get(n) {
                 i.page.scroll = y.clamp(0.0, i.page.max);
@@ -3290,6 +3336,14 @@ pub fn click(i: &mut Inner, p: PageHit) {
             set(i, "adblock_off_sites", json!(list));
         }
         PageHit::PermDefault(kind, v) => send(&i.proxy, json!({"t": "permDefault", "kind": kind, "v": v})),
+        PageHit::PopupSiteAdd => {
+            super::form::open(i, "Allow pop-ups on a site", &[("Site", "")], super::form::FormAct::PopupSite);
+        }
+        PageHit::PopupSiteDel(host) => {
+            let mut list = s.settings.popup_sites.clone();
+            list.retain(|h| *h != host);
+            set(i, "popup_sites", json!(list));
+        }
         PageHit::Panels(which) => {
             // Opening the changelog is reading it: the start page's note goes.
             if which == "changes" && s.settings.seen_version != env!("LUMEN_VERSION") {
@@ -3506,6 +3560,26 @@ mod tests {
     fn fmt_bytes_rounds_like_the_brief() {
         assert_eq!(fmt_bytes(4_404_019), "4.2 MB");
         assert_eq!(fmt_bytes(317_440), "310 KB");
+    }
+
+    /// A torrent that is still looking for its peers says so: a row of zeroes
+    /// reads as frozen, and it is not.
+    #[test]
+    fn a_torrent_waiting_for_its_info_says_what_it_is_doing() {
+        let mut d = dl("progress", "torrent");
+        d.note = "Finding peers for torrent info · 12 peers".into();
+        let s = super::status_line(&d);
+        assert!(s.contains("Finding peers for torrent info"), "{s}");
+        assert!(!s.contains("0 B of 0 B"), "{s}");
+
+        // A paused magnet with no size yet: the note says why it waits, and
+        // no zeroes.
+        let mut d = dl("paused", "torrent");
+        d.note = "from example.com: press Resume to start".into();
+        let s = super::status_line(&d);
+        assert!(s.starts_with("Paused"), "{s}");
+        assert!(s.contains("press Resume to start"), "{s}");
+        assert!(!s.contains("0 B of 0 B"), "{s}");
     }
 
     #[test]

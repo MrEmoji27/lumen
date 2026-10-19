@@ -125,6 +125,17 @@ pub struct UiDl {
     pub ratio: f64,
 }
 
+/// A pop-up Lumen stopped: the host it wanted, and the site that asked.
+#[derive(Clone, Debug)]
+pub struct UiPopup {
+    /// The tab it was stopped in.
+    pub tab: u64,
+    /// The host the pop-up wanted to open.
+    pub target: String,
+    /// The host of the page that asked. "Allow on <site>" adds this one.
+    pub site: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct UiState {
     pub tabs: Vec<UiTab>,
@@ -147,6 +158,8 @@ pub struct UiState {
     pub battery: bool,
     /// The active tab's page is asking the person something: the card over the page.
     pub page_ask: Option<UiAsk>,
+    /// A pop-up Lumen stopped: the bar over the page.
+    pub popup_note: Option<UiPopup>,
     pub downloads: Vec<UiDl>,
     pub agent_busy: bool,
     /// Per agent session: what became of the person's last message to it, in words.
@@ -431,6 +444,10 @@ pub enum Hit {
     FileCancel,
     FilePath,
     FileName,
+    /// The bar over a page whose pop-up was stopped: let this site open them.
+    PopupAllow(u64),
+    /// The same bar, put away.
+    PopupDismiss(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -2929,6 +2946,8 @@ impl Inner {
         }
         // Where the hovered link goes: a pill at the page's bottom left, under every card.
         self.draw_link(s);
+        // A pop-up Lumen stopped: a bar over the page, with the way back.
+        self.draw_popup_note(s);
         // The cards over everything else. Their order is their z-order.
         color::draw(self, s);
         form::draw(self, s);
@@ -4772,6 +4791,46 @@ impl Inner {
         self.gfx.text(&text, R::new(r.x + 10.0, r.y, r.w - 20.0, r.h), f, th.dim);
     }
 
+    /// A pop-up Lumen stopped: a bar over the page saying so, with the two
+    /// things the person can do about it. Not a dialog: the page keeps its
+    /// place, and the bar goes away by itself.
+    fn draw_popup_note(&mut self, s: &UiState) {
+        let Some(note) = s.popup_note.clone() else { return };
+        if s.full || s.panel != "none" {
+            return;
+        }
+        let (sx, sy, sw, _sh) = s.stage;
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let head = "Pop-up blocked";
+        let target = if note.target.is_empty() { String::new() } else { format!(" · {}", note.target) };
+        let allow = if note.site.is_empty() { "Allow on this site".to_string() } else { format!("Allow on {}", note.site) };
+        let fw = lo.font(12.5, 500);
+        let bw = self.gfx.measure(&allow, lo.font(12.5, 600)) + 26.0;
+        let tw = self.gfx.measure(head, fw);
+        let tt = self.gfx.measure(&target, lo.font(12.5, 450));
+        let w = (tw + tt + 46.0 + bw + 30.0).min(sw - 24.0).max(240.0);
+        let h = 38.0;
+        let r = R::new(sx + (sw - w) / 2.0, sy + 12.0, w, h);
+        self.floats.push((r, lo.r_card));
+        self.gfx.round(r, lo.r_card, th.solid(th.raise));
+        self.gfx.round_stroke(r, lo.r_card, th.line, 1.0);
+        // The mark: a small dot in the look's live colour, like the crash note's.
+        self.gfx.circle(r.x + 20.0, r.y + h / 2.0, 3.5, th.accent);
+        self.gfx.text(head, R::new(r.x + 32.0, r.y, tw + 2.0, h), fw, th.text);
+        self.gfx.text(&target, R::new(r.x + 34.0 + tw, r.y, tt + 2.0, h), lo.font(12.5, 450), th.dim);
+        // The way back: let this site open pop-ups, or let the note go.
+        let b = R::new(r.right() - 30.0 - bw, r.y + (h - 26.0) / 2.0, bw, 26.0);
+        self.pill_button(b, &allow, Hit::PopupAllow(note.tab), true, 1.0);
+        let x = R::new(r.right() - 28.0, r.y + (h - 24.0) / 2.0, 24.0, 24.0);
+        let gone = Hit::PopupDismiss(note.tab);
+        if self.is_hover(&gone) {
+            self.gfx.round(x, 12.0, th.press);
+        }
+        self.gfx.icon("close", x.x + 6.0, x.y + 6.0, 12.0, th.dim);
+        self.hit(x, gone);
+    }
+
     fn float_card(&mut self, r: R, a: f32) {
         self.floats.push((r, self.look.r_card));
         let lo = &self.look;
@@ -5244,6 +5303,12 @@ impl Inner {
             Hit::Menu => self.menu(x, y),
             Hit::WsChip => self.ws_menu(x, y),
             Hit::GlanceOpen => send(p, json!({"t": "glanceOpen"})),
+            Hit::PopupAllow(tab) => {
+                // Let this site open pop-ups from now on.
+                let site = self.state.as_ref().and_then(|s| s.popup_note.as_ref()).map(|n| n.site.clone()).unwrap_or_default();
+                send(p, json!({"t": "popupAllow", "id": tab, "site": site}));
+            }
+            Hit::PopupDismiss(tab) => send(p, json!({"t": "popupDismiss", "id": tab})),
             Hit::Sugg(i) => self.pick(i),
             Hit::DlFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "downloads");

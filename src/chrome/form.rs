@@ -40,6 +40,8 @@ pub enum FormAct {
     PagePrompt { aid: u64 },
     /// A site's sign-in (HTTP basic auth): user and password, straight to WebView2.
     SignIn { aid: u64 },
+    /// A site that may open pop-ups of its own.
+    PopupSite,
 }
 
 impl FormAct {
@@ -298,6 +300,20 @@ fn submit(i: &mut Inner, act: &FormAct, a: &[String]) {
             // Like the vault's: the password goes on an event, never in a logged message.
             let with = (a.len() >= 2).then(|| (a[0].clone(), a[1].clone()));
             let _ = i.proxy.send_event(crate::engine::Ev::SignInAnswer(*aid, with));
+        }
+        FormAct::PopupSite => {
+            // A host the person trusts with pop-ups.
+            let Some(host) = a.first().map(|v| crate::popup::host_of(v)) else { return };
+            if host.is_empty() {
+                i.page.flash = Some(("That is not a site name".into(), Instant::now()));
+                return;
+            }
+            let mut list = s.settings.popup_sites.clone();
+            if list.contains(&host) {
+                return;
+            }
+            list.push(host);
+            super::pages::set(i, "popup_sites", json!(list));
         }
     }
 }

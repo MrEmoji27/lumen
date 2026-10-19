@@ -135,6 +135,14 @@ pub struct Settings {
     pub cosmetic: bool,
     /// Count what the blocker stops, per day and per site, for the report.
     pub privacy_stats: bool,
+    /// Stop pop-ups a page opens on its own. A link the person clicked still
+    /// opens one. A file from before this setting reads as on.
+    #[serde(default = "yes")]
+    pub block_popups: bool,
+    /// Hosts whose pop-ups are allowed: keyed hosts, so `www.` and subdomains
+    /// count as one. Empty means no site is trusted.
+    #[serde(default)]
+    pub popup_sites: Vec<String>,
     /// The running "N blocked" note at the bottom of the sidebar.
     pub page_chip: bool,
     pub show_memory: bool,
@@ -321,6 +329,8 @@ impl Default for Settings {
             torrent_note: true,
             cosmetic: true,
             privacy_stats: true,
+            block_popups: true,
+            popup_sites: Vec::new(),
             page_chip: true,
             dark_pages: false,
             remember_text: true,
@@ -561,6 +571,13 @@ impl Settings {
         self.adblock_off_sites.sort();
         self.adblock_off_sites.dedup();
         self.adblock_off_sites.truncate(500);
+        // The trusted pop-up sites are hosts too, and the same words the page's
+        // own host is compared with.
+        self.popup_sites.iter_mut().for_each(|h| *h = crate::blocker::site_key(h));
+        self.popup_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
+        self.popup_sites.sort();
+        self.popup_sites.dedup();
+        self.popup_sites.truncate(500);
         // 0 means "never chosen"; a real port stays inside the range.
         if self.bt_port != 0 {
             self.bt_port = self.bt_port.clamp(BT_PORT_MIN, BT_PORT_MAX);

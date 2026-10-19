@@ -94,6 +94,9 @@ pub enum Ev {
     CloseMe(u64),
     /// New popup tab, and the tab that opened it.
     Popup(u64, u64),
+    /// A pop-up Lumen stopped: the tab that asked, the host it wanted, and the
+    /// host that asked.
+    PopupBlocked(u64, String, String),
     Download(Dl),
     /// A site asks for a permission. Answer with `answer_permission(pid, ..)`.
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
@@ -122,8 +125,12 @@ pub enum Ev {
     SiteCleared(String, bool),
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
-    /// A magnet link was cancelled out of a page; hand it to aria2.
-    Magnet(u64, String),
+    /// A magnet link was cancelled out of a page; hand it to aria2. The flag
+    /// says whether a click or a key asked for it.
+    Magnet(u64, String, bool),
+    /// A magnet, a moment after the page was asked: the page has said by now
+    /// whether the person clicked it.
+    MagnetSettled(u64, String),
     /// Time to read this tab's text for history search: (tab, url it was loading).
     Capture(u64, String),
     /// The text came back: (tab, url, JSON or "null").
@@ -153,7 +160,9 @@ pub enum Ev {
     Handoff(u64, String, String, String),
     /// aria2 took a download; `Added` says how it was started.
     AriaAdded(Box<Added>),
-    AriaFailed(u64, String),
+    /// aria2 refused a download: the tab it came from (0 for a manual add), the
+    /// address, and whether the tab was private.
+    AriaFailed(u64, String, bool),
     AriaJobs(Vec<crate::aria::Job>),
     /// A request from the agent thread, answered through its channel.
     Agent(crate::agent::Call),
@@ -321,9 +330,21 @@ pub struct Ctx {
     /// Run the person's userscripts in the person's own pages. Read when a tab is made,
     /// never watched: a change applies to tabs opened after it.
     pub userscripts: Cell<bool>,
-    /// Popup requests seen since the last one was handled: (was it a click, the page's site).
-    /// A sensor COM handler fills this; wry's own handler reads the front and decides.
-    pub popup_info: Rc<RefCell<VecDeque<(bool, String)>>>,
+    /// Popup requests seen since the last one was handled: (was it a click, the page's site,
+    /// the tab that asked). A sensor COM handler fills this; wry's own handler reads the
+    /// front and decides.
+    pub popup_info: Rc<RefCell<VecDeque<(bool, String, u64)>>>,
+    /// Pop-up protection: the setting, and the sites whose pop-ups are allowed.
+    pub popup_policy: RefCell<crate::popup::Policy>,
+    /// What each page did last: the click it saw, and the window a script opened.
+    /// A new document starts with nothing; the last click of the old one says
+    /// nothing about this one.
+    pub clicks: Rc<RefCell<HashMap<u64, crate::popup::Page>>>,
+    /// The script Lumen puts in every page, with the secret in it: the page
+    /// cannot forge what the script says.
+    pub popup_js: String,
+    /// That secret. A report without it is the page's own noise.
+    pub popup_token: String,
 }
 
 /// A strict-isolation environment on its way. See `start_own_env` / `poll_own_envs`.
@@ -569,6 +590,7 @@ fn build_tab_in(
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
         .with_initialization_script(if init_on("WEBRTC") { WEBRTC_JS } else { "" })
         .with_initialization_script(if init_on("CALL") { CALL_JS } else { "" })
+        .with_initialization_script(if init_on("POPUP") { ctx.popup_js.as_str() } else { "" })
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -578,14 +600,29 @@ fn build_tab_in(
         })
         .with_new_window_req_handler(move |uri, features| {
             // window.open / target=_blank. The sensor above already saw whether a
-            // click or key asked for this. No gesture, or a popup-host match, is a
-            // popup: block it and count it. A missing queue entry also blocks.
+            // click or key asked for this, and the page told us what that click
+            // was on. A pop-up the person did not ask for is stopped and said
+            // out loud; a link they clicked opens as before.
             let ctx = &popup_ctx;
-            let (gesture, site) = ctx.popup_info.borrow_mut().pop_front().unwrap_or((false, String::new()));
-            if !gesture || crate::blocker::popup_rule(&uri) {
+            let (gesture, site, tab) = ctx.popup_info.borrow_mut().pop_front().unwrap_or((false, String::new(), 0));
+            let target = crate::privacy_stats::host(&uri);
+            let page = ctx.clicks.borrow().get(&tab).cloned().unwrap_or_default();
+            let ask = crate::popup::Ask {
+                gesture,
+                link: crate::popup::link_click(&page, &target),
+                opener: site.clone(),
+                target: target.clone(),
+                popup_rule: crate::blocker::popup_rule(&uri),
+            };
+            let (block, trusted) = {
+                let p = ctx.popup_policy.borrow();
+                (p.block, p.trusted.clone())
+            };
+            if crate::popup::decide(&ask, block, &trusted) == crate::popup::Verdict::Deny {
                 if !site.is_empty() {
                     crate::privacy_stats::popup(&site, who);
                 }
+                let _ = ctx.proxy.send_event(Ev::PopupBlocked(tab, target, site));
                 return NewWindowResponse::Deny;
             }
             let new_id = ctx.alloc_id();
@@ -622,7 +659,7 @@ fn build_tab_in(
     // Tracking prevention is a setting of the profile, and InPrivate pages and the agent's
     // pages each have a profile of their own. Every page says it again; it costs nothing.
     set_tracking(&wv, &ctx.tracking.borrow());
-    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone(), who);
+    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone(), ctx.clicks.clone(), who);
     hook_zoom(&wv, id, ctx.proxy.clone());
     crate::glance::hook(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv, id, private);
@@ -632,7 +669,8 @@ fn build_tab_in(
         hook_page_asks(ctx, &wv, id);
     }
     hook_external(&wv, id, ctx.proxy.clone(), agent_page);
-    hook_popup_sensor(&wv, ctx.popup_info.clone());
+    hook_popup_sensor(&wv, ctx.popup_info.clone(), id);
+    hook_popup_page(&wv, id, ctx);
     hook_rtc(&wv, who);
     hook_call(&wv, id, ctx.proxy.clone());
     // Password saving is per profile. An agent's profile never saves passwords,
@@ -985,6 +1023,7 @@ fn hook_page(
     proxy: EventLoopProxy<Ev>,
     rewrite: Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>,
     https: Rc<RefCell<crate::sites::HttpsPolicy>>,
+    clicks: Rc<RefCell<HashMap<u64, crate::popup::Page>>>,
     who: crate::privacy_stats::Who,
 ) {
     let core = wv.webview();
@@ -999,6 +1038,8 @@ fn hook_page(
                 let mut redirected = Default::default();
                 let _ = args.IsRedirected(&mut redirected);
                 if redirected.as_bool() {
+                    // A new document: the clicks of the old one say nothing about this one.
+                    clicks.borrow_mut().remove(&id);
                     let _ = p.send_event(Ev::NavRedirected(id));
                     return Ok(());
                 }
@@ -1008,7 +1049,15 @@ fn hook_page(
                 // A magnet link is not a page: cancel and hand it to aria2.
                 if u.starts_with("magnet:") {
                     args.SetCancel(true)?;
-                    let _ = p.send_event(Ev::Magnet(id, u));
+                    // A magnet the person clicked is theirs: it starts at once.
+                    // One a page asked for on its own waits for Resume, because a
+                    // torrent shows the swarm the person's address.
+                    //
+                    // The click the page reports lands after the navigation
+                    // (measured on 2026-10-19), so the flag here may be early;
+                    // the main loop asks again a moment later.
+                    let clicked = clicks.borrow().get(&id).is_some_and(|p| crate::popup::clicked_magnet(p, &u));
+                    let _ = p.send_event(Ev::Magnet(id, u, clicked));
                     return Ok(());
                 }
                 // A click on the warning page for a site without https. Not a navigation.
@@ -1051,6 +1100,10 @@ fn hook_page(
                 }
                 // The journal times the page from here to NavigationCompleted.
                 let _ = p.send_event(Ev::NavStart(id, u.clone()));
+                // A new document: the clicks of the old one say nothing about
+                // this one. (A navigation Lumen cancels leaves the page as it
+                // was, and its clicks still count.)
+                clicks.borrow_mut().remove(&id);
                 let clean = clean_url(&u);
                 let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u), who));
                 if let Some(clean) = listed.or(clean) {
@@ -1953,7 +2006,7 @@ pub fn answer_permission(ctx: &Ctx, pid: u64, allow: Option<bool>) {
 /// new window; wry's own handler does not. This runs first (registered after
 /// build, and wry's callback is dispatched later on the message loop), so the
 /// flag is in the queue when the wry handler asks for it.
-fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String)>>>) {
+fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String, u64)>>>, id: u64) {
     let core = wv.webview();
     let mut token = 0i64;
     unsafe {
@@ -1972,7 +2025,50 @@ fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String)>>>)
                 let mut q = queue.borrow_mut();
                 // Bound: a page that spams window.open must not grow this forever.
                 if q.len() < 32 {
-                    q.push_back((user.as_bool(), site));
+                    q.push_back((user.as_bool(), site, id));
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    }
+}
+
+/// The page's own report of what it did: the last click, and a window a script
+/// opened. Lumen needs both to tell a link the person clicked from a pop-up a
+/// page pushed.
+fn hook_popup_page(wv: &WebView, id: u64, ctx: &Rc<Ctx>) {
+    let core = wv.webview();
+    let mut token = 0i64;
+    let clicks = ctx.clicks.clone();
+    let secret = ctx.popup_token.clone();
+    unsafe {
+        let _ = core.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut j = PWSTR::null();
+                if args.WebMessageAsJson(&mut j).is_err() {
+                    return Ok(());
+                }
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(&take(j)) else { return Ok(()) };
+                // Only Lumen's own script may say what the page did: a page
+                // that could forge it would be able to talk itself into a
+                // window, or into a torrent.
+                if msg["t"].as_str() != Some(secret.as_str()) {
+                    return Ok(());
+                }
+                let mut m = clicks.borrow_mut();
+                let p = m.entry(id).or_default();
+                match msg["lumen"].as_str().unwrap_or("") {
+                    "click" => {
+                        p.link = msg["link"].as_u64().unwrap_or(0) == 1;
+                        p.url = msg["url"].as_str().unwrap_or("").to_string();
+                        p.at = Instant::now();
+                    }
+                    "open" => {
+                        p.opened = Some((msg["url"].as_str().unwrap_or("").to_string(), Instant::now()));
+                    }
+                    _ => {}
                 }
                 Ok(())
             })),
