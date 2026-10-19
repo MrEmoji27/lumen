@@ -84,5 +84,18 @@
   "procs": 3,
   "tag": "spread3",
   "scenario": "idle"
+ },
+ {
+  "mb": 36,
+  "procs": 3,
+  "tag": "job2",
+  "scenario": "idle"
+ },
+ {
+  "mb": 148,
+  "procs": 9,
+  "trimmed": true,
+  "tag": "job2",
+  "scenario": "wiki"
  }
 ]

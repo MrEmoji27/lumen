@@ -421,7 +421,11 @@ pub fn fake(s: &mut UiState) {
         ];
         s.zooms = vec![("doc.rust-lang.org".into(), 125), ("news.ycombinator.com".into(), 110)];
     }
-    if fake_has("mem") {
+    if let Some(mb) = fake_count("mem") {
+        // A given load, in megabytes: "mem:1500" is 1.5 GB.
+        s.mem = Some((mb as u64 * 1024 * 1024, 9));
+        s.settings.show_memory = true;
+    } else if fake_has("mem") {
         s.mem = Some((412 * 1024 * 1024, 9));
         s.blocked = 1280;
         s.settings.show_memory = true;

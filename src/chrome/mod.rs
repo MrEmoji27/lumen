@@ -67,6 +67,27 @@ use motion::{Ease, Id, Motion, Prop};
 use style::Look;
 use theme::Theme;
 
+// ------------------------------------------------------------------ memory
+
+/// The memory figure where the number warms toward red and a glow starts to
+/// grow behind it: one gigabyte.
+const MEM_WARN: u64 = 1 << 30;
+/// The figure where the glow is full and breathes: two gigabytes.
+const MEM_HOT: u64 = 2 << 30;
+/// How long one breath of that glow takes.
+const MEM_BREATH: f32 = 4.0;
+
+/// The memory figure in short form: "312M", "1.2G". The compact column has no
+/// room for the long one.
+fn mem_short(bytes: u64) -> String {
+    let mb = bytes as f64 / 1048576.0;
+    if mb >= 1024.0 {
+        format!("{:.1}G", mb / 1024.0)
+    } else {
+        format!("{}M", mb.round() as u64)
+    }
+}
+
 // ------------------------------------------------------------------- state
 
 #[derive(Clone, Debug)]
@@ -687,6 +708,9 @@ pub(crate) struct Inner {
     link: String,
     born: Instant,
     spinning: bool,
+    /// The memory glow's timer is armed: the number is over the hard line and
+    /// the glow breathes.
+    mem_pulse: bool,
     /// Every animated value of the chrome.
     motion: Motion,
     animating: bool,
@@ -845,6 +869,7 @@ const ID_PAL: usize = 116;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
+const TIMER_MEM: usize = 5;
 #[cfg(debug_assertions)]
 const TIMER_SHOT: usize = 4;
 
@@ -1571,6 +1596,7 @@ impl Chrome {
                 sel: 0,
                 born: Instant::now(),
                 spinning: false,
+                mem_pulse: false,
                 motion: Motion::default(),
                 animating: false,
                 page: pages::Page::default(),
@@ -2188,6 +2214,7 @@ impl Inner {
             }
         }
         self.spin();
+        self.mem_timer();
         // Debug: LUMEN_TEST_FONT_PICK="ui_font:segoe" opens the font list with a
         // filter typed, so a screenshot can show it without clicking through.
         #[cfg(debug_assertions)]
@@ -2288,6 +2315,28 @@ impl Inner {
                     SetTimer(Some(self.hwnd), TIMER_SPIN, 33, None);
                 } else {
                     let _ = KillTimer(Some(self.hwnd), TIMER_SPIN);
+                }
+            }
+        }
+    }
+
+    /// The glow behind the memory number breathes only over the hard line, and
+    /// only in the compact column, where the number is drawn. Below that line
+    /// there is no timer and no repaint: an idle Lumen stays idle.
+    fn mem_timer(&mut self) {
+        let want = self.look.motion.enabled
+            && self.look.show_memory
+            && self
+                .state
+                .as_ref()
+                .is_some_and(|s| s.compact() && s.mem.is_some_and(|(b, _)| b >= MEM_HOT));
+        if want != self.mem_pulse {
+            self.mem_pulse = want;
+            unsafe {
+                if want {
+                    SetTimer(Some(self.hwnd), TIMER_MEM, 80, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_MEM);
                 }
             }
         }
@@ -3382,7 +3431,7 @@ impl Inner {
             90.0
         };
         let list_top = sb.y + base + self.ws_h(s);
-        let list = R::new(sb.x, list_top, sb.w, (sb.h - base - self.ws_h(s) - 40.0).max(1.0));
+        let list = R::new(sb.x, list_top, sb.w, (sb.h - base - self.ws_h(s) - self.footer_h(compact)).max(1.0));
         self.gfx.clip(list);
         // A workspace switch cross-fades the list.
         let wf = self.motion.enter(Id::Workspace(s.active_workspace), Prop::Opacity, 1.0, 1.0, 150, Ease::OutCubic).min(1.0);
@@ -3516,6 +3565,59 @@ impl Inner {
         self.gfx.unclip();
     }
 
+    /// The footer's height: the row of buttons, and above it, in the compact
+    /// column, the memory number.
+    fn footer_h(&self, compact: bool) -> f32 {
+        if compact && self.look.show_memory { 54.0 } else { 40.0 }
+    }
+
+    /// The memory number in the compact column: above the buttons, centred, and
+    /// short. It warms and glows as the browser's own memory grows.
+    fn draw_compact_mem(&mut self, s: &UiState, sb: R, fy: f32) {
+        if !self.look.show_memory {
+            return;
+        }
+        let Some((bytes, _)) = s.mem else { return };
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let t = mem_short(bytes);
+        // The figures are in the monospace face, so they do not jump about as they change.
+        let f = lo.mono_at(10.5, 500);
+        let tw = self.gfx.measure(&t, f);
+        let r = R::new(sb.x + (sb.w - tw) / 2.0, fy - 17.0, tw, 15.0);
+        // Under a gigabyte: plain faint text. Over two: red, with a glow that
+        // breathes. In between: the colour warms and the glow grows.
+        let hot = bytes >= MEM_HOT;
+        let warm = bytes >= MEM_WARN;
+        let t01 = if warm { (bytes - MEM_WARN) as f32 / (MEM_HOT - MEM_WARN) as f32 } else { 0.0 };
+        let c = if hot {
+            th.danger
+        } else if warm {
+            th.faint.mix(th.danger, t01.clamp(0.0, 1.0))
+        } else {
+            th.faint
+        };
+        // The glow behind the number. Over the hard line it breathes, a few
+        // seconds a breath; with reduced motion it is simply there.
+        let mut glow = if hot { 0.30 } else { 0.24 * t01.clamp(0.0, 1.0) };
+        if hot && lo.motion.enabled {
+            let phase = self.born.elapsed().as_secs_f32() / MEM_BREATH * std::f32::consts::TAU;
+            glow *= 0.72 + 0.28 * phase.sin();
+        }
+        if glow > 0.01 {
+            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            self.gfx.bloom(cx, cy, (r.w.max(22.0) * 0.7).max(18.0), th.danger.alpha(glow));
+        }
+        let h = Hit::Mem;
+        let hov = self.is_hover(&h);
+        let a = self.motion.hover(Self::button_id(&h), if hov { 1.0 } else { 0.0 });
+        if a > 0.01 {
+            self.gfx.round(R::new(r.x - 5.0, r.y - 2.0, r.w + 10.0, r.h + 4.0), lo.r_sm, th.hover.alpha(a.min(1.0)));
+        }
+        self.gfx.text(&t, r, f.align(Align::Center), if hov { th.text } else { c });
+        self.hit(r, h);
+    }
+
     /// The footer: the memory readout and the agent chip (left), then the
     /// dashboard, Drive, downloads and settings buttons (right). The compact sidebar keeps the two that fit; the agent chip is a
     /// status, and shows wherever it fits.
@@ -3554,6 +3656,11 @@ impl Inner {
             }
         }
         let room = (sb.right() - 8.0 - right_edge - 6.0).max(0.0);
+        // The compact column has no room for the long figure beside the
+        // buttons, but it has room for the short one above them.
+        if compact {
+            self.draw_compact_mem(s, sb, fy);
+        }
         // What lives at the right end of the footer steps leftward: the agent chip or
         // the memory number first, then the now-playing card before them.
         let mut right = sb.right() - 8.0;
@@ -6010,7 +6117,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(HTCLIENT as isize)
             }
             WM_TIMER => {
-                if wp.0 == TIMER_SPIN || wp.0 == TIMER_CLOCK || wp.0 == TIMER_ANIM {
+                if wp.0 == TIMER_SPIN || wp.0 == TIMER_CLOCK || wp.0 == TIMER_ANIM || wp.0 == TIMER_MEM {
                     i.invalidate();
                 }
                 #[cfg(debug_assertions)]
