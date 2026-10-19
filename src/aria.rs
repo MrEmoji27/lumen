@@ -221,10 +221,35 @@ struct Engine {
     child: Child,
     port: u16,
     secret: String,
+    /// It has been asked to stop, and has gone.
+    stopped: bool,
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl Engine {
+    /// Stop aria2 the clean way. It writes its DHT table and its session on
+    /// the way out, and a killed one writes neither: every start would be a
+    /// cold DHT, and the swarm takes a long while to answer a stranger. The
+    /// kill is still there for an engine that will not go.
+    fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        let _ = call(self.port, &self.secret, 0, "aria2.shutdown", &[]);
+        // aria2 needs a few seconds to stop the downloads, write the DHT table
+        // and go. Measured on 2026-10-19: 4.2 s with a torrent running.
+        for _ in 0..100 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -275,6 +300,17 @@ impl Aria {
     /// True when aria2 answers. Until then there is no downloader to talk to.
     pub fn ready(&self) -> bool {
         lock(&self.engine).is_some()
+    }
+
+    /// Ask aria2 to stop, and wait for it to say goodbye. Lumen calls this on
+    /// the way out, so the DHT table and the session are written: without it
+    /// every start is a cold DHT, and the swarm takes a long while to answer a
+    /// stranger.
+    pub fn shutdown(&self) {
+        let engine = lock(&self.engine).take();
+        if let Some(mut engine) = engine {
+            engine.stop();
+        }
     }
 
     /// Queue a URL. Headers are whole lines: "Cookie: a=b", "Referer: ...".
@@ -476,7 +512,7 @@ impl Engine {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let child = cmd.spawn().ok()?;
-        let engine = Engine { child, port, secret };
+        let engine = Engine { child, port, secret, stopped: false };
         // The port appears a moment after the process does. Wait for it.
         for _ in 0..BOOT_TRIES {
             if call(engine.port, &engine.secret, 1, "aria2.getVersion", &[]).is_ok() {

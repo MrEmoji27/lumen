@@ -82,6 +82,12 @@ use store::{SavedTab, Session, Settings};
 
 const TICK: Duration = Duration::from_secs(3);
 const STAGE_IDLE: Duration = Duration::from_secs(30);
+/// How long a torrent may look for its peers before the row says so plainly:
+/// after this, nobody is answering, and the person should know that.
+const METADATA_PATIENCE: Duration = Duration::from_secs(120);
+/// How long a magnet waits for the page to say whether the person clicked it.
+/// The page's report lands a moment after the navigation.
+const MAGNET_SETTLE: Duration = Duration::from_millis(400);
 /// A hidden tab keeps its caches this long, so flipping back is instant.
 const TRIM_AFTER: Duration = Duration::from_secs(30);
 /// The person away from mouse and keyboard this long, and the page on screen
@@ -728,6 +734,10 @@ struct App {
     aria_page: HashSet<String>,
     /// Why a page-started row waits: gid -> the note its paused row shows.
     aria_hold: HashMap<String, String>,
+    /// When each torrent started looking for its peers: gid -> the moment.
+    /// A torrent that has been looking for a long time with nobody answering
+    /// is the swarm's doing, and the row says so.
+    aria_since: HashMap<String, Instant>,
     /// A pop-up Lumen stopped, by tab: the host it wanted, the host that asked,
     /// and when. One notice per tab: the newest replaces the old.
     popup_notes: HashMap<u64, (String, String, Instant)>,
@@ -956,6 +966,9 @@ fn main() {
         .expect("window");
 
     let dark = resolve_dark(&settings, window.theme());
+    // The secret the page script keeps, so a page cannot forge what it says.
+    let popup_token = popup::token();
+    let popup_js = popup::script(&popup_token);
     let ctx = Rc::new(Ctx {
         window: Rc::new(window),
         proxy: event_loop.create_proxy(),
@@ -986,6 +999,8 @@ fn main() {
         userscripts: Cell::new(settings.userscripts),
         popup_info: Rc::new(RefCell::new(std::collections::VecDeque::new())),
         clicks: Rc::new(RefCell::new(HashMap::new())),
+        popup_js,
+        popup_token,
     });
 
     {
@@ -1124,6 +1139,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         aria_person: HashSet::new(),
         aria_page: HashSet::new(),
         aria_hold: HashMap::new(),
+        aria_since: HashMap::new(),
         popup_notes: HashMap::new(),
         translator: None,
         #[cfg(feature = "servo")]
@@ -1395,6 +1411,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             app.clear_on_exit();
             app.save_session();
             app.upnp.release();
+            // aria2 goes out the clean way, so it writes its DHT table and its
+            // session: the next start knows the swarm.
+            app.aria.shutdown();
             // The journal's goodbye: a run with this line is a run that ended.
             journal::stop(true, app.born.elapsed());
             privacy_stats::flush();
@@ -1657,6 +1676,34 @@ fn magnet_hold(page_url: &str) -> String {
     } else {
         format!("from {h}: press Resume to start")
     }
+}
+
+/// The name a magnet's row carries until aria2 knows the real one: the `dn=`
+/// name, or "Torrent" and a short piece of the magnet's own hash.
+fn magnet_label(url: &str, gid: &str) -> String {
+    let name = magnet_name(url);
+    if !name.is_empty() {
+        return name;
+    }
+    let hash = url.split_once("urn:btih:").map(|(_, h)| h.split('&').next().unwrap_or("")).unwrap_or("");
+    let short: String = hash.chars().take(7).collect();
+    let short = if short.is_empty() { gid.chars().take(7).collect() } else { short };
+    format!("Torrent {short}")
+}
+
+/// What a torrent's row says while aria2 is still looking for its peers: the
+/// metadata phase. Nothing is downloading yet, and the row must not read as
+/// frozen. After a while with nobody answering it says so plainly: the swarm
+/// is not answering, and that is nobody's fault at the keyboard.
+fn metadata_note(torrent: bool, peers: u32, looking: Duration) -> String {
+    if !torrent {
+        return String::new();
+    }
+    if peers == 0 && looking > METADATA_PATIENCE {
+        let mins = (looking.as_secs_f64() / 60.0).round() as u64;
+        return format!("Still looking for the torrent's info · {mins} min, no peers yet");
+    }
+    format!("Finding peers for torrent info · {peers} peers")
 }
 
 /// A person-started torrent pause-metadata stopped once its metadata is in:
@@ -3225,6 +3272,7 @@ impl App {
             self.aria_person.remove(&gid);
             self.aria_page.remove(&gid);
             self.aria_hold.remove(&gid);
+            self.aria_since.remove(&gid);
             let aria = self.aria.clone();
             std::thread::spawn(move || {
                 let _ = aria.remove(&gid);
@@ -3277,9 +3325,18 @@ impl App {
                     person: true,
                     hold: None,
                 }))),
-                Err(_) => proxy.send_event(Ev::AriaFailed(tab, url)),
+                Err(_) => proxy.send_event(Ev::AriaFailed(tab, url, private)),
             };
         });
+    }
+
+    /// A magnet the person asked for: it starts at once. One a page asked for
+    /// waits for the person, with a note saying which page asked.
+    fn start_magnet(&mut self, tab: u64, url: &str, clicked: bool) {
+        let private = self.idx(tab).is_some_and(|i| self.tabs[i].private);
+        let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
+        let hold = if clicked { None } else { Some(magnet_hold(&page)) };
+        self.add_magnet(url, private, hold);
     }
 
     /// A magnet link goes straight to aria2. The display name comes from `dn=`
@@ -3303,7 +3360,7 @@ impl App {
                     person,
                     hold,
                 }))),
-                Err(_) => proxy.send_event(Ev::AriaFailed(0, u)),
+                Err(_) => proxy.send_event(Ev::AriaFailed(0, u, private)),
             };
         });
         self.aria_poll.store(true);
@@ -4513,7 +4570,7 @@ impl App {
                                 person: false,
                                 hold: None,
                             }))),
-                            Err(_) => proxy.send_event(Ev::AriaFailed(tab, u)),
+                            Err(_) => proxy.send_event(Ev::AriaFailed(tab, u, private)),
                         };
                     });
                 };
@@ -4539,6 +4596,8 @@ impl App {
                     // A page's download: any torrent it spawns waits for Resume.
                     self.aria_page.insert(gid.clone());
                 }
+                // When this torrent started looking for its peers.
+                self.aria_since.insert(gid.clone(), Instant::now());
                 if let Some(note) = hold {
                     self.aria_hold.insert(gid.clone(), note);
                 }
@@ -4549,6 +4608,9 @@ impl App {
                     if private {
                         // Show it now, marked private, so it never reaches downloads.json.
                         let held = self.aria_hold.get(&gid).cloned();
+                        // A magnet is a torrent from the start, and it carries the
+                        // name it was given until aria2 knows the real one.
+                        let magnet = url.starts_with("magnet:");
                         self.downloads.insert(
                             0,
                             engine::Dl {
@@ -4561,8 +4623,8 @@ impl App {
                                 speed: 0,
                                 note: held.unwrap_or_else(|| "starting".into()),
                                 private,
-                                name: String::new(),
-                                kind: "file",
+                                name: if magnet { magnet_label(&url, &gid) } else { String::new() },
+                                kind: if magnet { "torrent" } else { "file" },
                                 up: 0,
                                 peers: 0,
                                 seeds: 0,
@@ -4582,7 +4644,7 @@ impl App {
                 }
                 self.aria_poll.store(true);
             }
-            Ev::AriaFailed(tab, url) => {
+            Ev::AriaFailed(tab, url, private) => {
                 if tab == 0 && !url.is_empty() {
                     // A manual add (Add link / magnet / torrent) that aria2 refused:
                     // show a failed row. There is no page to fall back to.
@@ -4594,6 +4656,7 @@ impl App {
                         url.rsplit(['/', '?', '#']).next().unwrap_or("").to_string()
                     };
                     let name = if name.is_empty() { "download".to_string() } else { name };
+                    let magnet = url.starts_with("magnet:");
                     self.downloads.insert(
                         0,
                         engine::Dl {
@@ -4605,9 +4668,10 @@ impl App {
                             state: "failed",
                             speed: 0,
                             note: "aria2 refused it".into(),
-                            private: false,
+                            // A private tab's row stays private: it leaves no trace.
+                            private,
                             name,
-                            kind: "file",
+                            kind: if magnet { "torrent" } else { "file" },
                             up: 0,
                             peers: 0,
                             seeds: 0,
@@ -4675,7 +4739,14 @@ impl App {
                         && !self.aria_ids.contains_key(new)
                     {
                         self.aria_ids.remove(old);
-                        self.aria_meta.remove(old);
+                        // What we know about the magnet follows the torrent it
+                        // became: the same address, the same name, the same age.
+                        if let Some(meta) = self.aria_meta.remove(old) {
+                            self.aria_meta.insert(new.clone(), meta);
+                        }
+                        if let Some(at) = self.aria_since.remove(old) {
+                            self.aria_since.insert(new.clone(), at);
+                        }
                         self.aria_ids.insert(new.clone(), id);
                         if self.aria_person.remove(old) {
                             // A person-started .torrent hands its consent to the
@@ -4704,6 +4775,21 @@ impl App {
                 let mut torrent_active = false;
                 for j in jobs {
                     let Some(&id) = self.aria_ids.get(&j.gid) else { continue };
+                    // A magnet is a torrent from the start, and it carries the name
+                    // it was given until aria2 knows the real one. A job aria2
+                    // brought back from its session file says so itself.
+                    let meta_url = self.aria_meta.get(&j.gid).map(|(u, _, _)| u.clone()).unwrap_or_default();
+                    let url = if meta_url.starts_with("magnet:") { meta_url } else { j.url.clone() };
+                    let magnet = url.starts_with("magnet:");
+                    let name = if !j.name.is_empty() {
+                        j.name.clone()
+                    } else if magnet {
+                        magnet_label(&url, &j.gid)
+                    } else {
+                        j.path.rsplit(['\\', '/']).next().unwrap_or("").to_string()
+                    };
+                    let ratio = if j.done > 0 { j.upload_length as f64 / j.done as f64 } else { 0.0 };
+                    let kind = if !j.name.is_empty() || magnet { "torrent" } else { "file" };
                     // A person-started torrent pause-metadata stopped once its
                     // metadata arrived: start it. Keep the poll awake for one
                     // more round to see it run.
@@ -4728,6 +4814,12 @@ impl App {
                     busy |= matches!(state, "progress" | "seeding");
                     let note = match j.status {
                         "active" if j.seeder => format!("{} peers", j.connections),
+                        // The metadata phase: aria2 is still looking for the
+                        // torrent's peers. Say so, or the row reads as frozen.
+                        "active" if kind == "torrent" && j.total == 0 => {
+                            let looking = self.aria_since.get(&j.gid).map(|at| Instant::now().duration_since(*at)).unwrap_or_default();
+                            metadata_note(true, j.connections, looking)
+                        }
                         "active" => format!("{} connections", j.connections),
                         "waiting" => "queued".to_string(),
                         "paused" => self.aria_hold.get(&j.gid).cloned().unwrap_or_default(),
@@ -4748,13 +4840,6 @@ impl App {
                         }
                     }
                     let private = self.downloads.iter().find(|x| x.id == id).is_some_and(|x| x.private);
-                    let name = if !j.name.is_empty() {
-                        j.name.clone()
-                    } else {
-                        j.path.rsplit(['\\', '/']).next().unwrap_or("").to_string()
-                    };
-                    let ratio = if j.done > 0 { j.upload_length as f64 / j.done as f64 } else { 0.0 };
-                    let kind = if j.name.is_empty() { "file" } else { "torrent" };
                     // The journal's view of it: one `download` line when it ends,
                     // and the reason the person was shown when aria2 gives up.
                     journal::download(id, kind, state, j.done as i64, private);
@@ -4943,13 +5028,31 @@ impl App {
                     self.tabs[i].url = url;
                 }
             }
-            Ev::Magnet(tab, url) => {
-                // A page (or an agent tab — those count as pages) asked for a
-                // magnet: it goes in paused, waiting for the person. The note
-                // says which page asked.
-                let private = self.idx(tab).is_some_and(|i| self.tabs[i].private);
-                let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
-                self.add_magnet(&url, private, Some(magnet_hold(&page)));
+            Ev::Magnet(tab, url, user) => {
+                // A magnet the person clicked starts at once: they asked for it,
+                // and a torrent of their own choosing is their business. One a
+                // page asked for waits for the person: a torrent shows the
+                // swarm the person's address, and no page may start one.
+                if user {
+                    self.start_magnet(tab, &url, true);
+                } else {
+                    // The page's report of the click lands after the
+                    // navigation (measured on 2026-10-19), so wait a moment
+                    // and ask again before holding the torrent.
+                    let (proxy, tab, url) = (self.ctx.proxy.clone(), tab, url);
+                    std::thread::Builder::new()
+                        .name("lumen-magnet".into())
+                        .spawn(move || {
+                            std::thread::sleep(MAGNET_SETTLE);
+                            let _ = proxy.send_event(Ev::MagnetSettled(tab, url));
+                        })
+                        .ok();
+                }
+            }
+            Ev::MagnetSettled(tab, url) => {
+                // The page has had its moment to say the person clicked it.
+                let clicked = self.ctx.clicks.borrow().get(&tab).is_some_and(|p| popup::clicked_magnet(p, &url));
+                self.start_magnet(tab, &url, clicked);
             }
             Ev::PopupBlocked(tab, target, site) => {
                 // A pop-up the person did not ask for. The chrome says so over the
@@ -5694,7 +5797,7 @@ impl App {
                                         person: true,
                                         hold: None,
                                     }))),
-                                    Err(_) => proxy.send_event(Ev::AriaFailed(0, u)),
+                                    Err(_) => proxy.send_event(Ev::AriaFailed(0, u, private)),
                                 };
                             });
                             self.aria_poll.store(true);
@@ -5720,7 +5823,7 @@ impl App {
                                     person: true,
                                     hold: None,
                                 }))),
-                                Err(_) => proxy.send_event(Ev::AriaFailed(0, String::new())),
+                                Err(_) => proxy.send_event(Ev::AriaFailed(0, String::new(), private)),
                             };
                         });
                         self.aria_poll.store(true);
@@ -6564,6 +6667,8 @@ impl App {
             self.clear_on_exit();
             self.save_session();
             self.upnp.release();
+            // aria2 goes out the clean way, so it writes its DHT table.
+            self.aria.shutdown();
             // Leaving on purpose, so the journal ends with a clean goodbye.
             journal::stop(true, self.born.elapsed());
             privacy_stats::flush();
@@ -7966,7 +8071,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
+    use super::{METADATA_PATIENCE, SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, magnet_label, metadata_note, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
+    use std::time::Duration;
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
     #[test]
@@ -8014,6 +8120,31 @@ mod tests {
         assert_eq!(magnet_hold("https://example.com/files?x=1"), "from example.com: press Resume to start");
         // No host to name: still says a page asked.
         assert_eq!(magnet_hold("about:blank"), "from a page: press Resume to start");
+    }
+
+    /// The row of a magnet carries the name it was given, until aria2 knows
+    /// the real one.
+    #[test]
+    fn magnet_label_falls_back_to_a_short_hash() {
+        let m = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny";
+        assert_eq!(magnet_label(m, "abc123"), "Big Buck Bunny");
+        // No dn=: the torrent's own hash, so the row is not a row of zeroes.
+        let m = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&tr=udp%3A%2F%2Ftracker.example%3A1337";
+        assert_eq!(magnet_label(m, "abc123"), "Torrent dd8255e");
+        // No hash either: the gid stands in.
+        assert_eq!(magnet_label("magnet:?tr=udp%3A%2F%2Ftracker.example", "abc123def"), "Torrent abc123d");
+    }
+
+    /// The metadata phase says what it is doing, and after a long while it
+    /// says plainly that nobody is answering.
+    #[test]
+    fn the_metadata_phase_says_what_it_is_doing() {
+        let soon = Duration::from_secs(30);
+        let long = Duration::from_secs(METADATA_PATIENCE.as_secs() + 30);
+        assert_eq!(metadata_note(true, 12, soon), "Finding peers for torrent info · 12 peers");
+        assert_eq!(metadata_note(true, 0, long), "Still looking for the torrent's info · 3 min, no peers yet");
+        // Not a torrent: it is not looking for anything.
+        assert_eq!(metadata_note(false, 0, long), "");
     }
 
     /// Only a person-started, unfinished, known-name torrent gets auto-started.

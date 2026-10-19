@@ -1591,7 +1591,12 @@ fn status_line(d: &UiDl) -> String {
             s
         }
         "paused" => {
-            let mut s = format!("Paused · {} of {}", fmt_bytes(d.received), fmt_bytes(d.total));
+            // A row with no total yet has nothing to show in bytes: the note
+            // says what it is waiting for instead.
+            let mut s = format!("Paused · {}", fmt_bytes(d.received));
+            if d.total > 0 {
+                s.push_str(&format!(" of {}", fmt_bytes(d.total)));
+            }
             if !d.note.is_empty() {
                 s.push_str(&format!(" · {}", d.note));
             }
@@ -3555,6 +3560,26 @@ mod tests {
     fn fmt_bytes_rounds_like_the_brief() {
         assert_eq!(fmt_bytes(4_404_019), "4.2 MB");
         assert_eq!(fmt_bytes(317_440), "310 KB");
+    }
+
+    /// A torrent that is still looking for its peers says so: a row of zeroes
+    /// reads as frozen, and it is not.
+    #[test]
+    fn a_torrent_waiting_for_its_info_says_what_it_is_doing() {
+        let mut d = dl("progress", "torrent");
+        d.note = "Finding peers for torrent info · 12 peers".into();
+        let s = super::status_line(&d);
+        assert!(s.contains("Finding peers for torrent info"), "{s}");
+        assert!(!s.contains("0 B of 0 B"), "{s}");
+
+        // A paused magnet with no size yet: the note says why it waits, and
+        // no zeroes.
+        let mut d = dl("paused", "torrent");
+        d.note = "from example.com: press Resume to start".into();
+        let s = super::status_line(&d);
+        assert!(s.starts_with("Paused"), "{s}");
+        assert!(s.contains("press Resume to start"), "{s}");
+        assert!(!s.contains("0 B of 0 B"), "{s}");
     }
 
     #[test]

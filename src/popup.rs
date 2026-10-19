@@ -6,6 +6,53 @@
 
 use std::time::{Duration, Instant};
 
+/// The secret that tells Lumen's own page reports from a page's forged ones.
+/// The script keeps it in a closure the page cannot reach, so a page cannot
+/// claim it clicked something.
+pub fn token() -> String {
+    let mut b = [0u8; 16];
+    let ok = unsafe {
+        use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
+        BCryptGenRandom(None, &mut b, BCRYPT_USE_SYSTEM_PREFERRED_RNG).is_ok()
+    };
+    if !ok {
+        // The system's numbers are not coming: a token of our own is still
+        // better than none, and the page cannot read this one either.
+        b = [0x5a; 16];
+    }
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The script Lumen puts in every page: it says what the last click was on,
+/// and when a script opened a window.
+///
+/// The click is caught in the capture phase, so it is seen before the page's
+/// own handlers run: a page that opens a window on the first click has already
+/// said what that click was on. The report is a message to the host, and the
+/// host reads it when the window is asked for. Measured on 2026-10-19: the
+/// message arrives first, because the page sends it before the browser asks
+/// for the window and the host reads the queue in the order it was filled.
+pub fn script(token: &str) -> String {
+    const SCRIPT: &str = r#"try{(()=>{const W=window.chrome&&window.chrome.webview;if(!W)return;
+const T='__TOKEN__';
+const say=m=>{m.t=T;try{W.postMessage(m)}catch(_){}};
+const opens=t=>!!t&&t!=='_self'&&t!=='_top'&&t!=='_parent';
+const onClick=e=>{let el=e.target,link=0,url='';
+ while(el&&el.nodeType===1){const tag=el.tagName;
+  if(tag==='A'||tag==='AREA'){if(!url)url=el.href?String(el.href):'';if(opens(el.getAttribute('target')))link=1;break}
+  if(tag==='FORM'){if(opens(el.getAttribute('target')))link=1;break}
+  if(tag==='BUTTON'||tag==='INPUT'){if(opens(el.getAttribute('formtarget')))link=1;
+   else if(el.form&&opens(el.form.getAttribute('target')))link=1;break}
+  el=el.parentElement}
+ say({lumen:'click',link:link,url:url})};
+document.addEventListener('click',onClick,true);
+document.addEventListener('auxclick',onClick,true);
+const O=window.open;
+if(typeof O==='function')window.open=function(u){say({lumen:'open',url:String(u||'')});return O.apply(this,arguments)};
+})()}catch(e){}"#;
+    SCRIPT.replace("__TOKEN__", token)
+}
+
 /// What the pop-up rules are right now: the setting, and the trusted sites.
 #[derive(Clone, Debug, Default)]
 pub struct Policy {
@@ -99,7 +146,7 @@ const CLICK_WINDOW: Duration = Duration::from_secs(10);
 pub struct Page {
     /// The last click was on a link that opens a window by itself.
     pub link: bool,
-    /// That link's address, when it had one.
+    /// The address of the link that was clicked, when the click was on one.
     pub url: String,
     /// When the click was.
     pub at: Instant,
@@ -111,6 +158,16 @@ impl Default for Page {
     fn default() -> Self {
         Page { link: false, url: String::new(), at: Instant::now(), opened: None }
     }
+}
+
+/// Whether the magnet is the one the person clicked: the page's last click
+/// was on a link with this address.
+///
+/// WebView2's own `IsUserInitiated` says true for a magnet navigation whether
+/// a click asked for it or the page did it on its own (measured on 2026-10-19),
+/// so the page's report of the click is what tells the two apart.
+pub fn clicked_magnet(page: &Page, url: &str) -> bool {
+    !page.url.is_empty() && page.url == url && page.at.elapsed() <= CLICK_WINDOW
 }
 
 /// Whether the click that asked for this window was on a link that opens one.
@@ -287,5 +344,19 @@ mod tests {
         assert_eq!(host_of(""), "");
         assert_eq!(host_of("not a host"), "");
         assert_eq!(host_of("example.com/evil"), "");
+    }
+
+    #[test]
+    fn a_magnet_is_the_persons_only_when_they_clicked_it() {
+        let m = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c";
+        let page = Page { link: false, url: m.into(), at: Instant::now(), opened: None };
+        assert!(clicked_magnet(&page, m));
+        // Another magnet: the page asked for that one.
+        assert!(!clicked_magnet(&page, "magnet:?xt=urn:btih:0000"));
+        // A click long ago is not the one that asked.
+        let old = Page { link: false, url: m.into(), at: Instant::now() - Duration::from_secs(60), opened: None };
+        assert!(!clicked_magnet(&old, m));
+        // No click at all.
+        assert!(!clicked_magnet(&Page::default(), m));
     }
 }

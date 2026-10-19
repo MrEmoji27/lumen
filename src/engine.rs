@@ -125,8 +125,12 @@ pub enum Ev {
     SiteCleared(String, bool),
     /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
-    /// A magnet link was cancelled out of a page; hand it to aria2.
-    Magnet(u64, String),
+    /// A magnet link was cancelled out of a page; hand it to aria2. The flag
+    /// says whether a click or a key asked for it.
+    Magnet(u64, String, bool),
+    /// A magnet, a moment after the page was asked: the page has said by now
+    /// whether the person clicked it.
+    MagnetSettled(u64, String),
     /// Time to read this tab's text for history search: (tab, url it was loading).
     Capture(u64, String),
     /// The text came back: (tab, url, JSON or "null").
@@ -156,7 +160,9 @@ pub enum Ev {
     Handoff(u64, String, String, String),
     /// aria2 took a download; `Added` says how it was started.
     AriaAdded(Box<Added>),
-    AriaFailed(u64, String),
+    /// aria2 refused a download: the tab it came from (0 for a manual add), the
+    /// address, and whether the tab was private.
+    AriaFailed(u64, String, bool),
     AriaJobs(Vec<crate::aria::Job>),
     /// A request from the agent thread, answered through its channel.
     Agent(crate::agent::Call),
@@ -334,6 +340,11 @@ pub struct Ctx {
     /// A new document starts with nothing; the last click of the old one says
     /// nothing about this one.
     pub clicks: Rc<RefCell<HashMap<u64, crate::popup::Page>>>,
+    /// The script Lumen puts in every page, with the secret in it: the page
+    /// cannot forge what the script says.
+    pub popup_js: String,
+    /// That secret. A report without it is the page's own noise.
+    pub popup_token: String,
 }
 
 /// A strict-isolation environment on its way. See `start_own_env` / `poll_own_envs`.
@@ -579,7 +590,7 @@ fn build_tab_in(
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
         .with_initialization_script(if init_on("WEBRTC") { WEBRTC_JS } else { "" })
         .with_initialization_script(if init_on("CALL") { CALL_JS } else { "" })
-        .with_initialization_script(if init_on("POPUP") { POPUP_JS } else { "" })
+        .with_initialization_script(if init_on("POPUP") { ctx.popup_js.as_str() } else { "" })
         .with_theme(theme(dark))
         .with_background_color(page_bg(dark))
         .with_incognito(private)
@@ -1032,15 +1043,21 @@ fn hook_page(
                     let _ = p.send_event(Ev::NavRedirected(id));
                     return Ok(());
                 }
-                // A new document: the clicks of the old one say nothing about this one.
-                clicks.borrow_mut().remove(&id);
                 let mut u = PWSTR::null();
                 args.Uri(&mut u)?;
                 let u = take(u);
                 // A magnet link is not a page: cancel and hand it to aria2.
                 if u.starts_with("magnet:") {
                     args.SetCancel(true)?;
-                    let _ = p.send_event(Ev::Magnet(id, u));
+                    // A magnet the person clicked is theirs: it starts at once.
+                    // One a page asked for on its own waits for Resume, because a
+                    // torrent shows the swarm the person's address.
+                    //
+                    // The click the page reports lands after the navigation
+                    // (measured on 2026-10-19), so the flag here may be early;
+                    // the main loop asks again a moment later.
+                    let clicked = clicks.borrow().get(&id).is_some_and(|p| crate::popup::clicked_magnet(p, &u));
+                    let _ = p.send_event(Ev::Magnet(id, u, clicked));
                     return Ok(());
                 }
                 // A click on the warning page for a site without https. Not a navigation.
@@ -1083,6 +1100,10 @@ fn hook_page(
                 }
                 // The journal times the page from here to NavigationCompleted.
                 let _ = p.send_event(Ev::NavStart(id, u.clone()));
+                // A new document: the clicks of the old one say nothing about
+                // this one. (A navigation Lumen cancels leaves the page as it
+                // was, and its clicks still count.)
+                clicks.borrow_mut().remove(&id);
                 let clean = clean_url(&u);
                 let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u), who));
                 if let Some(clean) = listed.or(clean) {
@@ -2013,32 +2034,6 @@ fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String, u64
     }
 }
 
-/// In every page, in every frame: what the last click was on, and when a script
-/// opened a window. The page cannot be trusted, but it can be watched, and it
-/// says so before the window is asked for.
-///
-/// The click is caught in the capture phase, so it is seen before the page's
-/// own handlers run: a page that opens a window on the first click has already
-/// said what that click was on. The report is a message to the host, and the
-/// host reads it when the window is asked for. Measured on 2026-10-19: the
-/// message arrives first, because the page sends it before the browser asks
-/// for the window and the host reads the queue in the order it was filled.
-const POPUP_JS: &str = r#"try{(()=>{const W=window.chrome&&window.chrome.webview;if(!W)return;
-const say=m=>{try{W.postMessage(m)}catch(_){}};
-const opens=t=>!!t&&t!=='_self'&&t!=='_top'&&t!=='_parent';
-const onClick=e=>{let el=e.target,link=0,url='';
- while(el&&el.nodeType===1){const tag=el.tagName;
-  if(tag==='A'||tag==='AREA'){if(opens(el.getAttribute('target'))){link=1;url=el.href?String(el.href):''}break}
-  if(tag==='FORM'){if(opens(el.getAttribute('target')))link=1;break}
-  if(tag==='BUTTON'||tag==='INPUT'){if(opens(el.getAttribute('formtarget')))link=1;break}
-  el=el.parentElement}
- say({lumen:'click',link:link,url:url})};
-document.addEventListener('click',onClick,true);
-document.addEventListener('auxclick',onClick,true);
-const O=window.open;
-if(typeof O==='function')window.open=function(u){say({lumen:'open',url:String(u||'')});return O.apply(this,arguments)};
-})()}catch(e){}"#;
-
 /// The page's own report of what it did: the last click, and a window a script
 /// opened. Lumen needs both to tell a link the person clicked from a pop-up a
 /// page pushed.
@@ -2046,6 +2041,7 @@ fn hook_popup_page(wv: &WebView, id: u64, ctx: &Rc<Ctx>) {
     let core = wv.webview();
     let mut token = 0i64;
     let clicks = ctx.clicks.clone();
+    let secret = ctx.popup_token.clone();
     unsafe {
         let _ = core.add_WebMessageReceived(
             &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
@@ -2055,6 +2051,12 @@ fn hook_popup_page(wv: &WebView, id: u64, ctx: &Rc<Ctx>) {
                     return Ok(());
                 }
                 let Ok(msg) = serde_json::from_str::<serde_json::Value>(&take(j)) else { return Ok(()) };
+                // Only Lumen's own script may say what the page did: a page
+                // that could forge it would be able to talk itself into a
+                // window, or into a torrent.
+                if msg["t"].as_str() != Some(secret.as_str()) {
+                    return Ok(());
+                }
                 let mut m = clicks.borrow_mut();
                 let p = m.entry(id).or_default();
                 match msg["lumen"].as_str().unwrap_or("") {
