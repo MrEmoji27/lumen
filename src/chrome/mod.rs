@@ -67,6 +67,27 @@ use motion::{Ease, Id, Motion, Prop};
 use style::Look;
 use theme::Theme;
 
+// ------------------------------------------------------------------ memory
+
+/// The memory figure where the number warms toward red and a glow starts to
+/// grow behind it: one gigabyte.
+const MEM_WARN: u64 = 1 << 30;
+/// The figure where the glow is full and breathes: two gigabytes.
+const MEM_HOT: u64 = 2 << 30;
+/// How long one breath of that glow takes.
+const MEM_BREATH: f32 = 4.0;
+
+/// The memory figure in short form: "312M", "1.2G". The compact column has no
+/// room for the long one.
+fn mem_short(bytes: u64) -> String {
+    let mb = bytes as f64 / 1048576.0;
+    if mb >= 1024.0 {
+        format!("{:.1}G", mb / 1024.0)
+    } else {
+        format!("{}M", mb.round() as u64)
+    }
+}
+
 // ------------------------------------------------------------------- state
 
 #[derive(Clone, Debug)]
@@ -80,6 +101,8 @@ pub struct UiTab {
     pub pinned: bool,
     /// A pin that is not on the page it was pinned on: the menu offers the way back.
     pub pin_away: bool,
+    /// An Essential: it keeps the site in the row above the tabs.
+    pub essential: bool,
     pub audio: bool,
     pub muted: bool,
     /// In a call; drawn as a microphone where the sound mark goes.
@@ -103,6 +126,57 @@ pub struct UiTab {
     /// The sidebar groups agent tabs by owner and puts a Stop on each group.
     pub owner: String,
     pub owner_name: String,
+}
+
+/// An Essential: a site kept open in every workspace, shown as an icon only.
+#[derive(Clone, Debug)]
+pub struct UiEssential {
+    pub url: String,
+    pub title: String,
+    /// The tab has wandered from the address it was kept at.
+    pub away: bool,
+    /// The tab that is the essential, when there is one here.
+    pub tab: u64,
+}
+
+/// A tab in the archive: what it was, and when it was closed away.
+#[derive(Clone, Debug)]
+pub struct UiArchived {
+    pub url: String,
+    pub title: String,
+    /// How long ago, in words.
+    pub when: String,
+}
+
+/// A workspace as the chrome sees it: its name and the colour it wears.
+#[derive(Clone, Debug)]
+pub struct UiWorkspace {
+    pub name: String,
+    /// The colour's number in the palette, empty for none.
+    pub colour: String,
+}
+
+/// The colours a workspace can wear: eight, each readable in light and dark.
+pub const WORKSPACE_COLOURS: [(&str, f32); 8] = [
+    ("Red", 25.0),
+    ("Orange", 60.0),
+    ("Green", 145.0),
+    ("Teal", 185.0),
+    ("Blue", 250.0),
+    ("Violet", 300.0),
+    ("Pink", 350.0),
+    ("Brown", 75.0),
+];
+
+/// The colour a workspace wears: its number in the palette, in the look's own
+/// lightness, so it reads in light and in dark.
+pub fn workspace_colour(dark: bool, colour: &str) -> Option<theme::Color> {
+    let n: usize = colour.parse().ok()?;
+    if n >= WORKSPACE_COLOURS.len() {
+        return None;
+    }
+    let (_, h) = WORKSPACE_COLOURS[n];
+    Some(theme::oklch(if dark { 0.72 } else { 0.55 }, 0.13, h))
 }
 
 #[derive(Clone, Debug)]
@@ -172,7 +246,12 @@ pub struct UiState {
     /// Remembered answers: (origin, what, allowed).
     pub rules: Vec<(String, String, bool)>,
     /// Workspace names, for the switcher at the top of the sidebar.
-    pub workspaces: Vec<String>,
+    pub workspaces: Vec<UiWorkspace>,
+    /// The essentials: the sites kept open in every workspace, in a row above
+    /// the tabs.
+    pub essentials: Vec<UiEssential>,
+    /// The tabs that were closed away because nobody looked at them.
+    pub archived: Vec<UiArchived>,
     /// Index into `workspaces` of the active one.
     pub active_workspace: usize,
     /// A glance card is open over the page.
@@ -368,6 +447,10 @@ pub enum Hit {
     KdbxFill,
     Sugg(usize),
     Shortcut(usize),
+    /// An essential's icon, by index: the site kept open in every workspace.
+    Essential(usize),
+    /// The "back home" mark on a pin that wandered, by tab.
+    PinHome(u64),
     /// A suggested site on the speed dial, and its "keep it" button.
     DialSugg(usize),
     DialPin(usize),
@@ -704,6 +787,19 @@ pub(crate) struct Inner {
     link: String,
     born: Instant,
     spinning: bool,
+    /// The memory glow's timer is armed: the number is over the hard line and
+    /// the glow breathes.
+    mem_pulse: bool,
+    /// The hidden sidebar: is it out, and when may it come in.
+    side_shown: bool,
+    /// The mouse is at the edge of the window: the sidebar waits there.
+    side_at_edge: bool,
+    /// The mouse is on the sidebar: it stays.
+    side_over: bool,
+    /// The key brought it in: it waits for the mouse.
+    side_forced: bool,
+    /// The hidden sidebar's slide: 0 is away, 1 is in.
+    side_slide: f32,
     /// Every animated value of the chrome.
     motion: Motion,
     animating: bool,
@@ -862,6 +958,7 @@ const ID_PAL: usize = 116;
 const TIMER_SPIN: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_ANIM: usize = 3;
+const TIMER_MEM: usize = 5;
 #[cfg(debug_assertions)]
 const TIMER_SHOT: usize = 4;
 
@@ -962,7 +1059,7 @@ const SEARCH_ROWS: usize = 9;
 /// order, so an empty query lists the tabs as they are.
 fn switch_rows(s: &UiState, q: &str) -> Vec<SwitchRow> {
     let mut all = switch_candidates(&s.tabs, &s.other_tabs);
-    let ws_name = s.workspaces.get(s.active_workspace).cloned().unwrap_or_default();
+    let ws_name = s.workspaces.get(s.active_workspace).map(|w| w.name.clone()).unwrap_or_default();
     for row in &mut all {
         if row.other.is_none() {
             row.ws_name = ws_name.clone();
@@ -1588,6 +1685,12 @@ impl Chrome {
                 sel: 0,
                 born: Instant::now(),
                 spinning: false,
+                mem_pulse: false,
+                side_shown: false,
+                side_at_edge: false,
+                side_over: false,
+                side_forced: false,
+                side_slide: 0.0,
                 motion: Motion::default(),
                 animating: false,
                 page: pages::Page::default(),
@@ -1963,6 +2066,15 @@ impl Chrome {
         }
         i.invalidate();
     }
+
+    /// The sidebar toggle key, with the sidebar hidden until the mouse reaches
+    /// the edge: the sidebar comes in over the page.
+    pub fn show_sidebar(&self) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        i.side_forced = true;
+        i.side_shown = true;
+        i.invalidate();
+    }
 }
 
 // ---------------------------------------------------------------- the guts
@@ -2205,6 +2317,7 @@ impl Inner {
             }
         }
         self.spin();
+        self.mem_timer();
         // Debug: LUMEN_TEST_FONT_PICK="ui_font:segoe" opens the font list with a
         // filter typed, so a screenshot can show it without clicking through.
         #[cfg(debug_assertions)]
@@ -2310,6 +2423,28 @@ impl Inner {
         }
     }
 
+    /// The glow behind the memory number breathes only over the hard line, and
+    /// only in the compact column, where the number is drawn. Below that line
+    /// there is no timer and no repaint: an idle Lumen stays idle.
+    fn mem_timer(&mut self) {
+        let want = self.look.motion.enabled
+            && self.look.show_memory
+            && self
+                .state
+                .as_ref()
+                .is_some_and(|s| s.compact() && s.mem.is_some_and(|(b, _)| b >= MEM_HOT));
+        if want != self.mem_pulse {
+            self.mem_pulse = want;
+            unsafe {
+                if want {
+                    SetTimer(Some(self.hwnd), TIMER_MEM, 80, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_MEM);
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------ layout
 
     /// The chrome's own heights for the current look.
@@ -2386,7 +2521,8 @@ impl Inner {
 
     /// The sidebar's rectangle, in chrome coordinates. None for a layout with no
     /// sidebar. The chrome covers the whole window, so this is always the edge
-    /// strip, with or without a panel open.
+    /// strip, with or without a panel open. A hidden sidebar waits off the edge
+    /// and slides in over the page.
     fn sidebar(&self) -> Option<R> {
         let s = self.state.as_ref()?;
         if !self.look.kind.sidebar() {
@@ -2395,7 +2531,11 @@ impl Inner {
         let (w, h) = self.size_dip();
         let sw = s.sidebar_w();
         let right = s.settings.sidebar_side == "right";
-        let x = if right { (w - sw).max(0.0) } else { 0.0 };
+        let mut x = if right { (w - sw).max(0.0) } else { 0.0 };
+        if self.side_slide < 1.0 {
+            let away = if right { w } else { -sw };
+            x = away + (x - away) * self.side_slide;
+        }
         match self.look.kind {
             Kind::Hybrid => {
                 let top = self.metrics().top();
@@ -2884,6 +3024,8 @@ impl Inner {
         }
         self.motion.set_config(lo.motion);
         self.motion.begin();
+        // The hidden sidebar slides in over the page, or out of the way.
+        self.slide_sidebar(s);
         // The workspace changed: the tab list cross-fades in its place.
         if self.last_ws != s.active_workspace {
             self.last_ws = s.active_workspace;
@@ -3150,10 +3292,174 @@ impl Inner {
         if self.look.ws_row { s.ws_h() } else { 0.0 }
     }
 
+    /// The essentials row's height: the icons in rows of four, or one per row in
+    /// the compact column.
+    fn essentials_h(&self, s: &UiState, compact: bool) -> f32 {
+        let n = s.essentials.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let per = if compact { 1 } else { 4 };
+        let rows = n.div_ceil(per);
+        rows as f32 * 32.0 + 8.0
+    }
+
+    /// The mark on a pin that wandered: the way back to the page it was made
+    /// on. It shows while the pointer is on the tile.
+    fn draw_pin_home(&mut self, t: &UiTab, r: R) {
+        if !t.pin_away {
+            return;
+        }
+        let th = self.look.theme;
+        let b = R::new(r.right() - 16.0, r.bottom() - 16.0, 13.0, 13.0);
+        let mh = Hit::PinHome(t.id);
+        self.hit(b, mh.clone());
+        let hov = self.is_hover(&Hit::Tab(t.id)) || self.is_hover(&mh);
+        if !hov {
+            return;
+        }
+        self.gfx.round(b, 4.0, th.side);
+        self.gfx.icon("home", b.x + 1.0, b.y + 1.0, 11.0, if self.is_hover(&mh) { th.text } else { th.dim });
+    }
+
+    /// The essentials: the sites the person keeps open all day, as icons in a
+    /// row above the tabs. The same row in every workspace.
+    fn draw_essentials(&mut self, s: &UiState, sb: R, compact: bool, y: f32) {
+        if s.essentials.is_empty() {
+            return;
+        }
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let per = if compact { 1 } else { 4 };
+        let pad = if compact { 6.0 } else { 8.0 };
+        let gap = if compact { 0.0 } else { 6.0 };
+        let cell = if compact { 30.0 } else { ((sb.w - 2.0 * pad - 3.0 * gap) / 4.0).max(28.0) };
+        let active = s.active_tab().map(|t| t.url.clone()).unwrap_or_default();
+        for (n, e) in s.essentials.iter().enumerate() {
+            let col = n % per;
+            let row = n / per;
+            let r = R::new(sb.x + pad + col as f32 * (cell + gap), y + row as f32 * 32.0, cell, 28.0);
+            let h = Hit::Essential(n);
+            let hov = self.is_hover(&h);
+            let a = self.motion.hover(Id::Essential(n), if hov { 1.0 } else { 0.0 }).min(1.0);
+            if a > 0.01 {
+                self.gfx.round(r, lo.r_sm, th.hover.alpha(a));
+            }
+            let host = host(&e.url);
+            let icon = R::new(r.x + (r.w - 20.0) / 2.0, r.y + 4.0, 20.0, 20.0);
+            let png = self.fav_png(&host, true);
+            match png.as_ref().and_then(|p| self.gfx.bitmap(site_key(&host), p)) {
+                Some(b) => self.gfx.draw_bitmap(&b, icon, 1.0),
+                None => {
+                    let letter = e.title.chars().next().or_else(|| host.chars().next()).unwrap_or('·').to_uppercase().to_string();
+                    self.gfx.round(icon, 6.0, th.raise);
+                    self.gfx.round_stroke(icon, 6.0, th.line, 1.0);
+                    self.gfx.text(&letter, icon, lo.font(11.0, 700).align(Align::Center), th.dim);
+                }
+            }
+            // The one on screen is the marked one.
+            if e.url == active {
+                self.gfx.round_stroke(icon, 6.0, th.accent, 2.0);
+            }
+            // An essential that wandered from the address it was kept at.
+            if e.away {
+                let b = R::new(r.right() - 12.0, r.y + 1.0, 11.0, 11.0);
+                let mh = Hit::PinHome(e.tab);
+                self.hit(b, mh.clone());
+                if hov || self.is_hover(&mh) {
+                    self.gfx.round(b, 3.0, th.side);
+                    self.gfx.icon("home", b.x + 1.0, b.y + 1.0, 9.0, if self.is_hover(&mh) { th.text } else { th.dim });
+                }
+            }
+            self.hit(r, h);
+        }
+    }
+
+    /// The sidebar is hidden until the mouse reaches the edge of the window:
+    /// the page has the whole width and the sidebar slides in over it.
+    fn hidden_sidebar(&self, s: &UiState) -> bool {
+        s.settings.hide_sidebar && self.look.kind.sidebar()
+    }
+
+    /// The hidden sidebar's slide: it comes in over the page and goes out
+    /// again. The page is never resized.
+    fn slide_sidebar(&mut self, s: &UiState) {
+        if !self.hidden_sidebar(s) {
+            self.side_slide = 1.0;
+            self.side_shown = true;
+            return;
+        }
+        // The dwell: a moment at the edge, so passing the mouse there does not
+        // bring the sidebar in.
+        let dwell = self.motion.enter(Id::Named("side-dwell"), Prop::Progress, 0.0, if self.side_at_edge { 1.0 } else { 0.0 }, 250, Ease::OutCubic);
+        // The mouse over the sidebar keeps it there, and so does the key. A
+        // menu, the address field or a drag keeps it too.
+        let hold = self.side_over || self.side_forced || self.side_busy();
+        let want = if dwell >= 1.0 || hold { 1.0 } else { 0.0 };
+        self.side_shown = want > 0.5;
+        self.side_slide = self.motion.enter(Id::Named("sidebar"), Prop::X, 0.0, want, 200, Ease::OutCubic);
+    }
+
+    /// The hidden sidebar follows the mouse: at the edge of the window it
+    /// waits a moment and then slides in; when the mouse leaves, it slides
+    /// away again.
+    fn side_mouse(&mut self, s: &UiState, x: f32, y: f32) {
+        if !self.hidden_sidebar(s) {
+            return;
+        }
+        let (w, h) = self.size_dip();
+        let right = s.settings.sidebar_side == "right";
+        let band = if right { w - x } else { x };
+        let at_edge = band <= layout::EDGE_BAND && y >= 0.0 && y <= h;
+        // On the sidebar as it is drawn: a hidden one waits off the edge, so
+        // the edge and the sidebar are two different places.
+        let over = self.sidebar().is_some_and(|sb| x >= sb.x && x <= sb.right() && y >= sb.y && y <= sb.bottom());
+        if self.side_at_edge != at_edge || self.side_over != over {
+            self.side_at_edge = at_edge;
+            self.side_over = over;
+            // The dwell starts on the next frame, and the frame has to come.
+            self.invalidate();
+        }
+        if !at_edge && !over {
+            // The mouse is elsewhere: the key's hold is over.
+            self.side_forced = false;
+        }
+    }
+
+    /// The mouse has left the sidebar: it goes away again, unless a menu, the
+    /// address field or a drag is in use.
+    fn side_leave(&mut self) {
+        self.side_at_edge = false;
+        self.side_over = false;
+        self.side_forced = false;
+        self.invalidate();
+    }
+
+    /// Something in the sidebar is in use: the sidebar stays where it is.
+    fn side_busy(&self) -> bool {
+        self.menu.is_some() || self.editing || self.drag.is_some()
+    }
+
+    /// The hidden sidebar is over the page: a shadow on the page's side, and
+    /// the chrome's window region is cut for it, so the sidebar shows on top
+    /// of the page without the page moving.
+    fn side_over_page(&mut self, s: &UiState, sb: R) {
+        let th = self.look.theme;
+        let right = s.settings.sidebar_side == "right";
+        let sh = if right { -8.0 } else { 8.0 };
+        self.gfx.round(R::new(sb.x + sh, sb.y, sb.w, sb.h), 0.0, th.shade.alpha(0.4));
+        let area = if right { R::new(sb.x - 8.0, sb.y, sb.w + 8.0, sb.h) } else { R::new(sb.x, sb.y, sb.w + 8.0, sb.h) };
+        self.floats.push((area, 0.0));
+    }
+
     fn draw_sidebar(&mut self, s: &UiState) {
         let Some(sb) = self.sidebar() else { return };
         let lo = self.look.clone();
         let th = lo.theme;
+        // Over the page: the shadow, and the region the chrome keeps for it.
+        if self.hidden_sidebar(s) && self.side_slide > 0.01 {
+            self.side_over_page(s, sb);
+        }
         // The sidebar's own colour; the page gaps behind the window keep `bg`. Glass draws a
         // frosted pane over its wallpaper instead.
         if lo.style == theme::Style::Glass {
@@ -3166,6 +3472,10 @@ impl Inner {
         if lo.style != theme::Style::Glass {
             let x = if s.settings.sidebar_side == "right" { sb.x + 0.5 } else { sb.right() - 0.5 };
             self.gfx.line(x, sb.y, x, sb.bottom(), th.line, 1.0);
+        }
+        // A thin line at the top of the sidebar, in the colour the workspace wears.
+        if let Some(c) = s.workspaces.get(s.active_workspace).and_then(|w| workspace_colour(th.dark, &w.colour)) {
+            self.gfx.round(R::new(sb.x, sb.y, sb.w, 2.0), 0.0, c);
         }
         let compact = s.compact();
         let top = sb.y;
@@ -3202,6 +3512,10 @@ impl Inner {
     fn draw_side_body(&mut self, s: &UiState) {
         let Some(sb) = self.sidebar() else { return };
         let lo = self.look.clone();
+        // Over the page: the shadow, and the region the chrome keeps for it.
+        if self.hidden_sidebar(s) && self.side_slide > 0.01 {
+            self.side_over_page(s, sb);
+        }
         self.gfx.fill(sb, lo.theme.side);
         let compact = s.compact();
         // A slim drag strip at the very top of the sidebar.
@@ -3232,7 +3546,8 @@ impl Inner {
         let room = (sb.w - 16.0 - 28.0 - glance_w - gaps).max(44.0 * n as f32);
         let cap = room / n.max(1) as f32;
         let mut wx = sb.x + 8.0;
-        for (i, name) in s.workspaces.iter().enumerate() {
+        for (i, w) in s.workspaces.iter().enumerate() {
+            let name = &w.name;
             let active = i == s.active_workspace;
             let tw = (self.gfx.measure(name, lo.font(12.0, 500)) + 20.0).min(cap).max(44.0);
             let r = R::new(wx, ws_y, tw, ws_h);
@@ -3248,6 +3563,10 @@ impl Inner {
                     self.gfx.round(r, lo.r_sm + 1.0, th.hover.alpha(a));
                 }
                 self.gfx.text(name, label, lo.font(12.0, 500).align(Align::Center), if hov { th.text } else { th.dim });
+            }
+            // The colour it wears: a small dot at the left of the name.
+            if let Some(c) = workspace_colour(th.dark, &w.colour) {
+                self.gfx.circle(r.x + 7.0, r.y + r.h / 2.0, 3.0, c);
             }
             self.hit(r, hit);
             wx += tw + 6.0;
@@ -3401,7 +3720,12 @@ impl Inner {
             90.0
         };
         let list_top = sb.y + base + self.ws_h(s);
-        let list = R::new(sb.x, list_top, sb.w, (sb.h - base - self.ws_h(s) - 40.0).max(1.0));
+        // The essentials sit between the chips and the tabs: the same row in
+        // every workspace.
+        let ess_y = list_top;
+        let list_top = list_top + self.essentials_h(s, compact);
+        let list = R::new(sb.x, list_top, sb.w, (sb.h - base - self.ws_h(s) - self.footer_h(compact)).max(1.0));
+        self.draw_essentials(s, sb, compact, ess_y);
         self.gfx.clip(list);
         // A workspace switch cross-fades the list.
         let wf = self.motion.enter(Id::Workspace(s.active_workspace), Prop::Opacity, 1.0, 1.0, 150, Ease::OutCubic).min(1.0);
@@ -3409,8 +3733,8 @@ impl Inner {
         // Agent tabs are grouped per agent: their own section, under a header with the
         // agent's name, its colour and a Stop that ends that agent alone.
         let groups = agent_groups(s);
-        let pins: Vec<UiTab> = s.tabs.iter().filter(|t| t.pinned && !t.agent).cloned().collect();
-        let rests: Vec<UiTab> = s.tabs.iter().filter(|t| !t.pinned && !t.agent).cloned().collect();
+        let pins: Vec<UiTab> = s.tabs.iter().filter(|t| t.pinned && !t.agent && !t.essential).cloned().collect();
+        let rests: Vec<UiTab> = s.tabs.iter().filter(|t| !t.pinned && !t.agent && !t.essential).cloned().collect();
         if !pins.is_empty() {
             let cols = if compact { 1 } else { (((sb.w - 2.0 * pad) + 4.0) / 44.0).floor().max(1.0) as usize };
             let tw = ((sb.w - 2.0 * pad) - 4.0 * (cols as f32 - 1.0)) / cols as f32;
@@ -3428,7 +3752,7 @@ impl Inner {
         // are drawn at their animated place: an added, closed or reordered tab makes
         // the ones around it glide instead of jump.
         if !compact {
-            let name = s.workspaces.get(s.active_workspace).filter(|_| s.workspaces.len() > 1).cloned().unwrap_or_else(|| "Tabs".into());
+            let name = s.workspaces.get(s.active_workspace).filter(|_| s.workspaces.len() > 1).map(|w| w.name.clone()).unwrap_or_else(|| "Tabs".into());
             let lr = R::new(sb.x + pad + 8.0, y + 2.0, sb.w - 2.0 * pad - 44.0, 20.0);
             self.label(&name, lr, th.faint.alpha(wf));
             let plus = R::new(sb.right() - pad - 26.0, y, 24.0, 24.0);
@@ -3535,6 +3859,59 @@ impl Inner {
         self.gfx.unclip();
     }
 
+    /// The footer's height: the row of buttons, and above it, in the compact
+    /// column, the memory number.
+    fn footer_h(&self, compact: bool) -> f32 {
+        if compact && self.look.show_memory { 54.0 } else { 40.0 }
+    }
+
+    /// The memory number in the compact column: above the buttons, centred, and
+    /// short. It warms and glows as the browser's own memory grows.
+    fn draw_compact_mem(&mut self, s: &UiState, sb: R, fy: f32) {
+        if !self.look.show_memory {
+            return;
+        }
+        let Some((bytes, _)) = s.mem else { return };
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let t = mem_short(bytes);
+        // The figures are in the monospace face, so they do not jump about as they change.
+        let f = lo.mono_at(10.5, 500);
+        let tw = self.gfx.measure(&t, f);
+        let r = R::new(sb.x + (sb.w - tw) / 2.0, fy - 17.0, tw, 15.0);
+        // Under a gigabyte: plain faint text. Over two: red, with a glow that
+        // breathes. In between: the colour warms and the glow grows.
+        let hot = bytes >= MEM_HOT;
+        let warm = bytes >= MEM_WARN;
+        let t01 = if warm { (bytes - MEM_WARN) as f32 / (MEM_HOT - MEM_WARN) as f32 } else { 0.0 };
+        let c = if hot {
+            th.danger
+        } else if warm {
+            th.faint.mix(th.danger, t01.clamp(0.0, 1.0))
+        } else {
+            th.faint
+        };
+        // The glow behind the number. Over the hard line it breathes, a few
+        // seconds a breath; with reduced motion it is simply there.
+        let mut glow = if hot { 0.30 } else { 0.24 * t01.clamp(0.0, 1.0) };
+        if hot && lo.motion.enabled {
+            let phase = self.born.elapsed().as_secs_f32() / MEM_BREATH * std::f32::consts::TAU;
+            glow *= 0.72 + 0.28 * phase.sin();
+        }
+        if glow > 0.01 {
+            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            self.gfx.bloom(cx, cy, (r.w.max(22.0) * 0.7).max(18.0), th.danger.alpha(glow));
+        }
+        let h = Hit::Mem;
+        let hov = self.is_hover(&h);
+        let a = self.motion.hover(Self::button_id(&h), if hov { 1.0 } else { 0.0 });
+        if a > 0.01 {
+            self.gfx.round(R::new(r.x - 5.0, r.y - 2.0, r.w + 10.0, r.h + 4.0), lo.r_sm, th.hover.alpha(a.min(1.0)));
+        }
+        self.gfx.text(&t, r, f.align(Align::Center), if hov { th.text } else { c });
+        self.hit(r, h);
+    }
+
     /// The footer: the memory readout and the agent chip (left), then the
     /// dashboard, Drive, downloads and settings buttons (right). The compact sidebar keeps the two that fit; the agent chip is a
     /// status, and shows wherever it fits.
@@ -3573,6 +3950,11 @@ impl Inner {
             }
         }
         let room = (sb.right() - 8.0 - right_edge - 6.0).max(0.0);
+        // The compact column has no room for the long figure beside the
+        // buttons, but it has room for the short one above them.
+        if compact {
+            self.draw_compact_mem(s, sb, fy);
+        }
         // What lives at the right end of the footer steps leftward: the agent chip or
         // the memory number first, then the now-playing card before them.
         let mut right = sb.right() - 8.0;
@@ -4198,6 +4580,10 @@ impl Inner {
             self.gfx.icon(sound_icon(t), b.x + 2.0, b.y + 2.0, 10.0, th.dim);
             self.hit(b, Hit::TabSnd(t.id));
         }
+        if pinned {
+            // A pin that wandered: the mark that takes it back home.
+            self.draw_pin_home(t, r);
+        }
         if pinned || compact {
             return;
         }
@@ -4351,7 +4737,7 @@ impl Inner {
             if a > 0.01 {
                 self.gfx.round(r, lo.r_sm, th.hover.alpha(a.min(1.0)));
             }
-            let name = s.workspaces.get(s.active_workspace).map(String::as_str).unwrap_or("");
+            let name = s.workspaces.get(s.active_workspace).map(|w| w.name.as_str()).unwrap_or("");
             let mut short: String = name.chars().take(if compact { 2 } else { 10 }).collect();
             if name.chars().count() > (if compact { 2 } else { 10 }) {
                 short.push('…');
@@ -4434,6 +4820,8 @@ impl Inner {
                 self.gfx.icon(sound_icon(t), b.x + 1.0, b.y + 1.0, 10.0, th.dim);
                 self.hit(b, Hit::TabSnd(t.id));
             }
+            // A pin that wandered: the mark that takes it back home.
+            self.draw_pin_home(t, r);
             return;
         }
         // Right to left: close, sound, split, translate.
@@ -4604,7 +4992,7 @@ impl Inner {
             .workspaces
             .iter()
             .enumerate()
-            .map(|(n, name)| (n as u32 + 1, if n == s.active_workspace { format!("· {name}") } else { name.clone() }))
+            .map(|(n, w)| (n as u32 + 1, if n == s.active_workspace { format!("· {}", w.name) } else { w.name.clone() }))
             .collect();
         items.push((0, String::new()));
         items.push((100, "New workspace".into()));
@@ -5105,6 +5493,10 @@ impl Inner {
 
     fn mouse_move(&mut self, x: f32, y: f32) {
         self.mouse = (x, y);
+        // The hidden sidebar follows the mouse.
+        if let Some(s) = self.state.clone() {
+            self.side_mouse(&s, x, y);
+        }
         if let Some(d) = &mut self.drag {
             d.dx = x - d.x0;
             d.dy = y - d.y0;
@@ -5283,6 +5675,16 @@ impl Inner {
             Hit::MediaTitle(id) => send(p, json!({"t": "activate", "id": id})),
             Hit::NewTab => send(p, json!({"t": "newtab"})),
             Hit::Sidebar => {
+                // With the sidebar hidden until the mouse reaches the edge, the
+                // button brings it in instead of folding it.
+                if let Some(s) = &self.state
+                    && self.hidden_sidebar(s)
+                {
+                    self.side_forced = true;
+                    self.side_shown = true;
+                    self.invalidate();
+                    return;
+                }
                 // The same change Ctrl+B makes: through the settings, so it is saved.
                 if let Some(s) = &self.state {
                     let mut st = s.settings.clone();
@@ -5405,6 +5807,17 @@ impl Inner {
                 });
             }
             Hit::PermBlock(pid) => send(p, json!({"t": "perm", "pid": pid, "allow": false})),
+            Hit::Essential(n) => {
+                // The icon of an essential: show its tab, in this workspace.
+                if let Some(e) = self.state.as_ref().and_then(|s| s.essentials.get(n)) {
+                    let url = e.url.clone();
+                    send(p, json!({"t": "essential", "url": url}));
+                }
+            }
+            Hit::PinHome(id) => {
+                // The mark on a pin that wandered: back to the page it was made on.
+                send(p, json!({"t": "pinBack", "id": id}));
+            }
             Hit::Shortcut(i) => {
                 if let Some(sc) = self.state.as_ref().and_then(|s| s.settings.shortcuts.get(i)) {
                     send(p, json!({"t": "nav", "url": sc.url}));
@@ -5529,6 +5942,11 @@ impl Inner {
                 let mut items: Vec<(u32, String)> = vec![(1, if t.pinned { "Unpin".into() } else { "Pin".into() })];
                 if t.pin_away {
                     items.push((17, "Back to pinned page".into()));
+                    items.push((24, "Pin this page instead".into()));
+                }
+                // An essential: the site stays open in every workspace.
+                if !t.essential && !t.private && !t.agent && t.url.starts_with("http") && s.essentials.len() < 12 {
+                    items.push((19, "Add to Essentials".into()));
                 }
                 // Never offer to copy a private URL anywhere it would be written down.
                 if !t.url.is_empty() && !t.private {
@@ -5537,9 +5955,9 @@ impl Inner {
                 }
                 // Move to another workspace (skip the active one).
                 if s.workspaces.len() > 1 {
-                    for (wi, name) in s.workspaces.iter().enumerate() {
+                    for (wi, w) in s.workspaces.iter().enumerate() {
                         if wi != s.active_workspace {
-                            items.push((20 + wi as u32, format!("Move to {name}")));
+                            items.push((20 + wi as u32, format!("Move to {}", w.name)));
                         }
                     }
                 } else {
@@ -5605,6 +6023,8 @@ impl Inner {
                         16 => "agentGrant",
                         17 => "pinBack",
                         18 => "pip",
+                        19 => "essentialAdd",
+                        24 => "pinHome",
                         15 => {
                             send(&i.proxy, json!({"t": "workspaceAdd"}));
                             return;
@@ -5628,6 +6048,25 @@ impl Inner {
                     send(&i.proxy, json!({"t": msg, "id": id}));
                 });
             }
+            Hit::Essential(n) => {
+                // An essential's own menu: take it out of the row, or make this
+                // page its home.
+                let Some(e) = s.essentials.get(n) else { return };
+                let url = e.url.clone();
+                let away = e.away;
+                let mut items: Vec<(u32, String)> = vec![(1, "Remove from Essentials".into())];
+                if away {
+                    items.push((0, String::new()));
+                    items.push((2, "Back to the address it was kept at".into()));
+                    items.push((3, "Keep this page instead".into()));
+                }
+                menu::open(self, &items, x, y, move |i, cmd| match cmd {
+                    1 => send(&i.proxy, json!({"t": "essentialRemove", "url": url})),
+                    2 => send(&i.proxy, json!({"t": "essentialBack", "url": url})),
+                    3 => send(&i.proxy, json!({"t": "essentialHome", "url": url})),
+                    _ => {}
+                });
+            }
             Hit::Workspace(w) => {
                 let mut items: Vec<(u32, String)> = vec![(1, "Rename".into())];
                 if s.workspaces.len() > 1 {
@@ -5636,17 +6075,31 @@ impl Inner {
                     items.push((3, "Close".into()));
                 }
                 items.push((0, String::new()));
+                items.push((5, "Colour".into()));
                 items.push((4, "New workspace".into()));
                 menu::open(self, &items, x, y, move |i, cmd| match cmd {
                     // Rename happens right here in the omnibox edit; Enter sends
                     // the new name back, Escape drops it.
                     1 => {
-                        let name = s.workspaces.get(w).map(|n| n.clone()).unwrap_or_default();
+                        let name = s.workspaces.get(w).map(|n| n.name.clone()).unwrap_or_default();
                         i.begin_workspace_rename(w, &name);
                     }
                     2 => send(&i.proxy, json!({"t": "workspaceDuplicate", "i": w})),
                     3 => send(&i.proxy, json!({"t": "workspaceClose", "i": w})),
                     4 => send(&i.proxy, json!({"t": "workspaceAdd"})),
+                    5 => {
+                        // The palette: the colours a workspace can wear.
+                        let pal: Vec<(u32, String)> = WORKSPACE_COLOURS
+                            .iter()
+                            .enumerate()
+                            .map(|(n, (name, _))| (100 + n as u32, name.to_string()))
+                            .collect();
+                        menu::open(i, &pal, x, y, move |i, cmd| {
+                            if cmd >= 100 {
+                                send(&i.proxy, json!({"t": "workspaceColour", "i": w, "c": (cmd - 100).to_string()}));
+                            }
+                        });
+                    }
                     _ => {}
                 });
             }
@@ -6022,6 +6475,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if i.hover.take().is_some() {
                     i.invalidate();
                 }
+                // The hidden sidebar: the mouse has left it.
+                i.side_leave();
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
@@ -6075,7 +6530,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(HTCLIENT as isize)
             }
             WM_TIMER => {
-                if wp.0 == TIMER_SPIN || wp.0 == TIMER_CLOCK || wp.0 == TIMER_ANIM {
+                if wp.0 == TIMER_SPIN || wp.0 == TIMER_CLOCK || wp.0 == TIMER_ANIM || wp.0 == TIMER_MEM {
                     i.invalidate();
                 }
                 #[cfg(debug_assertions)]
@@ -6518,6 +6973,7 @@ mod tests {
             fwd: false,
             pinned: false,
             pin_away: false,
+            essential: false,
             audio: false,
             muted: false,
             call: false,

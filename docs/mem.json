@@ -1,0 +1,195 @@
+[
+ {
+  "mb": 36,
+  "procs": 3,
+  "tag": "master",
+  "scenario": "idle"
+ },
+ {
+  "mb": 221,
+  "procs": 9,
+  "tag": "master",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 36,
+  "procs": 3,
+  "tag": "job1",
+  "scenario": "idle"
+ },
+ {
+  "mb": 111,
+  "procs": 9,
+  "tag": "job1",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 170,
+  "procs": 9,
+  "tag": "master",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 85,
+  "procs": 9,
+  "tag": "master2",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 83,
+  "procs": 9,
+  "tag": "job1",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 45,
+  "procs": 3,
+  "tag": "master",
+  "scenario": "idle"
+ },
+ {
+  "mb": 99,
+  "procs": 9,
+  "trimmed": true,
+  "tag": "master",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 36,
+  "procs": 3,
+  "tag": "job1",
+  "scenario": "idle"
+ },
+ {
+  "mb": 82,
+  "procs": 9,
+  "trimmed": true,
+  "tag": "job1",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 36,
+  "procs": 3,
+  "tag": "spread1",
+  "scenario": "idle"
+ },
+ {
+  "mb": 37,
+  "procs": 3,
+  "tag": "spread2",
+  "scenario": "idle"
+ },
+ {
+  "mb": 37,
+  "procs": 3,
+  "tag": "spread3",
+  "scenario": "idle"
+ },
+ {
+  "mb": 36,
+  "procs": 3,
+  "tag": "job2",
+  "scenario": "idle"
+ },
+ {
+  "mb": 148,
+  "procs": 9,
+  "trimmed": true,
+  "tag": "job2",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "job3",
+  "scenario": "idle"
+ },
+ {
+  "mb": 195,
+  "procs": 9,
+  "trimmed": false,
+  "tag": "job3",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "job3b",
+  "scenario": "idle"
+ },
+ {
+  "mb": 27,
+  "procs": 3,
+  "tag": "job3c",
+  "scenario": "idle"
+ },
+ {
+  "mb": 28,
+  "procs": 3,
+  "tag": "master2b",
+  "scenario": "idle"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "master2c",
+  "scenario": "idle"
+ },
+ {
+  "mb": 34,
+  "procs": 3,
+  "tag": "job4",
+  "scenario": "idle"
+ },
+ {
+  "mb": 89,
+  "procs": 9,
+  "trimmed": true,
+  "tag": "job4w",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "job5",
+  "scenario": "idle"
+ },
+ {
+  "mb": 100,
+  "procs": 9,
+  "trimmed": true,
+  "tag": "job5w",
+  "scenario": "wiki"
+ },
+ {
+  "mb": 709,
+  "procs": 18,
+  "tag": "job7before",
+  "scenario": "tabs10"
+ },
+ {
+  "mb": 627,
+  "procs": 15,
+  "tag": "job7after",
+  "scenario": "tabs10"
+ },
+ {
+  "mb": 237,
+  "procs": 10,
+  "tag": "job7after",
+  "scenario": "tabs10"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "job7",
+  "scenario": "idle"
+ },
+ {
+  "mb": 164,
+  "procs": 9,
+  "trimmed": false,
+  "tag": "job7",
+  "scenario": "wiki"
+ }
+]

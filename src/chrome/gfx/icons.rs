@@ -99,6 +99,8 @@ pub static TABLE: &[Entry] = &[
     lucide!("split", "columns-2"),
     // The Drive panel: a task handed to an agent.
     lucide!("send", "send"),
+    // The way back to the page a pin was made on.
+    lucide!("home", "house"),
 ];
 
 /// Every name `Gfx::geometry_icon` can draw by hand. Lucide has all of them; the hand-made
@@ -106,7 +108,7 @@ pub static TABLE: &[Entry] = &[
 #[cfg(test)]
 pub static GEOMETRY: &[&str] = &[
     "back", "fwd", "reload", "stop", "close", "min", "max", "restore", "plus", "search", "lock", "globe", "tab", "sliders",
-    "sound", "muted", "star", "star-on", "clock", "download", "pin", "play", "pause", "sidebar", "split",
+    "sound", "muted", "star", "star-on", "clock", "download", "pin", "play", "pause", "sidebar", "split", "home",
 ];
 
 pub fn find(name: &str) -> Option<(usize, &'static Entry)> {

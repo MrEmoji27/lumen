@@ -22,6 +22,7 @@ pub fn from_session(session: &Session) -> Vec<Workspace> {
         name: DEFAULT_NAME.to_string(),
         tabs: session.tabs.clone(),
         active,
+        colour: String::new(),
     }]
 }
 
@@ -67,6 +68,7 @@ pub fn to_session(
                     name: w.name.clone(),
                     tabs: active_tabs.to_vec(),
                     active: active_tab_idx.min(active_tabs.len().saturating_sub(1)),
+                    colour: w.colour.clone(),
                 }
             } else {
                 w.to_workspace()
@@ -83,6 +85,8 @@ pub fn to_session(
         maximized,
         workspaces: ws_list,
         active_workspace: a,
+        essentials: Vec::new(),
+        archived: Vec::new(),
     }
 }
 
@@ -97,6 +101,8 @@ pub struct WorkspaceData {
     pub saved: Vec<SavedTab>,
     /// Index of the active tab within `tab_ids` (active) or `saved` (inactive).
     pub active: usize,
+    /// The colour this workspace wears: a number in the palette, empty for none.
+    pub colour: String,
 }
 
 impl WorkspaceData {
@@ -106,6 +112,7 @@ impl WorkspaceData {
             tab_ids: Vec::new(),
             saved: Vec::new(),
             active: 0,
+            colour: String::new(),
         }
     }
 
@@ -115,6 +122,7 @@ impl WorkspaceData {
             name: self.name.clone(),
             tabs: self.saved.clone(),
             active: self.active.min(self.saved.len().saturating_sub(1)),
+            colour: self.colour.clone(),
         }
     }
 
@@ -144,6 +152,7 @@ impl From<&Workspace> for WorkspaceData {
             tab_ids: Vec::new(),
             saved: ws.tabs.clone(),
             active: ws.active.min(ws.tabs.len().saturating_sub(1)),
+            colour: ws.colour.clone(),
         }
     }
 }
@@ -181,6 +190,8 @@ mod tests {
             favicon: String::new(),
             pinned,
             pin_url: if pinned { url.to_string() } else { String::new() },
+            essential: false,
+            idle_ms: 0,
         }
     }
 
@@ -197,6 +208,8 @@ mod tests {
             maximized: false,
             workspaces: Vec::new(),
             active_workspace: 0,
+            essentials: Vec::new(),
+            archived: Vec::new(),
         };
         let (ws, active) = build_from_session(&session);
         assert_eq!(ws.len(), 1);
@@ -225,8 +238,8 @@ mod tests {
     fn new_session_with_workspaces() {
         let mut session = Session::default();
         session.workspaces = vec![
-            Workspace { name: "Main".into(), tabs: vec![tab("https://a.com", "A", false)], active: 0 },
-            Workspace { name: "Work".into(), tabs: vec![tab("https://b.com", "B", false), tab("https://c.com", "C", false)], active: 1 },
+            Workspace { name: "Main".into(), tabs: vec![tab("https://a.com", "A", false)], active: 0, colour: String::new() },
+            Workspace { name: "Work".into(), tabs: vec![tab("https://b.com", "B", false), tab("https://c.com", "C", false)], active: 1, colour: String::new() },
         ];
         session.active_workspace = 1;
         let (ws, active) = build_from_session(&session);
@@ -253,8 +266,8 @@ mod tests {
     fn round_trip_preserves_workspaces() {
         let session = Session {
             workspaces: vec![
-                Workspace { name: "Main".into(), tabs: vec![tab("https://a.com", "A", false)], active: 0 },
-                Workspace { name: "Work".into(), tabs: vec![tab("https://b.com", "B", false), tab("https://c.com", "C", false)], active: 1 },
+                Workspace { name: "Main".into(), tabs: vec![tab("https://a.com", "A", false)], active: 0, colour: String::new() },
+                Workspace { name: "Work".into(), tabs: vec![tab("https://b.com", "B", false), tab("https://c.com", "C", false)], active: 1, colour: String::new() },
             ],
             active_workspace: 1,
             ..Default::default()
@@ -282,8 +295,8 @@ mod tests {
         work_pin.pin_url = "https://mail.work/".into();
         let session = Session {
             workspaces: vec![
-                Workspace { name: "Main".into(), tabs: vec![tab("https://music.example/", "Music", true)], active: 0 },
-                Workspace { name: "Work".into(), tabs: vec![work_pin], active: 0 },
+                Workspace { name: "Main".into(), tabs: vec![tab("https://music.example/", "Music", true)], active: 0, colour: String::new() },
+                Workspace { name: "Work".into(), tabs: vec![work_pin], active: 0, colour: String::new() },
             ],
             active_workspace: 0,
             ..Default::default()
@@ -306,8 +319,8 @@ mod tests {
     #[test]
     fn switch_discards_and_activates() {
         let ws = vec![
-            WorkspaceData { name: "Main".into(), tab_ids: vec![1, 2], saved: Vec::new(), active: 0 },
-            WorkspaceData { name: "Work".into(), tab_ids: vec![3, 4, 5], saved: Vec::new(), active: 1 },
+            WorkspaceData { name: "Main".into(), tab_ids: vec![1, 2], saved: Vec::new(), active: 0, colour: String::new() },
+            WorkspaceData { name: "Work".into(), tab_ids: vec![3, 4, 5], saved: Vec::new(), active: 1, colour: String::new() },
         ];
         let (discard, activate) = switch(&ws, 0, 1);
         assert_eq!(discard, vec![1, 2]);
@@ -318,7 +331,7 @@ mod tests {
     #[test]
     fn switch_to_empty_workspace() {
         let ws = vec![
-            WorkspaceData { name: "Main".into(), tab_ids: vec![1], saved: Vec::new(), active: 0 },
+            WorkspaceData { name: "Main".into(), tab_ids: vec![1], saved: Vec::new(), active: 0, colour: String::new() },
             WorkspaceData::new("Empty"),
         ];
         let (discard, activate) = switch(&ws, 0, 1);
@@ -340,8 +353,8 @@ mod tests {
     fn from_session_preserves_existing() {
         let session = Session {
             workspaces: vec![
-                Workspace { name: "One".into(), tabs: vec![tab("https://a.com", "A", false)], active: 0 },
-                Workspace { name: "Two".into(), tabs: vec![], active: 0 },
+                Workspace { name: "One".into(), tabs: vec![tab("https://a.com", "A", false)], active: 0, colour: String::new() },
+                Workspace { name: "Two".into(), tabs: vec![], active: 0, colour: String::new() },
             ],
             active_workspace: 1,
             ..Default::default()
@@ -360,6 +373,7 @@ mod tests {
             tab_ids: vec![10, 20, 30],
             saved: Vec::new(),
             active: 2,
+            colour: String::new(),
         };
         assert_eq!(ws.active_id(), Some(30));
     }
@@ -372,6 +386,7 @@ mod tests {
             tab_ids: Vec::new(),
             saved: vec![tab("https://a.com", "A", false)],
             active: 0,
+            colour: String::new(),
         };
         assert!(!ws.is_active());
         assert_eq!(ws.active_id(), None);
@@ -395,6 +410,7 @@ mod tests {
             tab_ids: vec![1, 2],
             saved: vec![tab("https://a.com", "A", false)],
             active: 0,
+            colour: String::new(),
         };
         let w = ws.to_workspace();
         assert_eq!(w.tabs.len(), 1);

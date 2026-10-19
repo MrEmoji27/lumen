@@ -79,6 +79,9 @@ pub struct Settings {
     pub sidebar_side: String,
     pub sidebar_width: u32,
     pub compact: bool,
+    /// Hide the sidebar until the mouse reaches the edge of the window. The
+    /// page takes the whole width; the sidebar slides in over it.
+    pub hide_sidebar: bool,
     /// Height of one tab row in the sidebar, in px.
     pub tab_row_h: u32,
     /// Draw the site's icon in a tab row (off: the letter tile only).
@@ -160,6 +163,9 @@ pub struct Settings {
     /// goes to WebView2's low memory target, and back the moment you touch either again.
     #[serde(default = "yes")]
     pub trim_watched: bool,
+    /// Close the tabs nobody has looked at for this long into the archive:
+    /// "off" | "12h" | "1d" | "1w".
+    pub archive_after: String,
     /// Offer to save passwords and fill them in (WebView2's own, encrypted by Windows).
     pub save_passwords: bool,
     /// Hand http(s) downloads to aria2: many connections per file, resume, queue.
@@ -294,6 +300,7 @@ impl Default for Settings {
             sidebar_side: "left".into(),
             sidebar_width: 240,
             compact: false,
+            hide_sidebar: false,
             tab_row_h: 32,
             show_favicons: true,
             close_btn: "hover".into(),
@@ -320,6 +327,7 @@ impl Default for Settings {
             gpu_in_process: false,
             share_processes: true,
             trim_watched: true,
+            archive_after: crate::archive::DEFAULT.into(),
             save_passwords: true,
             accelerate_downloads: true,
             download_limit_kbps: 0,
@@ -528,6 +536,7 @@ impl Settings {
         one_of(&mut self.density, &DENSITIES, "comfortable");
         one_of(&mut self.close_btn, &CLOSE_BTNS, "hover");
         one_of(&mut self.date_format, &DATE_FORMATS, "long");
+        one_of(&mut self.archive_after, &crate::archive::CHOICES, crate::archive::DEFAULT);
         for c in [&mut self.bg_color, &mut self.side_color, &mut self.surface_color, &mut self.text_color, &mut self.dim_color] {
             clean_color(c);
         }
@@ -622,6 +631,22 @@ pub struct SavedTab {
     pub pinned: bool,
     /// The page a pin was pinned on. Empty in files from before pins remembered it.
     pub pin_url: String,
+    /// The tab is an Essential: it keeps the site open in every workspace.
+    pub essential: bool,
+    /// How long the tab has been unseen, in milliseconds. The time Lumen was
+    /// closed does not count, so the clock only runs while it is open.
+    pub idle_ms: u64,
+}
+
+/// A tab that was closed into the archive: what it was, and when it went.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArchivedTab {
+    pub url: String,
+    pub title: String,
+    pub favicon: String,
+    /// When it was archived, in seconds since the epoch.
+    pub when: u64,
 }
 
 /// A named set of tabs. Saved in session.json so workspaces survive a restart.
@@ -632,6 +657,8 @@ pub struct Workspace {
     pub tabs: Vec<SavedTab>,
     /// Index into `tabs` of the active tab in this workspace.
     pub active: usize,
+    /// The colour this workspace wears: a number in the palette, empty for none.
+    pub colour: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -647,6 +674,11 @@ pub struct Session {
     /// New format: one entry per workspace. Empty when the file predates workspaces.
     pub workspaces: Vec<Workspace>,
     pub active_workspace: usize,
+    /// The sites kept open in every workspace: the essentials. The same row in
+    /// every workspace, whichever one is open.
+    pub essentials: Vec<SavedTab>,
+    /// The tabs that were closed away because nobody looked at them.
+    pub archived: Vec<ArchivedTab>,
 }
 
 fn load<T: Default + for<'de> Deserialize<'de>>(name: &str) -> T {

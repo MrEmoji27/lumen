@@ -16,7 +16,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{GetClientRect, KillTimer, SetTimer},
 };
 
-use super::{Inner, TIMER_SHOT, UiDl, UiMark, UiState, UiTab, UiVisit};
+use super::{Inner, TIMER_SHOT, UiDl, UiEssential, UiMark, UiState, UiTab, UiVisit};
 
 fn dir() -> Option<PathBuf> {
     std::env::var_os("LUMEN_TEST_SHOT").map(PathBuf::from)
@@ -24,6 +24,17 @@ fn dir() -> Option<PathBuf> {
 
 fn fake_has(what: &str) -> bool {
     std::env::var("LUMEN_TEST_FAKE").is_ok_and(|v| v.split(',').any(|x| x.trim() == what))
+}
+
+/// A count in the fake data: `LUMEN_TEST_FAKE=tabs:8` asks for eight plain tabs,
+/// `pins:3` for three pinned ones. A layout can then be looked at with a known
+/// number of tabs in it.
+fn fake_count(what: &str) -> Option<usize> {
+    let v = std::env::var("LUMEN_TEST_FAKE").ok()?;
+    v.split(',')
+        .filter_map(|x| x.trim().split_once(':'))
+        .find(|(k, _)| *k == what)
+        .and_then(|(_, n)| n.trim().parse().ok())
 }
 
 /// After a real paint: if nothing is moving, arm the one-shot timer. Every paint resets it,
@@ -281,31 +292,56 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
 
 /// Sample data, appended to what the browser really has.
 pub fn fake(s: &mut UiState) {
+    let t = |id: u64, title: &str, url: &str| UiTab {
+        id,
+        title: title.into(),
+        url: url.into(),
+        loading: false,
+        back: false,
+        fwd: false,
+        pinned: false,
+        pin_away: false,
+        essential: false,
+        audio: false,
+        muted: false,
+        call: false,
+        status: "live",
+        agent: false,
+        agent_ok: false,
+        reader: false,
+        private: false,
+        split: false,
+        translated: false,
+        translating: false,
+        servo: false,
+        owner: String::new(),
+        owner_name: String::new(),
+    };
+    // A known number of plain tabs, for a layout that has to hold them.
+    if let Some(n) = fake_count("tabs") {
+        for i in 0..n {
+            s.tabs.push(t(9500 + i as u64, &format!("Tab {}", i + 1), &format!("https://site{}.example/", i + 1)));
+        }
+    }
+    // A known number of essentials: the sites kept open in every workspace.
+    if let Some(n) = fake_count("essentials") {
+        for i in 0..n {
+            s.essentials.push(UiEssential { url: format!("https://site{}.example/", i + 1), title: format!("Site {}", i + 1), away: false, tab: 0 });
+        }
+    }
+    // And a known number of pinned ones.
+    if let Some(n) = fake_count("pins") {
+        for i in 0..n {
+            s.tabs.push(UiTab { pinned: true, ..t(9600 + i as u64, &format!("Pin {}", i + 1), &format!("https://pin{}.example/", i + 1)) });
+        }
+    }
+    // Pins that wandered from the page they were made on.
+    if let Some(n) = fake_count("pinaway") {
+        for i in 0..n {
+            s.tabs.push(UiTab { pinned: true, pin_away: true, ..t(9700 + i as u64, &format!("Away {}", i + 1), &format!("https://elsewhere{}.example/", i + 1)) });
+        }
+    }
     if fake_has("tabs") {
-        let t = |id: u64, title: &str, url: &str| UiTab {
-            id,
-            title: title.into(),
-            url: url.into(),
-            loading: false,
-            back: false,
-            fwd: false,
-            pinned: false,
-            pin_away: false,
-            audio: false,
-            muted: false,
-            call: false,
-            status: "live",
-            agent: false,
-            agent_ok: false,
-            reader: false,
-            private: false,
-            split: false,
-            translated: false,
-            translating: false,
-            servo: false,
-            owner: String::new(),
-            owner_name: String::new(),
-        };
         let mut v = vec![
             UiTab { pinned: true, ..t(9001, "Mail", "https://mail.example.com/") },
             UiTab { pinned: true, audio: true, ..t(9002, "Music", "https://music.example.com/") },
@@ -399,7 +435,11 @@ pub fn fake(s: &mut UiState) {
         ];
         s.zooms = vec![("doc.rust-lang.org".into(), 125), ("news.ycombinator.com".into(), 110)];
     }
-    if fake_has("mem") {
+    if let Some(mb) = fake_count("mem") {
+        // A given load, in megabytes: "mem:1500" is 1.5 GB.
+        s.mem = Some((mb as u64 * 1024 * 1024, 9));
+        s.settings.show_memory = true;
+    } else if fake_has("mem") {
         s.mem = Some((412 * 1024 * 1024, 9));
         s.blocked = 1280;
         s.settings.show_memory = true;
