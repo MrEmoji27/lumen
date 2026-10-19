@@ -160,5 +160,36 @@
   "trimmed": true,
   "tag": "job5w",
   "scenario": "wiki"
+ },
+ {
+  "mb": 709,
+  "procs": 18,
+  "tag": "job7before",
+  "scenario": "tabs10"
+ },
+ {
+  "mb": 627,
+  "procs": 15,
+  "tag": "job7after",
+  "scenario": "tabs10"
+ },
+ {
+  "mb": 237,
+  "procs": 10,
+  "tag": "job7after",
+  "scenario": "tabs10"
+ },
+ {
+  "mb": 26,
+  "procs": 3,
+  "tag": "job7",
+  "scenario": "idle"
+ },
+ {
+  "mb": 164,
+  "procs": 9,
+  "trimmed": false,
+  "tag": "job7",
+  "scenario": "wiki"
  }
 ]

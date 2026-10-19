@@ -86,6 +86,7 @@ pub fn to_session(
         workspaces: ws_list,
         active_workspace: a,
         essentials: Vec::new(),
+        archived: Vec::new(),
     }
 }
 

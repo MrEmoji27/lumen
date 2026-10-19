@@ -139,6 +139,15 @@ pub struct UiEssential {
     pub tab: u64,
 }
 
+/// A tab in the archive: what it was, and when it was closed away.
+#[derive(Clone, Debug)]
+pub struct UiArchived {
+    pub url: String,
+    pub title: String,
+    /// How long ago, in words.
+    pub when: String,
+}
+
 /// A workspace as the chrome sees it: its name and the colour it wears.
 #[derive(Clone, Debug)]
 pub struct UiWorkspace {
@@ -228,6 +237,8 @@ pub struct UiState {
     /// The essentials: the sites kept open in every workspace, in a row above
     /// the tabs.
     pub essentials: Vec<UiEssential>,
+    /// The tabs that were closed away because nobody looked at them.
+    pub archived: Vec<UiArchived>,
     /// Index into `workspaces` of the active one.
     pub active_workspace: usize,
     /// A glance card is open over the page.
@@ -3270,7 +3281,7 @@ impl Inner {
             return 0.0;
         }
         let per = if compact { 1 } else { 4 };
-        let rows = (n + per - 1) / per;
+        let rows = n.div_ceil(per);
         rows as f32 * 32.0 + 8.0
     }
 

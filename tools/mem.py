@@ -180,8 +180,12 @@ def main():
     ap.add_argument("--lumen", default=str(ROOT / "target" / "release" / "lumen.exe"))
     ap.add_argument("--settle", type=float, default=0.0, help="seconds to leave it alone before measuring")
     ap.add_argument("--settings", default="", help="JSON laid over the settings of the Lumen under test")
+    ap.add_argument("--env", default="", help="extra environment: NAME=VALUE,NAME=VALUE")
     a = ap.parse_args()
     extra = json.loads(a.settings) if a.settings else None
+    for pair in filter(None, (x.strip() for x in a.env.split(","))):
+        k, _, v = pair.partition("=")
+        os.environ[k] = v
     rows = []
     for s in [x for x in a.scenarios.split(",") if x]:
         settle = a.settle or SETTLE.get(s, 15.0)

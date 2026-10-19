@@ -95,6 +95,8 @@ pub enum PageHit {
     Panels(&'static str),
     /// A link that opens in a tab of its own.
     OpenTab(&'static str),
+    /// A page to open in a new tab: the address is not known at build time.
+    OpenUrl(String),
     /// The problem report: to zemo, onto the clipboard, or into Downloads as a file.
     BugSend,
     BugCopy,
@@ -352,6 +354,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("keep_seeding", "Share torrents back after they finish", "Until ratio 1.0 or one hour, whichever first. Applies on next start."),
             Range("download_limit_kbps", "Download speed limit", "Caps aria2, the download engine. 0 is no limit.", Scale::Steps(DL_SPEEDS), "kbps"),
             Toggle("trim_watched", "Trim the page you are watching when you are away from the mouse and keyboard", "Measured on YouTube: 638 MB to about 400. The page comes back from disk when you touch mouse or keyboard again: a brief stutter, then as it was."),
+            Seg("archive_after", "Archive tabs I have not opened for", "Tabs you have not looked at for this long close themselves into the archive, where the History page can open them again.", &crate::archive::CHOICES),
             Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),
             Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
             Toggle("battery_saver", "Battery saver", "On battery, or with Windows' battery saver on: hidden tabs freeze after 1 minute and unload after 10, and motion is reduced. A leaf in the footer says so."),
@@ -2017,6 +2020,45 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
             }
         }
     }
+    // The archive: the tabs nobody looked at, closed away. One click opens one
+    // again.
+    if !s.archived.is_empty() {
+        y += lo.s3;
+        y = group_label(i, col, y, "Archived", 0);
+        let card = R::new(col.x, y, col.w, s.archived.len() as f32 * ROW);
+        if card.bottom() >= st.y && card.y <= st.bottom() {
+            i.gfx.round(card, lo.r_card, th.raise);
+            i.gfx.round_stroke(card, lo.r_card, th.line, 1.0);
+        }
+        for (n, a) in s.archived.iter().enumerate() {
+            let r = R::new(card.x, y, card.w, ROW);
+            y += ROW;
+            if r.y > st.bottom() || r.bottom() < st.y {
+                continue;
+            }
+            if n > 0 {
+                i.gfx.line(card.x + 1.0, r.y, card.right() - 1.0, r.y, th.line, 1.0);
+            }
+            let open = Hit::Page(PageHit::OpenUrl(a.url.clone()));
+            let hov = i.is_hover(&open);
+            if hov {
+                i.gfx.round(r.inset(4.0, 4.0), lo.r_md, th.hover);
+            }
+            let mut x = r.x + 18.0;
+            i.gfx.text(&a.when, R::new(x, r.y, 104.0, ROW), lo.mono_at(11.5, 450), th.faint);
+            x += 108.0;
+            let host = super::host(&a.url);
+            site_icon(i, R::new(x, r.y + (ROW - 18.0) / 2.0, 18.0, 18.0), &host);
+            x += 30.0;
+            let hf = lo.mono_at(11.5, 450);
+            let hw = (i.gfx.measure(&host, hf) + 4.0).min(240.0);
+            let hx = r.right() - 18.0 - hw;
+            let name = if a.title.is_empty() { a.url.clone() } else { a.title.clone() };
+            i.gfx.text(&name, R::new(x, r.y, (hx - lo.s4 - x).max(60.0), ROW), lo.body, th.text);
+            i.gfx.text(&host, R::new(hx, r.y, hw, ROW), hf.align(Align::Right), th.faint);
+            i.hit(r, open);
+        }
+    }
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
     close_button(i, st);
@@ -3299,6 +3341,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
             send(&i.proxy, json!({"t": "panel", "open": true, "which": which}));
         }
         PageHit::OpenTab(url) => send(&i.proxy, json!({"t": "openTab", "url": url})),
+        PageHit::OpenUrl(url) => send(&i.proxy, json!({"t": "openTab", "url": url})),
         PageHit::SeenVersion => set(i, "seen_version", json!(env!("LUMEN_VERSION"))),
         PageHit::BugSend => {
             if !s.bug_sent {

@@ -5,6 +5,7 @@
 //! Rust decides who lives, who sleeps, and when the UI hears about it.
 
 mod address;
+mod archive;
 mod aria;
 mod agent;
 mod agent_policy;
@@ -77,9 +78,13 @@ use windows::Win32::Foundation::HWND;
 use wry::{MemoryUsageLevel, Rect, WebView, WebViewExtWindows};
 
 use engine::{Action, Ctx, Ev};
-use store::{SavedTab, Session, Settings};
+use store::{ArchivedTab, SavedTab, Session, Settings};
 
 const TICK: Duration = Duration::from_secs(3);
+/// How often the archive looks for tabs nobody has looked at.
+const ARCHIVE_TICK: Duration = Duration::from_secs(60);
+/// How many closed-away tabs the archive keeps.
+const MAX_ARCHIVED: usize = 200;
 const STAGE_IDLE: Duration = Duration::from_secs(30);
 /// A hidden tab keeps its caches this long, so flipping back is instant.
 const TRIM_AFTER: Duration = Duration::from_secs(30);
@@ -242,6 +247,10 @@ struct Tab {
     pin_url: String,
     /// An Essential: the site stays in the row above the tabs, in every workspace.
     essential: bool,
+    /// How long the tab has been unseen, in milliseconds, and since when. The
+    /// time Lumen was closed does not count.
+    idle_ms: u64,
+    idle_at: Option<Instant>,
     audio: bool,
     muted: bool,
     /// Lumen's error page is up: the tab keeps the address that failed until a real page comes.
@@ -481,6 +490,8 @@ impl Tab {
             pinned: false,
             pin_url: String::new(),
             essential: false,
+            idle_ms: 0,
+            idle_at: None,
             audio: false,
             error_shown: false,
             asks_n: 0,
@@ -529,7 +540,13 @@ impl Tab {
             pinned: self.pinned,
             pin_url: self.pin_url.clone(),
             essential: self.essential,
+            idle_ms: self.idle_ms,
         }
+    }
+
+    /// How long the tab has been unseen.
+    fn idle(&self, now: Instant) -> Duration {
+        archive::idle(self.idle_ms, self.idle_at, now)
     }
 
     /// What the sleep policy looks at.
@@ -586,6 +603,11 @@ struct App {
     /// The essentials: the sites kept open in every workspace, the same row in
     /// all of them.
     essentials: Vec<SavedTab>,
+    /// The tabs that were closed away because nobody looked at them.
+    archived: Vec<ArchivedTab>,
+    /// Debug only: every tab looks as if it had been idle for this long, so the
+    /// archive can be seen without waiting a day.
+    test_idle: Option<Duration>,
     settings: Settings,
     panel: Panel,
     /// The report page's range tile: "today" | "7" | "30" | "all".
@@ -643,6 +665,8 @@ struct App {
     /// When the tick next wants to run. TICK apart, so a step that is not
     /// ready cannot wake the loop again on the same deadline.
     next_tick: Instant,
+    /// When the archive looks for tabs nobody has looked at.
+    next_archive: Instant,
     /// When the sidebar memory readout next wants a fresh number.
     next_mem: Instant,
     /// When the journal's next `sample` is due. Not a deadline of its own: it is
@@ -891,6 +915,18 @@ pub fn since_born() -> f64 {
     BORN.get().map_or(0.0, |b| b.elapsed().as_secs_f64() * 1000.0)
 }
 
+/// How long ago, in words: "now", "12m ago", "2h ago", "3d ago".
+fn ago(when: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(when);
+    let mins = now.saturating_sub(when) / 60;
+    match mins {
+        0..=1 => "now".into(),
+        2..=59 => format!("{mins}m ago"),
+        60..=1439 => format!("{}h ago", mins / 60),
+        _ => format!("{}d ago", mins / 1440),
+    }
+}
+
 fn main() {
     let _ = BORN.set(Instant::now());
     // `lumen.exe --version`: say which build this is, then done. No window.
@@ -1053,6 +1089,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         mru: mru::Mru::new(),
         closed: Vec::new(),
         essentials: Vec::new(),
+        archived: Vec::new(),
+        test_idle: None,
         settings,
         panel: Panel::None,
         report_range: "today".into(),
@@ -1087,6 +1125,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         unclean_last: false,
         born: Instant::now(),
         next_tick: Instant::now() + TICK,
+        next_archive: Instant::now() + ARCHIVE_TICK,
         next_mem: Instant::now() + MEM_TICK,
         journal_at: Instant::now() + journal::period(),
         minimized: false,
@@ -1278,6 +1317,16 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_TRANSLATE").is_some() {
         app.test_translate = true;
         app.new_tab(Some("https://es.wikipedia.org/wiki/Wikipedia:Portada".into()), None);
+    }
+    // Test hook: LUMEN_TEST_IDLE_HOURS=99 makes every tab look as if nobody had
+    // opened it for that long, so the archive can be seen without waiting a day.
+    if cfg!(debug_assertions)
+        && let Some(h) = std::env::var("LUMEN_TEST_IDLE_HOURS").ok().and_then(|v| v.parse::<u64>().ok())
+    {
+        app.test_idle = Some(Duration::from_secs(h * 3600));
+        // The archive does its work on its own minute, so the pages have loaded
+        // by the time it looks.
+        app.next_archive = Instant::now() + ARCHIVE_TICK;
     }
     // Test hook: LUMEN_TEST_MAGNET=1 adds one public-domain torrent magnet on the
     // first aria2 tick, then cancels it after LUMEN_TEST_CANCEL seconds (default 60).
@@ -2434,6 +2483,7 @@ impl App {
                     .collect(),
                 drive: self.drive_view(),
                 essentials,
+                archived: self.archived.iter().rev().map(|a| chrome::UiArchived { url: a.url.clone(), title: a.title.clone(), when: ago(a.when) }).collect(),
                 bug_report: (self.panel == Panel::Bug).then(|| self.bug_report.clone()).flatten(),
                 bug_sent: self.bug_sent,
                 unclean_last: self.unclean_last && !headless(),
@@ -2500,6 +2550,10 @@ impl App {
             t.pinned = saved.pinned;
             t.pin_url = pins::restored_pin_url(saved.pinned || saved.essential, &saved.pin_url, &t.url);
             t.essential = saved.essential;
+            // The idle time carries over; the stretch while Lumen was closed does
+            // not count, so the clock starts again from now.
+            t.idle_ms = saved.idle_ms;
+            t.idle_at = Some(Instant::now());
             t.workspace = self.active_workspace;
             if i == ws_active {
                 active = Some(t.id);
@@ -2677,6 +2731,14 @@ impl App {
         }
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
+        // The tab on screen is not idle: the clock for it starts again.
+        self.tabs[i].idle_ms = 0;
+        self.tabs[i].idle_at = None;
+        if let Some(p) = prev
+            && self.tabs[p].id != id
+        {
+            self.tabs[p].idle_at = Some(Instant::now());
+        }
         self.mru.touch(id);
         self.leave_panel();
         // Watching: an agent tab moves from the stage into the main window, awake.
@@ -2938,7 +3000,7 @@ impl App {
             monitor::unwatch(None, w, true);
         }
         if !t.url.is_empty() && !t.private {
-            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned, pin_url: t.pin_url, essential: t.essential });
+            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned, pin_url: t.pin_url, essential: t.essential, idle_ms: 0 });
             if self.closed.len() > MAX_CLOSED {
                 self.closed.remove(0);
             }
@@ -6529,6 +6591,10 @@ impl App {
         if self.dirty || self.dl_dirty || self.agent_seen.is_some() || self.settings.ram_limit {
             return true;
         }
+        // The archive looks for the tabs nobody has looked at.
+        if now >= self.next_archive {
+            return true;
+        }
         // A strictly isolated agent's browser is being made: the tick is what
         // notices it is ready and gives the waiting tabs their page.
         if !self.pending_own.is_empty() {
@@ -6674,8 +6740,58 @@ impl App {
     }
 
     /// Trim, freeze and discard hidden tabs, enforce the RAM cap, save what changed.
+    /// The tabs nobody has looked at for a long time close themselves into the
+    /// archive. The clock counts only the time Lumen was open.
+    fn archive_idle(&mut self, now: Instant) {
+        let Some(after) = archive::after(&self.settings.archive_after) else { return };
+        let mut gone = Vec::new();
+        for (i, t) in self.tabs.iter().enumerate() {
+            if self.on_stage(t.id) {
+                continue;
+            }
+            if !archive::may_archive(t.pinned, t.essential, false, t.audio || t.muted, t.call, t.agent, t.private) {
+                continue;
+            }
+            if t.idle(now) < after && self.test_idle.is_none_or(|d| d < after) {
+                continue;
+            }
+            gone.push(i);
+        }
+        for i in gone.into_iter().rev() {
+            self.archive_tab(i);
+        }
+    }
+
+    /// Close one tab into the archive: its title, its address, its icon and the
+    /// time it went.
+    fn archive_tab(&mut self, i: usize) {
+        let Some(t) = self.tabs.get(i) else { return };
+        if t.url.is_empty() || t.private || t.agent {
+            return;
+        }
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.archived.push(ArchivedTab { url: t.url.clone(), title: t.title.clone(), favicon: t.favicon.clone(), when });
+        if self.archived.len() > MAX_ARCHIVED {
+            self.archived.remove(0);
+        }
+        let id = t.id;
+        self.close(id);
+        self.dirty = true;
+        self.push();
+    }
+
+    /// The periodic work: once a minute the archive looks for tabs nobody has
+    /// looked at.
     fn tick(&mut self) {
         let now = Instant::now();
+        // The tabs nobody has looked at for a long time close themselves away.
+        if now >= self.next_archive {
+            self.next_archive = now + ARCHIVE_TICK;
+            self.archive_idle(now);
+        }
         // Strictly isolated agents whose browser came back since the last look.
         self.poll_own_envs();
         // Filter lists past their own expiry are fetched again, in the background, hourly.
@@ -8050,6 +8166,15 @@ impl App {
         if std::mem::take(&mut self.site_favs_dirty) {
             sitefavs::save(&self.site_favs);
         }
+        // Fold the idle stretch into the saved time, so the time Lumen was closed
+        // is not counted twice and not counted at all.
+        let now = Instant::now();
+        for t in self.tabs.iter_mut() {
+            if let Some(at) = t.idle_at {
+                t.idle_ms += now.saturating_duration_since(at).as_millis() as u64;
+                t.idle_at = Some(now);
+            }
+        }
         let (width, height) = logical_size(&self.ctx);
         let maximized = self.ctx.window.is_maximized();
         let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
@@ -8070,6 +8195,8 @@ impl App {
         );
         // The essentials are the same in every workspace, so they sit beside them.
         s.essentials = self.essentials.clone();
+        // And the tabs that were closed away.
+        s.archived = self.archived.clone();
         // Remember it for the panic hook: a panic must not lose these tabs.
         if let Ok(mut g) = LAST_SESSION.lock() {
             *g = Some(s.clone());
