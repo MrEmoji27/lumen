@@ -872,6 +872,17 @@ fn show_window(w: &tao::window::Window) {
     }
 }
 
+/// Hide the main window at once. tao's own set_visible goes through the event
+/// loop, and by the time Lumen is on its way out there is no event loop left to
+/// carry the message.
+fn hide_window(w: &tao::window::Window) {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    let h = HWND(w.hwnd() as _);
+    unsafe {
+        let _ = ShowWindow(h, SW_HIDE);
+    }
+}
+
 /// Which Lumen this is: the version, then the commit it was built from and its date.
 pub const VERSION: &str = concat!(env!("LUMEN_VERSION"), " (", env!("LUMEN_BUILD"), ")");
 
@@ -1407,6 +1418,14 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             _ => {}
         }
         if app.exit {
+            // The windows go first: the rest of the way out (aria2 saying
+            // goodbye) can take a few seconds, and the person has already
+            // closed Lumen. Nothing after this needs the window on screen.
+            hide_window(&app.ctx.window);
+            app.chrome.set_visible(false);
+            if let Some(w) = &app.watch {
+                w.hide();
+            }
             app.library.flush();
             app.clear_on_exit();
             app.save_session();

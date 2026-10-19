@@ -26,16 +26,22 @@ pub fn token() -> String {
 /// The script Lumen puts in every page: it says what the last click was on,
 /// and when a script opened a window.
 ///
-/// The click is caught in the capture phase, so it is seen before the page's
-/// own handlers run: a page that opens a window on the first click has already
-/// said what that click was on. The report is a message to the host, and the
-/// host reads it when the window is asked for. Measured on 2026-10-19: the
-/// message arrives first, because the page sends it before the browser asks
-/// for the window and the host reads the queue in the order it was filled.
+/// The click is caught in the capture phase, on the window, so it is seen
+/// before the page's own handlers run: a page that opens a window on the first
+/// click has already said what that click was on. The report is a message to
+/// the host, and the host reads it when the window is asked for. Measured on
+/// 2026-10-19: the message arrives first, because the page sends it before the
+/// browser asks for the window and the host reads the queue in the order it
+/// was filled.
+///
+/// The secret is kept out of the page's reach: the message is built in one go,
+/// with no prototype the page can see, and the sender is Lumen's own, bound
+/// before the page had a say in it.
 pub fn script(token: &str) -> String {
     const SCRIPT: &str = r#"try{(()=>{const W=window.chrome&&window.chrome.webview;if(!W)return;
 const T='__TOKEN__';
-const say=m=>{m.t=T;try{W.postMessage(m)}catch(_){}};
+const P=W.postMessage.bind(W);
+const say=(k,link,url)=>{try{P({__proto__:null,t:T,lumen:k,link:link,url:url})}catch(_){}};
 const opens=t=>!!t&&t!=='_self'&&t!=='_top'&&t!=='_parent';
 const onClick=e=>{let el=e.target,link=0,url='';
  while(el&&el.nodeType===1){const tag=el.tagName;
@@ -44,11 +50,11 @@ const onClick=e=>{let el=e.target,link=0,url='';
   if(tag==='BUTTON'||tag==='INPUT'){if(opens(el.getAttribute('formtarget')))link=1;
    else if(el.form&&opens(el.form.getAttribute('target')))link=1;break}
   el=el.parentElement}
- say({lumen:'click',link:link,url:url})};
-document.addEventListener('click',onClick,true);
-document.addEventListener('auxclick',onClick,true);
+ say('click',link,url)};
+window.addEventListener('click',onClick,true);
+window.addEventListener('auxclick',onClick,true);
 const O=window.open;
-if(typeof O==='function')window.open=function(u){say({lumen:'open',url:String(u||'')});return O.apply(this,arguments)};
+if(typeof O==='function')window.open=function(u){say('open',0,String(u||''));return O.apply(this,arguments)};
 })()}catch(e){}"#;
     SCRIPT.replace("__TOKEN__", token)
 }
