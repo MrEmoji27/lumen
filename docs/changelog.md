@@ -8,6 +8,23 @@ The rule: Lumen stays on the 0.6.7 line. A release build that goes to the person
 number: a batch of new features bumps the fourth part (0.6.7.5 -> 0.6.7.6), a small fix adds or
 bumps the last one (0.6.7.6 -> 0.6.7.6.1).
 
+## 0.6.7.6 — 2026-10-25
+
+- **Back on the 0.6.7 line.** 0.6.8 and 0.6.8.1 were numbered wrong; they are 0.6.7.5 and
+  0.6.7.5.1 below. From here a batch of features bumps the fourth number, a fix adds a fifth.
+- **A tab says what it costs.** Hover a tab and its memory sits beside the close button. A tab
+  at 500 MB or more shows it all the time, in a muted red.
+- **Heavy hidden tabs leave sooner.** A tab you are not looking at that holds more than 500 MB
+  unloads after 5 minutes instead of your normal unload time. Never one playing sound, in a
+  call, or pinned.
+- **The download helper starts when you download.** aria2 used to run from the moment Lumen
+  started, about 3 MB doing nothing. Now the first download, magnet or torrent starts it.
+  Unfinished downloads and torrents to seed still start it with Lumen.
+- **The start page is "Start"**, with a house, so it no longer looks like a second "New tab".
+- **No red streak over the window buttons.** It was the first workspace's colour line; it now
+  shows only when you have two or more workspaces.
+- **The site menu counts what was blocked**: "23 blocked on this page".
+
 ## 0.6.7.5.1 — 2026-10-25
 
 - Shipped by mistake as 0.6.8.1.
