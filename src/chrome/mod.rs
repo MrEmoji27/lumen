@@ -3473,8 +3473,9 @@ impl Inner {
             let x = if s.settings.sidebar_side == "right" { sb.x + 0.5 } else { sb.right() - 0.5 };
             self.gfx.line(x, sb.y, x, sb.bottom(), th.line, 1.0);
         }
-        // A thin line at the top of the sidebar, in the colour the workspace wears.
-        if let Some(c) = s.workspaces.get(s.active_workspace).and_then(|w| workspace_colour(th.dark, &w.colour)) {
+        // A thin line at the top of the sidebar, in the colour the workspace wears. Only with
+        // two or more: one workspace has nothing to tell apart, and its line looked like a glitch.
+        if let Some(c) = s.workspaces.get(s.active_workspace).filter(|_| s.workspaces.len() > 1).and_then(|w| workspace_colour(th.dark, &w.colour)) {
             self.gfx.round(R::new(sb.x, sb.y, sb.w, 2.0), 0.0, c);
         }
         let compact = s.compact();
