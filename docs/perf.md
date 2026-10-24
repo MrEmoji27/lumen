@@ -577,3 +577,18 @@ is the baseline tool's own miss), memory down on every row. One load flag,
 youtube-search adblock-off +1390 ms, is the network and not the change: a
 control build at HEAD with none of this code reads 2366 ms on that row
 against the old day's 1271 ms, and this build reads 1387 ms on the same row.
+
+## aria2 on demand, 25 October
+
+aria2c started with every Lumen and sat there: 2.7 MB private working set with nothing
+downloading. 0.6.7.6 starts it on the first download instead. Release builds, headless, nothing
+open, fresh data folder, 25 s, private working set of lumen.exe plus every process naming the
+data folder, the two builds interleaved:
+
+| Build | lumen.exe | aria2c | Tree |
+|---|---|---|---|
+| before (0.6.7.5.1 code, aria2 at start) | 21.0, 23.8 MB | 2.7 MB | 23.7, 26.5 MB |
+| 0.6.7.6 | 19.8, 20.7 MB | none | 19.8, 20.7 MB |
+
+The 2.7 MB is certain: the process is gone. The rest of the gap is lumen.exe's own spread
+between runs, about 1-3 MB, so it is not claimed.
