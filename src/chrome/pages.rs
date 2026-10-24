@@ -2984,7 +2984,7 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
             _ if tab.id == s.active => "Active",
             _ => "",
         };
-        let name = if tab.title.is_empty() { if tab.status == "new" { "New tab".into() } else { super::host(&tab.url) } } else { tab.title.clone() };
+        let name = if tab.title.is_empty() { if tab.status == "new" { "Start".into() } else { super::host(&tab.url) } } else { tab.title.clone() };
         rows.push(UsageRow {
             id: tab.id,
             name,
