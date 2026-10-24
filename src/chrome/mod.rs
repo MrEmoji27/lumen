@@ -111,6 +111,10 @@ pub struct UiTab {
     pub agent: bool,
     /// The person's tab, which they let agents use (right-click). Marked in the sidebar.
     pub agent_ok: bool,
+    /// The person locked it.
+    pub locked: bool,
+    /// Locked and not opened on this visit: no title, no icon, no page.
+    pub veiled: bool,
     pub reader: bool,
     /// InPrivate tab. Marked in the sidebar, never saved anywhere.
     pub private: bool,
@@ -208,6 +212,17 @@ pub struct UiDl {
     pub ratio: f64,
 }
 
+/// The lock card: Lumen locked with Windows Hello, or the tab on screen locked.
+#[derive(Clone, Debug)]
+pub struct UiLock {
+    /// All of Lumen, not one tab. A tab's card names nothing about it, not even its site.
+    pub app: bool,
+    /// Whether this PC has Windows Hello. None until Windows has said.
+    pub hello: Option<bool>,
+    /// Why the last unlock did not open, if it did not.
+    pub note: String,
+}
+
 /// A pop-up Lumen stopped: the host it wanted, and the site that asked.
 #[derive(Clone, Debug)]
 pub struct UiPopup {
@@ -237,6 +252,8 @@ pub struct UiState {
     pub media: Option<u64>,
     /// Ads and trackers blocked on the active tab's page. The site menu says it.
     pub blocked: u64,
+    /// A lock is up: Lumen's, or the tab on screen's.
+    pub lock: Option<UiLock>,
     pub cpu_cap: bool,
     /// Battery saver is in force: hidden tabs sleep sooner, motion is reduced, a leaf shows.
     pub battery: bool,
@@ -495,6 +512,8 @@ pub enum Hit {
     SiteSettings,
     /// The ad-block switch in the site popover: this site is in or out of the off list.
     SiteAdblock,
+    /// The lock card's button: true for Lumen's own lock, false for a tab's.
+    Unlock(bool),
     /// The zoom chip in the address bar: click takes the page back to 100%.
     ZoomChip,
     /// A row of the tab search card.
@@ -1084,7 +1103,11 @@ fn switch_rows(s: &UiState, q: &str) -> Vec<SwitchRow> {
 fn switch_candidates(tabs: &[UiTab], other: &[UiOther]) -> Vec<SwitchRow> {
     let mut all: Vec<SwitchRow> = tabs
         .iter()
-        .map(|t| SwitchRow { id: t.id, other: None, ws_name: String::new(), title: t.title.clone(), url: t.url.clone(), private: t.private })
+        .map(|t| {
+            // A locked tab is found by nothing it holds: no title, no address.
+            let (title, url) = if t.veiled { ("Locked tab".to_string(), String::new()) } else { (t.title.clone(), t.url.clone()) };
+            SwitchRow { id: t.id, other: None, ws_name: String::new(), title, url, private: t.private }
+        })
         .collect();
     for o in other {
         all.push(SwitchRow {
@@ -3056,6 +3079,20 @@ impl Inner {
         }
         self.motion.set_config(lo.motion);
         self.motion.begin();
+        // Lumen locked: the lock card over the whole window, and nothing else drawn or clickable.
+        if let Some(l) = s.lock.as_ref().filter(|l| l.app) {
+            let (w, h) = self.size_dip();
+            let all = R::new(0.0, 0.0, w, h);
+            if lo.style != theme::Style::Glass {
+                self.gfx.fill(all, page_ground(&lo));
+            }
+            self.draw_lock(all, l);
+            // The window still moves, shrinks and closes while it is locked.
+            self.hit(R::new(0.0, 0.0, w, 40.0), Hit::Drag);
+            self.window_buttons(w - 8.0, 6.0, 30.0, s);
+            self.motion.end();
+            return;
+        }
         // The hidden sidebar slides in over the page, or out of the way.
         self.slide_sidebar(s);
         // The workspace changed: the tab list cross-fades in its place.
@@ -3095,6 +3132,9 @@ impl Inner {
                 if a < 1.0 {
                     self.gfx.round(st, lo.page_radius, page_ground(&lo).alpha(1.0 - a));
                 }
+            } else if let Some(l) = &s.lock {
+                // The tab on screen is locked: its card where its page would be.
+                self.draw_lock(st, l);
             } else if self.ntp_visible() && !s.settings.first_run_done {
                 pages::draw_first_run(self, st, s);
             } else if self.ntp_visible() {
@@ -4573,7 +4613,10 @@ impl Inner {
         let dim = if asleep { 0.5 } else { 1.0 };
         let (fx, fy) = if pinned || compact { (r.x + (r.w - 16.0) / 2.0, r.y + (r.h - 16.0) / 2.0) } else { (r.x + 9.0, r.y + (r.h - 16.0) / 2.0) };
         let fav = R::new(fx, fy, 16.0, 16.0);
-        if t.loading {
+        if t.veiled {
+            let ink = if active && !pinned { th.pill_ink } else { th.dim };
+            self.gfx.icon("lock", fav.x + 1.0, fav.y + 1.0, 14.0, ink.alpha(alpha));
+        } else if t.loading {
             let phase = (self.born.elapsed().as_secs_f32() / 0.8).fract();
             self.gfx.spinner(fx + 8.0, fy + 8.0, 6.5, phase, th.line, th.accent.alpha(alpha));
         } else {
@@ -4711,7 +4754,9 @@ impl Inner {
             self.gfx.text("SV", b, lo.font(9.0, 650).align(Align::Center), th.dim.alpha(alpha));
             right = b.x - 4.0;
         }
-        let title = if !t.title.is_empty() {
+        let title = if t.veiled {
+            "Locked tab".into()
+        } else if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {
             "Start".into()
@@ -4834,7 +4879,9 @@ impl Inner {
         let fav = R::new(fx, fy, 16.0, 16.0);
         let asleep = matches!(t.status, "asleep" | "off" | "crashed");
         let dim = if asleep { 0.5 } else { 1.0 };
-        if t.loading {
+        if t.veiled {
+            self.gfx.icon("lock", fav.x + 1.0, fav.y + 1.0, 14.0, th.dim);
+        } else if t.loading {
             let phase = (self.born.elapsed().as_secs_f32() / 0.8).fract();
             self.gfx.spinner(fx + 8.0, fy + 8.0, 6.5, phase, th.line, th.accent);
         } else {
@@ -4917,7 +4964,9 @@ impl Inner {
             self.gfx.icon("globe", b.x, b.y, 16.0, if t.translating { th.faint } else { th.accent });
             right = b.x - 3.0;
         }
-        let title = if !t.title.is_empty() {
+        let title = if t.veiled {
+            "Locked tab".into()
+        } else if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {
             "Start".into()
@@ -5293,6 +5342,49 @@ impl Inner {
 
     /// A pill button. Primary is the look's ink (Signal) or its accent; quiet sits on the card
     /// with a hairline.
+    /// The lock card: a lock, what is locked, and the one way in. With no Windows Hello on
+    /// this PC there is nothing to ask, and the card says so instead of offering a button.
+    fn draw_lock(&mut self, area: R, l: &UiLock) {
+        let lo = self.look.clone();
+        let th = lo.theme;
+        let w = 420.0_f32.min(area.w - 40.0);
+        let (cx, top) = (area.x + area.w / 2.0, area.y + area.h * 0.36);
+        let ring = R::new(cx - 34.0, top - 34.0, 68.0, 68.0);
+        match lo.style {
+            theme::Style::Glass => {
+                self.gfx.bloom(cx, top, 90.0, th.accent.alpha(0.3));
+                self.gfx.round(ring, 34.0, theme::Color(1.0, 1.0, 1.0, 0.1));
+                self.gfx.round_stroke(ring, 34.0, theme::Color(1.0, 1.0, 1.0, 0.18), 1.0);
+            }
+            theme::Style::Precise => self.gfx.round_stroke(ring, 12.0, th.accent, 1.5),
+            theme::Style::Signal => self.gfx.round(ring, 34.0, th.raise),
+        }
+        let ink = if lo.style == theme::Style::Precise { th.accent } else { th.text };
+        self.gfx.icon("lock", cx - 13.0, top - 13.0, 26.0, ink);
+        let title = if l.app { "Lumen is locked" } else { "This tab is locked" };
+        self.gfx.text(title, R::new(cx - w / 2.0, top + 54.0, w, 30.0), lo.h2.align(Align::Center), th.text);
+        let line = if l.app {
+            "Windows Hello opens it: your face, your finger or your PIN."
+        } else {
+            "Its page stays hidden until Windows Hello says it is you."
+        };
+        self.gfx.text_wrap(line, R::new(cx - w / 2.0, top + 90.0, w, 40.0), lo.small.align(Align::Center), th.dim);
+        let mut y = top + 136.0;
+        if l.hello == Some(false) {
+            let no = "Windows Hello is not set up on this PC. Set a PIN in Windows Settings, Accounts, Sign-in options.";
+            self.gfx.text_wrap(no, R::new(cx - w / 2.0, y, w, 40.0), lo.small.align(Align::Center), th.faint);
+            return;
+        }
+        let label = "Unlock with Windows Hello";
+        let bw = self.gfx.measure(label, lo.body_strong) + 44.0;
+        let b = R::new(cx - bw / 2.0, y, bw, 40.0);
+        self.pill_button(b, label, Hit::Unlock(l.app), true, 1.0);
+        y = b.bottom() + 14.0;
+        if !l.note.is_empty() {
+            self.gfx.text(&l.note, R::new(cx - w / 2.0, y, w, 18.0), lo.small.align(Align::Center), th.faint);
+        }
+    }
+
     fn pill_button(&mut self, r: R, label: &str, hit: Hit, primary: bool, a: f32) {
         let lo = self.look.clone();
         let th = lo.theme;
@@ -5923,6 +6015,11 @@ impl Inner {
                 self.site_open = false;
                 send(p, json!({"t": "panel", "open": true, "which": "sites"}));
             }
+            Hit::Unlock(app) => {
+                if let Some(s) = &self.state {
+                    send(&self.proxy, json!({"t": "helloUnlock", "what": if app { "app" } else { "tab" }, "id": s.active}));
+                }
+            }
             Hit::SiteAdblock => {
                 // The switch: take this site out of the list or put it back, then reload
                 // so the page settles the way the switch now says.
@@ -6039,8 +6136,18 @@ impl Inner {
                 if t.audio && !t.muted {
                     items.push((18, "Picture in picture".into()));
                 }
+                // Locked with Windows Hello: its page shows only after a face, a finger or a PIN.
+                if !t.agent && t.status != "new" {
+                    items.push(if t.veiled {
+                        (27, "Unlock with Windows Hello".into())
+                    } else if t.locked {
+                        (26, "Remove the lock".into())
+                    } else {
+                        (25, "Lock this tab".into())
+                    });
+                }
                 // Agents stay out of this tab unless the person says so, one tab at a time.
-                if s.settings.agent && !t.agent && !t.private && t.url.starts_with("http") {
+                if s.settings.agent && !t.agent && !t.private && !t.locked && t.url.starts_with("http") {
                     items.push((16, if t.agent_ok { "Stop letting agents use this tab".into() } else { "Let agents use this tab".into() }));
                 }
                 // A pin's Close is already an unload, so it gets no second item for it.
@@ -6073,6 +6180,11 @@ impl Inner {
                         18 => "pip",
                         19 => "essentialAdd",
                         24 => "pinHome",
+                        25 | 26 => "lockTab",
+                        27 => {
+                            send(&i.proxy, json!({"t": "helloUnlock", "what": "tab", "id": id}));
+                            return;
+                        }
                         15 => {
                             send(&i.proxy, json!({"t": "workspaceAdd"}));
                             return;
@@ -7028,6 +7140,8 @@ mod tests {
             status: "live",
             agent: false,
             agent_ok: false,
+            locked: false,
+            veiled: false,
             reader: false,
             private,
             split: false,

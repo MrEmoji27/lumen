@@ -390,6 +390,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Seg("tracking", "Tracking prevention", "WebView2's own tracker blocking. Balanced blocks known trackers; Strict blocks most trackers, including ones a site loads at the top level. Applies to pages as they load.", &[("off", "Off"), ("basic", "Basic"), ("balanced", "Balanced"), ("strict", "Strict")]),
             Toggle("https_first", "Try https first", "A plain http address is tried over https first. When a site has no https at all, Lumen says so and lets you continue for this once or for good. Never happens for localhost, IP addresses or home-network names."),
             Toggle("gpc", "Tell sites not to sell or share my data", "Sends the Global Privacy Control signal (Sec-GPC: 1) and Do Not Track with every request, and tells the page itself through navigator.globalPrivacyControl. Sites that honour it must treat you as opted out."),
+            Toggle("lock_app", "Lock Lumen with Windows Hello", "Lumen opens behind a lock until Windows Hello says it is you: face, finger or PIN. To lock one tab, right-click it."),
             Toggle("block_popups", "Block pop-ups", "A window a page opens on its own is stopped. A link you clicked still opens one, and a site you trust may open as many as it likes."),
             PopupSites,
             Button("Site settings", "What each site may do, the zoom it is read at, the data it left behind, and the http addresses you let through.", "Open…", PageHit::Panels("sites")),
@@ -2994,7 +2995,7 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
             _ if tab.id == s.active => "Active",
             _ => "",
         };
-        let name = if tab.title.is_empty() { if tab.status == "new" { "Start".into() } else { super::host(&tab.url) } } else { tab.title.clone() };
+        let name = if tab.veiled { "Locked tab".into() } else if tab.title.is_empty() { if tab.status == "new" { "Start".into() } else { super::host(&tab.url) } } else { tab.title.clone() };
         rows.push(UsageRow {
             id: tab.id,
             name,

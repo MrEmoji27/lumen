@@ -97,6 +97,10 @@ pub enum Ev {
     /// A pop-up Lumen stopped: the tab that asked, the host it wanted, and the
     /// host that asked.
     PopupBlocked(u64, String, String),
+    /// Windows Hello answered: what was asked about ("app" | "tab" | "secret"), the tab, the verdict.
+    Hello(&'static str, u64, crate::hello::Verdict),
+    /// Whether this PC has Windows Hello set up at all.
+    HelloReady(bool),
     Download(Dl),
     /// A site asks for a permission. Answer with `answer_permission(pid, ..)`.
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },

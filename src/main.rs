@@ -25,6 +25,7 @@ mod engine;
 mod extlink;
 mod favicons;
 mod glance;
+mod hello;
 mod journal;
 mod kdbx;
 mod launch;
@@ -311,6 +312,11 @@ struct Tab {
     /// For a tab of the person's: the site (scheme://host) they said agents may use it on.
     /// Ends with a move to another site and with the tab.
     agent_ok: Option<String>,
+    /// The person locked this tab: its page shows only after Windows Hello, each time the
+    /// tab is come back to. Saved with the session.
+    locked: bool,
+    /// Windows Hello said yes for this visit. Leaving the tab locks it again.
+    unlocked: bool,
     view: Option<WebView>,
     /// A Servo page, for the hosts in the "Servo sites" list. The other engine.
     #[cfg(feature = "servo")]
@@ -552,6 +558,8 @@ impl Tab {
             downloads: String::new(),
             own_env: false,
             agent_ok: None,
+            locked: false,
+            unlocked: false,
             view: None,
             #[cfg(feature = "servo")]
             servo: None,
@@ -579,7 +587,13 @@ impl Tab {
             pin_url: self.pin_url.clone(),
             essential: self.essential,
             idle_ms: self.idle_ms,
+            locked: self.locked,
         }
+    }
+
+    /// Locked and not opened with Windows Hello on this visit: its page stays hidden.
+    fn veiled(&self) -> bool {
+        self.locked && !self.unlocked
     }
 
     /// How long the tab has been unseen.
@@ -867,6 +881,14 @@ struct App {
     vault: Option<kdbx::Vault>,
     /// When the vault was last used; the idle lock counts from here.
     vault_seen: Instant,
+    /// "Lock Lumen with Windows Hello": nothing shows until it says yes.
+    app_locked: bool,
+    /// Whether this PC has Windows Hello. None until Windows has said.
+    hello: Option<bool>,
+    /// The last word on an unlock that did not open: shown on the lock card.
+    hello_note: String,
+    /// The secret downloads were opened with Windows Hello, for as long as Lumen runs.
+    secret_open: bool,
 }
 
 /// Headless: a real Lumen whose window lives off-screen, never takes focus, has no taskbar
@@ -1274,8 +1296,21 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         spb: HashMap::new(),
         vault: None,
         vault_seen: Instant::now(),
+        app_locked: false,
+        hello: None,
+        hello_note: String::new(),
+        secret_open: false,
     };
     app.unclean_last = unclean;
+    // Locked with Windows Hello: the window opens on the lock screen. Never a headless run,
+    // which is the agents' and has no one to look at a prompt.
+    app.app_locked = app.settings.lock_app && !headless();
+    {
+        let proxy = app.ctx.proxy.clone();
+        hello::check(move |ok| {
+            let _ = proxy.send_event(Ev::HelloReady(ok));
+        });
+    }
     // aria2 starts when a download wants it. Only work it left unfinished (a download to
     // resume, a torrent to seed) starts it with Lumen.
     if aria::Aria::has_session(&store::data_dir()) {
@@ -2150,7 +2185,7 @@ impl App {
     /// The UI needs the whole window only for the new tab page and settings.
     /// The rest of the time it is a strip. A small surface is a fast surface.
     fn ui_full(&self) -> bool {
-        self.panel != Panel::None || self.active_tab().is_some_and(|t| t.status() == "new")
+        self.panel != Panel::None || self.app_locked || self.active_tab().is_some_and(|t| t.status() == "new" || t.veiled())
     }
 
     /// The page rectangle, in window coordinates.
@@ -2224,7 +2259,8 @@ impl App {
                 continue;
             }
             let stage = t.id == active || split == Some(t.id);
-            let want = on && stage && t.has_page();
+            // A locked tab's page stays hidden until Windows Hello says yes, split half too.
+            let want = on && stage && t.has_page() && !t.veiled();
             // A hidden stage page is looked at again: its target follows the panel over it.
             if want == t.visible && (want || !stage) {
                 continue;
@@ -2493,6 +2529,8 @@ impl App {
                         status: t.status(),
                         agent: t.agent,
                         agent_ok: self.agent_granted(t),
+                        locked: t.locked,
+                        veiled: t.veiled(),
                         reader: t.reader.is_some(),
                         private: t.private,
                         split: self.split.is_some() && self.on_stage(t.id),
@@ -2516,6 +2554,7 @@ impl App {
                 mem: self.mem,
                 media: self.media_tab.and_then(|id| self.tabs.iter().find(|t| t.id == id && t.audio).map(|t| t.id)),
                 blocked: privacy_stats::tab_blocked(self.active),
+                lock: self.lock_state(),
                 cpu_cap: self.job.is_some(),
                 page_ask: self
                     .page_asks
@@ -2687,6 +2726,7 @@ impl App {
             // not count, so the clock starts again from now.
             t.idle_ms = saved.idle_ms;
             t.idle_at = Some(Instant::now());
+            t.locked = saved.locked;
             t.workspace = self.active_workspace;
             if i == ws_active {
                 active = Some(t.id);
@@ -2875,6 +2915,8 @@ impl App {
             && self.tabs[p].id != id
         {
             self.tabs[p].idle_at = Some(Instant::now());
+            // A locked tab is opened for one visit: leaving it locks it again.
+            self.tabs[p].unlocked = false;
         }
         self.mru.touch(id);
         self.leave_panel();
@@ -3137,7 +3179,7 @@ impl App {
             monitor::unwatch(None, w, true);
         }
         if !t.url.is_empty() && !t.private {
-            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned, pin_url: t.pin_url, essential: t.essential, idle_ms: 0 });
+            self.closed.push(SavedTab { url: t.url, title: t.title, favicon: t.favicon, pinned: t.pinned, pin_url: t.pin_url, essential: t.essential, idle_ms: 0, locked: t.locked });
             if self.closed.len() > MAX_CLOSED {
                 self.closed.remove(0);
             }
@@ -5343,6 +5385,19 @@ impl App {
                 let clicked = self.ctx.clicks.borrow().get(&tab).is_some_and(|p| popup::clicked_magnet(p, &url));
                 self.start_magnet(tab, &url, clicked);
             }
+            Ev::HelloReady(ok) => {
+                self.hello = Some(ok);
+                // No Windows Hello on this PC: a lock nobody can open would lock the person
+                // out of their own browser. Nothing stays shut, and the card says why.
+                if !ok {
+                    self.app_locked = false;
+                    self.tabs.iter_mut().filter(|t| t.locked).for_each(|t| t.unlocked = true);
+                    self.hello_note = "Windows Hello is not set up on this PC, so locks cannot hold.".into();
+                    self.layout();
+                }
+                self.push();
+            }
+            Ev::Hello(what, id, verdict) => self.on_hello(what, id, verdict),
             Ev::PopupBlocked(tab, target, site) => {
                 // A pop-up the person did not ask for. The chrome says so over the
                 // page, with the way back: allow this site, or let it go.
@@ -5526,7 +5581,20 @@ impl App {
     fn on_ui(&mut self, raw: &str) {
         let Ok(m) = serde_json::from_str::<Value>(raw) else { return };
         let id = m["id"].as_u64().unwrap_or(0);
+        // Locked: nothing behind the lock screen can be reached, by click or by key.
+        if self.app_locked && !matches!(m["t"].as_str(), Some("helloUnlock" | "ready" | "win")) {
+            return;
+        }
         match m["t"].as_str().unwrap_or("") {
+            "lockTab" => self.toggle_lock(id),
+            "helloUnlock" => {
+                let what = match m["what"].as_str() {
+                    Some("app") => "app",
+                    Some("secret") => "secret",
+                    _ => "tab",
+                };
+                self.ask_hello(what, id);
+            }
             "fileList" => {
                 // A folder's read, from the file card's own thread.
                 self.chrome.file_list(&m);
@@ -7328,12 +7396,88 @@ impl App {
         !t.agent && t.agent_ok.as_deref().is_some_and(|site| site == engine::origin_of(&t.url))
     }
 
+    /// What the lock card shows: Lumen locked, or the tab on screen locked. None otherwise.
+    fn lock_state(&self) -> Option<chrome::UiLock> {
+        let hello = self.hello;
+        let note = self.hello_note.clone();
+        if self.app_locked {
+            return Some(chrome::UiLock { app: true, hello, note });
+        }
+        self.active_tab().filter(|t| t.veiled())?;
+        Some(chrome::UiLock { app: false, hello, note })
+    }
+
+    /// Lock a tab, or take its lock off. Locking is at once: the page goes behind the lock
+    /// card, and a lent tab is taken back from agents. Taking the lock off needs the tab open,
+    /// which needs Windows Hello first.
+    fn toggle_lock(&mut self, id: u64) {
+        let Some(i) = self.idx(id) else { return };
+        if self.tabs[i].agent {
+            return;
+        }
+        if self.tabs[i].locked {
+            if self.tabs[i].veiled() {
+                return;
+            }
+            self.tabs[i].locked = false;
+        } else {
+            self.tabs[i].locked = true;
+            self.tabs[i].unlocked = false;
+            self.lend(i, None);
+        }
+        self.hello_note.clear();
+        self.save_session();
+        self.layout();
+        self.push();
+    }
+
+    /// Ask Windows Hello about the app, a tab or the secret downloads. The answer comes back
+    /// as `Ev::Hello`; the UI thread never waits for it.
+    fn ask_hello(&mut self, what: &'static str, id: u64) {
+        let why = match what {
+            "app" => "Unlock Lumen",
+            "secret" => "Open your secret downloads in Lumen",
+            _ => "Unlock this tab in Lumen",
+        };
+        let proxy = self.ctx.proxy.clone();
+        hello::ask(self.ctx.window.hwnd() as isize, why, move |v| {
+            let _ = proxy.send_event(Ev::Hello(what, id, v));
+        });
+    }
+
+    fn on_hello(&mut self, what: &'static str, id: u64, verdict: hello::Verdict) {
+        self.hello_note = match verdict {
+            hello::Verdict::Yes => String::new(),
+            hello::Verdict::No => "Not unlocked. Try again when you are ready.".into(),
+            hello::Verdict::Unavailable => {
+                self.hello = Some(false);
+                "Windows Hello is not set up on this PC.".into()
+            }
+        };
+        if verdict == hello::Verdict::Yes {
+            match what {
+                "app" => self.app_locked = false,
+                "secret" => self.secret_open = true,
+                _ => {
+                    // Only the tab still on screen opens: one left meanwhile stays shut.
+                    if id == self.active
+                        && let Some(i) = self.idx(id)
+                    {
+                        self.tabs[i].unlocked = true;
+                    }
+                }
+            }
+        }
+        self.layout();
+        self.push();
+    }
+
     /// "Let agents use this tab", or take it back. Only a tab of the person's with a real page,
     /// never a private one, and only for the site it is on now.
     fn toggle_agent_grant(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
         let t = &self.tabs[i];
-        let site = if t.agent_ok.is_some() || t.agent || t.private || !t.url.starts_with("http") { None } else { Some(engine::origin_of(&t.url)) };
+        let site = if t.agent_ok.is_some() || t.agent || t.private || t.locked || !t.url.starts_with("http") { None } else { Some(engine::origin_of(&t.url)) };
         self.lend(i, site);
         self.push();
     }
@@ -8741,6 +8885,24 @@ mod tests {
 
     /// A heavy hidden tab leaves after five minutes, not after the normal half hour. Light
     /// tabs keep their time, and a heavy tab keeps its sound, its call and its pin.
+    /// A locked tab hides its page until Windows Hello opens it, and keeps its lock in the
+    /// session: a restart does not open it.
+    #[test]
+    fn a_locked_tab_stays_shut_until_hello_and_across_a_restart() {
+        let mut t = Tab::new(1, "https://mail.example.com/".into());
+        assert!(!t.veiled());
+        t.locked = true;
+        assert!(t.veiled());
+        t.unlocked = true;
+        assert!(!t.veiled());
+        // The saved tab keeps the lock and not the visit's opening.
+        let saved = t.saved();
+        assert!(saved.locked);
+        let mut back = Tab::new(2, saved.url);
+        back.locked = saved.locked;
+        assert!(back.veiled());
+    }
+
     /// "Never" is never: no freeze, no unload, no wake, and a heavy tab is not dropped early.
     #[test]
     fn never_means_never() {
