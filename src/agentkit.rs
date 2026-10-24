@@ -6,6 +6,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
 
@@ -37,6 +38,8 @@ pub struct Log {
     pub contexts: HashMap<String, u64>,
     /// The last drag the page started, intercepted: what a native HTML5 drop carries.
     pub drag: Option<Value>,
+    /// The hooks this log listens to (`record`). Older ones are ignored.
+    pub hooks: u64,
 }
 
 impl Log {
@@ -175,64 +178,50 @@ fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
 }
 
-/// Start recording for an agent's tab, and take over its dialogs (accept by default),
-/// since a modal alert would freeze every script the agent runs.
-pub fn watch(wv: &WebView, tab: u64, logs: &Logs) {
-    logs.borrow_mut().entry(tab).or_insert_with(|| Log { accept: true, ..Default::default() });
-    for m in ["Runtime.enable", "Log.enable"] {
-        fire(wv, m);
+/// Which set of hooks a tab's log answers to. A tab lent, taken back and lent again is
+/// hooked again; the old hooks see a number that is no longer theirs and record nothing.
+static HOOKS: AtomicU64 = AtomicU64::new(1);
+
+/// Run `f` on a tab's log, if the hooks calling are the ones it listens to now.
+fn with_log(l: &Logs, tab: u64, hooks: u64, f: impl FnOnce(&mut Log)) {
+    if let Some(log) = l.borrow_mut().get_mut(&tab).filter(|log| log.hooks == hooks) {
+        f(log);
+    }
+}
+
+/// Start recording a tab: its network requests (bodies kept for browser_network_body) and
+/// the browser's own log. `console` adds the page's console and uncaught errors; that takes
+/// Runtime.enable, which a page can detect, so a tab the person lent goes without it. What
+/// was recorded before stays; the hooks are new.
+pub fn record(wv: &WebView, tab: u64, logs: &Logs, console: bool) -> u64 {
+    let hooks = HOOKS.fetch_add(1, Ordering::Relaxed);
+    logs.borrow_mut().entry(tab).or_default().hooks = hooks;
+    fire(wv, "Log.enable");
+    if console {
+        fire(wv, "Runtime.enable");
     }
     // Response bodies are kept for browser_network_body: a few MB of them, no more.
     cdp(wv, "Network.enable", &json!({"maxTotalBufferSize": 32 * 1024 * 1024, "maxResourceBufferSize": 4 * 1024 * 1024, "maxPostDataSize": 65536}), |_| {});
-    // Same-process iframes run in execution contexts of this renderer. Their frameId is
-    // what an entry in the snapshot's frame list is entered through.
-    let l = logs.clone();
-    on_event(wv, "Runtime.executionContextCreated", move |v| {
-        let c = &v["context"];
-        let (Some(frame), Some(id)) = (c["auxData"]["frameId"].as_str(), c["id"].as_u64()) else { return };
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
-            log.contexts.insert(frame.to_string(), id);
-        }
-    });
-    let l = logs.clone();
-    on_event(wv, "Runtime.executionContextDestroyed", move |v| {
-        let Some(id) = v["executionContextId"].as_u64() else { return };
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
-            log.contexts.retain(|_, c| *c != id);
-        }
-    });
-    // A drag the page started (HTML5 draggable): the browser holds it until we say
-    // where it goes, or let it go.
-    let l = logs.clone();
-    on_event(wv, "Input.dragIntercepted", move |v| {
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
-            log.drag = Some(v["data"].clone());
-        }
-    });
-    let l = logs.clone();
-    on_event(wv, "Runtime.consoleAPICalled", move |v| {
-        let args: Vec<String> = v["args"].as_array().map(|a| a.iter().map(arg_text).collect()).unwrap_or_default();
-        let line = format!("[{}] {}", v["type"].as_str().unwrap_or("log"), clip(&args.join(" "), 600));
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
-            push(&mut log.console, line);
-        }
-    });
-    let l = logs.clone();
-    on_event(wv, "Runtime.exceptionThrown", move |v| {
-        let d = &v["exceptionDetails"];
-        let what = d["exception"]["description"].as_str().or(d["text"].as_str()).unwrap_or("exception");
-        let at = d["url"].as_str().map(|u| format!(" ({u}:{})", d["lineNumber"].as_u64().unwrap_or(0) + 1)).unwrap_or_default();
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
-            push(&mut log.console, format!("[uncaught] {}{at}", clip(what, 600)));
-        }
-    });
+    if console {
+        let l = logs.clone();
+        on_event(wv, "Runtime.consoleAPICalled", move |v| {
+            let args: Vec<String> = v["args"].as_array().map(|a| a.iter().map(arg_text).collect()).unwrap_or_default();
+            let line = format!("[{}] {}", v["type"].as_str().unwrap_or("log"), clip(&args.join(" "), 600));
+            with_log(&l, tab, hooks, |log| push(&mut log.console, line));
+        });
+        let l = logs.clone();
+        on_event(wv, "Runtime.exceptionThrown", move |v| {
+            let d = &v["exceptionDetails"];
+            let what = d["exception"]["description"].as_str().or(d["text"].as_str()).unwrap_or("exception");
+            let at = d["url"].as_str().map(|u| format!(" ({u}:{})", d["lineNumber"].as_u64().unwrap_or(0) + 1)).unwrap_or_default();
+            with_log(&l, tab, hooks, |log| push(&mut log.console, format!("[uncaught] {}{at}", clip(what, 600))));
+        });
+    }
     let l = logs.clone();
     on_event(wv, "Log.entryAdded", move |v| {
         let e = &v["entry"];
         let line = format!("[{} {}] {}", e["source"].as_str().unwrap_or(""), e["level"].as_str().unwrap_or(""), clip(e["text"].as_str().unwrap_or(""), 600));
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
-            push(&mut log.console, line);
-        }
+        with_log(&l, tab, hooks, |log| push(&mut log.console, line));
     });
     let l = logs.clone();
     on_event(wv, "Network.requestWillBeSent", move |v| {
@@ -248,31 +237,77 @@ pub fn watch(wv: &WebView, tab: u64, logs: &Logs) {
         if n.url.starts_with("data:") {
             return;
         }
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
+        with_log(&l, tab, hooks, |log| {
             log.last_net = Some(Instant::now());
             push(&mut log.net, n);
-        }
+        });
     });
     let l = logs.clone();
     on_event(wv, "Network.responseReceived", move |v| {
         let id = v["requestId"].as_str().unwrap_or("");
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
+        with_log(&l, tab, hooks, |log| {
             log.last_net = Some(Instant::now());
             if let Some(n) = log.net.iter_mut().rev().find(|n| n.id == id) {
                 n.status = v["response"]["status"].as_u64().unwrap_or(0) as u32;
                 n.mime = v["response"]["mimeType"].as_str().unwrap_or("").to_string();
             }
-        }
+        });
     });
     let l = logs.clone();
     on_event(wv, "Network.loadingFailed", move |v| {
         let id = v["requestId"].as_str().unwrap_or("");
-        if let Some(log) = l.borrow_mut().get_mut(&tab) {
+        with_log(&l, tab, hooks, |log| {
             log.last_net = Some(Instant::now());
             if let Some(n) = log.net.iter_mut().rev().find(|n| n.id == id) {
                 n.failed = v["blockedReason"].as_str().or(v["errorText"].as_str()).unwrap_or("failed").into();
             }
-        }
+        });
+    });
+    hooks
+}
+
+/// Stop recording a tab the person took back, and forget what it recorded. The byte count
+/// and the bandwidth cap may still want the Network domain: then it stays on, with no
+/// bodies kept.
+pub fn stop(wv: Option<&WebView>, tab: u64, logs: &Logs, keep_net: bool) {
+    logs.borrow_mut().remove(&tab);
+    let Some(wv) = wv else { return };
+    fire(wv, "Log.disable");
+    if keep_net {
+        cdp(wv, "Network.enable", &json!({"maxTotalBufferSize": 0, "maxResourceBufferSize": 0}), |_| {});
+    } else {
+        fire(wv, "Network.disable");
+    }
+}
+
+/// Start recording for an agent's tab, console too, and take over its dialogs (accept by
+/// default), since a modal alert would freeze every script the agent runs.
+pub fn watch(wv: &WebView, tab: u64, logs: &Logs) {
+    let fresh = !logs.borrow().contains_key(&tab);
+    let hooks = record(wv, tab, logs, true);
+    if fresh && let Some(log) = logs.borrow_mut().get_mut(&tab) {
+        log.accept = true;
+    }
+    // Same-process iframes run in execution contexts of this renderer. Their frameId is
+    // what an entry in the snapshot's frame list is entered through.
+    let l = logs.clone();
+    on_event(wv, "Runtime.executionContextCreated", move |v| {
+        let c = &v["context"];
+        let (Some(frame), Some(id)) = (c["auxData"]["frameId"].as_str(), c["id"].as_u64()) else { return };
+        with_log(&l, tab, hooks, |log| {
+            log.contexts.insert(frame.to_string(), id);
+        });
+    });
+    let l = logs.clone();
+    on_event(wv, "Runtime.executionContextDestroyed", move |v| {
+        let Some(id) = v["executionContextId"].as_u64() else { return };
+        with_log(&l, tab, hooks, |log| log.contexts.retain(|_, c| *c != id));
+    });
+    // A drag the page started (HTML5 draggable): the browser holds it until we say
+    // where it goes, or let it go.
+    let l = logs.clone();
+    on_event(wv, "Input.dragIntercepted", move |v| {
+        with_log(&l, tab, hooks, |log| log.drag = Some(v["data"].clone()));
     });
     // Dialogs: Lumen answers them, the agent reads what they said.
     unsafe {
@@ -323,5 +358,28 @@ mod tests {
         assert_eq!(arg_text(&json!({"type": "object", "description": "Object"})), "Object");
         assert_eq!(arg_text(&json!({"type": "number", "unserializableValue": "NaN"})), "NaN");
         assert_eq!(clip("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn old_hooks_record_nothing() {
+        let logs: Logs = Rc::default();
+        logs.borrow_mut().insert(7, Log { hooks: 2, ..Default::default() });
+        with_log(&logs, 7, 1, |log| push(&mut log.console, "stale".into()));
+        with_log(&logs, 7, 2, |log| push(&mut log.console, "live".into()));
+        with_log(&logs, 8, 2, |log| push(&mut log.console, "other tab".into()));
+        let logs = logs.borrow();
+        assert_eq!(logs[&7].console.iter().collect::<Vec<_>>(), ["live"]);
+        assert!(!logs.contains_key(&8));
+    }
+
+    #[test]
+    fn taking_a_tab_back_forgets_its_record() {
+        let logs: Logs = Rc::default();
+        logs.borrow_mut().insert(7, Log { hooks: 3, ..Default::default() });
+        stop(None, 7, &logs, false);
+        assert!(logs.borrow().is_empty());
+        // A hook still attached to the page finds no log, and writes none.
+        with_log(&logs, 7, 3, |log| push(&mut log.console, "after".into()));
+        assert!(logs.borrow().is_empty());
     }
 }
