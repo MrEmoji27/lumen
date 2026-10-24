@@ -123,6 +123,8 @@ const TAB_MEM_EVERY: Duration = Duration::from_secs(60);
 /// for Control: a feed that scrolled forever should not hold a gigabyte for half an hour.
 const HEAVY_MEM: u64 = 500 * 1024 * 1024;
 const HEAVY_AFTER: Duration = Duration::from_secs(300);
+/// "Never", as a sleep time: longer than any run. Nothing is due at it and nothing wakes for it.
+const NEVER: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
 /// Readings the network rate is taken over: about five seconds.
 const NET_WINDOW: usize = 5;
 /// How long the agent's cursor and pill stay over a lent tab after the agent's last click
@@ -424,6 +426,12 @@ enum SleepStep {
     Discard,
 }
 
+/// The freeze and unload times from the settings, in minutes, 0 for never.
+fn sleep_durations(sleep_min: u32, discard_min: u32) -> (Duration, Duration) {
+    let d = |m: u32| if m == 0 { NEVER } else { Duration::from_secs(m as u64 * 60) };
+    (d(sleep_min), d(discard_min))
+}
+
 /// The step a hidden tab is owed `idle` after it was hidden, if any. A tab that
 /// is playing audio is trimmed and nothing more: frozen or dropped, the music
 /// would stop. Its clock restarts when the audio does (see `Ev::Audio`). A tab in
@@ -437,7 +445,7 @@ fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Dura
         return (idle >= TRIM_AFTER && !t.trimmed).then_some(SleepStep::Trim);
     }
     // A heavy page is dropped at HEAVY_AFTER, or at the normal time when that is first.
-    let discard = if t.heavy { discard.min(HEAVY_AFTER) } else { discard };
+    let discard = if t.heavy && discard < NEVER { discard.min(HEAVY_AFTER) } else { discard };
     if idle >= discard && !t.pinned {
         Some(SleepStep::Discard)
     } else if idle >= sleep && !t.suspended {
@@ -471,7 +479,7 @@ fn input_idle() -> Duration {
 /// How long after hiding the tab's next step comes, for the loop's next wake.
 fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> Option<Duration> {
     // The same line the drop uses: HEAVY_AFTER, or the normal time when that is first.
-    let discard = if t.heavy { discard.min(HEAVY_AFTER) } else { discard };
+    let discard = if t.heavy && discard < NEVER { discard.min(HEAVY_AFTER) } else { discard };
     if t.call {
         None
     } else if !t.trimmed {
@@ -6934,7 +6942,9 @@ impl App {
             .filter(|t| t.has_page() && !t.crashed && !self.on_stage(t.id))
             .filter_map(|t| {
                 let mem = self.tab_mem.get(&t.id).copied();
-                Some(t.hidden_at? + next_sleep_step_after(&t.sleep_state(mem), sleep, discard)?)
+                // A step at "never" is no wake at all.
+                let step = next_sleep_step_after(&t.sleep_state(mem), sleep, discard).filter(|d| *d < NEVER)?;
+                Some(t.hidden_at? + step)
             })
             .min()
     }
@@ -8422,16 +8432,11 @@ impl App {
         self.settings.battery_saver && self.on_battery
     }
 
-    /// When a hidden tab freezes and when it unloads. Battery saver shortens both to at
-    /// most 1 and 10 minutes.
+    /// When a hidden tab freezes and when it unloads: the person's own times, 0 for never.
+    /// Battery saver used to cut them to 1 and 10 minutes, and tabs froze while the person
+    /// was still coming back to them. It keeps to the motion now.
     fn sleep_times(&self) -> (Duration, Duration) {
-        let sleep = Duration::from_secs(self.settings.sleep_after_min as u64 * 60);
-        let discard = Duration::from_secs(self.settings.discard_after_min as u64 * 60);
-        if self.power_saving() {
-            (sleep.min(Duration::from_secs(60)), discard.min(Duration::from_secs(600)))
-        } else {
-            (sleep, discard)
-        }
+        sleep_durations(self.settings.sleep_after_min, self.settings.discard_after_min)
     }
 
     /// Clean close with "clear history on exit" on. Lumen's history and the page
@@ -8515,7 +8520,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{HEAVY_AFTER, HEAVY_MEM, METADATA_PATIENCE, SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, magnet_label, metadata_note, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
+    use super::{HEAVY_AFTER, HEAVY_MEM, METADATA_PATIENCE, NEVER, sleep_durations, SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, magnet_label, metadata_note, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
     use std::time::Duration;
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
@@ -8736,6 +8741,25 @@ mod tests {
 
     /// A heavy hidden tab leaves after five minutes, not after the normal half hour. Light
     /// tabs keep their time, and a heavy tab keeps its sound, its call and its pin.
+    /// "Never" is never: no freeze, no unload, no wake, and a heavy tab is not dropped early.
+    #[test]
+    fn never_means_never() {
+        use std::time::Duration;
+        let (sleep, discard) = sleep_durations(0, 0);
+        assert!(sleep >= NEVER && discard >= NEVER);
+        let year = Duration::from_secs(365 * 24 * 3600);
+        assert_eq!(due_sleep_step(&st(false, true, false, false), year, sleep, discard), None);
+        let heavy = SleepState { heavy: true, ..st(false, true, true, false) };
+        assert_eq!(due_sleep_step(&heavy, year, sleep, discard), None);
+        // What the wake asks for is "never", which next_tab_wake drops.
+        assert!(next_sleep_step_after(&heavy, sleep, discard).is_some_and(|d| d >= NEVER));
+        // Freeze on time, unload never: the tab freezes and stays.
+        let (sleep, discard) = sleep_durations(5, 0);
+        assert_eq!(due_sleep_step(&st(false, true, false, false), Duration::from_secs(300), sleep, discard), Some(SleepStep::Suspend));
+        assert_eq!(due_sleep_step(&st(false, true, true, false), year, sleep, discard), None);
+        assert_eq!(sleep_durations(5, 30), (Duration::from_secs(300), Duration::from_secs(1800)));
+    }
+
     #[test]
     fn sleep_policy_unloads_a_heavy_hidden_tab_sooner() {
         use std::time::Duration;

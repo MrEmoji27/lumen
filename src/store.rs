@@ -117,9 +117,10 @@ pub struct Settings {
     pub search: String,
     /// Wallpaper image URL for the new tab page. Empty = none.
     pub wallpaper: String,
-    /// Minutes a hidden tab waits before it is suspended (frozen, memory trimmed).
+    /// Minutes a hidden tab waits before it is suspended (frozen, memory trimmed). 0 is never.
     pub sleep_after_min: u32,
     /// Minutes a hidden tab waits before it is discarded (process freed, reload on click).
+    /// 0 is never.
     pub discard_after_min: u32,
     /// "strict" | "balanced" | "basic" | "off"
     pub tracking: String,
@@ -558,8 +559,14 @@ impl Settings {
         self.sidebar_width = self.sidebar_width.clamp(232, 400);
         self.gap = self.gap.clamp(0, 32);
         self.radius = self.radius.clamp(0, 20);
-        self.sleep_after_min = self.sleep_after_min.clamp(1, 240);
-        self.discard_after_min = self.discard_after_min.clamp(self.sleep_after_min, 1440);
+        // 0 is never, for both. A real time stays in range, and an unload never comes
+        // before the freeze.
+        if self.sleep_after_min != 0 {
+            self.sleep_after_min = self.sleep_after_min.clamp(1, 240);
+        }
+        if self.discard_after_min != 0 {
+            self.discard_after_min = self.discard_after_min.clamp(self.sleep_after_min.max(1), 1440);
+        }
         self.ram_limit_mb = self.ram_limit_mb.clamp(512, 32768);
         self.agent_port = self.agent_port.clamp(1024, 65535);
         self.cpu_limit_pct = self.cpu_limit_pct.clamp(5, 100);
@@ -777,6 +784,21 @@ pub fn set_clear_history_pending(pending: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0 is "never" for the freeze and the unload, and survives the clamp; a real time is
+    /// kept in range and an unload never comes before the freeze.
+    #[test]
+    fn never_survives_the_clamp() {
+        let mut s = Settings { sleep_after_min: 0, discard_after_min: 0, ..Settings::default() };
+        s.clamp();
+        assert_eq!((s.sleep_after_min, s.discard_after_min), (0, 0));
+        let mut s = Settings { sleep_after_min: 60, discard_after_min: 10, ..Settings::default() };
+        s.clamp();
+        assert_eq!((s.sleep_after_min, s.discard_after_min), (60, 60));
+        let mut s = Settings { sleep_after_min: 0, discard_after_min: 30, ..Settings::default() };
+        s.clamp();
+        assert_eq!((s.sleep_after_min, s.discard_after_min), (0, 30));
+    }
 
     /// The chrome sends the whole Settings back as JSON when one thing changes (a new
     /// speed-dial tile, a toggle). A value that does not read back is dropped silently.
