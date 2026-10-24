@@ -10,7 +10,6 @@ use super::{
     Hit, Inner, UiState,
     gfx::{Align, R},
     pages::{close_button, column, fmt_bytes, title_block},
-    report::fmt_time,
     send,
 };
 
@@ -104,7 +103,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         Tile {
             caption: "BLOCKED TODAY",
             value: privacy.blocked().to_string(),
-            note: format!("{} saved · {}", fmt_bytes(privacy.bytes as i64), fmt_time(privacy.ms)),
+            note: "ads, trackers and the rest".into(),
             open: Some("report"),
         },
     ];

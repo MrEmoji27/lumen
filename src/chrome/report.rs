@@ -1,7 +1,8 @@
 //! The privacy report: what Lumen stopped, by day and by site, like another browser's.
 //!
 //! The numbers come from `privacy_stats::Snapshot`, filled into `UiState.report` only while
-//! this page is open. Bytes and time saved are estimates, and the page says so.
+//! this page is open. Every number on it is a count of something that happened: no
+//! estimates, so no "data saved" or "time saved".
 //!
 //! One layout, three skins. The hero, the panels and the chart each ask the look how to be
 //! drawn: Signal is paper and ink with red only for today, Glass is frosted with a glow and a
@@ -13,7 +14,7 @@ use super::{
     Hit, Inner, UiState,
     gfx::{Align, R},
     group_digits,
-    pages::{close_button, column, empty_state, fmt_bytes, group_label, site_icon, title_block},
+    pages::{close_button, column, empty_state, group_label, site_icon, title_block},
     send,
     style::ROW_H,
     theme::{Color, Style, Theme},
@@ -34,16 +35,6 @@ pub enum Click {
 }
 
 const RANGES: [(&str, &str); 4] = [("today", "Today"), ("7", "7 days"), ("30", "30 days"), ("all", "All time")];
-
-/// Milliseconds as a person reads them: "40 ms", "12 s", "4 min", "1.2 h".
-pub fn fmt_time(ms: u64) -> String {
-    match ms {
-        0..=999 => format!("{ms} ms"),
-        1_000..=59_999 => format!("{} s", ms / 1_000),
-        60_000..=3_599_999 => format!("{} min", ms / 60_000),
-        _ => format!("{:.1} h", ms as f64 / 3_600_000.0),
-    }
-}
 
 /// A small trend for one number against the period before it. None for "all",
 /// or when there is nothing to compare.
@@ -234,17 +225,6 @@ fn rows_panel(i: &mut Inner, col: R, y: f32, title: &str, rows: &[(&str, &str, S
     r.bottom() + i.look.s4
 }
 
-/// What was saved: the data the blocked requests would have cost, and the waiting.
-fn saved_rows(c: &Counts) -> Vec<(&'static str, &'static str, String, &'static str)> {
-    if c.bytes == 0 && c.ms == 0 {
-        return Vec::new();
-    }
-    vec![
-        ("download", "Data", fmt_bytes(c.bytes as i64), "Data saved by blocking, estimated."),
-        ("clock", "Time", fmt_time(c.ms), "Waiting saved on faster pages, estimated."),
-    ]
-}
-
 /// Everything else Lumen did quietly, the ones that happened.
 fn other_rows(c: &Counts) -> Vec<(&'static str, &'static str, String, &'static str)> {
     [
@@ -269,7 +249,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     let col = column(st, 860.0);
     i.gfx.clip(st);
     let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
-    y = title_block(i, col, y, "Privacy report", "What Lumen stopped. Data and time saved are estimates.");
+    y = title_block(i, col, y, "Privacy report", "What Lumen stopped, counted as it happened.");
 
     // The range, as a row of small pills.
     let mut x = col.x;
@@ -306,7 +286,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
             R::new(col.x, y + i.look.s5, col.w, 160.0),
             "shield",
             "Nothing blocked yet",
-            "Browse a little. Every ad, popup and tracker Lumen stops is counted here, with the data and time it saved you.",
+            "Browse a little. Every ad, pop-up and tracker Lumen stops is counted here.",
         );
         i.gfx.unclip();
         i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
@@ -322,7 +302,12 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         y = draw_site_head(i, col, y, site);
     }
     y = blocked_panel(i, col, y, &c, &prev, range, snap.site.is_some());
-    y = rows_panel(i, col, y, "Saved", &saved_rows(&c));
+    // Where an estimate of data and time saved used to be: what blocking means, no number.
+    if stopped(&c) > 0 {
+        let line = "A blocked request is one your PC never downloaded and the page never waited for.";
+        i.gfx.text(line, R::new(col.x, y - i.look.s2, col.w, 18.0), i.look.small, th.dim);
+        y += 18.0 + i.look.s3;
+    }
     y = rows_panel(i, col, y, "Other statistics", &other_rows(&c));
 
     if let Some(site) = &snap.site {
@@ -334,7 +319,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     }
 
     if snap.agent.blocked() > 0 {
-        let line = format!("AI agent tabs, counted apart: {} blocked, {} saved.", snap.agent.blocked(), fmt_bytes(snap.agent.bytes as i64));
+        let line = format!("AI agent tabs, counted apart: {} blocked.", group_digits(snap.agent.blocked()));
         i.gfx.text(&line, R::new(col.x, y, col.w, 20.0), i.look.small, th.faint);
         y += 28.0;
     }
@@ -513,14 +498,6 @@ pub fn click(i: &mut Inner, c: Click) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn time_reads_like_a_person_says_it() {
-        assert_eq!(fmt_time(40), "40 ms");
-        assert_eq!(fmt_time(12_400), "12 s");
-        assert_eq!(fmt_time(240_000), "4 min");
-        assert_eq!(fmt_time(4_320_000), "1.2 h");
-    }
 
     #[test]
     fn trend_reads_a_change_against_the_period_before() {

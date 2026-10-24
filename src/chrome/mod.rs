@@ -5148,7 +5148,7 @@ impl Inner {
                 let open = s.tabs.iter().filter(|t| !t.agent).count();
                 let asleep = s.tabs.iter().filter(|t| !t.agent && matches!(t.status, "asleep" | "off")).count();
                 let cards = [
-                    ("Blocked today", group_digits(blocked.blocked()), String::new(), format!("ads and trackers · {} saved", pages::fmt_bytes(blocked.bytes as i64))),
+                    ("Blocked today", group_digits(blocked.blocked()), String::new(), "ads, trackers and the rest".to_string()),
                     (
                         "Lumen",
                         mem.map(|m| format!("{}", m.round())).unwrap_or_else(|| "—".into()),
