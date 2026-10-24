@@ -235,6 +235,7 @@ pub struct UiState {
     pub mem: Option<(u64, u32)>,
     /// The tab whose sound the footer's now-playing card follows.
     pub media: Option<u64>,
+    /// Ads and trackers blocked on the active tab's page. The site menu says it.
     pub blocked: u64,
     pub cpu_cap: bool,
     /// Battery saver is in force: hidden tabs sleep sooner, motion is reduced, a leaf shows.
@@ -4141,13 +4142,13 @@ impl Inner {
         // The site's own switch: out of the list means ads and trackers are blocked here.
         // The words are long for a card this wide, so they wrap beside the switch.
         let row = R::new(card.x + 12.0, y, card.w - 24.0, 40.0);
-        self.gfx.text_wrap(
-            "Block ads and trackers on this site",
-            R::new(row.x + 4.0, row.y + 3.0, row.w - 54.0, 34.0),
-            lo.font(12.5, 450),
-            th.faint,
-        );
         let on = !crate::blocker::site_off(&s.settings.adblock_off_sites, &site);
+        // While it is on and has caught something, it says how much, for this page.
+        let words = match s.blocked {
+            n if on && n > 0 => format!("Block ads and trackers on this site · {} blocked on this page", group_digits(n)),
+            _ => "Block ads and trackers on this site".into(),
+        };
+        self.gfx.text_wrap(&words, R::new(row.x + 4.0, row.y + 3.0, row.w - 54.0, 34.0), lo.font(12.5, 450), th.faint);
         self.switch(R::new(row.right() - 38.0, row.y + (row.h - 22.0) / 2.0, 38.0, 22.0), on, "siteadblock", 1.0, Some(Hit::SiteAdblock));
         y += 46.0;
         for kind in &kinds {

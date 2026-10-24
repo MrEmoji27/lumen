@@ -374,6 +374,8 @@ pub fn fake(s: &mut UiState) {
     }
     if fake_has("page") {
         // The active tab is a secure, bookmarked page: lock, star and the offer chips show.
+        // The blocker has caught a few things on it, for the site menu's count.
+        s.blocked = 23;
         let id = s.active;
         if let Some(t) = s.tabs.iter_mut().find(|t| t.id == id) {
             t.title = "The Rust Programming Language".into();
