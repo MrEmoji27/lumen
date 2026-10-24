@@ -290,6 +290,13 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
     });
 }
 
+/// What the sample tabs cost, so a shot shows the tab rows' memory: one light, one heavy,
+/// one past a gigabyte.
+pub fn fake_mem() -> Vec<(u64, u64)> {
+    const MB: u64 = 1024 * 1024;
+    if fake_has("tabs") { vec![(9004, 212 * MB), (9006, 640 * MB), (9012, 1400 * MB), (9010, 88 * MB)] } else { Vec::new() }
+}
+
 /// Sample data, appended to what the browser really has.
 pub fn fake(s: &mut UiState) {
     let t = |id: u64, title: &str, url: &str| UiTab {

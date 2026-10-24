@@ -170,6 +170,15 @@ pub const WORKSPACE_COLOURS: [(&str, f32); 8] = [
 
 /// The colour a workspace wears: its number in the palette, in the look's own
 /// lightness, so it reads in light and in dark.
+/// A tab at or over this many bytes is heavy: its row shows what it costs without a hover.
+pub const HEAVY_TAB: u64 = 500 * 1024 * 1024;
+
+/// "86 MB", "1.2 GB": what a tab row says it costs.
+fn mem_label(b: u64) -> String {
+    let mb = b as f64 / (1024.0 * 1024.0);
+    if mb >= 1024.0 { format!("{:.1} GB", mb / 1024.0) } else { format!("{} MB", mb.round() as u64) }
+}
+
 pub fn workspace_colour(dark: bool, colour: &str) -> Option<theme::Color> {
     let n: usize = colour.parse().ok()?;
     if n >= WORKSPACE_COLOURS.len() {
@@ -785,6 +794,8 @@ pub(crate) struct Inner {
     page_ask_shown: Option<u64>,
     /// Where the link under the pointer goes, drawn as a pill at the page's foot.
     link: String,
+    /// What each tab's page costs, bytes, from the last sample. Read by a tab row on hover.
+    tab_mem: HashMap<u64, u64>,
     born: Instant,
     spinning: bool,
     /// The memory glow's timer is armed: the number is over the hard line and
@@ -1683,6 +1694,7 @@ impl Chrome {
                 page_ask_shown: None,
                 link: String::new(),
                 sel: 0,
+                tab_mem: HashMap::new(),
                 born: Instant::now(),
                 spinning: false,
                 mem_pulse: false,
@@ -1953,6 +1965,23 @@ impl Chrome {
         }
     }
 
+    /// Each tab's memory, bytes, from the latest sample. Stored without a repaint: a row
+    /// reads it when the pointer is over it. Only a tab that turns heavy, or stops being
+    /// heavy, changes what is on screen without a hover, so only that repaints.
+    pub fn set_tab_mem(&self, m: HashMap<u64, u64>) {
+        let Ok(mut i) = self.inner.try_borrow_mut() else { return };
+        let heavy = |m: &HashMap<u64, u64>| {
+            let mut v: Vec<u64> = m.iter().filter(|e| *e.1 >= HEAVY_TAB).map(|e| *e.0).collect();
+            v.sort_unstable();
+            v
+        };
+        let changed = heavy(&i.tab_mem) != heavy(&m);
+        i.tab_mem = m;
+        if changed {
+            i.invalidate();
+        }
+    }
+
     pub fn usage(&self, v: Value) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         i.page.usage = Some(v);
@@ -2174,6 +2203,8 @@ impl Inner {
     fn apply(&mut self, #[cfg_attr(not(debug_assertions), allow(unused_mut))] mut s: UiState) {
         #[cfg(debug_assertions)]
         shot::fake(&mut s);
+        #[cfg(debug_assertions)]
+        self.tab_mem.extend(shot::fake_mem());
         // The whole style of this state, in one place. Reduced-motion is read
         // here too, so a system that turns animations off is felt at once.
         // Battery saver: the chrome moves less, whatever the motion setting says.
@@ -4622,6 +4653,22 @@ impl Inner {
             self.hit(b, Hit::TabPip(t.id));
             right = b.x - 2.0;
         }
+        // What the page costs: on hover, and always for a heavy one, so a gigabyte tab is
+        // seen without opening Control. Nothing for a tab with no page.
+        let mem = self.tab_mem.get(&t.id).copied().filter(|b| *b > 0);
+        if let Some(b) = mem.filter(|b| *b >= HEAVY_TAB || self.is_hover(&Hit::Tab(t.id)) || self.is_hover(&Hit::TabX(t.id))) {
+            let text = mem_label(b);
+            let f = lo.font(11.0, 500);
+            let w = self.gfx.measure(&text, f) + 4.0;
+            let heavy = b >= HEAVY_TAB;
+            let ink = match (heavy, active) {
+                (true, _) => th.danger.alpha(if active { 0.9 } else { 0.75 }),
+                (false, true) => th.pill_ink.alpha(0.6),
+                (false, false) => th.faint,
+            };
+            self.gfx.text(&text, R::new(right - w, r.y, w, r.h), f.align(Align::Right), ink.alpha(alpha));
+            right -= w + 4.0;
+        }
         let badge_y = r.y + (r.h - 16.0) / 2.0;
         // A tag: small spaced capitals in a hairline pill, quiet on any row.
         let tag_ink = if active { th.pill_ink.alpha(0.7) } else { th.faint };
@@ -7019,6 +7066,14 @@ mod tests {
 
     /// The tab search covers every workspace, the sidebar's order when nothing is typed, and
     /// marks private tabs.
+    #[test]
+    fn a_tab_row_says_what_it_costs() {
+        const MB: u64 = 1024 * 1024;
+        assert_eq!(mem_label(212 * MB), "212 MB");
+        assert_eq!(mem_label(1400 * MB), "1.4 GB");
+        assert!(500 * MB >= HEAVY_TAB && 499 * MB < HEAVY_TAB);
+    }
+
     #[test]
     fn the_tab_search_covers_every_workspace() {
         let tabs = [tab(1, "Docs", "https://docs.test/", false), tab(2, "Inbox", "https://mail.test/", true)];

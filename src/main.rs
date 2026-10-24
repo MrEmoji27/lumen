@@ -115,6 +115,9 @@ const SAMPLE: Duration = Duration::from_millis(1000);
 /// A CPU figure is the difference of two readings. The second comes this soon after the
 /// page opens, so it does not sit on a dash for a whole second.
 const SAMPLE_FIRST: Duration = Duration::from_millis(400);
+/// How often each tab's memory is taken while Control is shut: for the tab rows' hover and
+/// the sleep policy. Only while some tab of the person's has a page.
+const TAB_MEM_EVERY: Duration = Duration::from_secs(60);
 /// Readings the network rate is taken over: about five seconds.
 const NET_WINDOW: usize = 5;
 /// How long the agent's cursor and pill stay over a lent tab after the agent's last click
@@ -693,6 +696,10 @@ struct App {
     job: Option<monitor::Job>,
     /// Control page bookkeeping.
     next_sample: Option<Instant>,
+    /// What each tab's page costs, bytes, from the last sample (Control's, or the slow one).
+    tab_mem: HashMap<u64, u64>,
+    /// The slow per-tab sample. None while no tab of the person's has a page.
+    next_tab_mem: Option<Instant>,
     /// The watch on mouse and keyboard: when the input check next runs. Armed
     /// only while an on-screen page is load-done and trimmable; None otherwise,
     /// so the loop keeps sleeping.
@@ -1170,6 +1177,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         exit: false,
         job,
         next_sample: None,
+        tab_mem: HashMap::new(),
+        next_tab_mem: None,
         next_trim: None,
         prev_cpu: HashMap::new(),
         prev_at: Instant::now(),
@@ -1394,6 +1403,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 }
                 if app.next_sample.is_some_and(|t| t <= now) {
                     app.sample();
+                }
+                if app.next_tab_mem.is_some_and(|t| t <= now) {
+                    app.sample_tabs();
                 }
                 if app.lent.as_ref().is_some_and(|l| l.at + LENT_SHOW <= now) {
                     app.lent = None;
@@ -2748,6 +2760,7 @@ impl App {
         let want = self.wanted_zoom(i);
         self.put_zoom(i, want);
         self.limit_tab(i);
+        self.arm_tab_mem();
     }
 
     /// Strict-isolation browsers that came back since the last look: build the tabs
@@ -3962,6 +3975,32 @@ impl App {
     fn sample(&mut self) {
         let gap = if self.prev_cpu.is_empty() { SAMPLE_FIRST } else { SAMPLE };
         self.next_sample = Some(Instant::now() + gap);
+        self.ask_usage();
+    }
+
+    /// The slow sample: each tab's memory once a minute while Control is shut. Control's
+    /// own sample, once a second, leaves the same figures, so this one rests meanwhile.
+    fn sample_tabs(&mut self) {
+        self.next_tab_mem = None;
+        if !self.panel.live() {
+            self.ask_usage();
+        }
+    }
+
+    /// Arm the slow sample when a tab of the person's has a page, disarm it when none has:
+    /// an idle Lumen with nothing open never wakes for it.
+    fn arm_tab_mem(&mut self) {
+        let any = self.tabs.iter().any(|t| !t.agent && t.view.is_some());
+        if !any {
+            self.next_tab_mem = None;
+            self.tab_mem.clear();
+        } else if self.next_tab_mem.is_none() {
+            self.next_tab_mem = Some(Instant::now() + TAB_MEM_EVERY);
+        }
+    }
+
+    /// Ask WebView2 for its processes; the answer comes back as `on_usage`.
+    fn ask_usage(&self) {
         // The person's browser and every strictly isolated agent's: each is a process tree
         // of its own, and its pages are tabs here too.
         let mut envs: Vec<_> = self.ctx.env.borrow().iter().map(|e| (String::new(), e.clone())).collect();
@@ -3969,8 +4008,33 @@ impl App {
         monitor::sample(envs, self.ctx.proxy.clone());
     }
 
+    /// (environment, main-frame id) -> tab. Frame ids are only unique inside one environment.
+    fn tab_owners(&self) -> HashMap<(String, u32), u64> {
+        let mut owner = HashMap::new();
+        for t in &self.tabs {
+            if let Some(f) = t.view.as_ref().and_then(monitor::frame_id) {
+                let env = if t.own_env { engine::own_env_key(&t.profile) } else { String::new() };
+                owner.insert((env, f), t.id);
+            }
+        }
+        owner
+    }
+
     /// Raw process numbers in; per-tab memory, CPU and network out, straight to the UI.
     fn on_usage(&mut self, procs: Vec<monitor::Proc>) {
+        // Every sample, Control's or the slow one, leaves each tab's memory behind.
+        let owner = self.tab_owners();
+        let mut mem: HashMap<u64, u64> = HashMap::new();
+        for p in &procs {
+            let mine: Vec<u64> = p.frames.iter().filter_map(|f| owner.get(&(p.env.clone(), *f)).copied()).collect();
+            // A process shared by several tabs: split it evenly, as Control does.
+            for id in &mine {
+                *mem.entry(*id).or_default() += p.mem / mine.len() as u64;
+            }
+        }
+        self.chrome.set_tab_mem(mem.clone());
+        self.tab_mem = mem;
+        self.arm_tab_mem();
         if !self.panel.live() {
             return;
         }
@@ -3980,14 +4044,6 @@ impl App {
         // The first reading has nothing to take CPU time from: no CPU figure yet, not 0%.
         let first = self.prev_cpu.is_empty();
         let pct = |c: f64| if first { Value::Null } else { json!(c) };
-        // (environment, main-frame id) -> tab. Frame ids are only unique inside one environment.
-        let mut owner: HashMap<(String, u32), u64> = HashMap::new();
-        for t in &self.tabs {
-            if let Some(f) = t.view.as_ref().and_then(monitor::frame_id) {
-                let env = if t.own_env { engine::own_env_key(&t.profile) } else { String::new() };
-                owner.insert((env, f), t.id);
-            }
-        }
         let mut tabs: HashMap<u64, (f64, f64)> = HashMap::new();
         let (mut ui, mut core, mut helpers, mut total) = ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
         let mut next_cpu = HashMap::new();
@@ -6815,7 +6871,7 @@ impl App {
         let mem = watch.then_some(self.next_mem);
         // The cursor over a lent tab goes when the agent has been still a while.
         let lent = self.lent.as_ref().map(|l| l.at + LENT_SHOW);
-        for t in [self.next_sample, mem, lent].into_iter().flatten() {
+        for t in [self.next_sample, self.next_tab_mem, mem, lent].into_iter().flatten() {
             if t < at {
                 at = t;
             }
