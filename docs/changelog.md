@@ -7,6 +7,15 @@ door's server info all say it. `+dev` means the build had changes nobody committ
 The rule: a release build that goes to the person gets the next number. Small fixes bump the last
 digit. A batch of new features bumps the middle one.
 
+## 0.6.8.1 — 2026-10-25
+
+- **An agent can read the network of a tab you lend it.** Right-click a tab, "Let agents use
+  this tab", and from that moment the agent sees the page's requests and what the server
+  answered. Take the tab back and the record is gone. The page's own console lines stay
+  private: catching them uses a switch a site can detect.
+- **A tab nobody recorded says so.** It used to answer "no requests recorded", as if the
+  page had been quiet.
+
 ## 0.6.8 — 2026-10-20
 
 - **Pop-ups a page pushes on you stop.** A site that opens an ad window on your first click
