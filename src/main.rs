@@ -118,6 +118,11 @@ const SAMPLE_FIRST: Duration = Duration::from_millis(400);
 /// How often each tab's memory is taken while Control is shut: for the tab rows' hover and
 /// the sleep policy. Only while some tab of the person's has a page.
 const TAB_MEM_EVERY: Duration = Duration::from_secs(60);
+/// A hidden tab whose page holds more than this is unloaded after HEAVY_AFTER hidden,
+/// instead of the normal discard time. The figure is the one `tab_mem` already keeps
+/// for Control: a feed that scrolled forever should not hold a gigabyte for half an hour.
+const HEAVY_MEM: u64 = 500 * 1024 * 1024;
+const HEAVY_AFTER: Duration = Duration::from_secs(300);
 /// Readings the network rate is taken over: about five seconds.
 const NET_WINDOW: usize = 5;
 /// How long the agent's cursor and pill stay over a lent tab after the agent's last click
@@ -340,6 +345,9 @@ struct SleepState {
     trimmed: bool,
     suspended: bool,
     pinned: bool,
+    /// Its page holds more than `HEAVY_MEM`. It goes after `HEAVY_AFTER` hidden instead of
+    /// the normal discard time, if that is sooner.
+    heavy: bool,
 }
 
 /// A tab as the unload rules see it: Windows short of memory, or the RAM cap reached.
@@ -419,7 +427,8 @@ enum SleepStep {
 /// The step a hidden tab is owed `idle` after it was hidden, if any. A tab that
 /// is playing audio is trimmed and nothing more: frozen or dropped, the music
 /// would stop. Its clock restarts when the audio does (see `Ev::Audio`). A tab in
-/// a call is left alone entirely: a call is quiet whenever nobody talks.
+/// a call is left alone entirely: a call is quiet whenever nobody talks. A tab
+/// whose page is heavy is dropped sooner than the normal time, but never pinned.
 fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Duration) -> Option<SleepStep> {
     if t.call {
         return None;
@@ -427,6 +436,8 @@ fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Dura
     if t.audio {
         return (idle >= TRIM_AFTER && !t.trimmed).then_some(SleepStep::Trim);
     }
+    // A heavy page is dropped at HEAVY_AFTER, or at the normal time when that is first.
+    let discard = if t.heavy { discard.min(HEAVY_AFTER) } else { discard };
     if idle >= discard && !t.pinned {
         Some(SleepStep::Discard)
     } else if idle >= sleep && !t.suspended {
@@ -459,6 +470,8 @@ fn input_idle() -> Duration {
 
 /// How long after hiding the tab's next step comes, for the loop's next wake.
 fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> Option<Duration> {
+    // The same line the drop uses: HEAVY_AFTER, or the normal time when that is first.
+    let discard = if t.heavy { discard.min(HEAVY_AFTER) } else { discard };
     if t.call {
         None
     } else if !t.trimmed {
@@ -466,7 +479,8 @@ fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> 
     } else if t.audio {
         None
     } else if !t.suspended {
-        Some(sleep)
+        // The heavy drop may come before the freeze: wake for whichever is first.
+        Some(if t.heavy && !t.pinned { sleep.min(discard) } else { sleep })
     } else if !t.pinned {
         Some(discard)
     } else {
@@ -565,9 +579,18 @@ impl Tab {
         archive::idle(self.idle_ms, self.idle_at, now)
     }
 
-    /// What the sleep policy looks at.
-    fn sleep_state(&self) -> SleepState {
-        SleepState { audio: self.audio, call: self.call, trimmed: self.trimmed, suspended: self.suspended, pinned: self.pinned }
+    /// What the sleep policy looks at. `mem` is what the page last cost, from `tab_mem`:
+    /// a page over `HEAVY_MEM` leaves sooner, unless an agent is working in its tab.
+    fn sleep_state(&self, mem: Option<u64>) -> SleepState {
+        SleepState {
+            audio: self.audio,
+            call: self.call,
+            trimmed: self.trimmed,
+            suspended: self.suspended,
+            pinned: self.pinned,
+            // No figure yet is not heavy. A busy agent's tab is not the sleep policy's to drop.
+            heavy: mem.is_some_and(|b| b > HEAVY_MEM) && (!self.agent || self.stage_idle),
+        }
     }
 
     /// The tab has a live page, of whichever engine. A Servo tab has no WebView2.
@@ -6897,14 +6920,19 @@ impl App {
     }
 
     /// The next sleep-policy step of any hidden tab, in the past if one is due:
-    /// trim at TRIM_AFTER, freeze at sleep_after_min, discard at discard_after_min.
-    /// A crashed page is already dead; a page playing audio is only ever trimmed.
+    /// trim at TRIM_AFTER, freeze at sleep_after_min, discard at discard_after_min or,
+    /// for a heavy page, at HEAVY_AFTER. A crashed page is already dead; a page playing
+    /// audio is only ever trimmed. Read fresh each wake, so a tab a new memory sample
+    /// made heavy is due at its own five minutes.
     fn next_tab_wake(&self) -> Option<Instant> {
         let (sleep, discard) = self.sleep_times();
         self.tabs
             .iter()
             .filter(|t| t.has_page() && !t.crashed && !self.on_stage(t.id))
-            .filter_map(|t| Some(t.hidden_at? + next_sleep_step_after(&t.sleep_state(), sleep, discard)?))
+            .filter_map(|t| {
+                let mem = self.tab_mem.get(&t.id).copied();
+                Some(t.hidden_at? + next_sleep_step_after(&t.sleep_state(mem), sleep, discard)?)
+            })
             .min()
     }
 
@@ -7085,15 +7113,17 @@ impl App {
         }
         let (sleep, discard) = self.sleep_times();
         for i in 0..self.tabs.len() {
-            if self.on_stage(self.tabs[i].id) {
+            let id = self.tabs[i].id;
+            if self.on_stage(id) {
                 continue;
             }
+            let mem = self.tab_mem.get(&id).copied();
             let t = &mut self.tabs[i];
             if !t.has_page() {
                 continue;
             }
             let Some(at) = t.hidden_at else { continue };
-            match due_sleep_step(&t.sleep_state(), now - at, sleep, discard) {
+            match due_sleep_step(&t.sleep_state(mem), now - at, sleep, discard) {
                 Some(SleepStep::Discard) => {
                     self.discard(i);
                     self.push();
@@ -8480,7 +8510,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{METADATA_PATIENCE, SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, magnet_label, metadata_note, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
+    use super::{HEAVY_AFTER, HEAVY_MEM, METADATA_PATIENCE, SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, magnet_label, metadata_note, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
     use std::time::Duration;
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
@@ -8620,7 +8650,7 @@ mod tests {
     }
 
     fn st(audio: bool, trimmed: bool, suspended: bool, pinned: bool) -> SleepState {
-        SleepState { audio, call: false, trimmed, suspended, pinned }
+        SleepState { audio, call: false, trimmed, suspended, pinned, heavy: false }
     }
 
     /// Windows short of memory, or the RAM cap: the hidden tab looked at longest ago goes,
@@ -8697,5 +8727,51 @@ mod tests {
         assert_eq!(next_sleep_step_after(&st(false, true, true, true), sleep, discard), None);
         assert_eq!(next_sleep_step_after(&st(false, true, false, false), sleep, discard), Some(sleep));
         assert_eq!(next_sleep_step_after(&st(false, true, true, false), sleep, discard), Some(discard));
+    }
+
+    /// A heavy hidden tab leaves after five minutes, not after the normal half hour. Light
+    /// tabs keep their time, and a heavy tab keeps its sound, its call and its pin.
+    #[test]
+    fn sleep_policy_unloads_a_heavy_hidden_tab_sooner() {
+        use std::time::Duration;
+        let (sleep, discard) = (Duration::from_secs(600), Duration::from_secs(1800));
+        let s = |x| Duration::from_secs(x);
+        let heavy = |audio, trimmed, suspended, pinned| SleepState { heavy: true, ..st(audio, trimmed, suspended, pinned) };
+        // Five minutes hidden, and not a moment before.
+        assert_eq!(due_sleep_step(&heavy(false, true, true, false), s(299), sleep, discard), None);
+        assert_eq!(due_sleep_step(&heavy(false, true, true, false), s(300), sleep, discard), Some(SleepStep::Discard));
+        // Light: the normal time.
+        assert_eq!(due_sleep_step(&st(false, true, true, false), s(300), sleep, discard), None);
+        assert_eq!(due_sleep_step(&st(false, true, true, false), s(1801), sleep, discard), Some(SleepStep::Discard));
+        // The loop wakes for the five minutes, not for the half hour.
+        assert_eq!(next_sleep_step_after(&heavy(false, true, true, false), sleep, discard), Some(HEAVY_AFTER));
+        // A heavy tab that has not frozen yet is due at the earlier of the two.
+        assert_eq!(next_sleep_step_after(&heavy(false, true, false, false), sleep, discard), Some(HEAVY_AFTER));
+        assert_eq!(next_sleep_step_after(&heavy(false, true, false, false), s(60), discard), Some(s(60)));
+        // Sound, a call, a pin: unchanged, however heavy.
+        assert_eq!(due_sleep_step(&heavy(true, true, false, false), s(3600), sleep, discard), None);
+        assert_eq!(due_sleep_step(&SleepState { call: true, ..heavy(false, true, true, false) }, s(3600), sleep, discard), None);
+        assert_eq!(due_sleep_step(&heavy(false, true, true, true), s(3600), sleep, discard), None);
+        // A normal unload already sooner than five minutes keeps its own time.
+        let (sleep, discard) = (s(60), s(120));
+        assert_eq!(due_sleep_step(&heavy(false, true, true, false), s(119), sleep, discard), None);
+        assert_eq!(due_sleep_step(&heavy(false, true, true, false), s(121), sleep, discard), Some(SleepStep::Discard));
+        assert_eq!(next_sleep_step_after(&heavy(false, true, true, false), sleep, discard), Some(discard));
+    }
+
+    /// The memory sample is what makes a tab heavy, and a busy agent's tab never is.
+    #[test]
+    fn a_heavy_tab_is_one_the_memory_sample_says_is_heavy() {
+        let t = Tab::new(1, "https://feed.example/".into());
+        assert!(!t.sleep_state(None).heavy, "no figure yet is not heavy");
+        assert!(!t.sleep_state(Some(HEAVY_MEM)).heavy, "at the line is not over it");
+        assert!(t.sleep_state(Some(HEAVY_MEM + 1)).heavy);
+        // An agent working in its tab: the page is in use, and not the policy's to drop.
+        let mut busy = Tab::new(2, "https://agent.example/".into());
+        busy.agent = true;
+        assert!(!busy.sleep_state(Some(HEAVY_MEM * 2)).heavy);
+        // The agent gone quiet, the tab sleeps like any other.
+        busy.stage_idle = true;
+        assert!(busy.sleep_state(Some(HEAVY_MEM * 2)).heavy);
     }
 }
