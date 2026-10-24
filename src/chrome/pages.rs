@@ -55,6 +55,10 @@ pub enum PageHit {
     DlAddLink,
     DlTorrentPick,
     DlOpenFolder,
+    /// The Secret button: open the secret downloads with Windows Hello, or shut them.
+    DlSecret,
+    /// A secret file's action ("file" opens it, "back" moves it back), by its place in the list.
+    Secret(&'static str, usize),
     DlLimit,
     DlNote,
     PermReset(usize),
@@ -1863,6 +1867,43 @@ fn tile_label(d: &UiDl) -> String {
     }
 }
 
+/// The secret downloads, open: a card of their files with Open and Move back, and the plain
+/// truth about what "secret" means here. Returns the y after it.
+fn draw_secret(i: &mut Inner, col: R, st: R, y: f32, s: &UiState) -> f32 {
+    let th = i.theme;
+    let mut y = group_label(i, col, y, "Secret", s.secret.len());
+    let note = "Kept out of your Downloads folder and out of Lumen's lists until Windows Hello. Hidden, not encrypted: anyone signed in to Windows as you can still find the folder.";
+    i.gfx.text_wrap(note, R::new(col.x, y, col.w, 34.0), i.look.small, th.faint);
+    y += 40.0;
+    if s.secret.is_empty() {
+        i.gfx.text("Nothing here yet. A finished download's \"Hide in secret\" moves it here.", R::new(col.x, y, col.w, 18.0), i.look.small, th.dim);
+        return y + 30.0 + i.look.s4;
+    }
+    let row_h = 56.0;
+    let card = R::new(col.x - 6.0, y, col.w + 12.0, s.secret.len() as f32 * row_h + 6.0);
+    if card.bottom() >= st.y && card.y <= st.bottom() {
+        i.gfx.round(card, i.look.r_card, th.raise);
+        i.gfx.round_stroke(card, i.look.r_card, th.line, 1.0);
+    }
+    y += 3.0;
+    for (n, f) in s.secret.iter().enumerate() {
+        let tile = R::new(col.x + 10.0, y + 10.0, 36.0, 36.0);
+        i.gfx.round(tile, i.look.r_md, th.bg);
+        i.gfx.round_stroke(tile, i.look.r_md, th.line, 1.0);
+        i.gfx.icon("lock", tile.x + 10.0, tile.y + 10.0, 16.0, th.dim);
+        let mut right = col.right() - 10.0;
+        for (label, a) in [("Move back", "back"), ("Open", "file")] {
+            right = row_action(i, right, y + 14.0, label, PageHit::Secret(a, n));
+        }
+        let tx = tile.right() + i.look.s3;
+        let tw = (right - i.look.s3 - tx).max(60.0);
+        i.gfx.text(&f.name, R::new(tx, y + 9.0, tw, 20.0), i.look.body_strong, th.text);
+        i.gfx.text(&fmt_bytes(f.size as i64), R::new(tx, y + 29.0, tw, 18.0), i.look.small, th.faint);
+        y += row_h;
+    }
+    card.bottom() + i.look.s4
+}
+
 fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let col = column(st, COL_W);
@@ -1892,7 +1933,8 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
 
     // Toolbar: things to add on the left, the cap and the cleanup on the right.
     let mut x = col.x;
-    for (label, hit) in [("Add link", PageHit::DlAddLink), ("Open torrent…", PageHit::DlTorrentPick), ("Open folder", PageHit::DlOpenFolder)] {
+    let secret_label = if s.secret_open { "Lock secret" } else { "Secret" };
+    for (label, hit) in [("Add link", PageHit::DlAddLink), ("Open torrent…", PageHit::DlTorrentPick), ("Open folder", PageHit::DlOpenFolder), (secret_label, PageHit::DlSecret)] {
         x = outline_button(i, x, y, label, hit, false).right() + i.look.s2;
     }
     let chip = format!("Speed limit: {}", chip_label(s.settings.download_limit_kbps));
@@ -1908,6 +1950,9 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
         row_action(i, cr.x - i.look.s2, y + 1.0, "Clear finished", PageHit::DlClear);
     }
     y += 30.0 + i.look.s4;
+    if s.secret_open {
+        y = draw_secret(i, col, st, y, s);
+    }
 
     if s.downloads.is_empty() {
         let area = R::new(col.x, y + 56.0, col.w, 200.0);
@@ -1958,7 +2003,7 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
                 "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
                 "paused" => &[("Resume", "resume"), ("Cancel", "cancel")],
                 "seeding" => &[("Stop seeding", "stopSeed")],
-                "done" => &[("Open", "open"), ("Show in folder", "folder")],
+                "done" => &[("Open", "open"), ("Show in folder", "folder"), ("Hide in secret", "secret")],
                 "failed" if d.url.starts_with("http") => &[("Retry", "retry")],
                 _ => &[],
             };
@@ -3261,6 +3306,15 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::Dl(a, id) => send(&i.proxy, json!({"t": "dl", "a": a, "id": id})),
         PageHit::DlClear => send(&i.proxy, json!({"t": "dl", "a": "clear"})),
         PageHit::DlOpenFolder => send(&i.proxy, json!({"t": "dl", "a": "openFolder"})),
+        PageHit::DlSecret => {
+            let open = i.state.as_ref().is_some_and(|s| s.secret_open);
+            send(&i.proxy, json!({"t": "secret", "a": if open { "lock" } else { "open" }}));
+        }
+        PageHit::Secret(a, n) => {
+            if let Some(f) = i.state.as_ref().and_then(|s| s.secret.get(n)) {
+                send(&i.proxy, json!({"t": "secret", "a": a, "name": f.name}));
+            }
+        }
         PageHit::DlAddLink => {
             // The clipboard decides: a link goes to aria2, anything else gets a note.
             let text = super::read_clipboard(i.hwnd_raw());

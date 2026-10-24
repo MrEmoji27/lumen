@@ -383,6 +383,14 @@ pub fn fake(s: &mut UiState) {
         s.lock = Some(super::UiLock { app: false, hello: Some(true), note: String::new() });
         s.full = true;
     }
+    // The secret downloads, opened.
+    if fake_has("secret") {
+        s.secret_open = true;
+        s.secret = vec![
+            super::UiSecret { name: "tax-return-2025.pdf".into(), size: 1_840_000 },
+            super::UiSecret { name: "passport-scan.jpg".into(), size: 3_210_000 },
+        ];
+    }
     // Lumen's own lock, over the whole window.
     if fake_has("applock") {
         s.lock = Some(super::UiLock { app: true, hello: Some(true), note: "Not unlocked. Try again when you are ready.".into() });

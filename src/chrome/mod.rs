@@ -212,6 +212,13 @@ pub struct UiDl {
     pub ratio: f64,
 }
 
+/// One file in the secret downloads.
+#[derive(Clone, Debug)]
+pub struct UiSecret {
+    pub name: String,
+    pub size: u64,
+}
+
 /// The lock card: Lumen locked with Windows Hello, or the tab on screen locked.
 #[derive(Clone, Debug)]
 pub struct UiLock {
@@ -262,6 +269,10 @@ pub struct UiState {
     /// A pop-up Lumen stopped: the bar over the page.
     pub popup_note: Option<UiPopup>,
     pub downloads: Vec<UiDl>,
+    /// The secret downloads were opened with Windows Hello.
+    pub secret_open: bool,
+    /// What is in them, while open and the Downloads page is up.
+    pub secret: Vec<UiSecret>,
     pub agent_busy: bool,
     /// Per agent session: what became of the person's last message to it, in words.
     pub agent_notes: Vec<(String, String)>,

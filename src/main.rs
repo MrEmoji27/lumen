@@ -37,6 +37,7 @@ mod pagekit;
 mod privacy_stats;
 mod popup;
 mod pins;
+mod secret;
 mod recall;
 #[cfg(feature = "servo")]
 mod servo_engine;
@@ -2572,6 +2573,12 @@ impl App {
                     site: site.clone(),
                 }),
                 battery: self.power_saving(),
+                secret_open: self.secret_open,
+                secret: if self.secret_open && self.panel == Panel::Downloads {
+                    secret::list().into_iter().map(|f| chrome::UiSecret { name: f.name, size: f.size }).collect()
+                } else {
+                    Vec::new()
+                },
                 downloads: self
                     .downloads
                     .iter()
@@ -6159,9 +6166,11 @@ impl App {
                 self.push();
             }
             "focusPage" => self.focus_page(),
+            "secret" => self.on_secret(&m),
             "dl" => {
                 let a = m["a"].as_str().unwrap_or("");
                 match a {
+                    "secret" => self.hide_download(id),
                     "retry" => self.retry_download(id),
                     "remove" => self.remove_download(id),
                     "pause" | "resume" | "cancel" if self.videos.contains_key(&id) => self.video_control(id, a),
@@ -7394,6 +7403,48 @@ impl App {
     /// The person said agents may use this tab, and it is still on the site they said it for.
     fn agent_granted(&self, t: &Tab) -> bool {
         !t.agent && t.agent_ok.as_deref().is_some_and(|site| site == engine::origin_of(&t.url))
+    }
+
+    /// "Hide in secret": a finished download leaves the Downloads folder for the secret one,
+    /// and its row goes from the list.
+    fn hide_download(&mut self, id: u64) {
+        let Some(d) = self.downloads.iter().find(|d| d.id == id && d.state == "done") else { return };
+        match secret::move_in(std::path::Path::new(&d.path)) {
+            Ok(_) => {
+                self.remove_download(id);
+                self.chrome.flash("Moved to your secret downloads".into());
+            }
+            Err(_) => self.chrome.flash("Could not move it: the file is gone or in use".into()),
+        }
+        self.push();
+    }
+
+    /// The secret downloads: open them with Windows Hello, shut them, open or move back one.
+    fn on_secret(&mut self, m: &Value) {
+        let name = m["name"].as_str().unwrap_or("");
+        match m["a"].as_str().unwrap_or("") {
+            "open" => {
+                // No Windows Hello on this PC: a lock nobody can open would only hide the
+                // person's own files from them.
+                if self.hello == Some(false) {
+                    self.secret_open = true;
+                } else {
+                    self.ask_hello("secret", 0);
+                }
+            }
+            "lock" => self.secret_open = false,
+            "file" if self.secret_open => {
+                if let Ok(p) = secret::path_of(name) {
+                    open_path(&p.display().to_string(), false);
+                }
+            }
+            "back" if self.secret_open => match secret::move_out(name) {
+                Ok(_) => self.chrome.flash("Moved back to your Downloads folder".into()),
+                Err(_) => self.chrome.flash("Could not move it back".into()),
+            },
+            _ => {}
+        }
+        self.push();
     }
 
     /// What the lock card shows: Lumen locked, or the tab on screen locked. None otherwise.
