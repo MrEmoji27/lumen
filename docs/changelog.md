@@ -8,6 +8,15 @@ The rule: Lumen stays on the 0.6.7 line. A release build that goes to the person
 number: a batch of new features bumps the fourth part (0.6.7.5 -> 0.6.7.6), a small fix adds or
 bumps the last one (0.6.7.6 -> 0.6.7.6.1).
 
+## 0.6.7.6.1 — 2026-10-25
+
+- **Tabs stop freezing too soon.** Battery saver used to cut the freeze to 1 minute and the
+  unload to 10 on battery, whatever you had set. It only reduces motion now; your times are
+  your times.
+- **"Never" for both.** Settings > Performance: freeze and unload hidden tabs after a time from
+  1 minute to 8 hours, or Never. With unloading on Never, heavy tabs stay too. Running out of
+  memory still unloads one.
+
 ## 0.6.7.6 — 2026-10-25
 
 - **Back on the 0.6.7 line.** 0.6.8 and 0.6.8.1 were numbered wrong; they are 0.6.7.5 and
