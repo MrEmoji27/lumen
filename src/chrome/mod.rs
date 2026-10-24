@@ -926,7 +926,7 @@ impl SwitchRow {
     fn label(&self) -> String {
         match (self.title.is_empty(), host(&self.url)) {
             (false, _) => self.title.clone(),
-            (true, h) if h.is_empty() => "New tab".into(),
+            (true, h) if h.is_empty() => "Start".into(),
             (true, h) => h,
         }
     }
@@ -3473,8 +3473,9 @@ impl Inner {
             let x = if s.settings.sidebar_side == "right" { sb.x + 0.5 } else { sb.right() - 0.5 };
             self.gfx.line(x, sb.y, x, sb.bottom(), th.line, 1.0);
         }
-        // A thin line at the top of the sidebar, in the colour the workspace wears.
-        if let Some(c) = s.workspaces.get(s.active_workspace).and_then(|w| workspace_colour(th.dark, &w.colour)) {
+        // A thin line at the top of the sidebar, in the colour the workspace wears. Only with
+        // two or more: one workspace has nothing to tell apart, and its line looked like a glitch.
+        if let Some(c) = s.workspaces.get(s.active_workspace).filter(|_| s.workspaces.len() > 1).and_then(|w| workspace_colour(th.dark, &w.colour)) {
             self.gfx.round(R::new(sb.x, sb.y, sb.w, 2.0), 0.0, c);
         }
         let compact = s.compact();
@@ -4551,9 +4552,9 @@ impl Inner {
                 None => {
                     let on_pill = active && !pinned;
                     if t.status == "new" {
+                        // The start page: a house, never a plus. The plus is the New tab button's.
                         let ink = if on_pill { th.pill_ink } else { th.dim };
-                        self.gfx.round_stroke(fav, 5.0, ink.alpha(0.5 * alpha), 1.0);
-                        self.gfx.icon("plus", fav.x + 3.0, fav.y + 3.0, 10.0, ink.alpha(alpha));
+                        self.gfx.icon("home", fav.x + 1.0, fav.y + 1.0, 14.0, ink.alpha(alpha));
                     } else {
                         let letter = host(&t.url).chars().next().unwrap_or('·').to_uppercase().to_string();
                         self.gfx.round(fav, 5.0, th.raise.alpha(alpha * dim));
@@ -4665,7 +4666,7 @@ impl Inner {
         let title = if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {
-            "New tab".into()
+            "Start".into()
         } else {
             let h = host(&t.url);
             if h.is_empty() { "Untitled".into() } else { h }
@@ -4794,8 +4795,7 @@ impl Inner {
             match bmp {
                 Some(b) => self.gfx.draw_bitmap(&b, fav, dim),
                 None if t.status == "new" => {
-                    self.gfx.round_stroke(fav, 5.0, ink(th.dim).alpha(0.5), 1.0);
-                    self.gfx.icon("plus", fav.x + 3.0, fav.y + 3.0, 10.0, ink(th.dim));
+                    self.gfx.icon("home", fav.x + 1.0, fav.y + 1.0, 14.0, ink(th.dim));
                 }
                 None => {
                     // No icon: the site's letter on a quiet tile, never a colour of its own.
@@ -4872,7 +4872,7 @@ impl Inner {
         let title = if !t.title.is_empty() {
             t.title.clone()
         } else if t.status == "new" {
-            "New tab".into()
+            "Start".into()
         } else {
             let h = host(&t.url);
             if h.is_empty() { "Untitled".into() } else { h }
