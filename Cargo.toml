@@ -1,13 +1,15 @@
 [package]
 name = "lumen"
-version = "0.6.8"
+version = "0.6.7"
 edition = "2024"
 default-run = "lumen"
 
-# The version people see is 0.6.7.<release>: Cargo wants three numbers, Lumen shows four.
-# Each build that goes out bumps `release`; build.rs makes LUMEN_VERSION from both.
+# Lumen stays on the 0.6.7 line: the person's rule. The version people see is
+# 0.6.7.<release>, and `release` grows parts: a batch of features bumps its first part
+# (6 -> 7), a small fix adds or bumps the last (6 -> 6.1 -> 6.2). It is a string, since
+# TOML has no number with two dots. build.rs makes LUMEN_VERSION from both.
 [package.metadata.lumen]
-release = 1
+release = "5.1"
 
 [dependencies]
 servo = { version = "0.7", optional = true }

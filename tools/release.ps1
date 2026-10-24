@@ -10,7 +10,7 @@ if ($porcelain) {
 
 # 2. changelog line
 $base = (Get-Content Cargo.toml | Where-Object { $_ -match '^version\s*=' } | Select-Object -First 1) -replace '^version\s*=\s*"','' -replace '"\s*$',''
-$rel = (Get-Content Cargo.toml | Where-Object { $_ -match '^release\s*=' } | Select-Object -First 1) -replace '^release\s*=\s*','' -replace '\s*$',''
+$rel = (Get-Content Cargo.toml | Where-Object { $_ -match '^release\s*=' } | Select-Object -First 1) -replace '^release\s*=\s*','' -replace '\s*$','' -replace '"',''
 $version = if ($rel) { "$base.$rel" } else { $base }
 $changelog = Get-Content docs/changelog.md -Raw
 if (-not ($changelog -match ("## " + [regex]::Escape($version) + "\s*[-—]"))) {
@@ -34,7 +34,7 @@ foreach ($name in @("lumen.exe","lumen-agent.exe")) {
     $p = Join-Path "target\release" $name
     if (Test-Path $p) {
         $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes((Resolve-Path $p)))
-        $m = [regex]::Match($text, '(\d+\.\d+\.\d+(?:\.\d+)?) \([0-9a-f]{7}[^)]*?( \+dev)?\)')
+        $m = [regex]::Match($text, '(\d+(?:\.\d+)+) \([0-9a-f]{7}[^)]*?( \+dev)?\)')
         $old = if ($m.Success) { $m.Groups[1].Value + $(if ($m.Groups[2].Success) { "-dev" } else { "" }) } else { (Get-Item $p).LastWriteTime.ToString("yyyy-MM-dd-HHmm") }
         $stem = $name -replace '\.exe$',''
         $dest = "$stem-$old.exe"

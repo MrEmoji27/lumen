@@ -21,8 +21,9 @@ fn version() {
     let release = toml
         .split("[package.metadata.lumen]")
         .nth(1)
-        .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("release").map(|r| r.trim_start_matches([' ', '=']).trim().to_string())))
-        .filter(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()));
+        .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("release").map(|r| r.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string())))
+        // Parts and dots only: "6", "6.1", "6.1.2".
+        .filter(|r| r.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())));
     let v = match release {
         Some(r) => format!("{base}.{r}"),
         None => base,

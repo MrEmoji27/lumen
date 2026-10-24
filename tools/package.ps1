@@ -14,7 +14,7 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
 $base = (Get-Content Cargo.toml | Where-Object { $_ -match '^version\s*=' } | Select-Object -First 1) -replace '^version\s*=\s*"','' -replace '"\s*$',''
-$rel = (Get-Content Cargo.toml | Where-Object { $_ -match '^release\s*=' } | Select-Object -First 1) -replace '^release\s*=\s*','' -replace '\s*$',''
+$rel = (Get-Content Cargo.toml | Where-Object { $_ -match '^release\s*=' } | Select-Object -First 1) -replace '^release\s*=\s*','' -replace '\s*$','' -replace '"',''
 $version = if ($rel) { "$base.$rel" } else { $base }
 $bin = Join-Path $TargetDir "release"
 
