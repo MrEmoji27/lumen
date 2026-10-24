@@ -229,6 +229,9 @@ pub(super) enum Item {
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
 const NET: &[u32] = &[32, 64, 128, 256, 512, 1024, 2048, 5120, 10240, 25600, 51200, 102400];
 const DL_SPEEDS: &[u32] = &[0, 1024, 5120, 10240];
+/// Freeze and unload stops, in minutes. 0 is Never, at the far end of the slider.
+const FREEZE_STOPS: &[u32] = &[1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 0];
+const UNLOAD_STOPS: &[u32] = &[5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 0];
 /// The clock's size, in px. 0 follows the window.
 const CLOCK_SIZES: &[u32] = &[0, 48, 64, 80, 96, 112, 128, 152, 176];
 /// The speed-dial columns. 0 follows the width.
@@ -361,9 +364,9 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Range("download_limit_kbps", "Download speed limit", "Caps aria2, the download engine. 0 is no limit.", Scale::Steps(DL_SPEEDS), "kbps"),
             Toggle("trim_watched", "Trim the page you are watching when you are away from the mouse and keyboard", "Measured on YouTube: 638 MB to about 400. The page comes back from disk when you touch mouse or keyboard again: a brief stutter, then as it was."),
             Seg("archive_after", "Archive tabs I have not opened for", "Tabs you have not looked at for this long close themselves into the archive, where the History page can open them again.", &crate::archive::CHOICES),
-            Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Linear(1.0, 60.0, 1.0), "min"),
-            Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened.", Scale::Linear(5.0, 240.0, 5.0), "min"),
-            Toggle("battery_saver", "Battery saver", "On battery, or with Windows' battery saver on: hidden tabs freeze after 1 minute and unload after 10, and motion is reduced. A leaf in the footer says so."),
+            Range("sleep_after_min", "Freeze hidden tabs after", "Frozen tabs stop running and wake instantly.", Scale::Steps(FREEZE_STOPS), "min"),
+            Range("discard_after_min", "Unload hidden tabs after", "Unloaded tabs free all memory and reload when opened. A tab over 500 MB goes after 5 minutes, unless this is Never.", Scale::Steps(UNLOAD_STOPS), "min"),
+            Toggle("battery_saver", "Battery saver", "On battery, or with Windows' battery saver on: motion is reduced. Your freeze and unload times stay as they are. A leaf in the footer says so."),
         ]),
         ("Passwords", vec![
             Toggle("save_passwords", "Offer to save passwords", "Saved by WebView2, encrypted by Windows with your sign-in. Fills them in next time."),
@@ -463,6 +466,13 @@ fn fmt_value(v: f32, unit: &str) -> String {
             }
         }
         "%" => format!("{}%", v as u32),
+        // Minutes: Never at 0, hours past the hour.
+        "min" => match v as u32 {
+            0 => "Never".to_string(),
+            m if m >= 60 && m % 60 == 0 => format!("{} h", m / 60),
+            m if m > 60 => format!("{} h {} min", m / 60, m % 60),
+            m => format!("{m} min"),
+        },
         u => format!("{} {u}", v as u32),
     }
 }
@@ -3496,7 +3506,15 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_link, column, days_from_civil, fmt_bytes, group, midnight, summary, tile_label, unix_now};
+    use super::{classify_link, column, days_from_civil, fmt_bytes, fmt_value, group, midnight, summary, tile_label, unix_now};
+
+    #[test]
+    fn sleep_times_read_as_words() {
+        assert_eq!(fmt_value(0.0, "min"), "Never");
+        assert_eq!(fmt_value(45.0, "min"), "45 min");
+        assert_eq!(fmt_value(120.0, "min"), "2 h");
+        assert_eq!(fmt_value(90.0, "min"), "1 h 30 min");
+    }
     use crate::chrome::gfx::R;
     use crate::chrome::UiDl;
 
