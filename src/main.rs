@@ -485,6 +485,12 @@ struct Typed {
 }
 
 impl Tab {
+    /// The agent kit records this page: an agent's own, or one the person lent. The byte
+    /// count and the bandwidth cap leave its Network domain as the kit set it.
+    fn recorded(&self) -> bool {
+        self.agent || self.agent_ok.is_some()
+    }
+
     fn new(id: u64, url: String) -> Self {
         Self {
             id,
@@ -2731,6 +2737,9 @@ impl App {
                     let _ = v.set_bounds(logical_rect(sx, sy, sw, sh));
                     let _ = v.set_visible(true);
                 }
+            } else if t.agent_ok.is_some() {
+                // A lent tab that slept: the record goes on in the new page.
+                agentkit::record(&v, t.id, &self.agent_logs, false);
             }
             t.view = Some(v);
             t.suspended = false;
@@ -2779,13 +2788,13 @@ impl App {
         let t = &self.tabs[i];
         let Some(v) = &t.view else { return };
         if self.settings.net_limit {
-            monitor::throttle(v, Some(self.settings.net_limit_kbps), t.agent);
+            monitor::throttle(v, Some(self.settings.net_limit_kbps), t.recorded());
         }
         // A frozen page fetches nothing, and a DevTools call could wake it.
         if self.panel.live()
             && !t.suspended
             && !self.watches.contains_key(&t.id)
-            && let Some(w) = monitor::watch(v, t.id, self.net.clone(), t.agent)
+            && let Some(w) = monitor::watch(v, t.id, self.net.clone(), t.recorded())
         {
             self.watches.insert(t.id, w);
         }
@@ -3944,9 +3953,9 @@ impl App {
         let keep = self.settings.net_limit;
         for (id, w) in std::mem::take(&mut self.watches) {
             let t = self.idx(id).map(|i| &self.tabs[i]);
-            // An agent's page keeps the Network domain: its own tools read it.
-            let agent = t.is_some_and(|t| t.agent);
-            monitor::unwatch(t.and_then(|t| t.view.as_ref()), w, keep || agent);
+            // A recorded page keeps the Network domain: the agents' tools read it.
+            let recorded = t.is_some_and(|t| t.recorded());
+            monitor::unwatch(t.and_then(|t| t.view.as_ref()), w, keep || recorded);
         }
     }
 
@@ -4053,7 +4062,7 @@ impl App {
             let cap = s.net_limit.then_some(s.net_limit_kbps);
             for t in &self.tabs {
                 if let Some(v) = &t.view {
-                    monitor::throttle(v, cap, t.agent);
+                    monitor::throttle(v, cap, t.recorded());
                 }
             }
         }
@@ -4171,7 +4180,9 @@ impl App {
             self.agent.set(self.settings.agent, self.settings.agent_port, &self.ctx.proxy);
             if !self.settings.agent {
                 // Door shut: nothing the person allowed to agents outlasts it.
-                self.tabs.iter_mut().for_each(|t| t.agent_ok = None);
+                for i in 0..self.tabs.len() {
+                    self.lend(i, None);
+                }
             }
         }
         if old.journal != self.settings.journal {
@@ -4262,7 +4273,7 @@ impl App {
                     }
                     // The person let agents use this tab on one site; another site ends it.
                     if self.tabs[i].agent_ok.as_deref().is_some_and(|site| site != engine::origin_of(&u)) {
-                        self.tabs[i].agent_ok = None;
+                        self.lend(i, None);
                     }
                     // Another page: the original text went with the old document, and
                     // a translation still in the air is for a page that is gone.
@@ -6449,7 +6460,7 @@ impl App {
                 if let Some(l) = self.lent.take()
                     && let Some(i) = self.idx(l.tab)
                 {
-                    self.tabs[i].agent_ok = None;
+                    self.lend(i, None);
                     self.chrome.flash("Agents can no longer use this tab".into());
                 }
                 self.sync_watch();
@@ -7220,9 +7231,28 @@ impl App {
     /// never a private one, and only for the site it is on now.
     fn toggle_agent_grant(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
-        let t = &mut self.tabs[i];
-        t.agent_ok = if t.agent_ok.is_some() || t.agent || t.private || !t.url.starts_with("http") { None } else { Some(engine::origin_of(&t.url)) };
+        let t = &self.tabs[i];
+        let site = if t.agent_ok.is_some() || t.agent || t.private || !t.url.starts_with("http") { None } else { Some(engine::origin_of(&t.url)) };
+        self.lend(i, site);
         self.push();
+    }
+
+    /// Lend a tab of the person's to agents for one site, or take it back. While lent, the
+    /// page's network and browser log are recorded for the agents' tools; taken back, the
+    /// record is dropped and the DevTools domains go back to how the monitor wants them.
+    fn lend(&mut self, i: usize, site: Option<String>) {
+        let keep_net = self.settings.net_limit || self.watches.contains_key(&self.tabs[i].id);
+        let t = &mut self.tabs[i];
+        let was = t.agent_ok.is_some();
+        t.agent_ok = site;
+        if t.agent || was == t.agent_ok.is_some() {
+            return;
+        }
+        if was {
+            agentkit::stop(t.view.as_ref(), t.id, &self.agent_logs, keep_net);
+        } else if let Some(v) = &t.view {
+            agentkit::record(v, t.id, &self.agent_logs, false);
+        }
     }
 
     /// One primitive for an agent. An agent may use the tabs its session opened, and a tab of
@@ -7572,8 +7602,9 @@ impl App {
                     return;
                 }
                 let mut logs = self.agent_logs.borrow_mut();
+                // Silence here is not "nothing happened": say the tab is not recorded.
                 let Some(log) = logs.get_mut(&tab) else {
-                    let _ = reply.send(Ok(json!([])));
+                    let _ = reply.send(Err("this tab is not recorded: a tab the person lends is recorded from the moment they lend it".into()));
                     return;
                 };
                 let out = if network {

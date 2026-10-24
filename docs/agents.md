@@ -273,6 +273,11 @@ the tab goes to another site, when it closes, or when you choose **Stop letting 
 tab**. A lent tab can be read and steered. It can never be scripted (no eval), never get uploads,
 never be closed or resized by an agent.
 
+While a tab is lent, Lumen records its network requests and the browser's own log, from the
+moment you lend it. `browser_network`, `browser_network_body` and `browser_console` read that
+record. The page's own console lines are not recorded: catching them takes a DevTools switch a
+page can see, and this is your logged-in profile. Take the tab back and the record is gone.
+
 ## The Drive panel
 
 The arrow in the footer opens Drive: type a task once ("find the cheapest kettle and put it in
