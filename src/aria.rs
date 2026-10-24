@@ -19,8 +19,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard,
-        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex, MutexGuard, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::Duration,
@@ -214,7 +214,26 @@ pub struct Aria {
     /// Download speed cap in bytes/s (0 = none). Held here so it survives an
     /// engine that has not booted yet, and is applied the moment it has.
     limit: AtomicU64,
+    /// What a boot needs, kept so aria2 can start when it is first wanted.
+    boot: Boot,
+    /// A boot has been asked for. aria2 starts once per run, at most.
+    woken: AtomicBool,
+    /// The boot ran and gave no engine: Lumen downloads files itself from now on.
+    failed: AtomicBool,
+    me: Weak<Aria>,
 }
+
+/// The arguments of one boot.
+struct Boot {
+    data: PathBuf,
+    downloads: PathBuf,
+    keep_seeding: bool,
+    bt_port: u16,
+}
+
+/// How long a download waits for aria2 to start before it falls back to WebView2's own
+/// downloader. A cold start (the exe checked, the port answering) takes about a second.
+const WAKE_WAIT: Duration = Duration::from_secs(20);
 
 /// The process, and how to talk to it. One per Lumen run.
 struct Engine {
@@ -257,44 +276,74 @@ impl Engine {
 
 #[allow(dead_code)]
 impl Aria {
-    /// Returns at once. The binary is fetched, checked and started on a
-    /// background thread; `ready()` is false until that is done.
-    pub fn start(
-        data_dir: &Path,
-        download_dir: &Path,
-        keep_seeding: bool,
-        limit_kbps: u32,
-        bt_port: u16,
-    ) -> Arc<Aria> {
-        let aria = Arc::new(Aria {
+    /// Returns at once, with nothing running. aria2 starts the first time it is wanted
+    /// (`wake`, or a download added): idle, it costs no memory at all. Measured as
+    /// "Helpers", about 3.5 MB, when it started with Lumen whether anything downloaded or not.
+    pub fn idle(data_dir: &Path, download_dir: &Path, keep_seeding: bool, limit_kbps: u32, bt_port: u16) -> Arc<Aria> {
+        Arc::new_cyclic(|me| Aria {
             engine: Mutex::new(None),
             urls: Mutex::new(HashMap::new()),
             ids: AtomicU64::new(0),
             limit: AtomicU64::new(limit_kbps as u64 * 1024),
-        });
-        let weak = Arc::downgrade(&aria);
-        let data = data_dir.to_path_buf();
-        let dl = download_dir.to_path_buf();
+            boot: Boot { data: data_dir.to_path_buf(), downloads: download_dir.to_path_buf(), keep_seeding, bt_port },
+            woken: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            me: me.clone(),
+        })
+    }
+
+    /// Start aria2 now, if it is not started yet. Returns at once: the binary is fetched,
+    /// checked and started on a background thread; `ready()` is false until that is done.
+    pub fn wake(&self) {
+        if self.woken.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let weak = self.me.clone();
+        let Boot { data, downloads, keep_seeding, bt_port } = &self.boot;
+        let (data, dl, keep_seeding, bt_port) = (data.clone(), downloads.clone(), *keep_seeding, *bt_port);
         let _ = thread::Builder::new()
             .name("lumen-aria".into())
             .spawn(move || {
-                let Some(engine) = Engine::boot(&data, &dl, keep_seeding, bt_port) else { return };
-                // Lumen may have died while we were downloading. Let the
-                // engine drop and the aria2 process dies with it.
-                if let Some(aria) = weak.upgrade() {
-                    *lock(&aria.engine) = Some(engine);
-                    // The speed limit chosen before boot takes effect now.
-                    aria.try_speed_limit();
-                }
+                let engine = Engine::boot(&data, &dl, keep_seeding, bt_port);
+                // Lumen may have died while we were booting. Let the engine drop and the
+                // aria2 process dies with it.
+                let Some(aria) = weak.upgrade() else { return };
+                let Some(engine) = engine else {
+                    aria.failed.store(true, Ordering::Release);
+                    return;
+                };
+                *lock(&aria.engine) = Some(engine);
+                // The speed limit chosen before boot takes effect now.
+                aria.try_speed_limit();
+                // Trackers are a network errand of their own: once a week, never in
+                // the way of a start.
+                trackers::refresh(&data, &aria);
             });
-        // Trackers are a network errand of their own: once a week, off this
-        // thread, never in the way of a start.
-        let late = aria.clone();
-        let late_data = data_dir.to_path_buf();
-        let _ = thread::Builder::new()
-            .name("lumen-trackers".into())
-            .spawn(move || trackers::refresh(&late_data, &late));
-        aria
+    }
+
+    /// It was asked to start and could not. Downloads stop coming to it for this run.
+    pub fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    /// aria2 left unfinished work last time: downloads to resume, torrents to seed.
+    /// Then it starts with Lumen, as before; otherwise it waits to be wanted.
+    pub fn has_session(data_dir: &Path) -> bool {
+        fs::metadata(data_dir.join("aria2").join(SESSION)).is_ok_and(|m| m.len() > 0)
+    }
+
+    /// Start aria2 if needed and wait for it, up to `WAKE_WAIT`. For a caller off the UI
+    /// thread that has a download in hand.
+    fn wait_ready(&self) -> Result<(), String> {
+        self.wake();
+        let until = std::time::Instant::now() + WAKE_WAIT;
+        while !self.ready() {
+            if self.failed.load(Ordering::Acquire) || std::time::Instant::now() >= until {
+                return Err("aria2 did not start".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
     }
 
     /// True when aria2 answers. Until then there is no downloader to talk to.
@@ -323,6 +372,7 @@ impl Aria {
     /// Like `add`, into a folder of its own instead of the download folder. A torrent that a
     /// .torrent file fetched this way spawns inherits the folder.
     pub fn add_in(&self, url: &str, headers: &[String], filename: Option<&str>, pause: bool, dir: Option<&Path>) -> Result<String, String> {
+        self.wait_ready()?;
         let (port, secret) = self.line()?;
         let mut options = uri_options(headers, filename, pause);
         if let (Some(dir), Some(map)) = (dir, options.as_object_mut()) {
@@ -1174,10 +1224,27 @@ mod live {
     }
 
     #[test]
+    fn aria2_waits_to_be_wanted() {
+        let dir = case("idle");
+        let aria = Aria::idle(&dir, &dir.join("downloads"), true, 0, 6881);
+        // Nothing started: no engine, no boot asked for, nothing failed.
+        assert!(!aria.ready() && !aria.woken.load(Ordering::Acquire) && !aria.failed());
+        // Work left in the session starts it with Lumen; an empty or missing one does not.
+        assert!(!Aria::has_session(&dir));
+        let _ = fs::create_dir_all(dir.join("aria2"));
+        let _ = fs::write(dir.join("aria2").join(SESSION), "");
+        assert!(!Aria::has_session(&dir));
+        let _ = fs::write(dir.join("aria2").join(SESSION), "https://example.com/a.zip
+");
+        assert!(Aria::has_session(&dir));
+    }
+
+    #[test]
     #[ignore = "downloads aria2 and a file off the internet"]
     fn it_downloads_a_file_through_aria2() {
         let dir = case("live");
-        let aria = Aria::start(&dir, &dir.join("downloads"), true, 0, 6881);
+        let aria = Aria::idle(&dir, &dir.join("downloads"), true, 0, 6881);
+        aria.wake();
         for _ in 0..300 {
             if aria.ready() {
                 break;
@@ -1224,7 +1291,8 @@ mod live {
     #[ignore = "downloads aria2 and a tracker list off the internet"]
     fn a_fresh_tracker_list_reaches_a_running_aria2() {
         let dir = case("push");
-        let aria = Aria::start(&dir, &dir.join("downloads"), true, 0, 6881);
+        let aria = Aria::idle(&dir, &dir.join("downloads"), true, 0, 6881);
+        aria.wake();
         for _ in 0..300 {
             if aria.ready() {
                 break;

@@ -1225,7 +1225,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         prompts: Vec::new(),
         ext_gate: Default::default(),
         library: library::Library::load(&store::data_dir()),
-        aria: aria::Aria::start(&store::data_dir(), &store::download_dir(), keep_seeding, dl_limit, bt_port),
+        aria: aria::Aria::idle(&store::data_dir(), &store::download_dir(), keep_seeding, dl_limit, bt_port),
         aria_ids: HashMap::new(),
         aria_adopted: false,
         aria_poll: aria::Poll::new(),
@@ -1268,6 +1268,12 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         vault_seen: Instant::now(),
     };
     app.unclean_last = unclean;
+    // aria2 starts when a download wants it. Only work it left unfinished (a download to
+    // resume, a torrent to seed) starts it with Lumen.
+    if aria::Aria::has_session(&store::data_dir()) {
+        app.aria.wake();
+    }
+    app.ctx.aria_on.set(app.settings.accelerate_downloads);
     {
         // One small thread asks aria2 about its jobs. It sleeps on a condvar
         // until a download gives it something to ask about.
@@ -6873,9 +6879,6 @@ impl App {
         if !self.shown || headless() {
             return true;
         }
-        if self.settings.accelerate_downloads && !self.ctx.aria_on.get() && self.aria.ready() {
-            return true;
-        }
         self.next_tab_wake().is_some_and(|t| t <= now)
     }
 
@@ -7146,7 +7149,9 @@ impl App {
         // The sidebar memory readout has its own clock in the event loop.
         self.enforce_ram(now);
         self.settle_clear();
-        self.ctx.aria_on.set(self.settings.accelerate_downloads && self.aria.ready());
+        // Downloads go to aria2 while the setting is on; the first one starts it. One that
+        // could not start leaves them to WebView2 for the rest of the run.
+        self.ctx.aria_on.set(self.settings.accelerate_downloads && !self.aria.failed());
         self.library.flush();
         if self.agent_seen.is_some_and(|t| now - t > Duration::from_secs(6)) {
             self.agent_seen = None;
@@ -7199,7 +7204,7 @@ impl App {
                     self.toggle_translate(i);
                 }
             }
-            if self.test_magnet && self.aria.ready() && !self.test_pending && self.test_dl.is_none() {
+            if self.test_magnet && !self.test_pending && self.test_dl.is_none() {
                 self.test_magnet = false;
                 self.test_pending = true;
                 const MAGNET: &str = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.webtorrent.dev";
