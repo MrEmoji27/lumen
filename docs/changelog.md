@@ -4,10 +4,13 @@ One version number, in `Cargo.toml`. Every exe also carries the commit it was bu
 that commit's date: `lumen-agent --version`, the Settings page under its title, and the agent
 door's server info all say it. `+dev` means the build had changes nobody committed.
 
-The rule: a release build that goes to the person gets the next number. Small fixes bump the last
-digit. A batch of new features bumps the middle one.
+The rule: Lumen stays on the 0.6.7 line. A release build that goes to the person gets the next
+number: a batch of new features bumps the fourth part (0.6.7.5 -> 0.6.7.6), a small fix adds or
+bumps the last one (0.6.7.6 -> 0.6.7.6.1).
 
-## 0.6.8.1 — 2026-10-25
+## 0.6.7.5.1 — 2026-10-25
+
+- Shipped by mistake as 0.6.8.1.
 
 - **An agent can read the network of a tab you lend it.** Right-click a tab, "Let agents use
   this tab", and from that moment the agent sees the page's requests and what the server
@@ -16,7 +19,9 @@ digit. A batch of new features bumps the middle one.
 - **A tab nobody recorded says so.** It used to answer "no requests recorded", as if the
   page had been quiet.
 
-## 0.6.8 — 2026-10-20
+## 0.6.7.5 — 2026-10-20
+
+- Shipped by mistake as 0.6.8.
 
 - **Pop-ups a page pushes on you stop.** A site that opens an ad window on your first click
   anywhere gets nothing; a link you click still opens its window. A note says "Pop-up blocked"
