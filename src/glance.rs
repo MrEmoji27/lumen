@@ -1,6 +1,4 @@
 //! Shift+click to peek at a link without leaving the current tab.
-//! The page reports the click via `chrome.webview.postMessage`; Lumen opens the
-//! URL in a floating card over the page. One glance at a time, never saved.
 
 use tao::event_loop::EventLoopProxy;
 use webview2_com::{
@@ -15,8 +13,6 @@ use wry::{WebView, WebViewExtWindows};
 
 use crate::engine::Ev;
 
-/// Injected into every page. Captures shift+clicks on anchors, cancels the
-/// default navigation, and posts the URL back to Lumen as a glance request.
 pub const GLANCE_JS: &str = r#"(()=>{if(window!==window.top)return;
 const W=window.chrome&&window.chrome.webview;if(!W)return;
 document.addEventListener('click',e=>{if(!e.shiftKey)return;
@@ -24,7 +20,6 @@ const a=e.target.closest('a');if(a){e.preventDefault();e.stopImmediatePropagatio
 W.postMessage({lumen:'glance',url:a.href})}},true);
 })();"#;
 
-/// Hook one page to listen for glance click messages.
 pub fn hook(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     let core = wv.webview();
     let mut token = 0i64;
@@ -52,14 +47,8 @@ pub fn hook(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     }
 }
 
-/// Ask the page whether the focus sits in a field. The answer arrives as JSON:
-/// "true" or "false".
 const CHECK_FOCUS_JS: &str = "(()=>{const a=document.activeElement;return !!(a&&(['INPUT','TEXTAREA','SELECT'].includes(a.tagName)||a.isContentEditable))})()";
 
-/// Keys the card takes for itself, while it has focus. Escape closes it.
-/// Enter promotes it to a tab — but only when the page is not focused in a
-/// field, so a form still submits; the check is a script, so the page sees
-/// the key first either way.
 pub fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
     let controller = wv.controller();
     let mut token = 0i64;
@@ -79,7 +68,6 @@ pub fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
                 args.VirtualKey(&mut vk)?;
                 const ESC: u32 = 0x1B;
                 const RETURN: u32 = 0x0D;
-                // Async state: the key went to the WebView2 process.
                 let down = |k: u16| GetAsyncKeyState(k as i32) < 0;
                 if vk == ESC && !down(VK_SHIFT.0) {
                     args.SetHandled(true)?;
@@ -89,7 +77,6 @@ pub fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
                     && let Ok(core) = controller.CoreWebView2()
                 {
                     let p = p0.clone();
-                    // The answer arrives as JSON: "true" (a field has focus) or "false".
                     let _ = core.ExecuteScript(
                         &HSTRING::from(CHECK_FOCUS_JS),
                         &ExecuteScriptCompletedHandler::create(Box::new(move |_, json| {

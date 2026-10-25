@@ -1,18 +1,4 @@
 //! Who may do what, in one place.
-//!
-//! Every tool call from an agent goes through `authorize` before anything runs. The rules are
-//! a table (`RULES`), one row per tool, and a test fails if a tool has no row. A denial is an
-//! MCP tool error that says which setting would allow the call, and it leaves one line in the
-//! journal: the tool and a short reason code, never a path, a URL or page content.
-//!
-//! The rules in short:
-//! - An agent uses the tabs its session opened. A tab of the person's is off limits until the
-//!   person grants that one tab (right-click: Let agents use this tab). The grant ends when the
-//!   tab goes to another site or closes.
-//! - Never in the person's tabs: eval, upload, close, resize.
-//! - `browser_eval` runs only in the agent's own tabs of the separate agent profile.
-//! - `browser_upload` is off unless the person turns it on, and then reads one folder only.
-//! - Only http(s) pages are downloaded; only http(s), data: and search words are opened.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -20,28 +6,20 @@ use serde_json::{Value, json};
 
 use crate::agent::Who;
 
-/// What the policy needs to know about one tab.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabInfo {
     pub id: u64,
-    /// Opened by an agent (or by a page in an agent's tab).
     pub agent: bool,
-    /// For an agent tab, the session that owns it.
     pub owner: String,
-    /// The person said agents may use this person's tab, and it is still on the same site.
     pub granted: bool,
 }
 
-/// How an agent stands to a tab.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Access {
-    /// The agent opened it.
     Own,
-    /// The person's tab, granted to agents.
     Granted,
 }
 
-/// The one test of tab ownership. `on_agent` uses it for every primitive, `authorize` for every tool.
 pub fn access(session: &str, agent: bool, owner: &str, granted: bool) -> Option<Access> {
     if agent {
         (!owner.is_empty() && owner == session).then_some(Access::Own)
@@ -50,21 +28,16 @@ pub fn access(session: &str, agent: bool, owner: &str, granted: bool) -> Option<
     }
 }
 
-/// A person's tab may be steered, not scripted: these DevTools calls run page code or reach files.
 pub fn cdp_allowed_on_person_tab(method: &str) -> bool {
     !matches!(method, "Runtime.evaluate" | "Runtime.callFunctionOn" | "DOM.setFileInputFiles" | "Page.addScriptToEvaluateOnNewDocument")
 }
 
-/// The state a decision needs, read from the UI thread once per tool call.
 #[derive(Clone, Debug, Default)]
 pub struct PolicyCtx {
     pub tabs: Vec<TabInfo>,
-    /// Settings > AI agent > Agents use my profile.
     pub shared_profile: bool,
-    /// Settings > AI agent > Let agents upload files.
     pub upload_on: bool,
     pub upload_dir: PathBuf,
-    /// This Drive run was paused and taken over by the person: only browser_handoff runs.
     pub paused: bool,
 }
 
@@ -95,30 +68,20 @@ impl PolicyCtx {
     }
 }
 
-/// Which tabs a tool needs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scope {
-    /// No tab.
     Free,
-    /// `tab`: the agent's own, or one the person granted.
     Tab,
-    /// `tab` if given, same rule.
     TabOpt,
-    /// `tab`: the agent's own only. Acts on the page in ways a visitor of someone else's tab should not.
     OwnTab,
 }
 
-/// What else must hold.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Gate {
     Nothing,
-    /// `url` is something an agent may open.
     Url,
-    /// `url` is http(s).
     Download,
-    /// Own tab of the isolated agent profile.
     Eval,
-    /// The setting is on and every path is inside the upload folder.
     Upload,
 }
 
@@ -132,7 +95,6 @@ const fn rule(tool: &'static str, scope: Scope, gate: Gate) -> Rule {
     Rule { tool, scope, gate }
 }
 
-/// Every tool, once. A new tool without a row here is refused, and a test fails.
 pub const RULES: &[Rule] = &[
     rule("browser_open", Scope::Free, Gate::Url),
     rule("browser_navigate", Scope::Tab, Gate::Url),
@@ -158,8 +120,6 @@ pub const RULES: &[Rule] = &[
     rule("browser_console", Scope::Tab, Gate::Nothing),
     rule("browser_network", Scope::Tab, Gate::Nothing),
     rule("browser_network_body", Scope::Tab, Gate::Nothing),
-    // Cookies and storage are the agent's own profile's, so a shared profile is refused
-    // the same way eval is: a file of the person's cookies must never leave their jar.
     rule("browser_state_save", Scope::OwnTab, Gate::Eval),
     rule("browser_state_load", Scope::OwnTab, Gate::Eval),
     rule("browser_record_start", Scope::Free, Gate::Nothing),
@@ -178,18 +138,15 @@ pub const RULES: &[Rule] = &[
     rule("browser_doctor", Scope::Free, Gate::Nothing),
     rule("browser_whoami", Scope::Free, Gate::Nothing),
     rule("browser_consent", Scope::Tab, Gate::Nothing),
-    // Runs of other tools: each step is authorized on its own, so the run itself needs nothing.
     rule("browser_batch", Scope::Free, Gate::Nothing),
     rule("browser_scripts", Scope::Free, Gate::Nothing),
     rule("browser_script_run", Scope::Free, Gate::Nothing),
     rule("browser_fill", Scope::Tab, Gate::Nothing),
-    // Read the page the way a snapshot does.
     rule("browser_table", Scope::Tab, Gate::Nothing),
     rule("browser_extract", Scope::Tab, Gate::Nothing),
     rule("browser_links", Scope::Tab, Gate::Nothing),
 ];
 
-/// Hooks for the integration tests. Debug builds only; a release build has no such tools.
 #[cfg(debug_assertions)]
 const TEST_RULES: &[Rule] = &[
     rule("browser_test_crash", Scope::OwnTab, Gate::Nothing),
@@ -197,7 +154,6 @@ const TEST_RULES: &[Rule] = &[
     rule("browser_test_state", Scope::Free, Gate::Nothing),
     rule("browser_test_grant", Scope::Free, Gate::Nothing),
     rule("browser_test_profile", Scope::Tab, Gate::Nothing),
-    // Free on purpose: the watch smoke step activates the person's own first tab.
     rule("browser_test_activate", Scope::Free, Gate::Nothing),
     rule("browser_test_tell", Scope::Free, Gate::Nothing),
     rule("browser_test_pause", Scope::Free, Gate::Nothing),
@@ -212,12 +168,10 @@ fn find(tool: &str) -> Option<&'static Rule> {
     RULES.iter().chain(TEST_RULES).find(|r| r.tool == tool)
 }
 
-/// A refusal: what to tell the agent, and a reason code for the journal.
 #[derive(Debug, PartialEq)]
 pub struct Denied {
     pub text: String,
     pub code: &'static str,
-    /// Worth a journal line. A tab that is simply gone is not a denial.
     pub log: bool,
 }
 
@@ -225,20 +179,15 @@ fn denied(code: &'static str, text: impl Into<String>) -> Denied {
     Denied { text: text.into(), code, log: true }
 }
 
-/// What a yes carries: the upload paths as checked, for the caller to use instead of the raw ones.
 #[derive(Debug, Default, PartialEq)]
 pub struct Approval {
     pub files: Vec<String>,
 }
 
-/// May this agent make this call? Called for every tool call, before it runs.
 pub fn authorize(who: &Who, tool: &str, args: &Value, ctx: &PolicyCtx) -> Result<Approval, Denied> {
     let Some(rule) = find(tool) else {
         return Err(denied("unknown_tool", format!("unknown tool {tool}")));
     };
-    // A Drive run the person paused: the tab is theirs now. The one thing the agent may
-    // still do is ask for it back, and that is exactly browser_handoff. (The pause hook a
-    // debug build has is the person's own hand on that switch, so it passes too.)
     let test_hook = cfg!(debug_assertions) && tool == "browser_test_pause";
     if ctx.paused && tool != "browser_handoff" && !test_hook {
         return Err(denied(
@@ -248,15 +197,12 @@ pub fn authorize(who: &Who, tool: &str, args: &Value, ctx: &PolicyCtx) -> Result
     }
     if rule.scope != Scope::Free {
         match args["tab"].as_u64() {
-            // A missing tab is the tool's own error to give ("missing tab id").
             None => {}
             Some(id) => {
                 let known = ctx.tabs.iter().find(|t| t.id == id);
                 let here = known.and_then(|t| access(&who.session, t.agent, &t.owner, t.granted));
                 match (here, rule.scope) {
                     (None, _) => {
-                        // The same words for a tab that is gone, another agent's, or the person's
-                        // own: an agent learns nothing about tabs that are not its.
                         return Err(Denied {
                             text: format!(
                                 "no tab {id} you may use; browser_tabs lists yours. The person's tabs are off limits unless they right-click one and choose \"Let agents use this tab\"."
@@ -333,10 +279,6 @@ pub fn authorize(who: &Who, tool: &str, args: &Value, ctx: &PolicyCtx) -> Result
     }
 }
 
-// --------------------------------------------------------------------- urls
-
-/// Pages an agent may open: http(s), data:, view-source: of those, or plain words (a search).
-/// The error is the scheme to name in the refusal.
 pub fn url_allowed(url: &str) -> Result<(), &'static str> {
     let lower = url.trim().to_ascii_lowercase();
     let lower = lower.strip_prefix("view-source:").unwrap_or(&lower);
@@ -348,9 +290,6 @@ pub fn url_allowed(url: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-// ------------------------------------------------------------------- upload
-
-/// The folder agents may upload from: the setting, or "Lumen agent uploads" in the home folder.
 pub fn upload_dir(setting: &str) -> PathBuf {
     let s = setting.trim();
     if s.is_empty() {
@@ -359,16 +298,12 @@ pub fn upload_dir(setting: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// `raw` as a real file inside `dir`, or why not. No `..`, no UNC or device paths, nothing that
-/// leaves the folder through a symlink or junction: the answer is the canonical path, and that
-/// is what gets uploaded.
 pub fn upload_path(dir: &Path, raw: &str) -> Result<PathBuf, &'static str> {
     let raw = raw.trim();
     if raw.is_empty() || raw.chars().any(char::is_control) {
         return Err("not a usable path");
     }
     let norm = raw.replace('/', "\\");
-    // Rooted without a drive, UNC (\\server\share), device (\\.\) and verbatim (\\?\) paths.
     if norm.starts_with('\\') {
         return Err("network, device and rooted paths are not allowed");
     }
@@ -399,7 +334,6 @@ pub fn upload_path(dir: &Path, raw: &str) -> Result<PathBuf, &'static str> {
     Ok(simplify(&real))
 }
 
-/// `\\?\C:\x` as `C:\x`, which DevTools and most programs read more happily.
 fn simplify(p: &Path) -> PathBuf {
     let s = p.display().to_string();
     match s.strip_prefix(r"\\?\") {
@@ -408,16 +342,10 @@ fn simplify(p: &Path) -> PathBuf {
     }
 }
 
-// ---------------------------------------------------------------- downloads
-
-/// Agents' downloads and PDFs land here, apart from the person's own. Every session gets a
-/// folder of its own inside it; see `agent_downloads_dir_for`.
 pub fn agent_downloads_dir() -> PathBuf {
     crate::store::download_dir().join("Agent downloads")
 }
 
-/// One agent's own folder under "Agent downloads". `folder` is the session's cleaned
-/// folder name; anything path-like is refused, so a label can never write elsewhere.
 pub fn agent_downloads_dir_for(folder: &str) -> PathBuf {
     let root = agent_downloads_dir();
     let name = folder.trim();
@@ -427,8 +355,6 @@ pub fn agent_downloads_dir_for(folder: &str) -> PathBuf {
     root.join(name)
 }
 
-/// Whether a download row is this agent's own, for browser_downloads: inside its folder,
-/// or started by it. The person's downloads and other agents' files are not its business.
 pub fn is_agent_download(dir: &Path, path: &str, url: &str, started_by_agent: impl Fn(&str) -> bool) -> bool {
     if started_by_agent(url) {
         return true;
@@ -437,7 +363,6 @@ pub fn is_agent_download(dir: &Path, path: &str, url: &str, started_by_agent: im
     !path.is_empty() && path.to_ascii_lowercase().starts_with(&root)
 }
 
-/// What `Op::Policy` answers, built from plain values so the UI thread can fill it in.
 pub fn ctx_value(tabs: Vec<TabInfo>, shared: bool, upload: bool, upload_dir: &str, paused: bool) -> Value {
     json!({
         "tabs": tabs.iter().map(|t| json!({"id": t.id, "agent": t.agent, "owner": t.owner, "granted": t.granted})).collect::<Vec<_>>(),
@@ -458,7 +383,6 @@ mod tests {
         TabInfo { id, agent, owner: owner.into(), granted }
     }
 
-    /// A folder to work in, empty, named for the test.
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lumen-policy-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -490,7 +414,6 @@ mod tests {
         seen.sort();
         seen.dedup();
         assert_eq!(seen.len(), RULES.len(), "a tool has two rows");
-        // A rule that wants a tab belongs to a tool that takes one.
         for t in listed.as_array().unwrap() {
             let name = t["name"].as_str().unwrap();
             let r = RULES.iter().find(|r| r.tool == name).unwrap();
@@ -511,17 +434,14 @@ mod tests {
         let c = ctx(&tmp("own"));
         for tool in ["browser_click", "browser_snapshot", "browser_close", "browser_eval", "browser_resize", "browser_reload"] {
             assert!(authorize(&who("A"), tool, &json!({"tab": 1, "script": "1"}), &c).is_ok(), "{tool} on its own tab");
-            // Session B's tab, the person's tab, and a tab that does not exist: one answer.
             for other in [2u64, 3, 99] {
                 let e = authorize(&who("A"), tool, &json!({"tab": other}), &c).unwrap_err();
                 assert_eq!(e.code, "tab_not_yours", "{tool} on {other}");
                 assert!(e.text.contains("Let agents use this tab"));
             }
         }
-        // A tab that is simply gone is no denial worth a journal line; another agent's tab is.
         assert!(!authorize(&who("A"), "browser_click", &json!({"tab": 99}), &c).unwrap_err().log);
         assert!(authorize(&who("A"), "browser_click", &json!({"tab": 2}), &c).unwrap_err().log);
-        // An empty session name owns nothing, even an agent tab with no owner.
         let mut c2 = c.clone();
         c2.tabs.push(tab(7, true, "", false));
         assert!(authorize(&who(""), "browser_click", &json!({"tab": 7}), &c2).is_err());
@@ -537,9 +457,7 @@ mod tests {
             let e = authorize(&who("A"), tool, &json!({"tab": 4, "paths": []}), &c).unwrap_err();
             assert_eq!(e.code, "person_tab", "{tool} on a granted tab");
         }
-        // Any agent may use a granted tab: the grant is to agents, for that tab.
         assert!(authorize(&who("B"), "browser_click", &json!({"tab": 4}), &c).is_ok());
-        // Not granted: no.
         assert!(authorize(&who("A"), "browser_click", &json!({"tab": 3}), &c).is_err());
     }
 
@@ -561,7 +479,6 @@ mod tests {
         let e = authorize(&who("A"), "browser_eval", &json!({"tab": 1}), &c).unwrap_err();
         assert_eq!(e.code, "eval_shared_profile");
         assert!(e.text.contains("agent_shared_profile"), "{}", e.text);
-        // The rest still works in the shared profile.
         assert!(authorize(&who("A"), "browser_click", &json!({"tab": 1}), &c).is_ok());
     }
 
@@ -624,10 +541,8 @@ mod tests {
             "sub\\..\\ok.txt".into(),
             // a sibling whose name starts like the folder's
             format!("{}\\up-evil.txt", root.display()),
-            // outside, plain
             format!("{o}\\key.txt"),
             "C:\\Windows\\win.ini".into(),
-            // UNC, device, verbatim, rooted
             "\\\\server\\share\\x.txt".into(),
             "//server/share/x.txt".into(),
             "\\\\?\\C:\\Windows\\win.ini".into(),
@@ -635,12 +550,10 @@ mod tests {
             "\\\\.\\C:\\Windows\\win.ini".into(),
             "\\\\.\\pipe\\x".into(),
             "\\Windows\\win.ini".into(),
-            // drive-relative, alternate streams, device names
             "C:win.ini".into(),
             format!("{d}\\ok.txt:hidden"),
             "NUL".into(),
             "CON".into(),
-            // folders, missing files, junk
             "sub".into(),
             d.clone(),
             "nope.txt".into(),
@@ -653,7 +566,6 @@ mod tests {
             assert!(upload_path(&dir, p).is_err(), "{p:?} must be refused");
         }
         assert!(upload_path(&dir, "ok.txt").is_ok());
-        // The folder itself missing, or not a full path, is a refusal too.
         assert!(upload_path(&root.join("nope"), "ok.txt").is_err());
         assert!(upload_path(Path::new("up"), "ok.txt").is_err());
     }
@@ -675,7 +587,6 @@ mod tests {
         assert!(link.join("key.txt").is_file(), "the junction works as a path");
         assert!(upload_path(&dir, "link\\key.txt").is_err(), "relative through the junction");
         assert!(upload_path(&dir, &link.join("key.txt").display().to_string()).is_err(), "absolute through the junction");
-        // A junction to somewhere inside the folder is fine; it is the real file that counts.
         fs::create_dir_all(dir.join("real")).unwrap();
         fs::write(dir.join("real").join("a.txt"), "x").unwrap();
         let inside = dir.join("alias");
@@ -692,13 +603,10 @@ mod tests {
         fs::write(dir.join("a.txt"), "x").unwrap();
         fs::write(root.join("b.txt"), "x").unwrap();
         let c = ctx(&dir);
-        // A person's granted tab: no uploads, whatever the setting says.
         assert_eq!(authorize(&who("A"), "browser_upload", &json!({"tab": 4, "paths": ["a.txt"]}), &c).unwrap_err().code, "person_tab");
-        // One bad path spoils the lot.
         let e = authorize(&who("A"), "browser_upload", &json!({"tab": 1, "paths": ["a.txt", root.join("b.txt").display().to_string()]}), &c).unwrap_err();
         assert_eq!(e.code, "upload_path");
         assert!(e.text.contains("agent_upload_dir"), "{}", e.text);
-        // No paths at all passes the gate; the tool says "missing paths".
         assert!(authorize(&who("A"), "browser_upload", &json!({"tab": 1}), &c).is_ok());
     }
 
@@ -723,7 +631,6 @@ mod tests {
             assert_eq!(authorize(&who("A"), "browser_download", &json!({"url": url}), &c).unwrap_err().code, "url_scheme", "{url}");
         }
         assert!(authorize(&who("A"), "browser_download", &json!({"url": "https://example.com/a.torrent"}), &c).is_ok());
-        // With a tab, the tab rule applies too.
         assert!(authorize(&who("A"), "browser_download", &json!({"url": "https://example.com/a", "tab": 2}), &c).is_err());
         assert!(authorize(&who("A"), "browser_download", &json!({"url": "https://example.com/a", "tab": 1}), &c).is_ok());
     }
@@ -736,13 +643,11 @@ mod tests {
         let f = mine.join("x.pdf").display().to_string();
         assert!(is_agent_download(&mine, &f, "https://other/x", started));
         assert!(is_agent_download(&mine, &f.to_ascii_uppercase(), "https://other/x", started));
-        // Another agent's folder is not this one's, and neither is the person's downloads.
         let other = agent_downloads_dir_for("agent-c3d4").join("y.pdf").display().to_string();
         assert!(!is_agent_download(&mine, &other, "https://other/y", started));
         let theirs = crate::store::download_dir().join("tax-return.pdf").display().to_string();
         assert!(!is_agent_download(&mine, &theirs, "https://bank.example/tax", started));
         assert!(!is_agent_download(&mine, "", "https://bank.example/tax", started));
-        // The folder name only ever names a folder: no separators, no walk up.
         assert_eq!(agent_downloads_dir_for(""), agent_downloads_dir());
         assert_eq!(agent_downloads_dir_for("..\\..\\x"), agent_downloads_dir());
         assert_eq!(agent_downloads_dir_for("a/b"), agent_downloads_dir());
@@ -757,14 +662,11 @@ mod tests {
         assert_eq!(c.tabs.len(), 2);
         assert!(c.shared_profile && c.upload_on && c.paused);
         assert_eq!(c.upload_dir, dir);
-        // Nothing sent: everything off, the default folder.
         let c = PolicyCtx::from_value(&json!({}));
         assert!(!c.shared_profile && !c.upload_on && !c.paused && c.tabs.is_empty());
         assert!(c.upload_dir.ends_with("Lumen agent uploads"));
     }
 
-    /// A paused Drive run: the agent may ask the person to hand the tab back and do
-    /// nothing else, whatever its rights would otherwise be.
     #[test]
     fn a_paused_run_may_only_ask_for_the_tab_back() {
         let mut c = ctx(&tmp("paused"));
@@ -774,7 +676,6 @@ mod tests {
             assert_eq!(e.code, "drive_paused", "{tool}");
         }
         assert!(authorize(&who("A"), "browser_handoff", &json!({"tab": 1, "message": "done"}), &c).is_ok());
-        // Unpausing gives everything back.
         c.paused = false;
         assert!(authorize(&who("A"), "browser_click", &json!({"tab": 1}), &c).is_ok());
     }

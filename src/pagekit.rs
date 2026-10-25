@@ -1,11 +1,4 @@
-//! Things Lumen does to a page: dark mode for sites that have none (Dark Reader, MIT)
-//! and reader mode (Mozilla Readability, Apache-2.0, sanitized by DOMPurify).
-//!
-//! Bundled, pinned (SHA-256 of the files in assets/):
-//!   darkreader 4.9.133      82619e7a0bcabbea15a91488bc74fd0f9ba8f8f2a1cc67527f78166037cce166
-//!   readability 0.6.0       34dcab3d0832d0019f02990eed6b6124e029e8c32b9f0c6f2550544ff8dff174
-//!   readerable  0.6.0       a98d28805804c1986ceed470678a3f409f150ee7f1d227f8c8239c005d21de65
-//!   dompurify   3.4.17      cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31
+//! Things Lumen does to a page.
 
 use base64::Engine as _;
 use serde_json::Value;
@@ -16,15 +9,11 @@ const READERABLE: &str = include_str!("../assets/readability/Readability-readera
 const PURIFY: &str = include_str!("../assets/readability/purify.min.js");
 const SERIF: &[u8] = include_bytes!("../ui/fonts/serif.woff2");
 
-/// Colors Dark Reader paints with, from Lumen's palette.
 pub struct Look {
     pub bg: String,
     pub text: String,
 }
 
-/// Runs at document creation, top frame only. Defines Dark Reader once, then switches it on
-/// after the DOM exists, unless the page is already dark (many sites follow the dark system
-/// theme) or its host is in `skip`. Run again with new colors, it re-enables with those.
 pub fn dark_script(look: &Look, skip: &[String]) -> String {
     let cfg = serde_json::json!({
         "brightness": 100, "contrast": 95, "sepia": 0,
@@ -52,10 +41,8 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     )
 }
 
-/// Turns Dark Reader off in an open page.
 pub const DARK_OFF: &str = "try{window.DarkReader&&window.DarkReader.disable()}catch(e){}";
 
-/// Runs in the page; returns the article as JSON, or null when there is none.
 pub fn extract_script() -> String {
     format!(
         r#"(()=>{{try{{
@@ -75,7 +62,6 @@ return {{title:a.title||document.title,byline:a.byline||'',siteName:a.siteName||
     )
 }
 
-/// Reader page colors and type.
 pub struct Style {
     pub dark: bool,
     pub bg: String,
@@ -88,13 +74,10 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// A standalone page: no scripts (strict CSP), images kept, Lumen typography.
 pub fn render(article: &Value, original: &str, st: &Style) -> String {
     let get = |k: &str| article.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let (title, byline, site) = (esc(&get("title")), esc(&get("byline")), esc(&get("siteName")));
-    // DOMPurify already sanitized it; the CSP below is the second lock.
     let content = get("content").replace("<script", "&lt;script");
-    // About 230 words a minute, about 5.2 characters a word.
     let chars = article.get("length").and_then(|v| v.as_u64()).unwrap_or(0) as f64;
     let minutes = ((chars / 1200.0).round() as u64).max(1);
     let font = base64::engine::general_purpose::STANDARD.encode(SERIF);
@@ -138,11 +121,6 @@ table{{border-collapse:collapse;font-size:16px}}td,th{{padding:6px 10px;border-b
     )
 }
 
-// --------------------------------------------------------------- media and PiP
-
-/// Runs at document creation, top frame only. When the page registers Media Session
-/// action handlers (play, next, previous) the shim keeps a reference, so Lumen can
-/// press them later; the page's own registration is passed through untouched.
 pub const MEDIA_SHIM: &str = r#"(()=>{if(window!==window.top)return;try{
 const h=Object.create(null);const ms=navigator.mediaSession;
 if(ms&&typeof ms.setActionHandler==='function'){
@@ -161,13 +139,6 @@ if(e.ended)continue;const s=(e.paused?0:1e9)+(e.videoWidth||0)*(e.videoHeight||0
 if(s>bs){best=e;bs=s;}}return best;}
 }catch(e){}})();"#;
 
-/// Runs at document creation, top frame, youtube.com only. YouTube offers AV1 before
-/// everything else; this machine decodes it in software (powerEfficient false) — in the
-/// renderer, at the cost of a core. The shim asks mediaCapabilities once whether AV1
-/// for this source type is power efficient, and from then on refuses av01 to
-/// MediaSource.isTypeSupported when it is not: YouTube falls to VP9, decoded on the
-/// GPU. While the check is still pending every type passes through untouched, and if
-/// a machine does decode AV1 efficiently the gate never closes.
 pub const AV1_GATE: &str = r#"(()=>{if(window!==window.top)return;
 const h=location.hostname;
 if(!(h==='youtube.com'||h.endsWith('.youtube.com')))return;
@@ -183,27 +154,20 @@ if(checked&&!hw&&typeof t==='string'&&/av01/i.test(t))return false;
 return orig.apply(MS,arguments);};
 }catch(e){}})();"#;
 
-/// Picture-in-picture: the biggest video playing, else the biggest one there is.
 pub const PIP_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m){m.pip();return;}
 const vs=[...document.querySelectorAll('video')].filter(v=>!v.ended&&v.videoWidth)
 .sort((a,b)=>b.videoWidth*b.videoHeight-a.videoWidth*a.videoHeight);const v=vs[0];
 if(v&&v.requestPictureInPicture){const p=v.requestPictureInPicture();if(p&&p.catch)p.catch(()=>{});}}catch(e){}})()"#;
 
-/// Play/pause: the shim's handlers when the page has any, the biggest media element
-/// when it does not. Pages that play through Media Session handlers never see a
-/// stray element.play(): those handlers are the page's own buttons, pressed for it.
 const TOGGLE_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m){m.toggle();return;}
 let best=null,bs=-1;for(const e of document.querySelectorAll('video,audio')){
 if(e.ended)continue;const s=(e.paused?0:1e9)+(e.videoWidth||0)*(e.videoHeight||0)+(e.duration||0);
 if(s>bs){best=e;bs=s;}}if(!best)return;
 if(best.paused){const p=best.play();if(p&&p.catch)p.catch(()=>{});}else best.pause();}catch(e){}})()"#;
 
-/// Next and previous have no page API at all: only the handlers the page registered
-/// (kept by the shim) can do them. A page without them gets nothing, quietly.
 const NEXT_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m)m.next();}catch(e){}})()"#;
 const PREV_JS: &str = r#"(()=>{try{const m=window.__lumenMS;if(m)m.prev();}catch(e){}})()"#;
 
-/// What the footer card and the media keys send into the tab that has sound.
 pub fn media_js(cmd: &str) -> &'static str {
     match cmd {
         "next" => NEXT_JS,

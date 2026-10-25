@@ -1,5 +1,4 @@
 //! Agent smoke: real headless Lumen, local pages, under 60 s.
-//!     cargo test -j 2 --test agent_smoke -- --ignored --nocapture
 
 use std::{
     io::{Read, Write},
@@ -22,8 +21,6 @@ fn tmp(name: &str) -> PathBuf {
     dir
 }
 
-/// The headless Lumen this test started. A panic anywhere in the test still kills
-/// it: a leftover headless Lumen would hold the console open and hang the run.
 struct KillLumen(Child);
 
 impl Drop for KillLumen {
@@ -95,7 +92,6 @@ fn serve(mut s: std::net::TcpStream) {
 }
 
 fn ref_of(snapshot: &str, role: &str, name: &str) -> String {
-    // find line like: - radio "medium" [ref=e5]
     for line in snapshot.lines() {
         let l = line.trim();
         if l.contains(&format!("- {} \"{}\"", role, name)) || l.contains(&format!("- {} '{}'", role, name)) {
@@ -105,10 +101,8 @@ fn ref_of(snapshot: &str, role: &str, name: &str) -> String {
                 return rest[..end].to_string();
             }
         }
-        // also match select options? generic: role name
         if l.to_lowercase().contains(&format!("{}", role.to_lowercase())) && l.contains(name) {
             if let Some(i) = l.find("ref=") {
-                // ensure role matches roughly
                 if l.contains(&format!("{} \"{}\"", role, name)) || l.contains(&format!("{} '{}'", role, name)) || l.contains(&format!("{} {}", role, name)) {
                     let rest = &l[i+4..];
                     let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
@@ -131,16 +125,13 @@ fn smoke() {
     std::fs::create_dir_all(&downloads).unwrap();
     let settings = json!({"agent": true, "agent_port": 47680});
     std::fs::write(dir.join("settings.json"), settings.to_string()).unwrap();
-    // A script the person wrote that tries a tool agents may not use (upload is off).
     std::fs::create_dir_all(dir.join("scripts")).unwrap();
     std::fs::write(dir.join("scripts").join("sneaky.luau"), "--- Tries an upload.\nlocal ok, why = lumen.try('browser_upload', {tab = input.tab, ref = 'e1', paths = {'C:/x'}})\nreturn {ok = ok, why = why}\n").unwrap();
 
     let mut cmd = Command::new(LUMEN);
     cmd.arg("--headless").env("LUMEN_HEADLESS","1").env("LUMEN_DATA",&dir).env("LUMEN_DOWNLOADS",&downloads);
-    // The idle clock puts a quiet agent's view to sleep after 2 s here, not 30.
     cmd.env("LUMEN_STAGE_IDLE_MS", "2000");
     let lumen = KillLumen(cmd.spawn().unwrap());
-    // wait token
     let mut token = String::new();
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(60) {
@@ -153,34 +144,26 @@ fn smoke() {
 
     let page = |p: &str| format!("{}{}", base, p.trim_start_matches('/'));
 
-    // open /form background=true
     let (code, out) = run_agent(&dir, "smoke", "browser_open", &[&format!("url={}", page("/form")), "background=true"]);
     eprintln!("OPEN:\n{}", out);
     assert_eq!(code, 0);
     assert!(out.starts_with("tab "), "got: {}", out);
     let tab: u64 = out.lines().next().unwrap().trim_start_matches("tab ").trim().parse().unwrap();
 
-    // find refs via snapshot
     let (code, snap) = run_agent(&dir, "smoke", "browser_snapshot", &[&format!("tab={}", tab)]);
     eprintln!("SNAP:\n{}", snap);
     assert_eq!(code, 0);
     let name_ref = ref_of(&snap, "textbox", "name").to_string();
-    // fallback if ref_of fails? try input
     let name_ref = if name_ref.is_empty() { ref_of(&snap, "input", "name") } else { name_ref };
     let radio_ref = ref_of(&snap, "radio", "medium");
     let pick_ref = ref_of(&snap, "combobox", "pick");
-    // submit button
     let submit_ref = ref_of(&snap, "button", "submit");
 
-    // type
     let (code, out) = run_agent(&dir, "smoke", "browser_type", &[&format!("tab={}", tab), &format!("ref={}", name_ref), "text=Smoke"]);
-    // args parse: text=Smoke as key=value already; but we passed text=Smoke? We passed "text=Smoke" yes as one arg? Actually args list has "text=Smoke"? We passed &format!("text=Smoke") yes.
     eprintln!("TYPE: {}", out);
     assert_eq!(code, 0);
     assert!(out.contains("now holds \"Smoke\""), "got: {}", out);
 
-    // click radio medium — the stage occlusion spike, background_click_stays_back:
-    // the view sits on the off-screen stage, out of sight but visible to Chromium.
     let t0 = Instant::now();
     let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", radio_ref)]);
     eprintln!("CLICK RADIO: {}", out);
@@ -196,12 +179,10 @@ fn smoke() {
     assert!(vis.contains("visible"), "stage view is hidden from Chromium: {vis}");
     eprintln!("TIME background_click_stays_back: {:.1}s", t0.elapsed().as_secs_f64());
 
-    // select pick Banana
     let (code, out) = run_agent(&dir, "smoke", "browser_select", &[&format!("tab={}", tab), &format!("ref={}", pick_ref), "option=Banana"]);
     eprintln!("SELECT: {}", out);
     assert_eq!(code, 0);
 
-    // two_agents_on_the_stage: a second session's tab, side by side on the stage.
     let t0 = Instant::now();
     let (code, out2) = run_agent(&dir, "smoke2", "browser_open", &[&format!("url={}", page("/form")), "background=true"]);
     eprintln!("OPEN 2: {}", out2);
@@ -223,8 +204,6 @@ fn smoke() {
     eprintln!("TIME two_agents_on_the_stage: {:.1}s", t0.elapsed().as_secs_f64());
     let _ = run_agent(&dir, "smoke2", "browser_close", &[&format!("tab={}", tab2)]);
 
-    // watch_mid_task (Task 10): the person activates the agent tab; the same view
-    // moves into the main window, the agent's calls keep landing, nothing reloads.
     let t0 = Instant::now();
     let bacon_ref = ref_of(&snap, "checkbox", "bacon");
     let large_ref = ref_of(&snap, "radio", "large");
@@ -254,7 +233,6 @@ fn smoke() {
     eprintln!("NAV ENTRIES: {}", nav);
     assert_eq!(code, 0);
     assert!(nav.trim().contains('1'), "watching reloaded the page: {nav}");
-    // The person goes back to their own tab; the agent tab returns to the stage.
     let (code, out) = run_agent(&dir, "smoke", "browser_test_activate", &[&format!("tab={}", person_tab)]);
     eprintln!("ACTIVATE PERSON: {code} {out}");
     assert_eq!(code, 0);
@@ -268,15 +246,12 @@ fn smoke() {
     assert!(vis.contains("visible"), "back on the stage but hidden: {vis}");
     eprintln!("TIME watch_mid_task: {:.1}s", t0.elapsed().as_secs_f64());
 
-    // A click that only changes the page says how much changed.
     let more_ref = ref_of(&snap, "button", "more");
     let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", more_ref)]);
     eprintln!("CLICK MORE: {}", out);
     assert_eq!(code, 0);
     assert!(out.contains(" on the page") && !out.contains("nothing on the page"), "a click that changed the page said: {out}");
 
-    // stage_idle_wakes: quiet past the idle clock (2 s, ticks every 3 s), the view sleeps;
-    // the next click wakes it and lands.
     let t0 = Instant::now();
     thread::sleep(Duration::from_secs(7));
     let (code, state) = run_agent(&dir, "smoke", "browser_test_state", &[]);
@@ -290,15 +265,12 @@ fn smoke() {
     assert!(out.contains("it is now checked"), "a click after the view slept did not land: {out}");
     eprintln!("TIME stage_idle_wakes: {:.1}s", t0.elapsed().as_secs_f64());
 
-    // click submit
     let t0 = Instant::now();
     let (code, out) = run_agent(&dir, "smoke", "browser_click", &[&format!("tab={}", tab), &format!("ref={}", submit_ref)]);
     eprintln!("SUBMIT: {}", out);
     assert_eq!(code, 0);
     eprintln!("TIME submit: {:.1}s", t0.elapsed().as_secs_f64());
 
-    // batch_is_never_a_permission: each step is authorized alone. Step 2 (upload, off by
-    // default) is refused, step 1 stays done, step 3 never runs.
     let t0 = Instant::now();
     let steps = json!([
         {"tool": "browser_open", "args": {"url": page("/done")}},
@@ -309,20 +281,17 @@ fn smoke() {
     assert!(out.contains("1 ok browser_open") && out.contains("2 ERR browser_upload") && !out.contains("3 ok"), "{out}");
     let opened: u64 = out.lines().find_map(|l| l.strip_prefix("Tab ").and_then(|r| r.split(' ').next()).and_then(|n| n.parse().ok())).expect("the batch shows the tab it stopped on");
     let _ = run_agent(&dir, "smoke", "browser_close", &[&format!("tab={opened}")]);
-    // No runs inside runs, and no more than 20 steps.
     let nested = json!([{"tool": "browser_batch", "args": {"steps": []}}]);
     let (_, out) = run_agent(&dir, "smoke", "browser_batch", &[&format!("steps={nested}")]);
     assert!(out.contains("cannot run inside a run"), "{out}");
     let many: Vec<Value> = (0..21).map(|_| json!({"tool": "browser_tabs"})).collect();
     let (_, out) = run_agent(&dir, "smoke", "browser_batch", &[&format!("steps={}", json!(many))]);
     assert!(out.contains("1 to 20 steps"), "{out}");
-    // A script is no more than its agent: the upload it tries is refused the same way.
     let (code, out) = run_agent(&dir, "smoke", "browser_script_run", &["name=sneaky", &format!("input={}", json!({"tab": tab}))]);
     eprintln!("SCRIPT DENIED: {code} {out}");
     assert!(out.contains("\"ok\": false") && out.contains("upload"), "{out}");
     eprintln!("TIME batch_and_script_rules: {:.1}s", t0.elapsed().as_secs_f64());
 
-    // the_person_speaks: a message rides on the next reply, once, before anything else.
     let (code, _) = run_agent(&dir, "smoke", "browser_test_tell", &["say=now", "text=use the cheaper one"]);
     assert_eq!(code, 0);
     let (_, out) = run_agent(&dir, "smoke", "browser_tabs", &[]);
@@ -330,7 +299,6 @@ fn smoke() {
     let (_, out) = run_agent(&dir, "smoke", "browser_tabs", &[]);
     assert!(!out.contains("The person says"), "a message is delivered once: {out}");
 
-    // close tabs
     let _ = run_agent(&dir, "smoke", "browser_close", &[&format!("tab={}", tab)]);
 
     eprintln!("TIME whole smoke run: {:.1}s", run_started.elapsed().as_secs_f64());

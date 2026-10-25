@@ -1,5 +1,4 @@
-//! Drawing. Direct2D for shapes and bitmaps, DirectWrite for text.
-//! Everything is in DIPs; the render target carries the window's DPI.
+//! Drawing.
 
 use std::{cell::RefCell, collections::HashMap};
 
@@ -68,7 +67,6 @@ pub enum Align {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Font {
     pub face: Face,
-    /// Size in tenths of a DIP, so it can be a hash key.
     pub size10: u32,
     pub weight: u32,
     pub italic: bool,
@@ -90,34 +88,23 @@ pub struct Gfx {
     d2d: ID2D1Factory,
     dw: IDWriteFactory5,
     wic: Option<IWICImagingFactory>,
-    /// Every bundled font, unpacked from WOFF2 into one in-memory collection.
     bundled: Option<IDWriteFontCollection1>,
-    /// Every family Windows has installed, as DirectWrite names them. Read once.
     installed: Vec<String>,
     ui_family: String,
     serif_family: String,
     mono_family: String,
-    /// Family names as DirectWrite sees them in the bundle (font files name themselves oddly).
     families: Vec<String>,
-    /// What every draw call goes to: the window's target, or (debug shots) a WIC bitmap's.
     target: Option<ID2D1RenderTarget>,
-    /// The window's own target, kept for Resize.
     hwnd_rt: Option<ID2D1HwndRenderTarget>,
     brush: Option<ID2D1SolidColorBrush>,
     round: Option<ID2D1StrokeStyle>,
     formats: RefCell<HashMap<Font, IDWriteTextFormat>>,
     ellipsis: RefCell<HashMap<Font, IDWriteInlineObject>>,
-    /// Decoded favicons, per tab id. Dropped when the target is lost.
     pub bitmaps: HashMap<u64, ID2D1Bitmap>,
-    /// Lucide icons as alpha masks for the current target, tinted when drawn.
-    /// Key: (icon index, pixel size, stroke x100). Bounded; dropped with the target.
     icon_masks: RefCell<HashMap<(usize, u32, u32), ID2D1Bitmap>>,
-    /// The SVG rasterizer: made when a mask is missing, dropped at the end of that frame.
     raster: RefCell<Option<icons::Rasterizer>>,
-    /// Rasterizing failed once: draw the hand-made icons from now on instead of retrying every frame.
     raster_failed: std::cell::Cell<bool>,
     pub dpi: f32,
-    /// Debug shots: the window's target and brush, set aside while a WIC target draws.
     #[cfg(debug_assertions)]
     parked: Option<Parked>,
 }
@@ -213,9 +200,6 @@ impl Gfx {
                 let hp = D2D1_HWND_RENDER_TARGET_PROPERTIES {
                     hwnd: self.hwnd,
                     pixelSize: D2D_SIZE_U { width: w.max(1), height: h.max(1) },
-                    // Present and go on. Waiting for the vertical blank held the UI thread
-                    // (pages, agent calls, input) 16 to 40 ms every frame for a 1 ms draw;
-                    // DWM composes the window, so nothing tears.
                     presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
                 };
                 let Ok(t) = self.d2d.CreateHwndRenderTarget(&props, &hp) else { return false };
@@ -241,7 +225,6 @@ impl Gfx {
         }
     }
 
-    /// Start a frame. False means nothing can be drawn right now.
     pub fn begin(&mut self, w: u32, h: u32, clear: Color) -> bool {
         if !self.ensure_target(w, h) {
             return false;
@@ -255,11 +238,9 @@ impl Gfx {
     }
 
     pub fn end(&mut self) {
-        // The SVG rasterizer only lives for the frame that needed it.
         self.raster.take();
         if let Some(t) = &self.target {
             let r = unsafe { t.EndDraw(None, None) };
-            // Device lost (driver reset, sleep). Rebuild on the next frame.
             if r.is_err() {
                 self.target = None;
                 self.hwnd_rt = None;
@@ -280,8 +261,6 @@ impl Gfx {
         b
     }
 
-    // ----------------------------------------------------------- shapes
-
     #[allow(dead_code)]
     pub fn fill(&self, r: R, c: Color) {
         unsafe { self.t().FillRectangle(&r.d2d(), self.b(c)) };
@@ -298,9 +277,6 @@ impl Gfx {
         unsafe { self.t().DrawRoundedRectangle(&rr, self.b(c), width, None) };
     }
 
-    /// A rounded rectangle filled with a straight gradient: the stops run left to
-    /// right, or top to bottom with `vertical`. Each stop is a position 0..1 and a
-    /// colour, alpha included, so two gradients can be laid over each other.
     pub fn grad(&self, r: R, radius: f32, stops: &[(f32, Color)], vertical: bool) {
         unsafe {
             let t = self.t();
@@ -327,8 +303,6 @@ impl Gfx {
         unsafe { self.t().FillEllipse(&e, self.b(c)) };
     }
 
-    /// A soft bloom: `c` at the centre fading to nothing at radius `r`. Glass's wallpaper is
-    /// two of these on its ground; a smooth gradient needs no blur to look frosted.
     pub fn bloom(&self, cx: f32, cy: f32, r: f32, c: Color) {
         unsafe {
             let t = self.t();
@@ -355,7 +329,6 @@ impl Gfx {
         unsafe { self.t().DrawEllipse(&e, self.b(c), w, self.round.as_ref()) };
     }
 
-    /// Open polyline or arcs, stroked. Points in DIPs.
     fn path(&self, build: impl FnOnce(&ID2D1GeometrySink), c: Color, w: f32, closed: bool) {
         unsafe {
             let Ok(g) = self.d2d.CreatePathGeometry() else { return };
@@ -385,7 +358,6 @@ impl Gfx {
         );
     }
 
-    /// Arc around (cx, cy) from angle a0 sweeping `sweep` degrees clockwise.
     pub fn arc(&self, cx: f32, cy: f32, r: f32, a0: f32, sweep: f32, c: Color, w: f32) {
         let pt = |a: f32| {
             let a = a.to_radians();
@@ -417,8 +389,6 @@ impl Gfx {
         unsafe { self.t().PopAxisAlignedClip() };
     }
 
-    /// What follows is drawn faded to `opacity` and moved down `dy`, until `end_fade`. A card's
-    /// entrance. Only while it moves: a settled card draws without the layer.
     pub fn begin_fade(&self, opacity: f32, dy: f32) {
         unsafe {
             let p = D2D1_LAYER_PARAMETERS {
@@ -442,12 +412,6 @@ impl Gfx {
         }
     }
 
-    // ------------------------------------------------------------- text
-
-    /// Choose the interface, display and monospace families by setting. A key
-    /// ("segoe", "instrument", "cascadia"...) picks a bundled font or the system
-    /// default; any other name is looked up among the fonts Windows has
-    /// installed. Clears cached formats on change.
     pub fn set_families(&mut self, ui: &str, display: &str, mono: &str) {
         let ui = self.resolve(ui, Face::Ui);
         let serif = self.resolve(display, Face::Serif);
@@ -462,13 +426,10 @@ impl Gfx {
         }
     }
 
-    /// A setting value to a family DirectWrite knows: a bundled key, an installed
-    /// family (by its own spelling), or the face's fallback.
     fn resolve(&self, key: &str, face: Face) -> String {
         let key = key.trim();
         if let Some(bundled_key) = keyword(key) {
             return self.bundled_named(bundled_key).unwrap_or_else(|| {
-                // A bundled family that will not load: Windows' own, or the monospace fallback.
                 match face {
                     Face::Ui => SYSTEM_UI.into(),
                     Face::Serif => SERIF_FALLBACK.into(),
@@ -479,15 +440,12 @@ impl Gfx {
         if key.is_empty() {
             return self.fallback(face);
         }
-        // The monospace keys name fonts that ship with Windows, not with Lumen.
         if face == Face::Mono {
             return self.installed_named(key).unwrap_or_else(|| self.installed_named(MONO_FALLBACK).unwrap_or_else(|| SYSTEM_UI.into()));
         }
-        // A bundled name said directly ("Instrument Sans").
         if let Some(f) = self.bundled_named(key) {
             return f;
         }
-        // An installed family, spelled the way Windows spells it.
         self.installed_named(key).unwrap_or_else(|| self.fallback(face))
     }
 
@@ -499,24 +457,18 @@ impl Gfx {
         }
     }
 
-    /// A family name in the bundle, matched by keyword (the files name themselves
-    /// in their own language).
     fn bundled_named(&self, word: &str) -> Option<String> {
         self.families.iter().find(|f| f.contains(word)).cloned()
     }
 
-    /// A family name Windows has installed, matched without case.
     fn installed_named(&self, name: &str) -> Option<String> {
         self.installed.iter().find(|f| f.eq_ignore_ascii_case(name)).cloned()
     }
 
-    /// Every installed family name, in the order DirectWrite lists them. For the
-    /// settings' searchable font picker.
     pub fn installed_families(&self) -> &[String] {
         &self.installed
     }
 
-    /// The interface family in use ("Segoe UI Variable Text" when the system one).
     pub fn ui_family(&self) -> &str {
         &self.ui_family
     }
@@ -526,15 +478,12 @@ impl Gfx {
             return Some(x.clone());
         }
         unsafe {
-            // System font from the system collection; anything else from the bundle.
             let bundled = || self.bundled.as_ref().and_then(|c| c.cast::<IDWriteFontCollection>().ok());
             let name = match f.face {
                 Face::Ui => self.ui_family.as_str(),
                 Face::Serif => self.serif_family.as_str(),
                 Face::Mono => self.mono_family.as_str(),
             };
-            // A family the bundle carries is looked up in it; every other name
-            // (Windows' own fonts) comes from the system collection.
             let coll = if self.families.iter().any(|f| f == name) { bundled() } else { None };
             let (family, coll): (HSTRING, Option<IDWriteFontCollection>) = (HSTRING::from(name), coll);
             let fmt = self
@@ -566,7 +515,6 @@ impl Gfx {
         }
     }
 
-    /// One line of text, vertically centered in r, ellipsized if it does not fit.
     pub fn text(&self, s: &str, r: R, f: Font, c: Color) {
         let Some(fmt) = self.format(f) else { return };
         let w = wide(s);
@@ -582,7 +530,6 @@ impl Gfx {
         };
     }
 
-    /// Text that wraps onto as many lines as fit in r, from the top. Clipped at r's bottom.
     pub fn text_wrap(&self, s: &str, r: R, f: Font, c: Color) {
         let Some(fmt) = self.format(f) else { return };
         let w = wide(s);
@@ -599,8 +546,6 @@ impl Gfx {
         }
     }
 
-    /// One line with its letters set `track` DIPs apart (the small capital labels), vertically
-    /// centred in r and clipped to it.
     pub fn text_tracked(&self, s: &str, r: R, f: Font, c: Color, track: f32) {
         let Some(fmt) = self.format(f) else { return };
         let w = wide(s);
@@ -614,7 +559,6 @@ impl Gfx {
         }
     }
 
-    /// How wide `text_tracked` sets a line.
     pub fn measure_tracked(&self, s: &str, f: Font, track: f32) -> f32 {
         self.measure(s, f) + track * s.chars().count() as f32
     }
@@ -629,9 +573,6 @@ impl Gfx {
         }
     }
 
-    // ----------------------------------------------------------- images
-
-    /// PNG bytes to a GPU bitmap, cached under `key`.
     pub fn bitmap(&mut self, key: u64, png: &[u8]) -> Option<ID2D1Bitmap> {
         if let Some(b) = self.bitmaps.get(&key) {
             return Some(b.clone());
@@ -658,9 +599,6 @@ impl Gfx {
         };
     }
 
-    /// Image file bytes (PNG, JPEG, BMP, GIF) to a bitmap cached under `key`, at
-    /// no more than `max_px` on the long side. Drawing a small bitmap enlarged is
-    /// the cheap, dependable blur: WIC does the work once, not every frame.
     pub fn bitmap_scaled(&mut self, key: u64, bytes: &[u8], max_px: u32) -> Option<ID2D1Bitmap> {
         if let Some(b) = self.bitmaps.get(&key) {
             return Some(b.clone());
@@ -680,7 +618,6 @@ impl Gfx {
             let bmp = if w > max_px || h > max_px {
                 let k = max_px as f32 / w.max(h).max(1) as f32;
                 let scaler = wic.CreateBitmapScaler().ok()?;
-                // Fant: a soft downsample, which is what the blur wants.
                 scaler
                     .Initialize(&conv, ((w as f32 * k) as u32).max(1), ((h as f32 * k) as u32).max(1), WICBitmapInterpolationModeFant)
                     .ok()?;
@@ -693,10 +630,6 @@ impl Gfx {
         }
     }
 
-    // ------------------------------------------------------------ icons
-
-    /// An icon by Lumen's name, drawn at (x, y) with size `s` DIPs. Lucide where the set has
-    /// it (see `icons.rs`), hand-made geometry for the rest.
     pub fn icon(&self, name: &str, x: f32, y: f32, s: f32, c: Color) {
         if self.lucide(name, x, y, s, c) {
             return;
@@ -704,7 +637,6 @@ impl Gfx {
         self.geometry_icon(name, x, y, s, c);
     }
 
-    /// The Lucide mask for (icon, pixel size, stroke): from the cache, or rasterized now.
     fn icon_mask(&self, idx: usize, px: u32, stroke100: u32) -> Option<ID2D1Bitmap> {
         let key = (idx, px, stroke100);
         if let Some(b) = self.icon_masks.borrow().get(&key) {
@@ -739,7 +671,6 @@ impl Gfx {
         Some(bmp)
     }
 
-    /// Draw a Lucide icon snapped to whole device pixels, so its strokes stay crisp.
     fn lucide(&self, name: &str, x: f32, y: f32, s: f32, c: Color) -> bool {
         let Some((idx, entry)) = icons::find(name) else { return false };
         let size = s * entry.scale;
@@ -748,13 +679,11 @@ impl Gfx {
         let stroke100 = (icons::stroke24(size) * 100.0).round() as u32;
         let Some(mask) = self.icon_mask(idx, px, stroke100) else { return false };
         let d = px as f32 / k;
-        // Centred in the s-by-s box, then onto whole device pixels.
         let (left, top) = (((x + (s - d) / 2.0) * k).round() / k, ((y + (s - d) / 2.0) * k).round() / k);
         let dest = D2D_RECT_F { left, top, right: left + d, bottom: top + d };
         let src = D2D_RECT_F { left: 0.0, top: 0.0, right: d, bottom: d };
         let t = self.t();
         unsafe {
-            // Opacity masks only work unantialiased; the mask is already pixel-exact.
             t.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             t.FillOpacityMask(&mask, self.b(c), D2D1_OPACITY_MASK_CONTENT_GRAPHICS, Some(&dest), Some(&src));
             t.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -762,8 +691,6 @@ impl Gfx {
         true
     }
 
-    /// Line icons on a 16-unit grid, drawn at (x, y) with size `s` DIPs. Only for names the
-    /// Lucide set lacks; see `icons::GEOMETRY`.
     fn geometry_icon(&self, name: &str, x: f32, y: f32, s: f32, c: Color) {
         let k = s / 16.0;
         let p = |px: f32, py: f32| (x + px * k, y + py * k);
@@ -867,7 +794,6 @@ impl Gfx {
                 self.polyline(&[p(5.0, 10.0), p(11.0, 10.0), p(10.0, 7.0), p(10.0, 3.0), p(6.0, 3.0), p(6.0, 7.0)], c, w, true);
             }
             "home" => {
-                // A little house: the page a pin was made on.
                 self.polyline(&[p(3.0, 7.5), p(8.0, 3.5), p(13.0, 7.5)], c, w, false);
                 self.polyline(&[p(4.5, 6.8), p(4.5, 12.5), p(11.5, 12.5), p(11.5, 6.8)], c, w, false);
             }
@@ -877,14 +803,11 @@ impl Gfx {
                 l(p(10.0, 3.5), p(10.0, 12.5));
             }
             "sidebar" => {
-                // A window with its left strip marked: the sidebar's own picture.
                 let (a, b) = (p(2.4, 3.2), p(13.6, 12.8));
                 self.round_stroke(R::new(a.0, a.1, b.0 - a.0, b.1 - a.1), 2.0 * k, c, w);
                 l(p(6.4, 3.4), p(6.4, 12.6));
             }
             "split" => {
-                // One window cut in two, the left half filled: two pages, one in focus. Two
-                // separate outlines read as the digits "00" at this size.
                 let (a, b) = (p(2.4, 3.2), p(13.6, 12.8));
                 let r = R::new(a.0, a.1, b.0 - a.0, b.1 - a.1);
                 let half = R::new(r.x + w * 0.5, r.y + w * 0.5, (r.w / 2.0 - w * 0.5).max(1.0), r.h - w);
@@ -896,24 +819,18 @@ impl Gfx {
         }
     }
 
-    /// Loading ring: a faint track and a turning arc.
     pub fn spinner(&self, cx: f32, cy: f32, r: f32, phase: f32, track: Color, c: Color) {
         self.ring(cx, cy, r, r, track, 1.5);
         self.arc(cx, cy, r, phase * 360.0, 90.0, c, 1.5);
     }
 }
 
-/// Most icon masks kept at once (a few dozen are ever in use; this only bounds a bug).
 const ICON_CACHE_MAX: usize = 128;
 
 const SYSTEM_UI: &str = "Segoe UI Variable Text";
-/// When the bundle will not give a serif, Windows does.
 const SERIF_FALLBACK: &str = "Georgia";
-/// The monospace the figures are set in when the setting says "cascadia" or
-/// names a font this PC does not have.
 const MONO_FALLBACK: &str = "Cascadia Mono";
 
-/// The bundled fonts' keywords, in the settings' words.
 fn keyword(key: &str) -> Option<&'static str> {
     Some(match key {
         "instrument" => "Instrument",
@@ -927,7 +844,6 @@ fn keyword(key: &str) -> Option<&'static str> {
     })
 }
 
-/// Every family name Windows has installed.
 fn system_families(dw: &IDWriteFactory5) -> Vec<String> {
     unsafe {
         let mut c: Option<IDWriteFontCollection1> = None;
@@ -940,7 +856,6 @@ fn system_families(dw: &IDWriteFactory5) -> Vec<String> {
     }
 }
 
-/// Every family name in a collection, in its first listed language.
 fn family_names(c: Option<&IDWriteFontCollection1>) -> Vec<String> {
     let Some(c) = c else { return Vec::new() };
     let mut out = Vec::new();
@@ -961,7 +876,6 @@ fn family_names(c: Option<&IDWriteFontCollection1>) -> Vec<String> {
     out
 }
 
-/// Unpack WOFF2 fonts into an in-memory collection DirectWrite can use.
 fn load_woff2(dw: &IDWriteFactory5, files: &[&[u8]]) -> Option<IDWriteFontCollection1> {
     unsafe {
         let loader = dw.CreateInMemoryFontFileLoader().ok()?;
@@ -977,10 +891,8 @@ fn load_woff2(dw: &IDWriteFactory5, files: &[&[u8]]) -> Option<IDWriteFontCollec
             }
             let bytes = std::slice::from_raw_parts(ptr as *const u8, size as usize).to_vec();
             stream.ReleaseFileFragment(ctx);
-            // Also for GDI, private to this process: the address bar is a Win32 edit box.
             let mut n = 0u32;
             let _ = windows::Win32::Graphics::Gdi::AddFontMemResourceEx(bytes.as_ptr() as _, bytes.len() as u32, None, &mut n);
-            // No owner: DirectWrite copies the bytes.
             let Ok(file) = loader.CreateInMemoryFontFileReference(dw, bytes.as_ptr() as _, bytes.len() as u32, None) else { continue };
             let _ = builder.AddFontFile(&file);
         }
@@ -989,12 +901,8 @@ fn load_woff2(dw: &IDWriteFactory5, files: &[&[u8]]) -> Option<IDWriteFontCollec
     }
 }
 
-
-/// Debug-only screenshots. The window's Direct2D target cannot be read back (PrintWindow
-/// returns an empty frame), so the same drawing code runs once more into a WIC bitmap.
 #[cfg(debug_assertions)]
 impl Gfx {
-    /// Swap a WIC bitmap target in for the window's. Draw as usual, then `end_shot`.
     pub fn begin_shot(&mut self, w: u32, h: u32) -> bool {
         if self.parked.is_some() {
             return false;
@@ -1027,7 +935,6 @@ impl Gfx {
         true
     }
 
-    /// Put the window's target back and write the shot as a PNG. `crop` is x, y, w, h in pixels.
     pub fn end_shot(&mut self, path: &std::path::Path, crop: Option<(i32, i32, i32, i32)>) -> bool {
         let Some(p) = self.parked.take() else { return false };
         let ok = self.target.as_ref().is_some_and(|t| unsafe { t.EndDraw(None, None) }.is_ok());

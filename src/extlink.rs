@@ -1,28 +1,16 @@
 //! Links that are not web pages: mailto:, tel:, spotify:, zoommtg:, steam:, ms-settings: ...
-//!
-//! WebView2 raises an event when a page tries to open one. Lumen cancels WebView2's own box and
-//! decides here: ask once per site and scheme, remember "always" in the permission rules, and
-//! only then hand the address to Windows. Agent tabs never get here.
-//!
-//! This file is the decision and the words. The question itself is in `chrome/dialog.rs`; the
-//! event is hooked in `engine.rs`; the glue is in `main.rs`.
 
 use std::{collections::HashMap, time::{Duration, Instant}};
 
 use crate::store::Rules;
 
-/// What to do with a page's request to open an app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// The person said always: open it.
     Open,
-    /// Ask the person.
     Ask,
-    /// Do nothing, and say nothing.
     Drop,
 }
 
-/// What the person answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
     Once,
@@ -30,21 +18,16 @@ pub enum Answer {
     Cancel,
 }
 
-/// Schemes that run code or reach into the machine when handed to Windows. Never opened, never
-/// asked about: no site has a good reason to start these.
 const NEVER: &[&str] = &[
     "javascript", "vbscript", "data", "file", "blob", "about", "chrome", "edge", "view-source", "ms-msdt", "ms-appinstaller", "ms-officecmd",
     "search-ms", "search", "shell", "ms-cxh", "ms-cxh-full", "ms-gamebarservices", "ms-gamingoverlay", "ms-ipp", "ms-ipps", "ldap", "ldaps", "ftp", "ws", "wss", "http", "https",
     "magnet", "ms-browser-extension", "ms-search", "ms-nfp", "ms-shell", "ms-quick-assist",
 ];
 
-/// The longest address handed to Windows.
 const MAX_URI: usize = 2048;
 
-/// How long a "no" is remembered, so a page that keeps asking is not asked again.
 const COOLDOWN: Duration = Duration::from_secs(30);
 
-/// The scheme of `uri`, lowercase, if the address is one Lumen may hand to Windows.
 pub fn scheme_of(uri: &str) -> Option<String> {
     if uri.len() > MAX_URI || uri.chars().any(|c| c.is_control()) {
         return None;
@@ -53,7 +36,6 @@ pub fn scheme_of(uri: &str) -> Option<String> {
     let ok = name.len() >= 2
         && name.starts_with(|c: char| c.is_ascii_alphabetic())
         && name.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
-    // `localhost:3000` is a host and a port, not an app.
     let port = rest.split(['/', '?', '#']).next().unwrap_or("");
     if !ok || (!port.is_empty() && port.chars().all(|c| c.is_ascii_digit())) {
         return None;
@@ -62,13 +44,10 @@ pub fn scheme_of(uri: &str) -> Option<String> {
     (!NEVER.contains(&s.as_str())).then_some(s)
 }
 
-/// The key in the permission rules: "open spotify".
 pub fn rule_kind(scheme: &str) -> String {
     format!("open {scheme}")
 }
 
-/// Open, ask or drop. Agents and private-mode rules are the caller's to pass in:
-/// `agent` is a tab an agent owns; a rule is read for a private tab but never written for one.
 pub fn decide(rules: &Rules, origin: &str, scheme: &str, user: bool, agent: bool) -> Decision {
     if agent {
         return Decision::Drop;
@@ -76,13 +55,11 @@ pub fn decide(rules: &Rules, origin: &str, scheme: &str, user: bool, agent: bool
     match rules.get(origin).and_then(|r| r.get(&rule_kind(scheme))).copied() {
         Some(true) => Decision::Open,
         Some(false) => Decision::Drop,
-        // A page that was not clicked on does not get to ask.
         None if !user => Decision::Drop,
         None => Decision::Ask,
     }
 }
 
-/// What a person calls the app behind a scheme.
 pub fn app_name(scheme: &str) -> String {
     let known = match scheme {
         "mailto" => "your mail app",
@@ -115,7 +92,6 @@ pub fn app_name(scheme: &str) -> String {
     known.to_string()
 }
 
-/// The title and the sentence of the question.
 pub fn prompt_words(origin: &str, scheme: &str) -> (String, String) {
     let app = app_name(scheme);
     let site = origin.split_once("://").map_or(origin, |(_, h)| h);
@@ -124,7 +100,6 @@ pub fn prompt_words(origin: &str, scheme: &str) -> (String, String) {
     (title, format!("{site} wants to open {app}."))
 }
 
-/// One question at a time per site and app, and a "no" is not asked again for a while.
 #[derive(Default)]
 pub struct Gate {
     asking: HashMap<(String, String), ()>,
@@ -132,7 +107,6 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// May this site ask about this app now? Marks the question as open when it may.
     pub fn begin(&mut self, origin: &str, scheme: &str, now: Instant) -> bool {
         let k = (origin.to_string(), scheme.to_string());
         self.muted.retain(|_, until| *until > now);
@@ -143,7 +117,6 @@ impl Gate {
         true
     }
 
-    /// The question is answered. A Cancel quiets this site and app for a while.
     pub fn finish(&mut self, origin: &str, scheme: &str, answer: Answer, now: Instant) {
         let k = (origin.to_string(), scheme.to_string());
         self.asking.remove(&k);
@@ -153,7 +126,6 @@ impl Gate {
     }
 }
 
-/// Hand the address to Windows. The caller has already decided this is fine.
 pub fn launch(uri: &str) -> bool {
     use windows::{
         Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
@@ -163,7 +135,6 @@ pub fn launch(uri: &str) -> bool {
         return false;
     }
     let r = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(uri), None, None, SW_SHOWNORMAL) };
-    // ShellExecute reports success with a number above 32.
     r.0 as usize > 32
 }
 
@@ -222,7 +193,6 @@ mod tests {
     fn always_opens_without_asking() {
         let r = rules(SITE, "open spotify", true);
         assert_eq!(decide(&r, SITE, "spotify", true, false), Decision::Open);
-        // Also from a redirect nobody clicked: the person said always.
         assert_eq!(decide(&r, SITE, "spotify", false, false), Decision::Open);
     }
 
@@ -274,16 +244,12 @@ mod tests {
         let mut g = Gate::default();
         let t0 = Instant::now();
         assert!(g.begin(SITE, "spotify", t0));
-        // The same question while it is open: no second box.
         assert!(!g.begin(SITE, "spotify", t0));
-        // A different app or site is its own question.
         assert!(g.begin(SITE, "steam", t0));
         assert!(g.begin("https://b.com", "spotify", t0));
         g.finish(SITE, "spotify", Answer::Cancel, t0);
-        // A page that keeps asking after a no is not asked again for a while.
         assert!(!g.begin(SITE, "spotify", t0 + Duration::from_secs(5)));
         assert!(g.begin(SITE, "spotify", t0 + COOLDOWN + Duration::from_secs(1)));
-        // A yes does not mute: the next click may ask again (or be an Always by then).
         g.finish(SITE, "steam", Answer::Once, t0);
         assert!(g.begin(SITE, "steam", t0));
     }

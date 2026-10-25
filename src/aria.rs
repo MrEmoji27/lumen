@@ -1,14 +1,4 @@
 //! Downloads run on many wires at once, so aria2 runs them.
-//!
-//! aria2 is a shell of a thing: we hand it a URL, it splits the file into
-//! pieces, opens sixteen connections, keeps the map on disk, and resumes
-//! tomorrow where it stopped tonight. We never speak to it but for JSON-RPC
-//! over localhost. No UI lives here.
-//!
-//! The binary is not ours, so it gets no trust for free. It arrives in a zip
-//! whose hash we pinned before we ever ran it, and only `aria2c.exe` leaves
-//! that zip. If the bytes are wrong, the file is deleted and we stay silent.
-//! `ready()` is false and Lumen keeps using its own downloader.
 
 use std::{
     collections::HashMap,
@@ -32,123 +22,77 @@ use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use crate::trackers;
 
-/// Where the zip comes from. One line, pinned to a release.
 const ZIP_URL: &str =
     "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip";
-/// Hash of that zip, computed here before a single byte of it was ever run.
 const ZIP_SHA256: &str = "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288";
-/// Hash of `aria2c.exe` as it sits inside that zip. A second lock on the same door.
 const EXE_SHA256: &str = "be2099c214f63a3cb4954b09a0becd6e2e34660b886d4c898d260febfe9d70c2";
-/// The one member we take out of the archive.
 const MEMBER: &str = "aria2-1.37.0-win-64bit-build1/aria2c.exe";
 const EXE: &str = "aria2c.exe";
 const ZIP: &str = "aria2.zip";
 const SESSION: &str = "session.txt";
-/// aria2c.exe is 5.6 MB. Anything larger was never the file we asked for.
 const MAX_EXE: usize = 64 << 20;
-/// The release zip is 2.4 MB. Same rule, same reason.
 const MAX_ZIP: usize = 32 << 20;
-/// Getting the zip is a one time thing; asking aria2 questions is not.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const RPC_TIMEOUT: Duration = Duration::from_secs(3);
-/// How long aria2 gets to open its port after it is spawned.
 const BOOT_TRIES: u32 = 50;
 const BOOT_SLEEP: Duration = Duration::from_millis(100);
 
-/// What aria2 is told at startup, every time. Every line here was read in
-/// `aria2c.exe --help=#all` for 1.37.0: a flag the binary does not know is
-/// dropped without a word, and the tuning would then be a lie.
 const FLAGS: &[&str] = &[
     "--enable-rpc",
-    // A downloader that listens on the network is a hole.
     "--rpc-listen-all=false",
     "--continue=true",
-    // Sixteen wires into one file, in pieces of a megabyte and up: small
-    // pieces keep every wire busy, 1M keeps the bookkeeping sane.
     "--max-connection-per-server=16",
     "--split=16",
     "--min-split-size=1M",
-    // falloc lays a big file down on NTFS at once. `none` would grow it in
-    // pieces and pay a seek per write.
     "--file-allocation=falloc",
     "--auto-file-renaming=true",
-    // Five at once, and aria2 slides the count toward whatever moves.
     "--max-concurrent-downloads=5",
     "--optimize-concurrent-downloads=true",
-    // 64 MB of finished pieces held in RAM: fewer, larger writes out, and a
-    // hash check never has to read the disk back.
     "--disk-cache=64M",
-    // HTTP: DNS off the blocking path, gzip when the server offers it.
     "--async-dns=true",
     "--http-accept-gzip=true",
-    // A dead server gets 15 seconds to connect and 30 to move, then five
-    // tries three seconds apart before the download is called failed.
     "--connect-timeout=15",
     "--timeout=30",
     "--max-tries=5",
     "--retry-wait=3",
-    // Hang up on a crawl. aria2's own help says this one never touches
-    // BitTorrent, so a torrent that is only waiting for peers is left alone.
     "--lowest-speed-limit=10K",
     "--save-session-interval=10",
     "--console-log-level=warn",
     "--summary-interval=0",
-    // BitTorrent: magnet links, DHT, local peer discovery, follow a
-    // finished .torrent into the torrent it names.
     "--enable-dht=true",
     "--bt-enable-lpd=true",
-    // These two ports belong to the upnp worker. It rewrites them; we do not.
     "--follow-torrent=true",
     "--bt-save-metadata=true",
-    // A torrent a PAGE starts must never join the swarm on its own: born
-    // paused, waiting for the person to press Resume. Person-started torrents
-    // are resumed by the main loop once their metadata is in.
     "--pause-metadata=true",
     "--seed-ratio=1.0",
-    // The swarm: 128 peers at a time, four times aria2's own default of 55.
-    // 0 means no cap, and an uncapped swarm is how a laptop cooks itself.
-    // Under 1M/s overall, aria2 goes looking for more of them.
     "--bt-max-peers=128",
     "--bt-request-peer-speed-limit=1M",
-    // The DHT has to shake hands with one live node before it finds the rest.
     "--dht-entry-point=dht.transmissionbt.com:6881",
-    // A tracker that never answers must not hold the swarm hostage for
-    // aria2's default of a minute.
     "--bt-tracker-connect-timeout=10",
     "--bt-tracker-timeout=10",
 ];
 
-/// One download, as the UI needs to see it.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct Job {
     pub gid: String,
     pub url: String,
-    /// Full file path. Empty until aria2 has decided on one.
     pub path: String,
     pub total: u64,
     pub done: u64,
-    /// Bytes per second, right now.
     pub speed: u64,
     pub connections: u32,
-    /// "active" | "waiting" | "paused" | "complete" | "error" | "removed"
     pub status: &'static str,
     pub error: String,
-    /// Torrent name from bittorrent.info.name. Empty for plain files.
     pub name: String,
-    /// Bytes per second out, right now.
     pub upload_speed: u64,
     pub upload_length: u64,
     pub num_seeders: u64,
-    /// True when the download is complete and seeding.
     pub seeder: bool,
-    /// Gids aria2 spawned for this one (a .torrent file becomes a torrent).
     pub followed_by: Vec<String>,
-    /// Number of files (a multi-file torrent opens its folder, not the first file).
     pub files: usize,
 }
 
-/// Job keys worth asking aria2 for. Request only these so the poll stays small.
 const KEYS: &[&str] = &[
     "gid",
     "status",
@@ -166,7 +110,6 @@ const KEYS: &[&str] = &[
     "bittorrent.info.name",
 ];
 
-/// gid -> the job it spawned, for every job that has a followedBy.
 pub fn follow_map(jobs: &[Job]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for j in jobs {
@@ -177,8 +120,6 @@ pub fn follow_map(jobs: &[Job]) -> HashMap<String, String> {
     map
 }
 
-/// The poll thread's switch. A download flips it on; the thread sleeps on a
-/// condvar until then, so an idle Lumen has no polling thread at all.
 pub struct Poll {
     on: Mutex<bool>,
     wake: Condvar,
@@ -189,13 +130,11 @@ impl Poll {
         Arc::new(Poll { on: Mutex::new(false), wake: Condvar::new() })
     }
 
-    /// True: start asking aria2 about its jobs. False: go back to sleep.
     pub fn store(&self, on: bool) {
         *lock(&self.on) = on;
         self.wake.notify_all();
     }
 
-    /// Sleep until a download has something to ask about.
     pub fn wait(&self) {
         let mut g = lock(&self.on);
         while !*g {
@@ -204,26 +143,17 @@ impl Poll {
     }
 }
 
-/// The engine, and nothing else. `start` returns before it knows anything.
 pub struct Aria {
-    /// The running engine. None until it arrives; none forever if it never does.
     engine: Mutex<Option<Engine>>,
-    /// gid to the URL we asked for, because a stopped job forgets its own URL.
     urls: Mutex<HashMap<String, String>>,
     ids: AtomicU64,
-    /// Download speed cap in bytes/s (0 = none). Held here so it survives an
-    /// engine that has not booted yet, and is applied the moment it has.
     limit: AtomicU64,
-    /// What a boot needs, kept so aria2 can start when it is first wanted.
     boot: Boot,
-    /// A boot has been asked for. aria2 starts once per run, at most.
     woken: AtomicBool,
-    /// The boot ran and gave no engine: Lumen downloads files itself from now on.
     failed: AtomicBool,
     me: Weak<Aria>,
 }
 
-/// The arguments of one boot.
 struct Boot {
     data: PathBuf,
     downloads: PathBuf,
@@ -231,16 +161,12 @@ struct Boot {
     bt_port: u16,
 }
 
-/// How long a download waits for aria2 to start before it falls back to WebView2's own
-/// downloader. A cold start (the exe checked, the port answering) takes about a second.
 const WAKE_WAIT: Duration = Duration::from_secs(20);
 
-/// The process, and how to talk to it. One per Lumen run.
 struct Engine {
     child: Child,
     port: u16,
     secret: String,
-    /// It has been asked to stop, and has gone.
     stopped: bool,
 }
 
@@ -251,18 +177,12 @@ impl Drop for Engine {
 }
 
 impl Engine {
-    /// Stop aria2 the clean way. It writes its DHT table and its session on
-    /// the way out, and a killed one writes neither: every start would be a
-    /// cold DHT, and the swarm takes a long while to answer a stranger. The
-    /// kill is still there for an engine that will not go.
     fn stop(&mut self) {
         if self.stopped {
             return;
         }
         self.stopped = true;
         let _ = call(self.port, &self.secret, 0, "aria2.shutdown", &[]);
-        // aria2 needs a few seconds to stop the downloads, write the DHT table
-        // and go. Measured on 2026-10-19: 4.2 s with a torrent running.
         for _ in 0..100 {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
                 return;
@@ -276,9 +196,6 @@ impl Engine {
 
 #[allow(dead_code)]
 impl Aria {
-    /// Returns at once, with nothing running. aria2 starts the first time it is wanted
-    /// (`wake`, or a download added): idle, it costs no memory at all. Measured as
-    /// "Helpers", about 3.5 MB, when it started with Lumen whether anything downloaded or not.
     pub fn idle(data_dir: &Path, download_dir: &Path, keep_seeding: bool, limit_kbps: u32, bt_port: u16) -> Arc<Aria> {
         Arc::new_cyclic(|me| Aria {
             engine: Mutex::new(None),
@@ -292,8 +209,6 @@ impl Aria {
         })
     }
 
-    /// Start aria2 now, if it is not started yet. Returns at once: the binary is fetched,
-    /// checked and started on a background thread; `ready()` is false until that is done.
     pub fn wake(&self) {
         if self.woken.swap(true, Ordering::AcqRel) {
             return;
@@ -305,35 +220,25 @@ impl Aria {
             .name("lumen-aria".into())
             .spawn(move || {
                 let engine = Engine::boot(&data, &dl, keep_seeding, bt_port);
-                // Lumen may have died while we were booting. Let the engine drop and the
-                // aria2 process dies with it.
                 let Some(aria) = weak.upgrade() else { return };
                 let Some(engine) = engine else {
                     aria.failed.store(true, Ordering::Release);
                     return;
                 };
                 *lock(&aria.engine) = Some(engine);
-                // The speed limit chosen before boot takes effect now.
                 aria.try_speed_limit();
-                // Trackers are a network errand of their own: once a week, never in
-                // the way of a start.
                 trackers::refresh(&data, &aria);
             });
     }
 
-    /// It was asked to start and could not. Downloads stop coming to it for this run.
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
     }
 
-    /// aria2 left unfinished work last time: downloads to resume, torrents to seed.
-    /// Then it starts with Lumen, as before; otherwise it waits to be wanted.
     pub fn has_session(data_dir: &Path) -> bool {
         fs::metadata(data_dir.join("aria2").join(SESSION)).is_ok_and(|m| m.len() > 0)
     }
 
-    /// Start aria2 if needed and wait for it, up to `WAKE_WAIT`. For a caller off the UI
-    /// thread that has a download in hand.
     fn wait_ready(&self) -> Result<(), String> {
         self.wake();
         let until = std::time::Instant::now() + WAKE_WAIT;
@@ -346,15 +251,10 @@ impl Aria {
         Ok(())
     }
 
-    /// True when aria2 answers. Until then there is no downloader to talk to.
     pub fn ready(&self) -> bool {
         lock(&self.engine).is_some()
     }
 
-    /// Ask aria2 to stop, and wait for it to say goodbye. Lumen calls this on
-    /// the way out, so the DHT table and the session are written: without it
-    /// every start is a cold DHT, and the swarm takes a long while to answer a
-    /// stranger.
     pub fn shutdown(&self) {
         let engine = lock(&self.engine).take();
         if let Some(mut engine) = engine {
@@ -362,15 +262,10 @@ impl Aria {
         }
     }
 
-    /// Queue a URL. Headers are whole lines: "Cookie: a=b", "Referer: ...".
-    /// `pause` puts it in paused, for a torrent a PAGE started: it must wait
-    /// for the person to press Resume. Returns the gid aria2 gave it.
     pub fn add(&self, url: &str, headers: &[String], filename: Option<&str>, pause: bool) -> Result<String, String> {
         self.add_in(url, headers, filename, pause, None)
     }
 
-    /// Like `add`, into a folder of its own instead of the download folder. A torrent that a
-    /// .torrent file fetched this way spawns inherits the folder.
     pub fn add_in(&self, url: &str, headers: &[String], filename: Option<&str>, pause: bool, dir: Option<&Path>) -> Result<String, String> {
         self.wait_ready()?;
         let (port, secret) = self.line()?;
@@ -392,8 +287,6 @@ impl Aria {
         Ok(gid)
     }
 
-    /// Queue a base64 .torrent (Open torrent…). Headers travel the same way
-    /// as for a URL, for sites that need a cookie even on the torrent itself.
     pub fn add_torrent(&self, b64: &str, headers: &[String]) -> Result<String, String> {
         let (port, secret) = self.line()?;
         let mut options = serde_json::Map::new();
@@ -413,19 +306,16 @@ impl Aria {
         Ok(gid)
     }
 
-    /// Stop the pieces, keep the file.
     pub fn pause(&self, gid: &str) -> Result<(), String> {
         let (port, secret) = self.line()?;
         call(port, &secret, self.id(), "aria2.forcePause", &[json!(gid)]).map(|_| ())
     }
 
-    /// Pick the pieces up again.
     pub fn resume(&self, gid: &str) -> Result<(), String> {
         let (port, secret) = self.line()?;
         call(port, &secret, self.id(), "aria2.unpause", &[json!(gid)]).map(|_| ())
     }
 
-    /// Kill it and forget it. A running download only stops if forced.
     pub fn remove(&self, gid: &str) -> Result<(), String> {
         let (port, secret) = self.line()?;
         let gone = call(port, &secret, self.id(), "aria2.forceRemove", &[json!(gid)]).ok();
@@ -436,19 +326,14 @@ impl Aria {
         gone.map(|_| ()).ok_or_else(|| "aria2 refused to forget that gid".to_string())
     }
 
-    /// Everything aria2 is holding: active, waiting, and recently stopped.
-    /// Newest first.
     pub fn jobs(&self) -> Vec<Job> {
         let Some((port, secret)) = self.line_opt() else { return Vec::new() };
         let known = lock(&self.urls).clone();
         let mut out: Vec<Job> = Vec::new();
         let keys = json!(KEYS);
-        // Active and waiting come out oldest first; stopped comes out newest first.
         read_list(port, &secret, self.id(), "aria2.tellActive", &[keys.clone()], true, &known, &mut out);
         read_list(port, &secret, self.id(), "aria2.tellWaiting", &[json!(0), json!(100), keys.clone()], true, &known, &mut out);
         read_list(port, &secret, self.id(), "aria2.tellStopped", &[json!(0), json!(100), keys], false, &known, &mut out);
-        // Rebuild the URL table from what is still alive, so it cannot grow
-        // without bound while a browser runs for weeks.
         let mut fresh = HashMap::new();
         for job in &out {
             if let Some(url) = known.get(&job.gid) {
@@ -461,14 +346,11 @@ impl Aria {
         out
     }
 
-    /// Bytes per second for the whole engine. 0 means no cap. Remembered, so it
-    /// survives an engine that has not booted yet and is applied when it does.
     pub fn set_speed_limit(&self, bytes_per_sec: u64) {
         self.limit.store(bytes_per_sec, Ordering::Relaxed);
         self.try_speed_limit();
     }
 
-    /// Push the remembered limit into the engine, if it is up.
     fn try_speed_limit(&self) {
         let Some((port, secret)) = self.line_opt() else { return };
         let bytes = self.limit.load(Ordering::Relaxed);
@@ -476,9 +358,6 @@ impl Aria {
         let _ = call(port, &secret, self.id(), "aria2.changeGlobalOption", &[value]);
     }
 
-    /// Hand aria2 a tracker list it has not seen, without restarting it.
-    /// aria2 takes `bt-tracker` as one comma separated string; it answered
-    /// `OK` to that shape on 1.37.0 before this was ever wired up.
     pub fn set_trackers(&self, joined: &str) {
         if joined.is_empty() {
             return;
@@ -488,7 +367,6 @@ impl Aria {
         let _ = call(port, &secret, self.id(), "aria2.changeGlobalOption", &[value]);
     }
 
-    /// Port and secret, or an error if the engine never came up.
     fn line(&self) -> Result<(u16, String), String> {
         self.line_opt().ok_or_else(|| "aria2 is not running".to_string())
     }
@@ -502,15 +380,11 @@ impl Aria {
     }
 }
 
-/// A poisoned lock is only poison because a thread panicked while holding it.
-/// The data inside is still good.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Engine {
-    /// Put a verified aria2c.exe on disk, run it, and wait for its port to
-    /// answer. None means Lumen downloads files itself.
     fn boot(data_dir: &Path, download_dir: &Path, keep_seeding: bool, bt_port: u16) -> Option<Engine> {
         let dir = data_dir.join("aria2");
         fs::create_dir_all(&dir).ok()?;
@@ -520,9 +394,6 @@ impl Engine {
         let secret = random_hex()?;
         let session = dir.join(SESSION);
         let mut cmd = Command::new(&exe);
-        // Everything that never changes, in one place a test can read. aria2
-        // drops an option it does not know without a word, so the list would
-        // rot silently if nothing held it to the binary it was written for.
         cmd.args(FLAGS);
         cmd.args([
             &format!("--rpc-listen-port={port}"),
@@ -535,47 +406,34 @@ impl Engine {
             &format!("--dht-listen-port={bt_port}"),
             "--follow-torrent=true",
             "--bt-save-metadata=true",
-            // A torrent a PAGE starts must never join the swarm on its own:
-            // born paused, waiting for the person to press Resume. Person-started
-            // torrents are resumed by the main loop once their metadata is in.
             "--pause-metadata=true",
             "--seed-ratio=1.0",
         ]);
-        // Stop seeding after an hour, or immediately when the user said no to sharing.
         cmd.arg(if keep_seeding { "--seed-time=60" } else { "--seed-time=0" });
-        // Last week's trackers, straight off disk: reading a file is not I/O
-        // worth fearing. A fresher list arrives on its own thread later and
-        // is pushed in over JSON-RPC, so nothing here waits on the network.
         let trackers = trackers::startup(data_dir);
         if !trackers.is_empty() {
             cmd.arg(format!("--bt-tracker={trackers}"));
         }
         if session.exists() {
-            // Last night's queue comes back.
             cmd.arg(format!("--input-file={}", session.display()));
         }
-        // Lumen dies, aria2 dies. No orphans eating the wire.
         cmd.arg(format!("--stop-with-process={}", std::process::id()));
-        // No console window. The user did not open a terminal.
         cmd.creation_flags(CREATE_NO_WINDOW.0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let child = cmd.spawn().ok()?;
         let engine = Engine { child, port, secret, stopped: false };
-        // The port appears a moment after the process does. Wait for it.
         for _ in 0..BOOT_TRIES {
             if call(engine.port, &engine.secret, 1, "aria2.getVersion", &[]).is_ok() {
                 return Some(engine);
             }
             thread::sleep(BOOT_SLEEP);
         }
-        // It never answered. Dropping it kills the process.
         None
     }
 }
 
-/// Bind a port, read it, let go. It falls to aria2 to hold on to it.
 fn free_port() -> Option<u16> {
     let socket = TcpListener::bind("127.0.0.1:0").ok()?;
     let port = socket.local_addr().ok()?.port();
@@ -583,7 +441,6 @@ fn free_port() -> Option<u16> {
     Some(port)
 }
 
-/// 32 bytes from the operating system, as hex. No seed, no clock.
 fn random_hex() -> Option<String> {
     let mut b = [0u8; 32];
     unsafe {
@@ -595,10 +452,6 @@ fn random_hex() -> Option<String> {
     Some(hex(&b))
 }
 
-// --------------------------------------------------------------- getting it
-
-/// The verified aria2c.exe, on disk. None means it cannot be had, or it
-/// cannot be believed.
 fn place_exe(dir: &Path) -> Option<PathBuf> {
     let exe = dir.join(EXE);
     if sha_of_file(&exe).as_deref() == Some(EXE_SHA256) {
@@ -613,7 +466,6 @@ fn place_exe(dir: &Path) -> Option<PathBuf> {
             let _ = fs::remove_file(&staged);
             return None;
         }
-        // Wrong bytes mean anything: a mirror, a proxy, a lie. Delete and refuse.
         if sha_of_file(&staged).as_deref() != Some(ZIP_SHA256) {
             eprintln!("lumen: aria2: zip hash is wrong, so it never runs");
             let _ = fs::remove_file(&staged);
@@ -629,7 +481,6 @@ fn place_exe(dir: &Path) -> Option<PathBuf> {
         let _ = fs::remove_file(&zip);
         return None;
     }
-    // Write beside the target and move, so a half binary never sits there.
     let staged = dir.join(format!("{EXE}.part"));
     let _ = fs::remove_file(&staged);
     fs::write(&staged, &body).ok()?;
@@ -642,14 +493,11 @@ fn place_exe(dir: &Path) -> Option<PathBuf> {
     Some(exe)
 }
 
-/// aria2c.exe if it was ever fetched: None when it is not there, Some(true) when it matches
-/// the pinned hash, Some(false) when it does not.
 pub fn pinned_state(data_dir: &Path) -> Option<bool> {
     let sha = sha_of_file(&data_dir.join("aria2").join(EXE))?;
     Some(sha == EXE_SHA256)
 }
 
-/// Bytes over the wire, written to disk. False if they never arrive.
 fn fetch(url: &str, to: &Path) -> bool {
     let config = ureq::config::Config::builder().timeout_global(Some(FETCH_TIMEOUT)).build();
     let agent = ureq::Agent::new_with_config(config);
@@ -683,15 +531,9 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-// ------------------------------------------------------------------- the zip
-
-/// One file out of a zip, inflated. Enough for a release archive: no zip64,
-/// no encryption, no split disks.
 fn zip_member(zip: &[u8], want: &str) -> Option<Vec<u8>> {
     let eocd = end_of_central_dir(zip)?;
     let count = u16::from_le_bytes([zip[eocd + 10], zip[eocd + 11]]) as usize;
-    // The central directory offset is the last thing a writer knows; the
-    // directory itself is read forward from there.
     let mut at = u32::from_le_bytes([zip[eocd + 16], zip[eocd + 17], zip[eocd + 18], zip[eocd + 19]])
         as usize;
     for _ in 0..count {
@@ -714,8 +556,6 @@ fn zip_member(zip: &[u8], want: &str) -> Option<Vec<u8>> {
     None
 }
 
-/// The entry's bytes, inflated. The local header sits before the data, so the
-/// data starts after its two variable length fields.
 fn read_local(zip: &[u8], local: usize, method: u16, size: usize, plain: usize) -> Option<Vec<u8>> {
     if sig(zip, local) != Some(0x0403_4b50) {
         return None;
@@ -737,10 +577,8 @@ fn read_local(zip: &[u8], local: usize, method: u16, size: usize, plain: usize) 
     Some(out)
 }
 
-/// Where the central directory starts, found from the end of the file.
 fn end_of_central_dir(zip: &[u8]) -> Option<usize> {
     let last = zip.len().checked_sub(22)?;
-    // Up to 64 KB of comment may follow the record.
     let from = last.saturating_sub(65_535);
     (from..=last).rev().find(|&i| sig(zip, i) == Some(0x0605_4b50))
 }
@@ -750,9 +588,6 @@ fn sig(zip: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-// ------------------------------------------------------------- json-rpc talk
-
-/// One JSON-RPC call over HTTP. It succeeds or it says why not.
 fn call(port: u16, secret: &str, id: u64, method: &str, params: &[Value]) -> Result<Value, String> {
     let body = request(id, secret, method, params).to_string();
     let config = ureq::config::Config::builder().timeout_global(Some(RPC_TIMEOUT)).build();
@@ -777,7 +612,6 @@ fn call(port: u16, secret: &str, id: u64, method: &str, params: &[Value]) -> Res
         .ok_or_else(|| format!("{method}: the answer had no result"))
 }
 
-/// The wire form. The secret goes first in params, always.
 fn request(id: u64, secret: &str, method: &str, params: &[Value]) -> Value {
     let mut all: Vec<Value> = Vec::with_capacity(params.len() + 1);
     all.push(Value::String(format!("token:{secret}")));
@@ -785,7 +619,6 @@ fn request(id: u64, secret: &str, method: &str, params: &[Value]) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": all})
 }
 
-/// Per download options. Header lines travel as a list; the name goes in "out".
 fn uri_options(headers: &[String], filename: Option<&str>, pause: bool) -> Value {
     let mut options = serde_json::Map::new();
     if !headers.is_empty() {
@@ -800,8 +633,6 @@ fn uri_options(headers: &[String], filename: Option<&str>, pause: bool) -> Value
     Value::Object(options)
 }
 
-/// One list call into jobs. `back_to_front` walks the reply backwards, for
-/// the calls that answer oldest first.
 fn read_list(
     port: u16,
     secret: &str,
@@ -828,7 +659,6 @@ fn read_list(
     }
 }
 
-/// aria2's words for a state, so far as they fit ours.
 fn map_status(status: &str) -> &'static str {
     match status {
         "active" => "active",
@@ -836,12 +666,10 @@ fn map_status(status: &str) -> &'static str {
         "paused" => "paused",
         "complete" => "complete",
         "removed" => "removed",
-        // "error", and anything we have never heard of, which is the same thing.
         _ => "error",
     }
 }
 
-/// aria2 counts in strings. Numbers with letters are still numbers.
 fn num(value: &Value) -> u64 {
     value
         .as_u64()
@@ -849,8 +677,6 @@ fn num(value: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// One tellStatus record, as a Job. `fallback` is the URL we asked for, since
-/// a stopped job forgets its own.
 fn job_from(record: &Value, fallback: &str) -> Job {
     let file = &record["files"][0];
     let path = file["path"].as_str().unwrap_or("");
@@ -882,7 +708,6 @@ fn job_from(record: &Value, fallback: &str) -> Job {
 mod tests {
     use super::*;
 
-    /// Caught off the wire from aria2 1.37.0, right after a small file landed.
     const TELL_STOPPED: &str = r#"{"bitfield":"80","completedLength":"577","connections":"0",
       "dir":"C:\\Users\\me\\Downloads","downloadSpeed":"0","errorCode":"0","errorMessage":"",
       "files":[{"completedLength":"577","index":"1","length":"577",
@@ -903,9 +728,6 @@ mod tests {
         assert_eq!(body["id"], 7);
         assert_eq!(body["method"], "aria2.tellActive");
         assert_eq!(body["params"], json!(["token:s3cret"]));
-        // Compared as JSON, not as text. serde_json keeps object keys in sorted or in
-        // insertion order depending on its preserve_order feature, which some of the
-        // dependency trees Lumen can be built with turn on. The shape is the point.
         assert_eq!(
             request(1, "k", "aria2.getVersion", &[]),
             json!({"jsonrpc": "2.0", "id": 1, "method": "aria2.getVersion", "params": ["token:k"]})
@@ -981,9 +803,7 @@ mod tests {
             options,
             json!({"header": ["Cookie: a=b", "Referer: https://a.test/"], "out": "movie.mkv"})
         );
-        // A name that is only spaces is no name at all.
         assert_eq!(uri_options(&["User-Agent: x".to_string()], Some(""), false), json!({"header": ["User-Agent: x"]}));
-        // A torrent a page started goes in paused, waiting for the person.
         assert_eq!(uri_options(&[], None, true), json!({"pause": "true"}));
     }
 
@@ -999,13 +819,11 @@ mod tests {
 
     #[test]
     fn the_speed_limit_reaches_the_global_option() {
-        // The same shape changeGlobalOption is handed; aria2 wants strings.
         let value = json!({"max-overall-download-limit": 4096u64.to_string()});
         assert_eq!(value["max-overall-download-limit"], "4096");
         assert_eq!(value.to_string(), r#"{"max-overall-download-limit":"4096"}"#);
     }
 
-    /// Caught off the wire from aria2 1.37.0 while a torrent was seeding.
     const TELL_SEEDING: &str = r#"{"bitfield":"ff","bittorrent":{"info":{"name":"bunny"}},
       "completedLength":"123456","connections":"9","dir":"C:\\dl","downloadSpeed":"0",
       "errorCode":"0","errorMessage":"","followedBy":["aa11bb22cc33dd44"],
@@ -1026,7 +844,6 @@ mod tests {
         assert!(j.seeder);
         assert_eq!(j.followed_by, vec!["aa11bb22cc33dd44"]);
         assert_eq!(j.files, 1);
-        // ratio = uploadLength / completedLength.
         let ratio = j.upload_length as f64 / j.done as f64;
         assert!((ratio - 51800.0 / 123456.0).abs() < 1e-12);
     }
@@ -1055,7 +872,6 @@ mod tests {
 
     #[test]
     fn the_key_list_covers_what_the_ui_reads() {
-        // The poll asks for exactly these; drop one and a field goes dark.
         for k in ["bittorrent.info.name", "uploadSpeed", "numSeeders", "seeder", "followedBy", "files"] {
             assert!(KEYS.contains(&k), "{k} is missing from the aria2 key list");
         }
@@ -1063,9 +879,6 @@ mod tests {
 
     #[test]
     fn the_flag_list_holds_what_this_build_was_tuned_with() {
-        // Every flag the tuning added, plus the ones kept from before. aria2
-        // drops an option it does not know without a word, so a typo here
-        // would look exactly like a tuning that works.
         for want in [
             "--min-split-size=1M",
             "--disk-cache=64M",
@@ -1089,11 +902,8 @@ mod tests {
         ] {
             assert!(FLAGS.contains(&want), "{want} is missing from the aria2 flag list");
         }
-        // The values these replaced must not creep back.
         assert!(!FLAGS.contains(&"--file-allocation=none"));
         assert!(!FLAGS.contains(&"--max-concurrent-downloads=4"));
-        // Every entry is one well formed flag, and no flag is said twice:
-        // aria2 would take the last one and nobody would notice.
         assert!(FLAGS.iter().all(|f| f.starts_with("--") && !f.contains(' ') && !f.is_empty()));
         let mut sorted: Vec<&str> = FLAGS.to_vec();
         sorted.sort_unstable();
@@ -1108,8 +918,6 @@ mod tests {
         both::<Job>();
     }
 
-    /// A zip with one deflated member, written by hand so the reader can be
-    /// checked without the internet.
     fn tiny_zip(member: &str, payload: &[u8]) -> Vec<u8> {
         use std::io::Write;
 
@@ -1125,15 +933,15 @@ mod tests {
         let local_at = z.len() as u32;
         z.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
         z.extend_from_slice(&20u16.to_le_bytes());
-        z.extend_from_slice(&0u16.to_le_bytes()); // flags
-        z.extend_from_slice(&8u16.to_le_bytes()); // deflate
-        z.extend_from_slice(&0u16.to_le_bytes()); // time
-        z.extend_from_slice(&0u16.to_le_bytes()); // date
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&8u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
         z.extend_from_slice(&crc.to_le_bytes());
         z.extend_from_slice(&(deflated.len() as u32).to_le_bytes());
         z.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         z.extend_from_slice(&(member.len() as u16).to_le_bytes());
-        z.extend_from_slice(&0u16.to_le_bytes()); // extra
+        z.extend_from_slice(&0u16.to_le_bytes());
         z.extend_from_slice(member.as_bytes());
         z.extend_from_slice(&deflated);
 
@@ -1153,7 +961,7 @@ mod tests {
         z.extend_from_slice(&0u16.to_le_bytes());
         z.extend_from_slice(&0u16.to_le_bytes());
         z.extend_from_slice(&0u16.to_le_bytes());
-        z.extend_from_slice(&0u32.to_le_bytes()); // attrs
+        z.extend_from_slice(&0u32.to_le_bytes());
         z.extend_from_slice(&local_at.to_le_bytes());
         z.extend_from_slice(member.as_bytes());
 
@@ -1190,7 +998,6 @@ mod tests {
         let payload = b"aria2 1.37.0, hidden behind a curl of deflate";
         let z = tiny_zip("aria2-1.37.0/aria2c.exe", payload);
         assert_eq!(zip_member(&z, "aria2-1.37.0/aria2c.exe").unwrap(), payload);
-        // A member that was never in there is nothing, not a crash.
         assert!(zip_member(&z, "aria2-1.37.0/OTHER.txt").is_none());
         assert!(zip_member(b"PK\x05\x06 not a zip", "x").is_none());
         assert!(zip_member(&[], "x").is_none());
@@ -1198,7 +1005,6 @@ mod tests {
 
     #[test]
     fn the_real_release_zip_holds_aria2c() {
-        // The hash we pinned is the hash of the file that is actually there.
         assert_eq!(ZIP_SHA256.len(), 64);
         assert_eq!(EXE_SHA256.len(), 64);
         assert_eq!(sha(b"hello"), "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
@@ -1207,7 +1013,6 @@ mod tests {
 
     #[test]
     fn a_big_zip_is_not_a_zip_we_read() {
-        // The reader must not believe a size that was never checked.
         let mut z = tiny_zip("a/b.txt", b"x");
         let eocd = z.len() - 22;
         let at = u32::from_le_bytes([z[eocd + 16], z[eocd + 17], z[eocd + 18], z[eocd + 19]]) as usize;
@@ -1219,8 +1024,6 @@ mod tests {
 
 #[cfg(test)]
 mod live {
-    //! Needs the internet. Run with: cargo test aria -- --ignored
-
     use super::*;
 
     fn case(what: &str) -> PathBuf {
@@ -1234,9 +1037,7 @@ mod live {
     fn aria2_waits_to_be_wanted() {
         let dir = case("idle");
         let aria = Aria::idle(&dir, &dir.join("downloads"), true, 0, 6881);
-        // Nothing started: no engine, no boot asked for, nothing failed.
         assert!(!aria.ready() && !aria.woken.load(Ordering::Acquire) && !aria.failed());
-        // Work left in the session starts it with Lumen; an empty or missing one does not.
         assert!(!Aria::has_session(&dir));
         let _ = fs::create_dir_all(dir.join("aria2"));
         let _ = fs::write(dir.join("aria2").join(SESSION), "");
@@ -1292,8 +1093,6 @@ mod live {
         assert!(jobs.iter().all(|j| !j.gid.is_empty()), "every job has a gid");
     }
 
-    /// The runtime tracker push, end to end: a fresh list, a running aria2,
-    /// and the value read back over the same JSON-RPC door Lumen uses.
     #[test]
     #[ignore = "downloads aria2 and a tracker list off the internet"]
     fn a_fresh_tracker_list_reaches_a_running_aria2() {
@@ -1307,8 +1106,6 @@ mod live {
             thread::sleep(Duration::from_millis(200));
         }
         assert!(aria.ready(), "aria2 never came up");
-        // The background thread fetches the public list on its own once it
-        // sees there is no cache. It does not have to be asked.
         let mut held = String::new();
         for _ in 0..60 {
             {
@@ -1328,15 +1125,11 @@ mod live {
         let trackers: Vec<&str> = held.split(',').collect();
         assert!(trackers.len() > 1, "the list never made it across: {held}");
         assert!(trackers.iter().all(|t| t.starts_with("udp://") || t.starts_with("http")), "not a tracker list: {held}");
-        // And the same list is on disk, so the next start does not need a fetch.
         let cached = crate::trackers::load(&dir.join("aria2"));
         assert!(!cached.is_empty(), "the list was pushed but never cached");
         assert_eq!(cached.join(","), held, "what aria2 holds and what is cached are one list");
     }
 
-    /// Hold every flag to the binary's own help. aria2 drops an option it
-    /// does not know without a word, so this is the only check that says the
-    /// tuning reaches the engine instead of vanishing on the way in.
     #[test]
     #[ignore = "downloads aria2 to read its help"]
     fn every_flag_is_one_aria2_knows() {

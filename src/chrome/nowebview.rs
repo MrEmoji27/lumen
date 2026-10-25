@@ -1,6 +1,4 @@
-//! No WebView2 on this PC. Lumen cannot show a single page without it, so instead of a
-//! message box it opens one small window of its own, drawn like the rest of the chrome: what
-//! is missing, a button to Microsoft's download page, and Close. Then it leaves.
+//! No WebView2 on this PC.
 
 use windows::{
     Win32::{
@@ -24,7 +22,6 @@ use windows::{
 use super::gfx::{Align, Font, Gfx, R};
 use super::theme::Theme;
 
-/// Microsoft's page for the WebView2 Runtime; its Evergreen bootstrapper is the first download.
 const GET_IT: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
 const W: f32 = 520.0;
 const H: f32 = 236.0;
@@ -40,14 +37,12 @@ thread_local! {
     static STATE: std::cell::RefCell<Option<State>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The two buttons, right-aligned at the foot: "Get WebView2" and "Close".
 fn buttons() -> [R; 2] {
     let close = R::new(W - PAD - 84.0, H - PAD - 34.0, 84.0, 34.0);
     let get = R::new(close.x - 10.0 - 132.0, close.y, 132.0, 34.0);
     [get, close]
 }
 
-/// Dark when Windows' apps are dark. A debug build's shot can ask with LUMEN_TEST_DARK=0 or 1.
 fn windows_dark() -> bool {
     if cfg!(debug_assertions)
         && let Some(v) = std::env::var_os("LUMEN_TEST_DARK")
@@ -123,7 +118,6 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 LRESULT(0)
             }
             WM_NCHITTEST => {
-                // The whole window drags, except its buttons.
                 let mut p = windows::Win32::Foundation::POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
                 let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut p);
                 let (x, y) = (p.x as f32 / k, p.y as f32 / k);
@@ -170,8 +164,6 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     }
 }
 
-/// Show the window and run it until it is closed. A debug build with `LUMEN_TEST_SHOT` set
-/// writes `nowebview.png` there instead and returns.
 pub fn show() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

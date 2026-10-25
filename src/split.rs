@@ -1,10 +1,4 @@
 //! Split view: two pages side by side, one divider between them.
-//!
-//! The divider is a child window of its own. It sits in the gap the two page
-//! rectangles leave open, so it never covers a page, and it can be grabbed,
-//! dragged and double-clicked like any other piece of window chrome.
-//! The main loop owns the split itself (which two tabs, where the divider is);
-//! this file owns the strip and passes mouse positions back as events.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -28,22 +22,15 @@ use windows::core::{PCWSTR, w};
 
 use crate::engine::Ev;
 
-/// The divider strip, in DIP. Wide enough to hit without aiming.
 pub const GAP: f64 = 7.0;
-/// How narrow a pane may get before the divider refuses to move further.
 pub const MIN_PANE: f64 = 180.0;
 
-/// Where the divider sits for a stage of `stage_w` and a split fraction `at`:
-/// the left pane's width. Each pane keeps a workable width; a stage too small for
-/// two of those shares what there is, half each, rather than stacking panes.
 pub fn left_width(stage_w: f64, at: f64, gap: f64) -> f64 {
     let min = MIN_PANE.min(((stage_w - gap) / 2.0).max(1.0));
     let max = (stage_w - gap - min).max(min);
     (stage_w * at).clamp(min, max)
 }
 
-/// The two pane rectangles and the divider strip, from a stage rectangle.
-/// (left, right, divider). The stage is (x, y, w, h).
 pub fn panes(stage: (f64, f64, f64, f64), at: f64) -> ((f64, f64, f64, f64), (f64, f64, f64, f64), (f64, f64, f64, f64)) {
     let (x, y, w, h) = stage;
     let lw = left_width(w, at, GAP);
@@ -53,8 +40,6 @@ pub fn panes(stage: (f64, f64, f64, f64), at: f64) -> ((f64, f64, f64, f64), (f6
     (left, divider, right)
 }
 
-/// The fraction of the stage the divider is at, from a pointer x in stage space.
-/// 0.5 when the stage is too small to tell.
 pub fn fraction(stage_x: f64, stage_w: f64, x: f64) -> f64 {
     if stage_w <= 0.0 {
         return 0.5;
@@ -64,16 +49,13 @@ pub fn fraction(stage_x: f64, stage_w: f64, x: f64) -> f64 {
 
 struct Inner {
     proxy: EventLoopProxy<Ev>,
-    /// Left button down on the strip.
     dragging: bool,
-    /// Pointer is over the strip.
     hover: bool,
     bg: COLORREF,
     grip: COLORREF,
     grip_hot: COLORREF,
 }
 
-/// The strip between the panes. Cheap to hold; the window lives as long as the app.
 pub struct Divider {
     hwnd: HWND,
     inner: Rc<RefCell<Inner>>,
@@ -118,13 +100,11 @@ impl Divider {
                 grip: COLORREF(0x0055_5555),
                 grip_hot: COLORREF(0x0080_8080),
             }));
-            // The window proc finds its state through this pointer, like the chrome window.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize);
             Divider { hwnd, inner }
         }
     }
 
-    /// Place the strip, in logical coordinates relative to the parent.
     pub fn set_bounds(&self, x: f64, y: f64, w: f64, h: f64) {
         unsafe {
             let k = GetDpiForWindow(self.hwnd) as f64 / 96.0;
@@ -142,8 +122,6 @@ impl Divider {
 
     pub fn set_visible(&self, on: bool) {
         unsafe {
-            // Showing it puts it at the top of the child order: it must not be
-            // covered by a page that was made later.
             let _ = ShowWindow(self.hwnd, if on { SW_SHOWNA } else { SW_HIDE });
             if on {
                 let _ = SetWindowPos(self.hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -151,13 +129,11 @@ impl Divider {
         }
     }
 
-    /// The strip's colors: the same as the gap around the pages, plus the grip.
     pub fn set_colors(&self, bg: (u8, u8, u8), grip: (u8, u8, u8)) {
         let Ok(mut i) = self.inner.try_borrow_mut() else { return };
         let c = |(r, g, b): (u8, u8, u8)| COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16));
         i.bg = c(bg);
         i.grip = c(grip);
-        // Under the pointer the grip steps toward the page color, so it reads as live.
         let lift = |v: u8| if v > 128 { v.saturating_sub(48) } else { v.saturating_add(48) };
         i.grip_hot = c((lift(grip.0), lift(grip.1), lift(grip.2)));
         unsafe {
@@ -176,7 +152,6 @@ impl Inner {
             let bg = CreateSolidBrush(self.bg);
             FillRect(dc, &rc, bg);
             let _ = DeleteObject(bg.into());
-            // A short rounded grip in the middle: the only thing that says "drag me".
             let hot = self.dragging || self.hover;
             let brush = CreateSolidBrush(if hot { self.grip_hot } else { self.grip });
             let old_b = SelectObject(dc, brush.into());
@@ -192,7 +167,6 @@ impl Inner {
         }
     }
 
-    /// The pointer's x in the parent's client area, in DIP.
     fn parent_x(&self, hwnd: HWND) -> Option<f64> {
         unsafe {
             let mut p = POINT::default();
@@ -249,7 +223,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_LBUTTONDOWN => {
                 i.dragging = true;
                 SetCapture(hwnd);
-                // No SetFocus: the pages keep their keyboard focus while the divider moves.
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
@@ -302,19 +275,16 @@ mod tests {
         let (l, _, r) = panes((0.0, 0.0, 1000.0, 600.0), 0.5);
         assert!(l.2 >= MIN_PANE && r.2 >= MIN_PANE);
 
-        // A stage too small for two minimum panes shares what there is.
         let (l, d, r) = panes((0.0, 0.0, 300.0, 400.0), 0.5);
         assert!((l.2 - r.2).abs() < 1.0);
         assert!(r.2 > 100.0);
         assert_eq!(r.0, d.0 + d.2);
-        // Dragging past either edge cannot invert the panes.
         let (l, _, r) = panes((0.0, 0.0, 900.0, 400.0), -3.0);
         assert!(l.2 >= MIN_PANE);
         assert!(r.2 >= MIN_PANE);
         let (l, _, r) = panes((0.0, 0.0, 900.0, 400.0), 4.0);
         assert!(l.2 >= MIN_PANE);
         assert!(r.2 >= MIN_PANE);
-        // A stage with no room at all still yields two rectangles, never an overlap.
         let (l, d, r) = panes((0.0, 0.0, 40.0, 100.0), 0.5);
         assert!(l.2 >= 1.0 && r.2 >= 1.0);
         assert_eq!(r.0, d.0 + d.2);
@@ -325,7 +295,6 @@ mod tests {
         assert!((fraction(200.0, 800.0, 600.0) - 0.5).abs() < 1e-9);
         assert!(fraction(200.0, 800.0, 100.0) >= 0.02);
         assert!(fraction(200.0, 800.0, 9999.0) <= 0.98);
-        // A stage with no width cannot be split: stay in the middle.
         assert_eq!(fraction(0.0, 0.0, 50.0), 0.5);
     }
 }

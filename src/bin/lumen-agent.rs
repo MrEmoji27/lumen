@@ -1,16 +1,4 @@
 //! lumen-agent: any AI agent can drive Lumen through this.
-//!
-//!   lumen-agent mcp                       stdio MCP server (Claude Code, opencode, Codex, Cursor...)
-//!   lumen-agent tools                     what tools there are
-//!   lumen-agent <tool> key=value ...      one call from a shell, result on stdout
-//!   lumen-agent <tool> '{"json": "args"}'
-//!
-//! It finds the running Lumen (port in settings.json, token in agent_token) and forwards
-//! to its MCP endpoint. No Lumen running: it starts one headless (off-screen, silent) and
-//! waits for it. So an agent's config needs only the path to this program, never a secret.
-//!
-//! Options: --session NAME (or LUMEN_SESSION) keeps CLI calls in one set of tabs. Images
-//! go to files in %TEMP% and the path is printed.
 
 use std::{
     io::{BufRead, Write},
@@ -44,7 +32,6 @@ impl Door {
         Ok(Door { url: format!("http://127.0.0.1:{port}/mcp"), token, agent })
     }
 
-    /// POST one JSON-RPC message. Returns (HTTP status, session header, body).
     fn post(&self, msg: &Value, session: &str) -> Result<(u16, String, String), String> {
         let mut req = self.agent.post(&self.url).header("Authorization", &format!("Bearer {}", self.token)).header("Content-Type", "application/json");
         if !session.is_empty() {
@@ -62,7 +49,6 @@ impl Door {
     }
 }
 
-/// The profile's "agent" setting. Missing settings mean a fresh profile: off.
 fn agent_switch_on() -> bool {
     std::fs::read_to_string(data_dir().join("settings.json"))
         .ok()
@@ -70,7 +56,6 @@ fn agent_switch_on() -> bool {
         .is_some_and(|v| v["agent"] == true)
 }
 
-/// Make sure a Lumen is listening. Start a headless one next to this program if none is.
 fn reach() -> Result<Door, String> {
     let door = Door::find()?;
     let ping = json!({"jsonrpc": "2.0", "id": 0, "method": "ping"});
@@ -81,8 +66,6 @@ fn reach() -> Result<Door, String> {
         Ok((code, ..)) => return Err(format!("Lumen answered {code}")),
         Err(_) => {}
     }
-    // A Lumen started with the switch off would never answer. Say so instead of
-    // starting one that waits there for nothing.
     if !agent_switch_on() {
         return Err(format!(
             "Lumen is not running, and its AI agent switch is off in {} (Settings > AI agent, or \"agent\": true in settings.json)",
@@ -97,7 +80,6 @@ fn reach() -> Result<Door, String> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(25) {
         std::thread::sleep(Duration::from_millis(300));
-        // A fresh profile writes its token on first start.
         let door = Door::find()?;
         match door.post(&ping, "") {
             Ok((200, ..)) => return Ok(door),
@@ -108,8 +90,6 @@ fn reach() -> Result<Door, String> {
     Err("started Lumen, but it did not answer within 25 s".into())
 }
 
-/// Start Lumen on its own: no console, no share in our stdin/stdout. A child that inherits
-/// our output pipe would keep the caller's shell waiting until Lumen exits.
 fn start_detached(exe: &std::path::Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     use windows::Win32::{
@@ -136,7 +116,6 @@ fn start_detached(exe: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("could not start Lumen: {e}"))
 }
 
-/// Which build this is: the version, then the commit it was built from and its date.
 const VERSION: &str = concat!(env!("LUMEN_VERSION"), " (", env!("LUMEN_BUILD"), ")");
 
 fn main() -> ExitCode {
@@ -186,8 +165,6 @@ const HELP: &str = "lumen-agent: drive the Lumen browser from any AI agent.
 
 Lumen not running? It is started headless: off-screen, silent, out of your way.";
 
-/// `lumen-agent doctor`: Lumen's own check-up, run by the lumen.exe beside this bridge, which
-/// knows the install. Its words and its exit code are passed through.
 fn doctor() -> ExitCode {
     let Ok(exe) = std::env::current_exe().map(|e| e.with_file_name("lumen.exe")) else { return ExitCode::FAILURE };
     if !exe.is_file() {
@@ -206,27 +183,19 @@ fn doctor() -> ExitCode {
     }
 }
 
-/// Lumen is up right now (no starting it).
 fn running() -> Option<Door> {
     let door = Door::find().ok()?;
     matches!(door.post(&json!({"jsonrpc": "2.0", "id": 0, "method": "ping"}), ""), Ok((200, ..))).then_some(door)
 }
 
-/// What Lumen wrote about its tools the last time its agent door opened.
 fn card() -> Option<Value> {
     std::fs::read_to_string(data_dir().join("agent_tools.json")).ok().and_then(|s| serde_json::from_str(&s).ok())
 }
 
-/// MCP over stdio: one JSON-RPC message per line in, one per line out.
-/// Lumen is started only when a tool is really called; until then the handshake and the
-/// tool list come from agent_tools.json, so opening an agent session costs nothing.
-/// `named` (`--session NAME`) asks Lumen to keep this client's profile under that name,
-/// so its logins outlive the session.
 fn stdio(named: &str) -> ExitCode {
     let mut door = running();
     let card = card();
     if door.is_none() && card.is_none() {
-        // Never ran with the agent on: nothing to answer from. Start it now.
         match reach() {
             Ok(d) => door = Some(d),
             Err(e) => return serve_error(&e),
@@ -244,7 +213,6 @@ fn stdio(named: &str) -> ExitCode {
         let Ok(mut msg) = serde_json::from_str::<Value>(&line) else { continue };
         let method = msg["method"].as_str().unwrap_or("").to_string();
         if method == "initialize" {
-            // --session NAME: ask Lumen to keep this client's profile under that name.
             if let Some(params) = msg["params"].as_object_mut() {
                 let mut meta = params.get("_meta").cloned().unwrap_or_else(|| json!({}));
                 if !meta.is_object() { meta = json!({}); }
@@ -257,7 +225,6 @@ fn stdio(named: &str) -> ExitCode {
                 meta.as_object_mut().unwrap().insert("lumen".into(), Value::Object(lumen_map));
                 params.insert("_meta".into(), meta);
             }
-            // Kept, so a session Lumen dropped (it was quiet for too long) can be opened again.
             hello = Some(msg.clone());
         }
         if door.is_none() {
@@ -281,7 +248,6 @@ fn stdio(named: &str) -> ExitCode {
                 }
                 continue;
             }
-            // A real call: now Lumen is needed. Start it, and open the session properly.
             match reach() {
                 Ok(d) => {
                     if let Some(h) = &hello
@@ -308,8 +274,6 @@ fn stdio(named: &str) -> ExitCode {
             && let Ok((200, sid, _)) = door.post(h, "")
             && !sid.is_empty()
         {
-            // Lumen forgot this session (idle for 15 minutes, or Lumen restarted). Open a new one
-            // and say it again. Tabs of the old session are gone; the agent will be told so.
             session = sid;
             sent = door.post(&msg, &session);
         }
@@ -331,7 +295,6 @@ fn stdio(named: &str) -> ExitCode {
             break;
         }
     }
-    // The client hung up: its tabs go too.
     if let Some(d) = door.as_ref()
         && !session.is_empty()
     {
@@ -347,7 +310,6 @@ fn error_for(msg: &Value, why: &str) -> String {
     }
 }
 
-/// Lumen cannot be reached: answer initialize honestly and every call with the reason.
 fn serve_error(why: &str) -> ExitCode {
     let mut out = std::io::stdout();
     for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -364,7 +326,6 @@ fn serve_error(why: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// key=value pairs (numbers and true/false understood, [..] and {..} read as JSON) or one JSON object.
 fn parse_args(a: &[String]) -> Result<Value, String> {
     if a.len() == 1 && a[0].trim_start().starts_with('{') {
         return serde_json::from_str(&a[0]).map_err(|e| format!("bad JSON: {e}"));
@@ -386,11 +347,6 @@ fn parse_args(a: &[String]) -> Result<Value, String> {
     Ok(Value::Object(m))
 }
 
-// ------------------------------------------------------------ named sessions
-
-/// A `--session NAME` is only a name on this side. Lumen never takes a name for a session: it
-/// hands out the id at `initialize`, and this program keeps that id in a file, one per name, so
-/// the next one-shot call finds its tabs again.
 fn clean_name(name: &str) -> String {
     let n: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || "-_".contains(*c)).take(40).collect();
     if n.is_empty() { "cli".into() } else { n }
@@ -404,8 +360,6 @@ fn session_file(name: &str) -> PathBuf {
     session_dir().join(format!("{}.id", clean_name(name)))
 }
 
-/// Only this Windows user may read the folder: no inherited rights, full control for the user.
-/// Best effort. The folder sits under the user's own data folder anyway.
 fn lock_to_user(dir: &std::path::Path) {
     use std::os::windows::process::CommandExt;
     let Ok(user) = std::env::var("USERNAME") else { return };
@@ -415,7 +369,7 @@ fn lock_to_user(dir: &std::path::Path) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .creation_flags(0x0800_0000)
         .status();
 }
 
@@ -434,15 +388,11 @@ fn save_session(name: &str, id: &str) {
     }
 }
 
-/// The id Lumen gave this name last time, if it is a plausible id.
 fn saved_session(name: &str) -> String {
     let id = std::fs::read_to_string(session_file(name)).map(|s| s.trim().to_string()).unwrap_or_default();
     if id.len() >= 32 && id.chars().all(|c| c.is_ascii_alphanumeric()) { id } else { String::new() }
 }
 
-/// Ask Lumen for a new session under this name and remember it. A named session keeps
-/// its profile (`_meta.lumen.profile`): its cookies and logins outlive the call, so the
-/// next worker under the same name starts logged in.
 fn open_session(door: &Door, name: &str) -> Result<String, String> {
     let label = if clean_name(name) == "cli" { "cli".to_string() } else { format!("cli-{}", clean_name(name)) };
     let hello = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
@@ -457,8 +407,6 @@ fn open_session(door: &Door, name: &str) -> Result<String, String> {
     }
 }
 
-/// One message in the named session. A session Lumen no longer knows (idle too long, or Lumen
-/// restarted) is replaced by a new one and the message is sent again.
 fn post_named(door: &Door, msg: &Value, name: &str) -> Result<(u16, String, String), String> {
     let saved = saved_session(name);
     if !saved.is_empty() {
@@ -531,10 +479,6 @@ fn once(tool: &str, rest: &[String], session: &str) -> ExitCode {
     if v["result"]["isError"] == true { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
-// ------------------------------------------------------------------ journal
-
-/// `lumen-agent journal [--days N]`: read Lumen's local usage journal and print a
-/// short plain-text report. No Lumen needed, no network, nothing written.
 fn journal_report(args: &[String]) -> ExitCode {
     let mut days = 14i64;
     let mut it = args.iter();
@@ -569,13 +513,11 @@ fn journal_report(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// One day of the journal and its lines.
 struct Day {
     date: String,
     lines: Vec<Value>,
 }
 
-/// Days since 1970-01-01 for a civil date. Howard Hinnant's algorithm.
 fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -585,7 +527,6 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     era as i64 * 146_097 + doe - 719_468
 }
 
-/// "2026-10-15" -> days since the epoch. Anything else is None.
 fn day_of(name: &str) -> Option<i64> {
     let (y, rest) = name.split_once('-')?;
     let (m, d) = rest.split_once('-')?;
@@ -593,8 +534,6 @@ fn day_of(name: &str) -> Option<i64> {
     ((1..=12).contains(&m) && (1..=31).contains(&d)).then(|| days_from_civil(y, m, d))
 }
 
-/// The day files in `dir`, oldest first, the last `days` of them. A line Lumen
-/// never finished writing is skipped; everything else is ready to read.
 fn read_days(dir: &std::path::Path, days: i64) -> Vec<Day> {
     let mut files: Vec<(i64, String, std::path::PathBuf)> = std::fs::read_dir(dir)
         .into_iter()
@@ -623,7 +562,6 @@ fn read_days(dir: &std::path::Path, days: i64) -> Vec<Day> {
         .collect()
 }
 
-/// The middle number of a list, or 0 for none.
 fn median(v: &mut [f64]) -> f64 {
     if v.is_empty() {
         return 0.0;
@@ -637,7 +575,6 @@ fn one(v: f64) -> String {
     format!("{v:.1}")
 }
 
-/// A page time in the unit that reads best: 812 ms, 4.2 s, 1.4 min.
 fn secs(ms: f64) -> String {
     if ms < 1000.0 {
         format!("{} ms", ms.round() as u64)
@@ -658,7 +595,6 @@ fn duration(secs: u64) -> String {
     }
 }
 
-/// The whole report: what happened, in the order a person would ask.
 fn report(days: &[Day]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -673,7 +609,6 @@ fn report(days: &[Day]) -> String {
     };
     let _ = writeln!(out, "Lumen journal — {span} ({} day(s), {} lines)", days.len(), lines.len());
 
-    // Sessions: how it ran, and how it ended.
     let starts = of("start");
     let exits = of("exit");
     let mut uptimes: Vec<f64> = exits.iter().filter_map(|v| v["uptime"].as_u64()).map(|s| s as f64).collect();
@@ -691,8 +626,6 @@ fn report(days: &[Day]) -> String {
         let _ = writeln!(out, "  unclean exit after {} (crash.log had {log} newer line(s))", u["from"].as_str().unwrap_or("?"));
     }
 
-    // Crashes, and whether the reload took. A crash is one line at the time and
-    // a second one when the tab loads again, so the second is not a second crash.
     let crash_lines = of("crash");
     let crashes: Vec<&Value> = crash_lines.iter().copied().filter(|v| v["reload"].is_null()).collect();
     let reloads: Vec<&Value> = crash_lines.iter().copied().filter(|v| v["reload"].is_string()).collect();
@@ -706,7 +639,6 @@ fn report(days: &[Day]) -> String {
         }
     }
 
-    // Memory and CPU, per day. The medians are of the minute samples.
     let samples = of("sample");
     if !samples.is_empty() {
         let _ = writeln!(out, "\nMemory per day (MB: median / max — lumen is Lumen's own process)");
@@ -735,7 +667,6 @@ fn report(days: &[Day]) -> String {
         let _ = writeln!(out, "  cpu: median {}% of the machine, worst {}%", one(idle), one(busy));
     }
 
-    // Pages: the slowest hosts, and the ones that failed.
     let navs: Vec<&Value> = lines.iter().copied().filter(|v| matches!(v["k"].as_str(), Some("nav" | "slow_nav"))).collect();
     let host = |v: &Value| v["host"].as_str().unwrap_or("").to_string();
     if !navs.is_empty() {
@@ -774,7 +705,6 @@ fn report(days: &[Day]) -> String {
         }
     }
 
-    // Everything Lumen had to say to the person.
     let errors = of("error");
     let panics = of("panic");
     if !errors.is_empty() || !panics.is_empty() {
@@ -791,7 +721,6 @@ fn report(days: &[Day]) -> String {
         let _ = writeln!(out, "  panics: {}", panics.len());
     }
 
-    // Frames that stuttered.
     let slow: Vec<&Value> = of("ui_slow");
     if !slow.is_empty() {
         let frames: f64 = slow.iter().map(|v| num(v, "n")).sum();
@@ -799,7 +728,6 @@ fn report(days: &[Day]) -> String {
         let _ = writeln!(out, "\nui_slow: {} frame(s) over 50 ms over {} minute(s), worst {}", frames as u64, slow.len(), secs(worst));
     }
 
-    // What got used.
     let features = of("feature");
     if !features.is_empty() {
         let _ = writeln!(out, "\nFeatures");
@@ -831,7 +759,6 @@ fn report(days: &[Day]) -> String {
         }
     }
 
-    // Idle wakes, which is how a spin shows up.
     let wakes = of("wake");
     if !wakes.is_empty() {
         let mut per: Vec<f64> = wakes.iter().map(|v| num(v, "n")).collect();
@@ -850,7 +777,6 @@ mod tests {
         let a: Vec<String> = ["tab=3", "ref=e5", "text=hello world", "submit=true", "paths=[\"C:/a.txt\"]", "timeout_ms=500"].iter().map(|s| s.to_string()).collect();
         let v = parse_args(&a).unwrap();
         assert_eq!(v, json!({"tab": 3, "ref": "e5", "text": "hello world", "submit": true, "paths": ["C:/a.txt"], "timeout_ms": 500}));
-        // A number where text is meant stays text.
         assert_eq!(parse_args(&["text=42".into()]).unwrap(), json!({"text": "42"}));
         assert_eq!(parse_args(&["{\"tab\": 1}".into()]).unwrap(), json!({"tab": 1}));
         assert!(parse_args(&["oops".into()]).is_err());
@@ -868,11 +794,9 @@ mod tests {
 
     #[test]
     fn a_saved_id_must_look_like_one() {
-        // No file: no id. The file is whatever the user's disk holds, so it is checked.
         assert_eq!(saved_session("no-such-name-ever-written"), "");
     }
 
-    /// A fixture the size of a short session, read back the way Lumen wrote it.
     fn fixture() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("lumen-agent-report-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -915,9 +839,7 @@ mod tests {
         let dir = fixture();
         let days = read_days(&dir, 14);
         assert_eq!(days.len(), 2, "both days are read");
-        // The half-written last line was left where it was.
         assert_eq!(days[1].lines.len(), 8, "{:?}", days[1].lines);
-        // --days takes the newest only.
         assert_eq!(read_days(&dir, 1).len(), 1);
         let text = report(&days);
         for want in [
@@ -938,8 +860,6 @@ mod tests {
         ] {
             assert!(text.contains(want), "{want:?} is missing from:\n{text}");
         }
-        // The slowest host is first among the pages that were timed, and its
-        // median is the middle of 9 s, 10 s and 11 s.
         let ranked = text.find("Slowest hosts").unwrap();
         let slow = text[ranked..].find("slow.example").unwrap();
         assert!(slow < text[ranked..].len());

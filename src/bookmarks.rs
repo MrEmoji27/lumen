@@ -1,8 +1,4 @@
 //! Reading the bookmarks other browsers keep, so they can be brought here once.
-//!
-//! Chrome, Edge, Brave and Opera GX are all Chromium: each keeps one JSON file named
-//! `Bookmarks` in its profile folder. We only ever read it. Nothing here writes to, locks
-//! or moves another browser's files.
 
 use std::path::PathBuf;
 
@@ -10,15 +6,12 @@ use serde_json::Value;
 
 use crate::library::Incoming;
 
-/// One browser whose file was found, and what is in it.
 #[derive(Clone, Debug)]
 pub struct Found {
     pub browser: &'static str,
     pub items: Vec<Incoming>,
 }
 
-/// Where each browser keeps its file on Windows, given the two folders everything hangs off.
-/// Only the default profile: that is where nearly everyone's bookmarks are.
 pub fn candidates(local: &std::path::Path, roaming: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
     vec![
         ("Chrome", local.join(r"Google\Chrome\User Data\Default\Bookmarks")),
@@ -28,7 +21,6 @@ pub fn candidates(local: &std::path::Path, roaming: &std::path::Path) -> Vec<(&'
     ]
 }
 
-/// Every browser on this PC with a readable file and at least one bookmark.
 pub fn scan() -> Vec<Found> {
     let (Some(local), Some(roaming)) = (dirs::data_local_dir(), dirs::data_dir()) else { return Vec::new() };
     candidates(&local, &roaming)
@@ -41,14 +33,8 @@ pub fn scan() -> Vec<Found> {
         .collect()
 }
 
-/// The roots Chromium keeps, as they are named in the file. Their own names (the bar, "Other
-/// bookmarks") say nothing worth keeping, so they do not become folders.
 const ROOTS: [&str; 3] = ["bookmark_bar", "other", "synced"];
 
-/// A Chromium `Bookmarks` file as bookmarks in folders one level deep. Everything that sat
-/// loose in a root goes in a folder named for the browser; a folder inside goes in
-/// "Browser / Folder", and a folder inside that in "Browser / Folder / Inner". A bad file is
-/// no bookmarks. Only web addresses come over: bookmarklets and `chrome://` pages do not.
 pub fn parse_chromium(json: &str, browser: &str) -> Vec<Incoming> {
     let Ok(v) = serde_json::from_str::<Value>(json) else { return Vec::new() };
     let mut out = Vec::new();
@@ -83,7 +69,6 @@ fn walk(nodes: &[Value], path: &mut Vec<String>, out: &mut Vec<Incoming>) {
     }
 }
 
-/// The words the page says after an import.
 pub fn summary(browser: &str, added: usize, skipped: usize) -> String {
     match (added, skipped) {
         (0, 0) => format!("{browser} had no bookmarks to bring over"),
@@ -164,7 +149,6 @@ mod tests {
         assert!(c[0].1.starts_with(r"C:\L"), "Chrome lives under %LOCALAPPDATA%");
     }
 
-    /// Importing the fixture twice into a library adds each bookmark once.
     #[test]
     fn importing_twice_adds_once() {
         let dir = std::env::temp_dir().join(format!("lumen-bookmarks-import-{}", std::process::id()));

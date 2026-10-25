@@ -10,7 +10,6 @@ use std::{
 
 use crate::{aria, blocker, bugreport, defaultapp, engine, hello, store, video};
 
-/// How a check came out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     Ok,
@@ -18,13 +17,11 @@ pub enum Mark {
     Fail,
 }
 
-/// One check: what it is called, how it came out, what was found, and what to do.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub name: &'static str,
     pub mark: Mark,
     pub found: String,
-    /// Empty on a row that is ok.
     pub fix: &'static str,
 }
 
@@ -32,7 +29,6 @@ fn row(name: &'static str, mark: Mark, found: impl Into<String>, fix: &'static s
     Row { name, mark, found: found.into(), fix }
 }
 
-/// Every check, and the first line of the text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
     pub head: String,
@@ -40,13 +36,10 @@ pub struct Report {
 }
 
 impl Report {
-    /// True when the process should leave with 1.
     pub fn failed(&self) -> bool {
         self.rows.iter().any(|r| r.mark == Mark::Fail)
     }
 
-    /// The report as plain text: one check a line, the fix indented under a row that needs
-    /// one, and the count at the end. Every row is scrubbed, so no address or path leaves here.
     pub fn text(&self) -> String {
         let mut out = bugreport::scrub(&self.head);
         for r in &self.rows {
@@ -66,7 +59,6 @@ impl Report {
         out
     }
 
-    /// "9 checks: 7 ok, 1 warning, 1 failed."
     pub fn summary(&self) -> String {
         let (mut ok, mut warn, mut fail) = (0, 0, 0);
         for r in &self.rows {
@@ -87,16 +79,12 @@ impl Report {
     }
 }
 
-/// What only the window knows, and a check outside it cannot.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Live {
-    /// The report comes from the window, which has the door's listener and its tabs.
     pub in_app: bool,
-    /// A lock is in use: "Lock Lumen", or a tab locked.
     pub locked: bool,
 }
 
-/// Whether `settings.json` or the session file is there and reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Parsed {
     Absent,
@@ -104,7 +92,6 @@ pub enum Parsed {
     Broken,
 }
 
-/// Who holds the agent door's port.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Port {
     Free,
@@ -112,7 +99,6 @@ pub enum Port {
     Other,
 }
 
-/// Every check, run against this PC.
 pub fn run(live: &Live) -> Report {
     let dir = store::data_dir();
     let settings = store::load_settings();
@@ -138,8 +124,6 @@ pub fn run(live: &Live) -> Report {
     Report { head: format!("Lumen {}", crate::VERSION), rows }
 }
 
-/// The agents' side: the bridge, the MCP clients, the agents' disk. Quiet for someone who
-/// does not use agents at all.
 fn agent_rows(dir: &std::path::Path, door: bool) -> Vec<Row> {
     use crate::agent_doctor as ad;
     let from = |name: &'static str, f: ad::Finding| {
@@ -159,9 +143,6 @@ fn agent_rows(dir: &std::path::Path, door: bool) -> Vec<Row> {
     vec![from("Agent bridge", bridge), from("MCP clients", ad::mcp(&regs)), from("Agent disk", ad::space(ad::agent_bytes(dir)))]
 }
 
-// ------------------------------------------------------------------- the checks
-
-/// The WebView2 Runtime is installed, and its version.
 pub fn webview_row(version: Option<&str>) -> Row {
     match version {
         Some(v) => row("WebView2", Mark::Ok, v, ""),
@@ -169,7 +150,6 @@ pub fn webview_row(version: Option<&str>) -> Row {
     }
 }
 
-/// The data folder exists, can be written, and has room.
 pub fn folder_row(exists: bool, writable: bool, free: Option<u64>) -> Row {
     if !exists {
         return row("Data folder", Mark::Fail, "missing", "Lumen makes it at the next start; if it stays missing, check where the app data folder lives");
@@ -184,7 +164,6 @@ pub fn folder_row(exists: bool, writable: bool, free: Option<u64>) -> Row {
     }
 }
 
-/// `settings.json` and the session file parse. A file that is not there is a first run.
 pub fn files_row(settings: Parsed, session: Parsed) -> Row {
     let broken = |p: Parsed| p == Parsed::Broken;
     match (broken(settings), broken(session)) {
@@ -198,7 +177,6 @@ pub fn files_row(settings: Parsed, session: Parsed) -> Row {
     }
 }
 
-/// The filter lists are on disk and inside their own `Expires:`.
 pub fn lists_row(present: usize, total: usize, stale: usize) -> Row {
     if present == 0 {
         return row("Filter lists", Mark::Warn, "none on disk yet", "open a page with the blocker on; Lumen fetches them then");
@@ -215,8 +193,6 @@ pub fn lists_row(present: usize, total: usize, stale: usize) -> Row {
     row("Filter lists", Mark::Ok, format!("{present} of {total} present, all current"), "")
 }
 
-/// The helpers: absent is fine, present must match the pinned bytes. `None` is absent,
-/// `Some(true)` matches, `Some(false)` does not.
 pub fn tools_row(items: &[(&str, Option<bool>)]) -> Row {
     let wrong: Vec<&str> = items.iter().filter(|(_, state)| *state == Some(false)).map(|(name, _)| *name).collect();
     if !wrong.is_empty() {
@@ -234,7 +210,6 @@ pub fn tools_row(items: &[(&str, Option<bool>)]) -> Row {
     row("Helpers", Mark::Ok, format!("{have} of {} present, all match the pinned SHA-256", items.len()), "")
 }
 
-/// Windows Hello is only needed when something is locked.
 pub fn hello_row(available: bool, lock_in_use: bool) -> Row {
     match (available, lock_in_use) {
         (true, _) => row("Windows Hello", Mark::Ok, "set up", ""),
@@ -243,8 +218,6 @@ pub fn hello_row(available: bool, lock_in_use: bool) -> Row {
     }
 }
 
-/// Whether Windows hands links to Lumen. News, not a fault: Windows will not let a program
-/// make itself the default.
 pub fn default_row(status: defaultapp::Status) -> Row {
     let found = match status {
         defaultapp::Status::Default => "Lumen is the default browser",
@@ -254,7 +227,6 @@ pub fn default_row(status: defaultapp::Status) -> Row {
     row("Default browser", Mark::Ok, found, "")
 }
 
-/// The agent door: off, open at its port, or open with nothing of Lumen's behind it.
 pub fn door_row(on: bool, port: u32, state: Port, in_app: bool) -> Row {
     if !on {
         return row("Agent door", Mark::Ok, "off", "");
@@ -269,7 +241,6 @@ pub fn door_row(on: bool, port: u32, state: Port, in_app: bool) -> Row {
     }
 }
 
-/// The last line of `crash.log`, and how many runs ended without saying goodbye.
 pub fn crashes_row(crash_last: Option<&str>, unclean: usize, days: u32) -> Row {
     let window = format!("the last {days} days");
     let exits = |n: usize| format!("{n} unclean exit{}", if n == 1 { "" } else { "s" });
@@ -283,17 +254,13 @@ pub fn crashes_row(crash_last: Option<&str>, unclean: usize, days: u32) -> Row {
     }
 }
 
-// -------------------------------------------------------------------- the reads
-
 const GIB: u64 = 1 << 30;
 
-/// "221 GB", "720 MB": the free space on a drive.
 fn size(bytes: u64) -> String {
     let gb = bytes as f64 / GIB as f64;
     if gb >= 1.0 { format!("{gb:.0} GB") } else { format!("{} MB", bytes / (1 << 20)) }
 }
 
-/// The file's own bytes, as `T` reads them.
 fn parsed<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Parsed {
     match fs::read_to_string(path) {
         Err(_) => Parsed::Absent,
@@ -307,7 +274,6 @@ fn parsed<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Parsed {
     }
 }
 
-/// Write a small file into the folder and take it away. False if either fails.
 fn probe_write(dir: &Path) -> bool {
     let path = dir.join(format!(".doctor-{}", std::process::id()));
     let wrote = fs::write(&path, b"ok").is_ok();
@@ -315,7 +281,6 @@ fn probe_write(dir: &Path) -> bool {
     wrote
 }
 
-/// Free bytes on the drive the folder is on.
 fn free_bytes(dir: &Path) -> Option<u64> {
     use windows::{Win32::Storage::FileSystem::GetDiskFreeSpaceExW, core::HSTRING};
     let path = HSTRING::from(dir);
@@ -324,7 +289,6 @@ fn free_bytes(dir: &Path) -> Option<u64> {
     Some(free)
 }
 
-/// The last line of the crash log, already scrubbed, or None when there is none.
 fn crash_last(dir: &Path) -> Option<String> {
     let line = bugreport::crash_tail(&dir.join("crash.log"), 1);
     (!line.trim().is_empty()).then_some(line)
@@ -334,7 +298,6 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-/// The unclean exits the journal holds within `days` of `now_ms`.
 fn unclean_exits(dir: &Path, now_ms: u64, days: u32) -> usize {
     let since = now_ms.saturating_sub(days as u64 * 86_400_000);
     let Ok(entries) = fs::read_dir(dir) else { return 0 };
@@ -346,7 +309,6 @@ fn unclean_exits(dir: &Path, now_ms: u64, days: u32) -> usize {
         .sum()
 }
 
-/// Unclean exits in one day file, from the window on.
 fn unclean_in(text: &str, since_ms: u64) -> usize {
     text.lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -355,7 +317,6 @@ fn unclean_in(text: &str, since_ms: u64) -> usize {
         .count()
 }
 
-/// Who answers at the agent door's port: a head request, and the code it comes back with.
 fn probe_door(port: u32) -> Port {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port as u16));
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
@@ -370,7 +331,6 @@ fn probe_door(port: u32) -> Port {
     let mut buf = [0u8; 512];
     let n = stream.read(&mut buf).unwrap_or(0);
     let head = String::from_utf8_lossy(&buf[..n]);
-    // A shut door says 503, an open one without the token says 401. Either is Lumen's.
     if head.starts_with("HTTP/1.1 401") || head.starts_with("HTTP/1.1 503") { Port::ThisLumen } else { Port::Other }
 }
 
@@ -379,7 +339,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A folder of its own under the temp dir, gone when the test is done.
     struct Temp(PathBuf);
 
     impl Drop for Temp {
@@ -409,7 +368,6 @@ mod tests {
         assert_eq!(folder_row(true, false, Some(GIB * 100)).mark, Mark::Fail);
         assert_eq!(folder_row(true, true, Some(GIB * 100)).mark, Mark::Ok);
         assert!(folder_row(true, true, Some(GIB * 100)).found.contains("100 GB"));
-        // Under a gigabyte, and a drive that will not say: both worth a look, neither a failure.
         assert_eq!(folder_row(true, true, Some(500 << 20)).mark, Mark::Warn);
         assert_eq!(folder_row(true, true, Some(500 << 20)).found, "writable, only 500 MB free");
         assert_eq!(folder_row(true, true, None).mark, Mark::Warn);
@@ -474,10 +432,8 @@ mod tests {
     fn the_door_is_told_by_what_answers() {
         assert_eq!(door_row(false, 47615, Port::Other, true).found, "off");
         assert_eq!(door_row(true, 47615, Port::ThisLumen, false).mark, Mark::Ok);
-        // Nothing behind it: a failure inside the window, a warning from a shell.
         assert_eq!(door_row(true, 47615, Port::Free, true).mark, Mark::Fail);
         assert_eq!(door_row(true, 47615, Port::Free, false).mark, Mark::Warn);
-        // Someone else's program holds it.
         assert_eq!(door_row(true, 47615, Port::Other, true).mark, Mark::Warn);
         assert!(door_row(true, 47615, Port::Other, true).found.contains("something else"));
     }
@@ -491,7 +447,6 @@ mod tests {
         let both = crashes_row(Some("panic at …"), 3, 7);
         assert_eq!(both.mark, Mark::Warn);
         assert_eq!(both.found, "last crash: panic at …; 3 unclean exits in the last 7 days");
-        // A blank line is no crash.
         assert_eq!(crashes_row(Some("  "), 0, 7).mark, Mark::Ok);
     }
 
@@ -537,7 +492,6 @@ mod tests {
         assert!(!text.contains("Users"), "{text}");
         assert!(text.contains("last crash: at …"), "{text}");
         assert!(text.contains("-> look at …"), "{text}");
-        // The first line is the version and build stamp, the last is the count.
         assert!(text.starts_with("Lumen 0.6.7.7 (abc1234 2026-10-25)\n"), "{text}");
         assert!(text.ends_with("2 checks: 0 ok, 1 warning, 1 failed"), "{text}");
         assert!(report.failed());

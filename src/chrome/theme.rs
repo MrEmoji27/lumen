@@ -1,5 +1,4 @@
-//! Colors. A palette is a hue, a neutral chroma and an accent; surfaces are derived.
-//! Same numbers the CSS used, computed here with the OKLCH formulas.
+//! Colors.
 
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
@@ -17,7 +16,6 @@ impl Color {
         let m = |a: f32, b: f32| a + (b - a) * t;
         Color(m(self.0, o.0), m(self.1, o.1), m(self.2, o.2), m(self.3, o.3))
     }
-    /// 0x00BBGGRR, for GDI (the edit boxes).
     pub fn colorref(self) -> u32 {
         let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
         c(self.0) | (c(self.1) << 8) | (c(self.2) << 16)
@@ -41,7 +39,6 @@ impl Color {
     }
 }
 
-/// OKLCH to sRGB. l 0..1, c chroma, h degrees.
 pub fn oklch(l: f32, c: f32, h: f32) -> Color {
     let (a, b) = (c * h.to_radians().cos(), c * h.to_radians().sin());
     let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
@@ -58,7 +55,6 @@ pub fn oklch(l: f32, c: f32, h: f32) -> Color {
     Color(gamma(r), gamma(g), gamma(bl), 1.0)
 }
 
-/// (hue, neutral chroma, accent l, accent c, accent h)
 fn palette(name: &str) -> (f32, f32, f32, f32, f32) {
     match name {
         "sand" => (70.0, 0.012, 0.72, 0.13, 48.0),
@@ -69,14 +65,10 @@ fn palette(name: &str) -> (f32, f32, f32, f32, f32) {
     }
 }
 
-/// The person's own colours, from settings. None means the palette's own.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Custom {
-    /// The window background: the space around the page.
     pub bg: Option<Color>,
-    /// The sidebar and toolbar surface.
     pub side: Option<Color>,
-    /// Cards, fields and other raised surfaces.
     pub surface: Option<Color>,
     pub text: Option<Color>,
     pub dim: Option<Color>,
@@ -86,23 +78,17 @@ impl Custom {
     pub fn is_empty(&self) -> bool {
         self.bg.is_none() && self.side.is_none() && self.surface.is_none() && self.text.is_none() && self.dim.is_none()
     }
-    /// Hex strings in (empty = none). Anything unreadable is ignored.
     pub fn from_hex(bg: &str, side: &str, surface: &str, text: &str, dim: &str) -> Custom {
         let c = |s: &str| Color::from_hex(s);
         Custom { bg: c(bg), side: c(side), surface: c(surface), text: c(text), dim: c(dim) }
     }
 }
 
-/// The three looks: each one a whole set of colours, type, corners and motion. The
-/// picture they are drawn to is docs/design/lumen-ui.html.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Style {
-    /// Warm paper and ink, one red signal. Light and dark. The default.
     #[default]
     Signal,
-    /// A frosted sidebar over a colour wallpaper, the page a floating card. Dark.
     Glass,
-    /// Near-black, hairlines, square-ish corners, one violet accent. Dark.
     Precise,
 }
 
@@ -114,7 +100,6 @@ impl Style {
             _ => Style::Signal,
         }
     }
-    /// Glass and Precise are dark looks; only Signal has a light twin.
     pub fn dark(self, wanted: bool) -> bool {
         self != Style::Signal || wanted
     }
@@ -131,10 +116,8 @@ fn wh(a: f32) -> Color {
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub dark: bool,
-    /// The active tab and the chosen segment: a solid pill, and what is written on it.
     pub pill: Color,
     pub pill_ink: Color,
-    /// The sidebar and toolbar surface. The same as `bg` until the person parts them.
     pub side: Color,
     pub bg: Color,
     pub raise: Color,
@@ -155,11 +138,8 @@ impl Theme {
         Theme::custom(palette_name, dark, accent_hex, &Custom::default())
     }
 
-    /// A look's own colours, with the person's accent and colours laid over them the way
-    /// `custom` does. The values are the reference picture's (`.sig`, `.sig.dark`, `.gl`, `.pr`).
     pub fn styled(style: Style, dark: bool, accent_hex: &str, c: &Custom) -> Theme {
         let dark = style.dark(dark);
-        // bg, raise (cards and fields), hover, press, line, text, dim, faint, accent, pill, pill ink
         let t = match (style, dark) {
             (Style::Signal, false) => (hx("#f1efe9"), hx("#ffffff"), hx("#e7e4dc"), hx("#dedad0"), hx("#dedad0"), hx("#141414"), hx("#3a3936"), hx("#8b877d"), hx("#e8322b"), hx("#141414"), hx("#ffffff")),
             (Style::Signal, true) => (hx("#121211"), hx("#1c1c1a"), hx("#23221f"), hx("#2b2a27"), hx("#2b2a27"), hx("#f2efe8"), hx("#cfcbc2"), hx("#8e8a80"), hx("#ff4a3d"), hx("#f2efe8"), hx("#121211")),
@@ -189,8 +169,6 @@ impl Theme {
         if c.is_empty() {
             return th;
         }
-        // The person's own colours win, as they did before the looks: a custom surface
-        // brings its own steps along.
         th.bg = c.bg.unwrap_or(th.bg);
         th.side = c.side.or(c.bg).unwrap_or(th.bg);
         let toward = if dark { Color(1.0, 1.0, 1.0, 1.0) } else { Color(0.0, 0.0, 0.0, 1.0) };
@@ -211,16 +189,11 @@ impl Theme {
         th
     }
 
-    /// A colour as it shows over the window's background: what a native edit box needs,
-    /// which cannot be see-through.
     pub fn solid(&self, c: Color) -> Color {
         let o = self.bg.mix(c, c.3);
         Color(o.0, o.1, o.2, 1.0)
     }
 
-    /// The same palette, with the person's own colours laid over it. Overriding
-    /// one surface pulls the steps around it along: a custom sidebar colour gets
-    /// its own hover, press and line, a custom background its own dim text.
     pub fn custom(palette_name: &str, dark: bool, accent_hex: &str, c: &Custom) -> Theme {
         let (h, chroma, al, ac, ah) = palette(palette_name);
         let k = |l: f32, cm: f32| oklch(l, chroma * cm, h);
@@ -254,9 +227,6 @@ impl Theme {
         let side = c.side.or(c.bg).unwrap_or(bg);
         let raise = c.surface.unwrap_or(raise);
         let text = c.text.unwrap_or(text);
-        // The steps around a custom surface: a little lighter in the dark, a
-        // little darker in the light. A custom text and background decide the
-        // two greys between them.
         let toward = if dark { Color(1.0, 1.0, 1.0, 1.0) } else { Color(0.0, 0.0, 0.0, 1.0) };
         let (hover, press, line) = if c.surface.is_some() {
             (raise.mix(toward, 0.05), raise.mix(toward, 0.11), raise.mix(text, 0.18))
@@ -301,10 +271,8 @@ mod tests {
         assert_eq!(s.pill.hex(), "#141414");
         let d = Theme::styled(Style::Signal, true, "", &Custom::default());
         assert_eq!((d.bg.hex(), d.accent.hex(), d.pill.hex()), ("#121211".into(), "#ff4a3d".into(), "#f2efe8".into()));
-        // Glass and Precise are dark whatever is asked.
         assert!(Theme::styled(Style::Glass, false, "", &Custom::default()).dark);
         assert_eq!(Theme::styled(Style::Precise, false, "", &Custom::default()).accent.hex(), "#8b7bff");
-        // The person's accent wins.
         assert_eq!(Theme::styled(Style::Signal, false, "#2f6bff", &Custom::default()).accent.hex(), "#2f6bff");
         assert_eq!(Style::of("nonsense"), Style::Signal);
     }
@@ -329,19 +297,15 @@ mod tests {
         assert_eq!(t.side, Color::from_hex("#203040").unwrap());
         assert_eq!(t.raise, Color::from_hex("#304050").unwrap());
         assert_eq!(t.text, Color::from_hex("#f0f0f0").unwrap());
-        // The steps follow the custom surface instead of the palette's.
         assert_ne!(t.hover, Theme::new("graphite", true, "").hover);
-        // And a custom sidebar alone does not drag the background with it.
         let c = Custom::from_hex("", "#203040", "", "", "");
         let t = Theme::custom("graphite", true, "", &c);
         assert_eq!(t.side, Color::from_hex("#203040").unwrap());
         assert_eq!(t.bg, Theme::new("graphite", true, "").bg);
-        // A custom background alone carries the side and the dim greys with it.
         let c = Custom::from_hex("#101418", "", "", "", "");
         let t = Theme::custom("graphite", true, "", &c);
         assert_eq!(t.side, t.bg);
         assert_ne!(t.faint, Theme::new("graphite", true, "").faint);
-        // A dim colour of its own wins over the derived one.
         let c = Custom::from_hex("#101418", "", "", "", "#888888");
         let t = Theme::custom("graphite", true, "", &c);
         assert_eq!(t.dim, Color::from_hex("#888888").unwrap());

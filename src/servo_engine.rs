@@ -1,16 +1,4 @@
-//! Servo, for the light sites. Behind the `servo` cargo feature: a normal Lumen
-//! build compiles none of this, and a tab only lands here when its host is in the
-//! "Servo sites" list.
-//!
-//! One Servo for the whole app, made when the first Servo tab opens. A Servo tab is
-//! a child window of Lumen's own, painted by Servo's GL renderer (ANGLE, because
-//! hybrid laptops have no native WGL interop); the window procedure below turns
-//! Windows messages into Servo input events. Dropping a [`Page`] closes the child
-//! window and frees the tab's memory; the shared Servo instance stays.
-//!
-//! What a Servo tab does not have: ad blocking, dark pages, reader view, translation,
-//! agent tools, downloads, permissions and the sleep policy's freeze (Servo has no
-//! equivalent of WebView2's suspend). Those are WebView2-only for now.
+//! Servo, for the light sites.
 
 use std::{cell::RefCell, num::NonZeroIsize, rc::Rc};
 
@@ -39,12 +27,6 @@ use windows::core::{PCWSTR, w};
 
 use crate::engine::Ev;
 
-// The prebuilt SpiderMonkey was compiled with a newer MSVC STL (VS 17.12+) than this
-// machine's toolset (14.41) and calls two of its vectorized helpers. Same contract, in
-// Rust, until the toolset is updated. Semantics from MSVC STL vector_algorithms.cpp.
-// (The same shim lives in examples/servo_tab.rs, where the spike found the need for it.)
-
-/// First occurrence of [needle, needle+n) in [first, last); `last` if none; `first` if n == 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __std_search_1(first: *const u8, last: *const u8, needle: *const u8, n: usize) -> *const u8 {
     if n == 0 {
@@ -62,7 +44,6 @@ pub unsafe extern "C" fn __std_search_1(first: *const u8, last: *const u8, needl
     }
 }
 
-/// Index of the first haystack byte that appears in needle; usize::MAX if none.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __std_find_first_of_trivial_pos_1(hay: *const u8, hay_len: usize, needle: *const u8, needle_len: usize) -> usize {
     if hay_len == 0 || needle_len == 0 {
@@ -73,7 +54,6 @@ pub unsafe extern "C" fn __std_find_first_of_trivial_pos_1(hay: *const u8, hay_l
     hay.iter().position(|b| set.contains(b)).unwrap_or(usize::MAX)
 }
 
-/// Servo wakes Lumen's event loop through this when it has work.
 #[derive(Clone)]
 struct Waker(EventLoopProxy<Ev>);
 
@@ -86,47 +66,36 @@ impl servo::EventLoopWaker for Waker {
     }
 }
 
-/// The one Servo. Made on the first Servo tab, so a Lumen that never opens one pays
-/// nothing for it.
 pub struct Engine {
     servo: Servo,
 }
 
 impl Engine {
     pub fn new(proxy: EventLoopProxy<Ev>) -> Engine {
-        // Servo's network stack wants a process-wide crypto provider before it starts.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let servo = ServoBuilder::default().event_loop_waker(Box::new(Waker(proxy))).build();
         servo.setup_logging();
         Engine { servo }
     }
 
-    /// Servo has something to do. Called on every turn of Lumen's loop.
     pub fn spin(&self) {
         self.servo.spin_event_loop();
     }
 
-    /// A page in a child window of `parent`. None when the window, the GL context or
-    /// the URL cannot be had; the caller then leaves the tab to WebView2.
     pub fn page(&self, parent: HWND, id: u64, url: &str, proxy: EventLoopProxy<Ev>) -> Option<Page> {
         Page::new(&self.servo, parent, id, url, proxy)
     }
 }
 
-/// What the window procedure needs: the page, and where the pointer last was.
 #[derive(Default)]
 struct State {
     webview: Option<WebView>,
     rendering: Option<Rc<WindowRenderingContext>>,
-    /// Last pointer position, in device pixels. Servo's events carry it.
     at: DevicePoint,
-    /// A mouse button is down: the window keeps the capture until it comes up.
     holding: bool,
-    /// What Servo last asked the cursor to be.
     cursor: Cursor,
 }
 
-/// One Servo page: a child window of Lumen's, and the Servo side of it.
 pub struct Page {
     hwnd: HWND,
     state: Rc<RefCell<State>>,
@@ -163,7 +132,6 @@ impl Page {
         Some(Page { hwnd, state })
     }
 
-    /// Place the page, in logical coordinates relative to Lumen's window.
     pub fn set_bounds(&self, x: f64, y: f64, w: f64, h: f64) {
         unsafe {
             let k = GetDpiForWindow(self.hwnd) as f64 / 96.0;
@@ -225,7 +193,6 @@ impl Page {
         }
     }
 
-    /// The page is the person's now: the child window gets the keyboard.
     pub fn focus(&self) {
         unsafe {
             let _ = SetFocus(Some(self.hwnd));
@@ -235,8 +202,6 @@ impl Page {
         }
     }
 
-    /// Debug builds only: one frame of the page, summed into a number, so a headless
-    /// run can prove Servo painted something instead of staying blank.
     #[cfg(debug_assertions)]
     pub fn proof_of_paint(&self) {
         let view = self.state.borrow().webview.clone();
@@ -254,7 +219,6 @@ impl Page {
 
 impl Drop for Page {
     fn drop(&mut self) {
-        // Close the window first: Servo's GL surface goes with it.
         {
             let mut s = self.state.borrow_mut();
             s.webview = None;
@@ -264,9 +228,6 @@ impl Drop for Page {
     }
 }
 
-// -------------------------------------------------------------------- delegate
-
-/// Servo's callbacks, turned into Lumen events. Nothing here touches app state.
 struct Delegate {
     id: u64,
     hwnd: HWND,
@@ -293,7 +254,6 @@ impl WebViewDelegate for Delegate {
     }
 
     fn notify_cursor_changed(&self, _: WebView, cursor: Cursor) {
-        // The window procedure asks for the cursor; remember what Servo wants.
         if let Some(cell) = state_of(self.hwnd) {
             if let Ok(mut s) = cell.try_borrow_mut() {
                 s.cursor = cursor;
@@ -305,7 +265,6 @@ impl WebViewDelegate for Delegate {
     }
 
     fn notify_closed(&self, _: WebView) {
-        // window.close() in the page: the tab goes, like any other page asking.
         let _ = self.proxy.send_event(Ev::CloseMe(self.id));
     }
 
@@ -314,8 +273,6 @@ impl WebViewDelegate for Delegate {
         let _ = self.proxy.send_event(Ev::ServoGone(self.id));
     }
 }
-
-// ------------------------------------------------------------------ the window
 
 const CLASS: PCWSTR = w!("LumenServo");
 
@@ -347,7 +304,6 @@ fn create_window(parent: HWND, state: *const RefCell<State>) -> Option<HWND> {
             None,
         )
         .ok()?;
-        // The window procedure finds its state through this pointer.
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
         Some(hwnd)
     }
@@ -377,7 +333,6 @@ fn physical(w: i32, h: i32) -> PhysicalSize<u32> {
     PhysicalSize::new(w.max(1) as u32, h.max(1) as u32)
 }
 
-/// Servo wants a display handle; on Windows that is enough to say "this machine".
 fn display_handle() -> DisplayHandle<'static> {
     unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new())) }
 }
@@ -388,7 +343,6 @@ fn window_handle(hwnd: HWND) -> WindowHandle<'static> {
     unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(h)) }
 }
 
-/// Windows' messages in, Servo's input events out. Also the paint.
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let Some(cell) = state_of(hwnd) else { return unsafe { DefWindowProcW(hwnd, msg, wp, lp) } };
     let Ok(mut s) = cell.try_borrow_mut() else { return unsafe { DefWindowProcW(hwnd, msg, wp, lp) } };
@@ -473,8 +427,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             LRESULT(0)
         }
         WM_MOUSEWHEEL => {
-            // Wheel deltas come in the window's own coordinates; the pointer is where
-            // Servo wants the event, so map the screen point back into the client.
             let mut pt = POINT { x: px, y: py };
             unsafe {
                 let _ = ScreenToClient(hwnd, &mut pt);
@@ -502,7 +454,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             LRESULT(0)
         }
         WM_CHAR => {
-            // The character, not the key: this is what types into a page.
             if let Some(c) = char::from_u32(wp.0 as u32)
                 && !c.is_control()
             {
@@ -550,7 +501,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     }
 }
 
-/// The keys a page gets as themselves. Everything else arrives as a character.
 fn named_key(vk: u16) -> Option<Key> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     let named = match VIRTUAL_KEY(vk) {
@@ -575,7 +525,6 @@ fn named_key(vk: u16) -> Option<Key> {
     Some(Key::Named(named))
 }
 
-/// Windows' cursors for what Servo asked for. None means: no pointer at all.
 fn cursor_of(cursor: Cursor) -> Option<HCURSOR> {
     if cursor == Cursor::None {
         return None;
@@ -599,13 +548,11 @@ fn cursor_of(cursor: Cursor) -> Option<HCURSOR> {
 mod tests {
     use super::*;
 
-    /// The keys a page has to get as themselves, and the ones that arrive as text.
     #[test]
     fn named_keys_cover_the_page_editing_ones() {
         assert!(matches!(named_key(0x0D), Some(Key::Named(NamedKey::Enter))));
         assert!(matches!(named_key(0x08), Some(Key::Named(NamedKey::Backspace))));
         assert!(matches!(named_key(0x25), Some(Key::Named(NamedKey::ArrowLeft))));
-        // A letter is not a named key: WM_CHAR carries it.
         assert!(named_key(0x41).is_none());
     }
 

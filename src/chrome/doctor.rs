@@ -30,11 +30,9 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         close_button(i, st);
         return;
     };
-    // Running it again sits level with the title, so it is there before and after a scroll.
     let f = lo.body.align(Align::Center);
     let w = i.gfx.measure("Check again", f) + 2.0 * lo.s4;
     outline_button(i, col.right() - w - 48.0, title_y + 4.0, "Check again", PageHit::DoctorRun, false);
-    // The version and build stamp on the left, how the checks came out on the right.
     let mono = lo.mono_at(11.0, 450);
     let sum = report.summary();
     let summary_w = i.gfx.measure(&sum, lo.small) + 4.0;
@@ -51,7 +49,6 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-/// One check: a card, its mark, its name, what it found, and the fix when it needs one.
 fn draw_row(i: &mut Inner, col: R, y: f32, row: &Row) -> f32 {
     let th = i.theme;
     let lo = i.look.clone();
@@ -71,8 +68,6 @@ fn draw_row(i: &mut Inner, col: R, y: f32, row: &Row) -> f32 {
     card.bottom() + lo.s2
 }
 
-/// The mark in its tile: ok is quiet, a warning is ink, a failure is a solid tile with the
-/// mark cut out of it.
 fn mark_tile(i: &mut Inner, r: R, mark: Mark) {
     let th = i.theme;
     let rad = if i.look.style == Style::Precise { i.look.round(30.0) } else { 9.0 };

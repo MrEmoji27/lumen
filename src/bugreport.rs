@@ -1,13 +1,4 @@
 //! A problem report the person reads in full before it goes anywhere.
-//!
-//! The report must never carry a URL, a host, a page title, a file path under
-//! the person's folder or anything typed into a page. So the journal lines are
-//! filtered down to the kinds and keys that are facts about Lumen, every message
-//! is scrubbed of links and paths, and the crash log is cut to its last lines.
-//!
-//! Plain values and plain text. The window that shows the report, and whatever
-//! sends it, live in main.rs.
-
 
 use std::{fs, path::Path};
 
@@ -18,25 +9,17 @@ use windows::Win32::{
 };
 use windows::core::HSTRING;
 
-/// Where Send posts a report: a Formspree form that mails it to zemo. Only on a press of
-/// Send, only the text the page shows.
 pub const SEND_TO: &str = "https://formspree.io/f/mojgjdjd";
 
-/// The line a report holds until the person says what happened.
 pub const STORY_PLACEHOLDER: &str = "(say what you did, what you expected, and what Lumen did instead)";
 
-/// The report with the person's own words in place of the placeholder. Empty words leave
-/// the placeholder, so the reader sees nothing was said.
 pub fn with_story(report: &str, story: &str) -> String {
     let story = story.trim();
     if story.is_empty() { report.to_string() } else { report.replacen(STORY_PLACEHOLDER, story, 1).replacen(NOTE_PLACEHOLDER, story, 1) }
 }
 
-/// Where a shared set of numbers keeps the person's note until they write one.
 pub const NOTE_PLACEHOLDER: &str = "(nothing added)";
 
-/// The same report, shared to help rather than about a fault: its head says so, and the
-/// person's words are an optional note.
 pub fn as_numbers(report: &str) -> String {
     report
         .replacen("Lumen problem report", "Lumen numbers, shared to help", 1)
@@ -44,8 +27,6 @@ pub fn as_numbers(report: &str) -> String {
         .replacen(STORY_PLACEHOLDER, NOTE_PLACEHOLDER, 1)
 }
 
-/// Post a report to `SEND_TO`. Blocking: call it off the window's thread. `kind` is
-/// "problem" or "crash". Err says why, in a few words.
 pub fn send(report: &str, kind: &str, version: &str) -> Result<(), String> {
     let config = ureq::config::Config::builder().timeout_global(Some(std::time::Duration::from_secs(20))).http_status_as_error(false).build();
     let agent = ureq::Agent::new_with_config(config);
@@ -69,44 +50,26 @@ fn short(s: &str) -> String {
     s.chars().take(80).collect()
 }
 
-/// What the report knows about this run, as plain strings the window fills in.
 #[derive(Debug, Clone)]
 pub struct Facts {
-    /// "0.6.3".
     pub version: String,
-    /// "abc1234 2026-10-18": the commit and its date.
     pub build: String,
-    /// "Windows 11 (build 26300)".
     pub os: String,
-    /// The WebView2 runtime version, or "" when none has started.
     pub webview: String,
-    /// The look's name: "signal", "glass", "precise".
     pub look: String,
-    /// "vertical", "horizontal" or "hybrid".
     pub layout: String,
-    /// "dark" or "light".
     pub theme: String,
-    /// The ad and tracker blocker is on.
     pub blocker: bool,
-    /// The agent door is open.
     pub agent_door: bool,
-    /// Seconds the window has been up.
     pub uptime_s: u64,
-    /// Tabs in the window.
     pub tabs: usize,
-    /// The process tree's memory in MB, when it has been measured.
     pub mem_mb: Option<u64>,
 }
 
-/// The Windows version, from the registry: "Windows 11 Pro 24H2 (build 26300)".
-/// Anything that will not read comes back as plain "Windows".
 pub fn os_version() -> String {
     os_text(reg_sz("ProductName").trim(), reg_sz("DisplayVersion").trim(), reg_sz("CurrentBuild").trim())
 }
 
-/// The header's OS text, from the three registry values. Kept apart from the
-/// read so the Windows 11 rule can be tested: ProductName says "Windows 10"
-/// even on Windows 11, and the build (22000 and up) is the truth.
 fn os_text(product: &str, display: &str, build: &str) -> String {
     let number: u32 = build.parse().unwrap_or(0);
     let mut text = if product.is_empty() { "Windows".to_string() } else { product.to_string() };
@@ -123,8 +86,6 @@ fn os_text(product: &str, display: &str, build: &str) -> String {
     text
 }
 
-/// One REG_SZ under HKLM's CurrentVersion key. "" when it will not read; the
-/// report is not worth a failure.
 fn reg_sz(name: &str) -> String {
     let key = HSTRING::from(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
     let name = HSTRING::from(name);
@@ -147,17 +108,10 @@ fn reg_sz(name: &str) -> String {
     }
 }
 
-/// The kinds a report keeps. A visit is not one of them: the report says what
-/// Lumen did, never where the person went.
 const KINDS: &[&str] = &["start", "exit", "unclean_exit", "crash", "panic", "error", "ui_first", "ui_slow"];
 
-/// The keys a kept line keeps, in this order, when present. Everything else a
-/// line carries — a host, a title, a query — is dropped.
 const KEYS: &[&str] = &["k", "v", "clean", "uptime", "n", "worst", "ms", "f", "m", "headless", "reload"];
 
-/// The newest `days` day files of the journal, oldest first, cut to the facts:
-/// "10-18 16:11:09 start v=0.6.2 headless=false", in local time. The last
-/// `max_lines` lines are kept; a folder that is not there says "".
 pub fn journal_digest(dir: &Path, days: usize, max_lines: usize) -> String {
     let Ok(entries) = fs::read_dir(dir) else { return String::new() };
     let mut names: Vec<String> =
@@ -178,16 +132,12 @@ pub fn journal_digest(dir: &Path, days: usize, max_lines: usize) -> String {
     lines.join("\n")
 }
 
-/// The last `lines` lines of a crash log, each scrubbed the same way, blank
-/// lines left out. A file that is not there says "".
 pub fn crash_tail(path: &Path, lines: usize) -> String {
     let Ok(text) = fs::read_to_string(path) else { return String::new() };
     let all: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
     all[all.len().saturating_sub(lines)..].iter().map(|line| scrub(line)).collect::<Vec<_>>().join("\n")
 }
 
-/// The whole report, as the person reads it before it goes anywhere. Sections
-/// with nothing in them say "none".
 pub fn build(f: &Facts, journal: &str, crash: &str) -> String {
     let mut out = String::from("Lumen problem report\nVersion ");
     out.push_str(&f.version);
@@ -224,7 +174,6 @@ pub fn build(f: &Facts, journal: &str, crash: &str) -> String {
     out
 }
 
-/// A section with nothing in it says "none".
 fn section(text: &str) -> &str {
     if text.trim().is_empty() { "none" } else { text }
 }
@@ -233,14 +182,11 @@ fn on(yes: bool) -> &'static str {
     if yes { "on" } else { "off" }
 }
 
-/// "1 h 12 min", "12 min", "40 s": how long the window has been up.
 fn uptime(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
     if h > 0 { format!("{h} h {m} min") } else if m > 0 { format!("{m} min") } else { format!("{s} s") }
 }
 
-/// One line of a day file as the report writes it: the time, the kind, then the
-/// kept keys in order. `m` is scrubbed like everything else that leaves here.
 fn line_text(value: &Value, kind: &str) -> String {
     let mut out = String::new();
     if let Some(t) = value.get("t").and_then(Value::as_u64) {
@@ -265,8 +211,6 @@ fn line_text(value: &Value, kind: &str) -> String {
     out
 }
 
-/// "MM-DD HH:MM:SS" in the PC's own time zone, as the person's clock read then. Windows
-/// converts; should it refuse, the UTC reading is used.
 fn stamp(ms: u64) -> String {
     use windows::Win32::{
         Foundation::{FILETIME, SYSTEMTIME},
@@ -282,7 +226,6 @@ fn stamp(ms: u64) -> String {
     format!("{:02}-{:02} {:02}:{:02}:{:02}", local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond)
 }
 
-/// "MM-DD HH:MM:SS", UTC, computed by hand.
 fn stamp_utc(ms: u64) -> String {
     let secs = ms / 1000;
     let (_, m, d) = civil_from_days((secs / 86_400) as i64);
@@ -290,7 +233,6 @@ fn stamp_utc(ms: u64) -> String {
     format!("{:02}-{:02} {:02}:{:02}:{:02}", m, d, tod / 3600, tod % 3600 / 60, tod % 60)
 }
 
-/// The civil date of days since 1970-01-01. Howard Hinnant's algorithm.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -304,9 +246,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// A URL or a Windows path becomes "…". The report may not carry an address, a
-/// host or a place on disk, and the only way to be sure of that is to keep none
-/// of it. Newlines become spaces: one line stays one line.
 pub(crate) fn scrub(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -319,16 +258,11 @@ pub(crate) fn scrub(text: &str) -> String {
     out.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
 }
 
-/// The start and length of the next URL or Windows path in `s`, if any. A URL
-/// runs to the whitespace or the closing mark after it; so does a path. Nothing
-/// that looks like one is ever kept, host included.
 fn next_private(s: &str) -> Option<(usize, usize)> {
     let bytes = s.as_bytes();
     for (i, _) in s.char_indices() {
         let rest = &s[i..];
         let link = rest.starts_with("http://") || rest.starts_with("https://");
-        // "C:\dir", "C:/dir" and "\\server\share". A letter before the colon is
-        // not enough on its own: "http://" has one too, hence the boundary.
         let drive = i + 2 < bytes.len()
             && bytes[i].is_ascii_alphabetic()
             && bytes[i + 1] == b':'
@@ -343,7 +277,6 @@ fn next_private(s: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// "YYYY-MM-DD.jsonl" and nothing else.
 pub(crate) fn day_file(name: &str) -> bool {
     let Some(day) = name.strip_suffix(".jsonl") else { return false };
     let bytes = day.as_bytes();
@@ -360,7 +293,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A folder of its own under the temp dir, gone when the test is done.
     struct Temp(PathBuf);
 
     impl Drop for Temp {
@@ -376,8 +308,6 @@ mod tests {
         Temp(dir)
     }
 
-    /// A journal with a visit in it: the report keeps the run and the trouble,
-    /// never the address and never the page.
     #[test]
     fn a_digest_keeps_the_run_and_not_the_visit() {
         let dir = tmp("digest");
@@ -398,7 +328,6 @@ mod tests {
             ),
         )
         .unwrap();
-        // Not a day file: not read at all.
         fs::write(dir.0.join("notes.jsonl"), "{\"t\":1,\"k\":\"error\",\"m\":\"https://other.example.com\"}\n").unwrap();
 
         let digest = journal_digest(&dir.0, 7, 100);
@@ -406,16 +335,12 @@ mod tests {
         assert!(!digest.contains(".com"), "{digest}");
         assert!(!digest.contains("nav"), "{digest}");
         assert!(!digest.contains("secret") && !digest.contains("dark"), "{digest}");
-        // Oldest file first, kept kinds only, kept keys only, "m" scrubbed.
-        // The time is local, so the test reads past it (15 characters: "MM-DD HH:MM:SS ").
         assert_eq!(
             digest.lines().map(|l| &l[15..]).collect::<Vec<_>>(),
             vec!["start v=0.6.1 headless=false", "error f=download m=yt-dlp gave up on …", "exit clean=true uptime=3600"],
         );
-        // The newest days only, and the last lines only.
         assert_eq!(journal_digest(&dir.0, 1, 100).lines().count(), 2);
         assert!(journal_digest(&dir.0, 7, 1).ends_with(" exit clean=true uptime=3600"));
-        // No folder: nothing to say.
         assert_eq!(journal_digest(&dir.0.join("gone"), 7, 100), "");
     }
 
@@ -430,7 +355,6 @@ mod tests {
         assert!(tail.contains("panic at …"), "{tail}");
         assert!(tail.contains("last line at …"), "{tail}");
         assert!(!tail.contains("http") && !tail.contains("example") && !tail.contains("Users"), "{tail}");
-        // The last lines only, and a file that is not there says nothing.
         assert_eq!(crash_tail(&path, 1), "last line at …");
         assert_eq!(crash_tail(&dir.0.join("gone.log"), 3), "");
     }
@@ -474,7 +398,6 @@ mod tests {
         assert!(text.contains("Recent journal (no addresses, no page content, local time):\n10-18 16:11:09 start v=0.6.2 headless=false"), "{text}");
         assert!(text.contains("Last crash log lines:\nnone"), "{text}");
 
-        // Nothing measured, nothing to tail: the sections still stand, saying none.
         let bare = Facts { build: String::new(), os: String::new(), webview: String::new(), mem_mb: None, ..facts };
         let text = build(&bare, "", "");
         assert!(text.contains("Version 0.6.3\n"), "{text}");
@@ -487,7 +410,6 @@ mod tests {
     fn the_os_line_names_windows_and_the_build_names_the_version() {
         let os = os_version();
         assert!(os.starts_with("Windows"), "{os}");
-        // ProductName still says Windows 10 on Windows 11: the build decides.
         assert_eq!(os_text("Windows 10 Pro", "24H2", "26300"), "Windows 11 Pro 24H2 (build 26300)");
         assert_eq!(os_text("Windows 10 Pro", "22H2", "19045"), "Windows 10 Pro 22H2 (build 19045)");
         assert_eq!(os_text("", "", ""), "Windows");
@@ -497,7 +419,6 @@ mod tests {
     fn a_stamp_is_short_and_the_utc_reading_is_right() {
         assert_eq!(stamp_utc(1_700_000_000_000), "11-14 22:13:20");
         assert_eq!(stamp_utc(0), "01-01 00:00:00");
-        // Local time: the same shape, whatever the zone.
         let s = stamp(1_700_000_000_000);
         assert_eq!(s.len(), 14, "{s}");
         assert_eq!(&s[2..3], "-");

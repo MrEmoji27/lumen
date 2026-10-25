@@ -1,7 +1,4 @@
-//! Search history by what the pages said. The text of each page you open goes, gzipped, into
-//! one append-only file. A search reads that file from start to end on its own thread. No
-//! index, no database, nothing in memory between searches: a few thousand pages scan in tens
-//! of milliseconds, and that is plenty for one person.
+//! Search history by what the pages said.
 
 use std::{
     collections::HashMap,
@@ -16,14 +13,10 @@ use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
 use serde_json::{Value, json};
 
 const FILE: &str = "pages.jsonl.gz";
-/// Text kept per page. The start of a page says what it is about.
 pub const MAX_TEXT: usize = 30_000;
-/// Past this the file is rewritten with only the newest copy of each page.
 const COMPACT_AT: u64 = 48 << 20;
-/// Pages kept by a compaction, newest first.
 const KEEP: usize = 6000;
 
-/// One answer: (url, title, a few words around the match).
 pub type Hit = (String, String, String);
 
 enum Job {
@@ -33,7 +26,6 @@ enum Job {
     Search { q: String, limit: usize, reply: Box<dyn FnOnce(String, Vec<Hit>) + Send> },
 }
 
-/// The handle the UI thread holds. Every call returns at once.
 #[derive(Clone)]
 pub struct Recall {
     tx: Sender<Job>,
@@ -59,12 +51,10 @@ impl Recall {
         let _ = self.tx.send(Job::Forget(url.into()));
     }
 
-    /// Everything, or everything from `since` (unix seconds) on.
     pub fn clear(&self, since: Option<u64>) {
         let _ = self.tx.send(Job::Clear(since));
     }
 
-    /// `reply` gets the query back with the hits, so a stale answer can be told apart.
     pub fn search(&self, q: &str, limit: usize, reply: impl FnOnce(String, Vec<Hit>) + Send + 'static) {
         let _ = self.tx.send(Job::Search { q: q.into(), limit, reply: Box::new(reply) });
     }
@@ -77,7 +67,6 @@ fn now() -> u64 {
 fn worker(path: PathBuf, rx: Receiver<Job>) {
     compact_if_big(&path);
     while let Ok(job) = rx.recv() {
-        // Typing sends a search per key. Only the last one still matters.
         let mut job = job;
         while let Ok(next) = rx.try_recv() {
             match (job, next) {
@@ -107,7 +96,6 @@ fn run(path: &Path, job: Job) {
     }
 }
 
-/// One gzip member per record: appending never touches what is already written.
 fn append(path: &Path, rec: &Value) {
     let Ok(f) = OpenOptions::new().create(true).append(true).open(path) else { return };
     let mut gz = GzEncoder::new(f, Compression::fast());
@@ -122,13 +110,11 @@ struct Rec {
     at: u64,
 }
 
-/// The newest copy of every page still remembered, in file order.
 fn load(path: &Path) -> Vec<Rec> {
     let Ok(f) = fs::File::open(path) else { return Vec::new() };
     let mut by_url: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<Option<Rec>> = Vec::new();
     for line in BufReader::new(MultiGzDecoder::new(f)).lines() {
-        // A torn last record (power cut) ends the read, it does not end the file.
         let Ok(line) = line else { break };
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         let url = v["u"].as_str().unwrap_or("").to_string();
@@ -198,13 +184,10 @@ fn search(path: &Path, q: &str, limit: usize) -> Vec<Hit> {
     scored.into_iter().take(limit).map(|s| s.2).collect()
 }
 
-/// About 90 characters from just before the first place `word` shows up in the text.
 fn snippet(text: &str, lower: &str, word: &str) -> String {
     let Some(at) = lower.find(word) else { return String::new() };
-    // `lower` and `text` can differ in byte length; work in characters.
     let ci = lower[..at].chars().count();
     let chars: Vec<char> = text.chars().collect();
-    // The match near the start: the address bar is narrow and cuts the end off.
     let start = ci.saturating_sub(12);
     let end = (ci + 80).min(chars.len());
     let mut s: String = chars[start..end].iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
@@ -239,18 +222,14 @@ mod tests {
         assert_eq!(h[0].0, "https://a.com");
         assert!(h[0].2.contains("lamps"));
         assert_eq!(search(&p, "lenses", 5).len(), 2);
-        // Newer copy of a page replaces the old one.
         append(&p, &json!({"u": "https://a.com", "t": "Lighthouses", "x": "Rewritten page about towers.", "at": 3}));
         assert!(search(&p, "lamps", 5).is_empty());
         append(&p, &json!({"u": "https://b.com", "del": 1}));
         assert!(search(&p, "yeast", 5).is_empty());
-        // Clear from a time on keeps what came before.
         rewrite(&p, |r| r.at < 3, usize::MAX);
         assert!(search(&p, "towers", 5).is_empty());
     }
 
-    /// Clear with a `since` keeps what is older; None takes everything. The jobs
-    /// are one queue, so the search answer can only come after the clear ran.
     #[test]
     fn clear_with_since_or_everything() {
         let dir = std::env::temp_dir().join(format!("lumen-recall-clear-{}", std::process::id()));
@@ -262,14 +241,11 @@ mod tests {
         };
         let r = Recall::start(&dir);
         r.add("https://old.com/", "Old", "alpha bravo charlie");
-        // A range starting after every visit: nothing goes.
         r.clear(Some(now() + 3600));
         assert_eq!(ask(&r, "alpha").len(), 1);
-        // A range starting at the epoch: everything from it on goes.
         r.clear(Some(0));
         assert!(ask(&r, "alpha").is_empty());
         r.add("https://new.com/", "New", "delta echo foxtrot");
-        // None means all of it, range or not.
         r.clear(None);
         assert!(ask(&r, "delta").is_empty());
     }

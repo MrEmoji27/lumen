@@ -1,6 +1,4 @@
-//! Engine layer. Everything that talks to WebView2 lives here.
-//! main.rs only sees WebView handles and `Ev` messages.
-//! To swap engines later (Servo), replace this file.
+//! Engine layer.
 
 use std::{
     cell::{Cell, RefCell},
@@ -43,7 +41,6 @@ use wry::{
     WebViewBuilderExtWindows, WebViewExtWindows,
 };
 
-/// What aria2 said after an add, and how the add was started.
 #[derive(Debug)]
 pub struct Added {
     pub gid: String,
@@ -51,15 +48,10 @@ pub struct Added {
     pub headers: Vec<String>,
     pub name: Option<String>,
     pub private: bool,
-    /// The person started it (address bar, Add link, Open torrent…, Retry):
-    /// it runs at once. A page started it: it waits for Resume.
     pub person: bool,
-    /// Why a page-started torrent is waiting; the paused row shows it.
     pub hold: Option<String>,
 }
 
-/// Messages from engine callbacks to the main loop.
-/// Callbacks never touch app state. They post here. No re-entrancy bugs.
 #[derive(Debug)]
 pub enum Ev {
     Ui(String),
@@ -68,137 +60,70 @@ pub enum Ev {
     Loading(u64, bool),
     Favicon(u64, String),
     Nav(u64, bool, bool),
-    /// A top-level navigation started: (tab, URL). The journal times it.
     NavStart(u64, String),
-    /// It ended: (tab, ok, WebErrorStatus code, HTTP status). One per top-level page.
     NavDone(u64, bool, i32, i32),
-    /// A server redirect began: the page is not the one that was asked for.
     NavRedirected(u64),
     Audio(u64, bool),
-    /// The page is in a call (a live microphone, camera or screen capture, or a connected
-    /// peer connection), or no longer.
     Call(u64, bool),
-    /// A page asks the person something: an alert, a confirm, a prompt, "leave site?", a sign-in.
     PageAsk { aid: u64, tab: u64, origin: String, ask: Ask },
-    /// A right-click on a page: WebView2's own items for that spot (command id, label, enabled;
-    /// `i32::MIN` is a separator), what was under the pointer, and where, in page DIPs.
     PageMenu { aid: u64, tab: u64, x: f32, y: f32, items: Vec<(i32, String, bool)>, link: String, selection: String },
-    /// Where the link under the pointer goes, or "" when it left the link.
     LinkHover(u64, String),
-    /// The person's sign-in: user and password, or None for Cancel. The password never leaves
-    /// this event.
     SignInAnswer(u64, Option<(String, String)>),
-    /// Windows says memory is low (and says so again every few seconds while it stays low).
     LowMemory,
     FullScreen(u64, bool),
     CloseMe(u64),
-    /// New popup tab, and the tab that opened it.
     Popup(u64, u64),
-    /// A pop-up Lumen stopped: the tab that asked, the host it wanted, and the
-    /// host that asked.
     PopupBlocked(u64, String, String),
-    /// Windows Hello answered: what was asked about ("app" | "tab" | "secret"), the tab, the verdict.
     Hello(&'static str, u64, crate::hello::Verdict),
-    /// Whether this PC has Windows Hello set up at all.
     HelloReady(bool),
-    /// A redirect Lumen stopped: the tab, the address the page wanted to go to,
-    /// and the host of the page that asked.
     RedirectBlocked(u64, String, String),
     Download(Dl),
-    /// A site asks for a permission. Answer with `answer_permission(pid, ..)`.
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
-    /// A page tried to open an app (mailto:, spotify:, ...): the tab, the page's origin, the
-    /// address, and whether a click or key started it. WebView2's own box was already cancelled.
     ExternalUri { tab: u64, origin: String, uri: String, user: bool },
-    /// The person answered the question about opening an app.
     ExternalAnswer { origin: String, uri: String, answer: crate::extlink::Answer },
-    /// The zoom of a page changed (a key, the wheel, or Lumen itself): (tab, factor).
     Zoom(u64, f64),
-    /// A plain http page was stopped to try https: (tab, the https address, the http one).
     Upgrade(u64, String, String),
-    /// Whether the site answers on the https port: (tab, https address, http address, answer).
     Probed(u64, String, String, crate::sites::Probe),
-    /// A click on the "this site does not use https" page: (tab, what was chosen).
     HttpChoice(u64, crate::sites::HttpChoice),
-    /// A top-level navigation hit a known malware or phishing host: (tab, the url).
     Danger(u64, String),
-    /// A click on the danger page: (tab, what was chosen).
     DangerChoice(u64, crate::sites::DangerChoice),
-    /// A click on Lumen's own error page.
     ErrorChoice(u64, crate::sites::ErrorChoice),
-    /// How many cookies the page's site has, for the lock's popover: (tab, count).
     SiteCookies(u64, usize),
-    /// A site's stored data was cleared: (origin, it worked).
     SiteCleared(String, bool),
-    /// A navigation was stopped to drop tracking parameters; load this instead.
     Redirect(u64, String),
-    /// A magnet link was cancelled out of a page; hand it to aria2. The flag
-    /// says whether a click or a key asked for it.
     Magnet(u64, String, bool),
-    /// A magnet, a moment after the page was asked: the page has said by now
-    /// whether the person clicked it.
     MagnetSettled(u64, String),
-    /// Time to read this tab's text for history search: (tab, url it was loading).
     Capture(u64, String),
-    /// The text came back: (tab, url, JSON or "null").
     PageText(u64, String, String),
-    /// Text search answers for the address bar: (query, hits).
     TextHits(String, Vec<crate::recall::Hit>),
-    /// Another `lumen.exe` was started: come to the front (and stop being headless).
     ShowMe,
-    /// This tab only existed to start a download, now handed off.
     Orphan(u64),
-    /// A video grab moved: (download id, what happened).
     Video(u64, crate::video::Up),
-    /// Reader mode extract came back: (tab, page url, JSON or "null").
     Reader(u64, String, String),
-    /// SponsorBlock init script for this tab: (tab id, script).
     SponsorBlock(u64, String),
-    /// Read aloud: the article's sentences came back: (tab, JSON [[a,b,"text"],..]).
     AloudPrep(u64, String),
-    /// Read aloud: (tab, sentence index; usize::MAX means "spoken through").
     AloudLine(u64, usize),
-    /// The KeePass dialogs came back: (path, master password). Quiet: a
-    /// password must never reach the debug log.
     VaultOpen(String, String),
-    /// The KeePass file was parsed: the vault, or why it failed. Quiet too.
     VaultReady(Result<Box<crate::kdbx::Vault>, String>),
-    /// A download WebView2 gave up so aria2 can take it: (tab, url, page url, file name).
     Handoff(u64, String, String, String),
-    /// aria2 took a download; `Added` says how it was started.
     AriaAdded(Box<Added>),
-    /// aria2 refused a download: the tab it came from (0 for a manual add), the
-    /// address, and whether the tab was private.
     AriaFailed(u64, String, bool),
     AriaJobs(Vec<crate::aria::Job>),
-    /// A request from the agent thread, answered through its channel.
     Agent(crate::agent::Call),
     Suspended(u64, bool),
     Key(Action),
     Usage(Vec<crate::monitor::Proc>),
-    /// A page died: (tab, the whole browser process went with it).
-    /// The browser going takes every page with it; one page going takes only itself.
     Crashed(u64, bool),
-    /// Shift+click on an anchor: open it as a glance (tab id, URL).
     Glance(u64, String),
-    /// The focused glance card got a key: "esc" closes it, "enter" promotes it.
     GlanceKey(&'static str),
-    /// A page took keyboard focus: a click landed in its half of the stage.
     PaneFocus(u64),
-    /// The split divider is being dragged: pointer x, in window coordinates.
     SplitDrag(f64),
-    /// The divider was let go of.
     SplitDrop,
-    /// The divider was double-clicked: back to the middle.
     SplitReset,
-    /// A page answered with its language and its text: (tab, target language, JSON).
     TrPage(u64, String, String),
-    /// The check-up is done: its report, made on its own thread.
-    Doctor(Box<crate::doctor::Report>),    /// The model for a language pair is on disk (or could not be fetched).
+    Doctor(Box<crate::doctor::Report>),
     TrModel(u64, bool, String),
-    /// A message from the translator page: JSON, tagged with "lumen":"tr".
     TrMsg(String),
-    /// Servo has work: spin its event loop. Also its page's reports to Lumen.
     #[cfg(feature = "servo")]
     ServoWake,
     #[cfg(feature = "servo")]
@@ -207,12 +132,10 @@ pub enum Ev {
     ServoTitle(u64, String),
     #[cfg(feature = "servo")]
     ServoLoad(u64, bool),
-    /// A Servo page died, or its engine gave up on it.
     #[cfg(feature = "servo")]
     ServoGone(u64),
 }
 
-/// A download's state, copied out of WebView2 for the main loop.
 #[derive(Debug, Clone)]
 pub struct Dl {
     pub id: u64,
@@ -220,27 +143,16 @@ pub struct Dl {
     pub path: String,
     pub received: i64,
     pub total: i64,
-    /// "progress" | "done" | "failed" | "paused" | "seeding"
     pub state: &'static str,
-    /// Bytes per second, when known (aria2).
     pub speed: u64,
-    /// A short extra, e.g. "16 connections".
     pub note: String,
-    /// Started by a private tab: works, but leaves no row in downloads.json.
     pub private: bool,
-    /// Display name: torrent name when known, else the file name.
     pub name: String,
-    /// "file" | "torrent" | "video"
     pub kind: &'static str,
-    /// Upload speed, bytes per second (aria2 torrents).
     pub up: u64,
-    /// Connected peers (aria2 torrents) or connections (plain files).
     pub peers: u64,
-    /// Seeder count (aria2 torrents).
     pub seeds: u64,
-    /// Uploaded / downloaded. 0 until both sides have bytes.
     pub ratio: f64,
-    /// Number of files (a multi-file torrent opens its folder).
     pub files: usize,
 }
 
@@ -266,23 +178,16 @@ pub enum Action {
     Bookmark,
     History,
     Bookmarks,
-    /// Ctrl+Shift+R: what Lumen stopped, by day and by site.
     Report,
-    /// Ctrl+Shift+D: everything at a glance.
     Dashboard,
     DevTools,
     Reader,
     Listen,
     DarkSite,
-    /// Ctrl+Alt+1..4: switch to workspace N.
     Workspace(usize),
-    /// Ctrl+\: two tabs side by side, or back to one.
     Split,
-    /// F8: the page's text in the target language, or the original text back.
     TranslatePage,
-    /// Ctrl+Shift+A: find an open tab, of any workspace.
     TabSearch,
-    /// Ctrl+K: the command palette over the sidebar.
     Palette,
 }
 
@@ -291,91 +196,44 @@ pub struct Ctx {
     pub proxy: EventLoopProxy<Ev>,
     pub env: RefCell<Option<ICoreWebView2Environment>>,
     pub next_id: Cell<u64>,
-    /// Webviews born from window.open, waiting for the main loop to adopt them.
     pub popups: RefCell<Vec<(u64, WebView)>>,
     pub dark: Cell<bool>,
-    /// Runs on every page right after it is built. Popups included. The `Who`
-    /// is the tab asking: what happens here is counted against it.
     pub on_built: RefCell<Option<Box<dyn Fn(&WebView, crate::privacy_stats::Who)>>>,
-    /// The first page creates the WebView2 environment with these.
     pub web_context: RefCell<wry::WebContext>,
     pub args: String,
     pub tracking: RefCell<String>,
-    /// Live download operations, by Lumen's download id.
     pub downloads: RefCell<HashMap<u64, ICoreWebView2DownloadOperation>>,
     pub passwords: Cell<bool>,
-    /// Permission requests waiting for the user.
     pub perms: RefCell<HashMap<u64, (ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2Deferral)>>,
-    /// Questions pages put to the person (alert, confirm, prompt, leave, sign in, a right-click),
-    /// each waiting on its deferral until the person answers.
     pub waiting: RefCell<HashMap<u64, Waiting>>,
-    /// aria2 is up and the setting is on: http(s) downloads go to it.
     pub aria_on: Cell<bool>,
-    /// URLs aria2 refused; WebView2 downloads these itself.
     pub bypass: RefCell<std::collections::HashSet<String>>,
-    /// Dark Reader script for new documents, when dark pages are on.
     pub dark_js: RefCell<Option<Rc<str>>>,
-    /// Tracking parameters a filter list removes (set by the blocker).
     pub rewrite: RefCell<Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>>,
-    /// Per tab: the id WebView2 gave the injected Dark Reader script.
     pub dark_ids: Rc<RefCell<HashMap<u64, String>>>,
-    /// Strict isolation: one environment per agent profile, made on first use.
     pub own_envs: RefCell<HashMap<String, ICoreWebView2Environment>>,
-    /// The ones being made right now. WebView2 answers on the UI thread's next turn,
-    /// so nobody waits: the tick picks the answer up and builds the waiting tabs.
     pub pending_envs: RefCell<Vec<PendingEnv>>,
-    /// Profiles the machine would not give a browser of their own. Asking again would
-    /// fail the same way; those agents fall back to a named profile of the shared one.
     pub own_env_failed: RefCell<std::collections::HashSet<String>>,
-    /// The WebView2 profile of each agent (by profile key). Kept past its tabs, because
-    /// a profile outlives them: its cookies are still there when the session ends and
-    /// must be wiped then.
     pub profiles: RefCell<HashMap<String, ICoreWebView2Profile>>,
-    /// Plain http pages: whether to try https first, and the hosts left alone.
     pub https: Rc<RefCell<crate::sites::HttpsPolicy>>,
-    /// Send the Global Privacy Control signal to pages (the header lives in the blocker).
     pub gpc: Cell<bool>,
-    /// Run the person's userscripts in the person's own pages. Read when a tab is made,
-    /// never watched: a change applies to tabs opened after it.
     pub userscripts: Cell<bool>,
-    /// Popup requests seen since the last one was handled: (was it a click, the page's site,
-    /// the tab that asked). A sensor COM handler fills this; wry's own handler reads the
-    /// front and decides.
     pub popup_info: Rc<RefCell<VecDeque<(bool, String, u64)>>>,
-    /// Pop-up protection: the setting, and the sites whose pop-ups are allowed.
     pub popup_policy: RefCell<crate::popup::Policy>,
-    /// Redirect protection: the setting, and the sites that may redirect.
     pub redirect_policy: Rc<RefCell<crate::popup::RedirectPolicy>>,
-    /// What each tab's page is now, for the redirect rule: its address and when
-    /// it finished loading. A new document starts unloaded.
     pub docs: Rc<RefCell<HashMap<u64, Doc>>>,
-    /// One navigation the person let through by hand: (tab, address). The next
-    /// navigation that matches it is not stopped again.
     pub redirect_pass: Rc<RefCell<Option<(u64, String)>>>,
-    /// Navigations Lumen itself started (the address bar, a bookmark, a history
-    /// row, a pin coming home), by tab, and when. WebView2 cannot tell them from
-    /// a page's own, so the main loop says.
     pub api_nav: Rc<RefCell<HashMap<u64, Instant>>>,
-    /// What each page did last: the click it saw, and the window a script opened.
-    /// A new document starts with nothing; the last click of the old one says
-    /// nothing about this one.
     pub clicks: Rc<RefCell<HashMap<u64, crate::popup::Page>>>,
-    /// The script Lumen puts in every page, with the secret in it: the page
-    /// cannot forge what the script says.
     pub popup_js: String,
-    /// That secret. A report without it is the page's own noise.
     pub popup_token: String,
 }
 
-/// A strict-isolation environment on its way. See `start_own_env` / `poll_own_envs`.
 pub struct PendingEnv {
     pub key: String,
     rx: std::sync::mpsc::Receiver<Result<ICoreWebView2Environment, String>>,
 }
 
-/// What a tab's page is, as far as the redirect rule needs to know: the address
-/// showing, and when it finished loading. `None` while a document loads, so a
-/// site's own routing during load is never mistaken for a redirect.
 #[derive(Clone, Debug, Default)]
 pub struct Doc {
     pub url: String,
@@ -390,7 +248,6 @@ impl Ctx {
     }
 }
 
-/// Drain a COM stream. Favicons are small; cap at 256 KB to be safe.
 fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
@@ -405,9 +262,6 @@ fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Vec<u8> {
     out
 }
 
-/// The WebView2 runtime's version, without starting it. None when the runtime is not there.
-/// A debug build pretends it is missing under LUMEN_TEST_NO_WEBVIEW2, to look at the window
-/// that says so.
 pub fn runtime_version() -> Option<String> {
     if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_NO_WEBVIEW2").is_some() {
         return None;
@@ -418,7 +272,6 @@ pub fn runtime_version() -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// The WebView2 Runtime is on this PC. Without it Lumen cannot show a page.
 pub fn webview2_present() -> bool {
     runtime_version().is_some()
 }
@@ -444,38 +297,24 @@ pub fn theme(dark: bool) -> Theme {
     if dark { Theme::Dark } else { Theme::Light }
 }
 
-/// Page background shown before first paint. Kills the white flash.
 fn page_bg(dark: bool) -> (u8, u8, u8, u8) {
     if dark { (22, 20, 19, 255) } else { (247, 244, 240, 255) }
 }
 
-// ---------------------------------------------------------------- building
-
-/// Chromium work Lumen has no use for. One comma list, because Chromium keeps
-/// only the last `--disable-features=` switch it is given.
 const UNNEEDED: &[&str] = &[
-    // A spare renderer is kept warm for the next navigation. Lumen has few tabs,
-    // and a warm process is 20 MB that sits there doing nothing.
     "SpareRendererForSitePerProcess",
-    // Hidden tabs are already frozen by Lumen's sleep policy; a second cache of
-    // the same pages for back and forward is memory nobody asked for.
     "BackForwardCache",
-    // No Cast dialog, no translation prompt, no new tab feed in a browser shell.
     "Translate",
     "MediaRouter",
     "InterestFeedContentSuggestions",
-    // Autofill and page hints fetched from a server. Lumen fills nothing in.
     "AutofillServerCommunication",
     "OptimizationHints",
-    // Edge chrome that never shows here.
     "msWebView2EnableShoppingFeatures",
     "msEdgeCollections",
     "msEdgeRewards",
     "msEdgeWallet",
 ];
 
-/// LUMEN_TEST_NOINIT=COSMETIC,GLANCE,...: leave those page scripts out, to measure
-/// what each one costs the page. Unset: every script runs, as always.
 fn init_on(name: &str) -> bool {
     match std::env::var("LUMEN_TEST_NOINIT") {
         Ok(list) => !list.split(',').any(|s| s.trim().eq_ignore_ascii_case(name)),
@@ -483,36 +322,21 @@ fn init_on(name: &str) -> bool {
     }
 }
 
-/// Chromium switches for the whole browser. Set once, when the environment is born.
-/// LUMEN_ARGS appends more, for measuring without a rebuild.
 pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
-    // wry's own defaults. Passing args replaces them, so keep them.
     let mut a = String::from("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
-    // One --disable-features only: Chromium keeps the last one it sees, so every
-    // feature Lumen does not need goes into this list.
     for f in UNNEEDED {
         a.push(',');
         a.push_str(f);
     }
     if crate::headless() {
-        // Off-screen is "occluded" to Chromium, which would then stop painting and slow timers.
-        // One --disable-features only: Chromium keeps the last one it sees.
-        // Sound is muted per page instead (see build_tab_in), so it can come back if the
-        // headless Lumen is turned into a normal one.
         a.push_str(",CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows");
     }
     if gpu_in_process {
-        // Measured: about 100 MB less commit, 55 MB less working set, one process fewer.
-        // Off by default since 0.6.7: it also took the GPU's video decoding away.
-        // Cost: a GPU driver crash takes the browser down with it.
         a.push_str(" --in-process-gpu --enable-features=NetworkServiceInProcess2");
     }
     if share_processes {
-        // Measured on 40 tabs: 54 -> 23 renderers, 310 MB less.
-        // Cost: one heavy tab can slow other tabs of the same site.
         a.push_str(" --process-per-site");
     }
-    // WebRTC must not leak the local address: only the public interface is offered.
     a.push_str(" --force-webrtc-ip-handling-policy=default_public_interface_only");
     if let Ok(extra) = std::env::var("LUMEN_ARGS") {
         a.push(' ');
@@ -521,22 +345,14 @@ pub fn browser_args(gpu_in_process: bool, share_processes: bool) -> String {
     a
 }
 
-/// Which WebView2 world a page lives in. Every agent session gets its own: its own cookies,
-/// storage, cache and permissions, whatever the others are doing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Profile {
-    /// The person's own pages: the unnamed profile of the shared environment.
     Main,
-    /// An agent in the shared environment, in a profile of its own (`agent-<key>`).
-    /// One browser process for the whole app, one cookie jar per agent.
     Shared(String),
-    /// An agent with an environment of its own: its own user-data folder, so its own
-    /// browser process. The hardest wall; costs about one browser process per agent.
     Own(String),
 }
 
 impl Profile {
-    /// The profile key, or "" for the person's own pages.
     #[allow(dead_code)]
     pub fn key(&self) -> &str {
         match self {
@@ -545,21 +361,11 @@ impl Profile {
         }
     }
 
-    /// An agent page, in whichever mode.
     pub fn agent(&self) -> bool {
         !matches!(self, Profile::Main)
     }
 }
 
-/// One page. Person's pages share the UI's environment, so one browser process,
-/// one GPU process, one network process for the whole app. An agent's pages live in
-/// their own profile (own cookies and storage) and, with strict isolation, in their
-/// own environment and user-data folder.
-/// `private`: WebView2 InPrivate. No cookies outlive the last private page, and
-/// nothing the page does reaches this profile's history.
-/// `agent_tab`: the tab belongs to an agent, whichever profile it is in (a shared
-/// profile makes that the person's own): userscripts and anything else for the person's
-/// pages stay off it.
 pub fn build_tab(ctx: &Rc<Ctx>, id: u64, url: Option<&str>, bounds: Rect, profile: Profile, private: bool, agent_tab: bool) -> wry::Result<WebView> {
     let env = ctx.env.borrow().clone();
     build_tab_in(ctx, id, url, bounds, env, &profile, private, agent_tab)
@@ -576,28 +382,19 @@ fn build_tab_in(
     agent_tab: bool,
 ) -> wry::Result<WebView> {
     let dark = ctx.dark.get();
-    // Who this page is: whose tab, private or not, person's or agent's. The
-    // blocker counts everything that happens here against this.
     let who = crate::privacy_stats::Who::new(id, private, profile.agent());
     let p_title = ctx.proxy.clone();
     let p_load = ctx.proxy.clone();
     let popup_ctx = ctx.clone();
     let popup_profile = profile.clone();
 
-    // A popup lives in its opener's environment, named profile and all: the cookie jar
-    // of an OAuth popup must be the one its opener is logged in with. An agent with an
-    // environment of its own never takes the shared one, whoever is calling.
     let env = match profile {
         Profile::Own(key) => own_env(ctx, key),
         _ => opener_env.clone(),
     };
-    // An Own-environment page with no environment ready yet: the caller was too early
-    // (the door builds the page when the environment lands). Never a fallback into the
-    // shared environment: that would put the agent in the person's own cookie jar.
     if matches!(profile, Profile::Own(_)) && env.is_none() {
         return Err(wry::Error::InitScriptError);
     }
-    // No environment yet: this page is the first, and it makes one for everyone.
     let first = env.is_none();
     let mut wc = first.then(|| ctx.web_context.borrow_mut());
     let base = match (env, wc.as_mut()) {
@@ -605,14 +402,10 @@ fn build_tab_in(
         (None, Some(wc)) => WebViewBuilder::new_with_web_context(wc).with_additional_browser_args(ctx.args.clone()),
         (None, None) => unreachable!(),
     };
-    // A named profile is what keeps two agents' cookies apart inside one environment.
-    // In an Own environment the whole folder is the agent's, so the default profile is fine.
     let base = match profile {
         Profile::Shared(key) => base.with_profile_name(format!("agent-{key}")),
         _ => base,
     };
-    // Userscripts: the person's own tabs only, never an agent's and never a private
-    // one. Read here, when the tab is made; the folder is not watched.
     let user_js = if !agent_tab && !private && ctx.userscripts.get() { crate::userscripts::bootstrap() } else { Vec::new() };
     let mut b = base
         .with_bounds(bounds)
@@ -621,8 +414,6 @@ fn build_tab_in(
         .with_hotkeys_zoom(true)
         .with_initialization_script(if init_on("COSMETIC") { crate::blocker::COSMETIC_JS } else { "" })
         .with_initialization_script(if init_on("GLANCE") { crate::glance::GLANCE_JS } else { "" })
-        // Pages can ask whether the person said no to being sold: navigator.globalPrivacyControl.
-        // Decided when the page is built; the header follows the setting at once.
         .with_initialization_script(if ctx.gpc.get() { GPC_JS } else { "" })
         .with_initialization_script(if init_on("WEBRTC") { WEBRTC_JS } else { "" })
         .with_initialization_script(if init_on("CALL") { CALL_JS } else { "" })
@@ -635,10 +426,6 @@ fn build_tab_in(
             let _ = p_load.send_event(Ev::Loading(id, matches!(e, PageLoadEvent::Started)));
         })
         .with_new_window_req_handler(move |uri, features| {
-            // window.open / target=_blank. The sensor above already saw whether a
-            // click or key asked for this, and the page told us what that click
-            // was on. A pop-up the person did not ask for is stopped and said
-            // out loud; a link they clicked opens as before.
             let ctx = &popup_ctx;
             let (gesture, site, tab) = ctx.popup_info.borrow_mut().pop_front().unwrap_or((false, String::new(), 0));
             let target = crate::privacy_stats::host(&uri);
@@ -673,12 +460,9 @@ fn build_tab_in(
                 Err(_) => NewWindowResponse::Deny,
             }
         });
-    // One wrapper per userscript: a script that does not parse loses only itself.
     for js in &user_js {
         b = b.with_initialization_script(js.as_str());
     }
-    // Dark pages: the script must be in place before the first document, so that
-    // navigation waits for WebView2 to confirm it (set_dark starts it).
     let agent_page = profile.agent();
     let dark_first = !agent_page && ctx.dark_js.borrow().is_some();
     if let Some(u) = url
@@ -692,8 +476,6 @@ fn build_tab_in(
     if first {
         ctx.env.replace(Some(wv.environment()));
     }
-    // Tracking prevention is a setting of the profile, and InPrivate pages and the agent's
-    // pages each have a profile of their own. Every page says it again; it costs nothing.
     set_tracking(&wv, &ctx.tracking.borrow());
     hook_page(
         &wv,
@@ -723,15 +505,12 @@ fn build_tab_in(
     hook_popup_page(&wv, id, ctx);
     hook_rtc(&wv, who);
     hook_call(&wv, id, ctx.proxy.clone());
-    // Password saving is per profile. An agent's profile never saves passwords,
-    // and InPrivate keeps nothing anyway, so private pages get it off too.
     set_passwords(&wv, ctx.passwords.get() && !agent_page && !private);
     hook_keys(&wv, ctx.proxy.clone());
     hook_focus(&wv, id, ctx.proxy.clone());
     if crate::headless() {
         set_muted(&wv, true);
     }
-    // A new view has no scripts yet; forget any id an older view of this tab had.
     ctx.dark_ids.borrow_mut().remove(&id);
     if !agent_page {
         set_dark(ctx, &wv, id, false, url.filter(|_| dark_first).map(str::to_string));
@@ -742,35 +521,23 @@ fn build_tab_in(
     Ok(wv)
 }
 
-// ------------------------------------------------------------ agent profiles
-
-/// A profile key as a folder name. Keys are hex from Lumen or a client name already
-/// cleaned once; this is the last line of defence before a path.
 fn safe_key(key: &str) -> String {
     let k: String = key.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(48).collect();
     if k.is_empty() || k == "." || k == ".." { "agent".into() } else { k }
 }
 
-/// The user-data folder of one strictly isolated agent. A folder of its own means a
-/// browser process of its own: its cookies, cache and everything else are its own.
 pub fn own_env_dir(key: &str) -> PathBuf {
     crate::store::data_dir().join("agent_envs").join(safe_key(key))
 }
 
-/// The environment of one strictly isolated agent, if it is ready.
 pub fn own_env(ctx: &Rc<Ctx>, key: &str) -> Option<ICoreWebView2Environment> {
     ctx.own_envs.borrow().get(&safe_key(key)).cloned()
 }
 
-/// Whether this machine said no to a browser of its own for this agent. Asked once,
-/// not per tab: the answer will not change.
 pub fn own_env_failed(ctx: &Rc<Ctx>, key: &str) -> bool {
     ctx.own_env_failed.borrow().contains(&safe_key(key))
 }
 
-/// Ask for one agent's environment. False when it is already made, already on its way,
-/// already refused, or the folder cannot be made. Nothing is waited on here: WebView2
-/// answers through the thread's message turn and `poll_own_envs` picks it up.
 pub fn start_own_env(ctx: &Rc<Ctx>, key: &str) -> bool {
     let key = safe_key(key);
     if ctx.own_envs.borrow().contains_key(&key) || ctx.own_env_failed.borrow().contains(&key) || ctx.pending_envs.borrow().iter().any(|p| p.key == key) {
@@ -813,9 +580,6 @@ pub fn start_own_env(ctx: &Rc<Ctx>, key: &str) -> bool {
     true
 }
 
-/// Whatever came back from the strict-isolation environments asked for so far. The keys
-/// returned are decided: the environment is in `own_envs`, or it failed and the agent
-/// falls back to a named profile of the shared environment.
 pub fn poll_own_envs(ctx: &Rc<Ctx>) -> Vec<String> {
     let mut ready = Vec::new();
     let mut keep = Vec::new();
@@ -841,19 +605,16 @@ pub fn poll_own_envs(ctx: &Rc<Ctx>) -> Vec<String> {
     ready
 }
 
-/// The WebView2 profile a page lives in. Own cookies, storage, permissions.
 pub fn webview_profile(wv: &WebView) -> Option<ICoreWebView2Profile> {
     unsafe { wv.webview().cast::<ICoreWebView2_13>().ok()?.Profile().ok() }
 }
 
-/// A profile's WebView2 name ("", the unnamed one, for the person's own pages).
 pub fn profile_name(profile: &ICoreWebView2Profile) -> String {
     let mut p = PWSTR::null();
     unsafe { profile.ProfileName(&mut p).ok() };
     take(p)
 }
 
-/// A profile's folder on disk. None when WebView2 will not say.
 pub fn profile_path(profile: &ICoreWebView2Profile) -> Option<PathBuf> {
     let mut p = PWSTR::null();
     unsafe { profile.ProfilePath(&mut p).ok()? };
@@ -861,7 +622,6 @@ pub fn profile_path(profile: &ICoreWebView2Profile) -> Option<PathBuf> {
     (!s.is_empty()).then(|| PathBuf::from(s))
 }
 
-/// Point a profile's own downloads (the ones WebView2 handles itself) at one folder.
 pub fn set_profile_download_dir(wv: &WebView, dir: &std::path::Path) {
     if let Some(profile) = webview_profile(wv) {
         unsafe {
@@ -870,8 +630,6 @@ pub fn set_profile_download_dir(wv: &WebView, dir: &std::path::Path) {
     }
 }
 
-/// Wipe a profile's cookies, storage, cache and permissions. An ephemeral session is
-/// over: its profile data goes with it. Asynchronous; WebView2 does it when it can.
 pub fn clear_profile(profile: &ICoreWebView2Profile) {
     let Ok(p2) = profile.cast::<ICoreWebView2Profile2>() else { return };
     let done = webview2_com::ClearBrowsingDataCompletedHandler::create(Box::new(|_| Ok(())));
@@ -880,8 +638,6 @@ pub fn clear_profile(profile: &ICoreWebView2Profile) {
     }
 }
 
-/// Remember an agent page's profile, so its cookies and storage can be wiped when the
-/// session ends. The profile outlives its tabs; the handle must too.
 pub fn remember_profile(ctx: &Rc<Ctx>, key: &str, wv: &WebView) {
     if key.is_empty() {
         return;
@@ -891,12 +647,6 @@ pub fn remember_profile(ctx: &Rc<Ctx>, key: &str, wv: &WebView) {
     }
 }
 
-/// The end of one agent session: its profile's cookies, storage, cache and permissions
-/// are gone at once, and its folder is deleted. WebView2 keeps a live profile's files
-/// open for the browser's whole life, so a folder of the shared environment goes at the
-/// next start, before anything has touched it (see `purge_at_start`). A session with an
-/// environment of its own loses its whole user-data folder right now.
-/// Ephemeral sessions are ephemeral: nothing is kept for the next run.
 pub fn purge_profile(ctx: &Rc<Ctx>, key: &str, strict: bool) {
     if key.is_empty() {
         return;
@@ -906,20 +656,16 @@ pub fn purge_profile(ctx: &Rc<Ctx>, key: &str, strict: bool) {
         clear_profile(&p);
     }
     if strict {
-        // Its own environment: let go of it first. That ends the agent's browser
-        // process, and with it the last holds on the folder.
         ctx.own_envs.borrow_mut().remove(&key);
         own_env_dir(&key).is_dir().then(|| delete_profile_files(own_env_dir(&key)));
     }
     queue_purge_in(&crate::store::data_dir(), &key);
 }
 
-/// The profiles whose folders are waiting for the browser that holds them to go.
 fn purge_queue_path(dir: &std::path::Path) -> PathBuf {
     dir.join("agent_purge.json")
 }
 
-/// Remember one profile's folder for the next start.
 fn queue_purge_in(dir: &std::path::Path, key: &str) {
     let path = purge_queue_path(dir);
     let mut list: Vec<String> = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -936,8 +682,6 @@ fn queue_purge_in(dir: &std::path::Path, key: &str) {
     }
 }
 
-/// Delete the folders of sessions that ended while Lumen was running. Called once at
-/// startup, before any page is built, so nothing holds those profiles yet.
 pub fn purge_at_start() {
     purge_at_start_in(&crate::store::data_dir(), &crate::store::data_dir().join("WebView2").join("EBWebView"));
 }
@@ -959,8 +703,6 @@ fn purge_at_start_in(dir: &std::path::Path, wv_root: &std::path::Path) {
     }
 }
 
-/// Every folder that looks like one profile's: WebView2's own naming, and anything in
-/// the user-data folder whose name ends with this profile's name.
 fn profile_dirs(wv_root: &std::path::Path, key: &str) -> Vec<PathBuf> {
     let needle = format!("agent-{}", safe_key(key));
     let mut out = vec![wv_root.join(format!("WV2Profile_{needle}"))];
@@ -975,9 +717,6 @@ fn profile_dirs(wv_root: &std::path::Path, key: &str) -> Vec<PathBuf> {
     out
 }
 
-/// Delete a profile's folder, over a few tries: the browser lets go of the last files a
-/// moment after its last page of that profile closes. On its own thread, so the door
-/// answering in between.
 pub fn delete_profile_files(dir: PathBuf) {
     let _ = std::thread::Builder::new().name("lumen-agent-purge".into()).spawn(move || {
         for _ in 0..12 {
@@ -992,10 +731,6 @@ pub fn delete_profile_files(dir: PathBuf) {
     });
 }
 
-/// A page of Lumen's own, off screen: for work that needs a web engine but not the
-/// person's attention (offline translation). Not a tab: no blocker, no shortcuts, no
-/// dark reader, and nothing shows it. It starts blank; the caller maps a host name
-/// and navigates. None when no page has made an environment yet.
 pub fn build_hidden(ctx: &Rc<Ctx>, bounds: Rect) -> Option<WebView> {
     let env = ctx.env.borrow().clone()?;
     let dark = ctx.dark.get();
@@ -1009,8 +744,6 @@ pub fn build_hidden(ctx: &Rc<Ctx>, bounds: Rect) -> Option<WebView> {
         .ok()
 }
 
-/// Popups are born inside a callback with no access to app state.
-/// They start at the bounds of whatever page is showing; main loop fixes them on adopt.
 fn content_bounds_now(ctx: &Ctx) -> Rect {
     let size = ctx.window.inner_size();
     Rect {
@@ -1019,20 +752,12 @@ fn content_bounds_now(ctx: &Ctx) -> Rect {
     }
 }
 
-// ------------------------------------------------------------------- hooks
-
-/// A page may change its title a hundred times a second (a chat that streams,
-/// a ticker). Every change would wake the main loop and redraw the sidebar.
-/// This lets one through per `TITLE_GAP`, and a thread sends the newest one when
-/// the gap is over, so the tab always ends on the last title the page set.
 fn title_pacer(id: u64, proxy: EventLoopProxy<Ev>) -> impl Fn(String) + 'static {
     use crate::pacing::{TITLE_GAP, Throttle};
     use std::sync::{Arc, Mutex};
     struct State {
         gate: Throttle<String>,
-        /// What the main loop was last told.
         sent: String,
-        /// A thread is waiting to send the newest title.
         waiting: bool,
     }
     let st = Arc::new(Mutex::new(State { gate: Throttle::default(), sent: String::new(), waiting: false }));
@@ -1067,13 +792,8 @@ fn title_pacer(id: u64, proxy: EventLoopProxy<Ev>) -> impl Fn(String) + 'static 
     }
 }
 
-/// Whether a navigation is a back, a forward or a reload. No click reported
-/// those, though the person asked for them; without this, the redirect rule
-/// would stop a Back to another site.
 fn history_nav(args: &ICoreWebView2NavigationStartingEventArgs) -> bool {
     let Ok(third) = args.cast::<ICoreWebView2NavigationStartingEventArgs3>() else {
-        // An older runtime cannot say which kind it is. Let it through rather
-        // than stop a Back the person asked for.
         return true;
     };
     let mut kind = COREWEBVIEW2_NAVIGATION_KIND_NEW_DOCUMENT;
@@ -1083,8 +803,6 @@ fn history_nav(args: &ICoreWebView2NavigationStartingEventArgs) -> bool {
     kind == COREWEBVIEW2_NAVIGATION_KIND_BACK_OR_FORWARD || kind == COREWEBVIEW2_NAVIGATION_KIND_RELOAD
 }
 
-/// The per-tab rules the navigation hook reads: plain http to https, redirects,
-/// and what each tab's page is.
 struct NavRules {
     https: Rc<RefCell<crate::sites::HttpsPolicy>>,
     redirect: Rc<RefCell<crate::popup::RedirectPolicy>>,
@@ -1093,8 +811,6 @@ struct NavRules {
     api_nav: Rc<RefCell<HashMap<u64, Instant>>>,
 }
 
-/// How long after Lumen asked for a navigation its mark still counts. The
-/// navigation starts within a turn of the call; two seconds is already generous.
 const API_NAV: Duration = Duration::from_secs(2);
 
 fn hook_page(
@@ -1110,8 +826,6 @@ fn hook_page(
     let core = wv.webview();
     let mut token = 0i64;
     unsafe {
-        // Links carry tracking tags (utm_*, fbclid, gclid...). Stop, strip, go.
-        // Server redirects are left alone, or a site that adds them back would loop.
         let p = proxy.clone();
         let (d_start, pass_start) = (docs.clone(), pass.clone());
         let _ = core.add_NavigationStarting(
@@ -1120,7 +834,6 @@ fn hook_page(
                 let mut redirected = Default::default();
                 let _ = args.IsRedirected(&mut redirected);
                 if redirected.as_bool() {
-                    // A new document: the clicks of the old one say nothing about this one.
                     clicks.borrow_mut().remove(&id);
                     let _ = p.send_event(Ev::NavRedirected(id));
                     return Ok(());
@@ -1128,21 +841,12 @@ fn hook_page(
                 let mut u = PWSTR::null();
                 args.Uri(&mut u)?;
                 let u = take(u);
-                // A magnet link is not a page: cancel and hand it to aria2.
                 if u.starts_with("magnet:") {
                     args.SetCancel(true)?;
-                    // A magnet the person clicked is theirs: it starts at once.
-                    // One a page asked for on its own waits for Resume, because a
-                    // torrent shows the swarm the person's address.
-                    //
-                    // The click the page reports lands after the navigation
-                    // (measured on 2026-10-19), so the flag here may be early;
-                    // the main loop asks again a moment later.
                     let clicked = clicks.borrow().get(&id).is_some_and(|p| crate::popup::clicked_magnet(p, &u));
                     let _ = p.send_event(Ev::Magnet(id, u, clicked));
                     return Ok(());
                 }
-                // A click on the warning page for a site without https. Not a navigation.
                 if u.starts_with("lumen-http:") {
                     args.SetCancel(true)?;
                     if let Some(choice) = crate::sites::parse_http_choice(&u) {
@@ -1150,7 +854,6 @@ fn hook_page(
                     }
                     return Ok(());
                 }
-                // A click on Lumen's error page: try again, or go back. Not a navigation.
                 if u.starts_with("lumen-error:") {
                     args.SetCancel(true)?;
                     if let Some(choice) = crate::sites::parse_error_choice(&u) {
@@ -1158,7 +861,6 @@ fn hook_page(
                     }
                     return Ok(());
                 }
-                // A click on the page that blocks a dangerous site. Not a navigation.
                 if u.starts_with("lumen-danger:") {
                     args.SetCancel(true)?;
                     if let Some(choice) = crate::sites::parse_danger_choice(&u) {
@@ -1166,26 +868,16 @@ fn hook_page(
                     }
                     return Ok(());
                 }
-                // A site on the malware or phishing lists: stop and show the warning.
-                // Before the redirect check, so a listed link is never followed.
                 if crate::blocker::danger_host(&u) {
                     args.SetCancel(true)?;
                     let _ = p.send_event(Ev::Danger(id, u));
                     return Ok(());
                 }
-                // Redirect protection: a page may not send the person to another site
-                // on its own, a moment after it loaded. A click, a key, a back, a
-                // forward and the site's own server redirects all go through.
                 let mut served = windows::core::BOOL::default();
                 let _ = args.IsRedirected(&mut served);
                 let doc = d_start.borrow().get(&id).cloned().unwrap_or_default();
                 let from = crate::privacy_stats::host(&doc.url);
-                // The person's own input, as the page reported it. WebView2's
-                // IsUserInitiated is true for a page's own navigation as well
-                // (measured on 2026-10-25), so it is not asked.
                 let person = clicks.borrow().get(&id).cloned().unwrap_or_default();
-                // A navigation Lumen started: the person typed it, clicked a
-                // bookmark or a history row, or a pin went home. Not the page.
                 let ours = api_nav.borrow_mut().remove(&id).is_some_and(|t| t.elapsed() <= API_NAV);
                 let step = crate::popup::Step {
                     gesture: ours || history_nav(&args) || crate::popup::asked_nav(&person, &u),
@@ -1195,7 +887,6 @@ fn hook_page(
                     loaded: doc.loaded.map(|t| t.elapsed()).unwrap_or_default(),
                     agent: who.agent,
                 };
-                // "Go anyway" on a note: this one navigation, this once.
                 let mut once = pass_start.borrow_mut();
                 let asked = matches!(once.as_ref(), Some((t, url)) if *t == id && *url == u);
                 if asked {
@@ -1212,18 +903,13 @@ fn hook_page(
                     let _ = p.send_event(Ev::RedirectBlocked(id, u.clone(), from));
                     return Ok(());
                 }
-                // Plain http: stop, and see whether the site speaks https. The main loop goes on.
                 if let Some(secure) = crate::sites::https_upgrade(&u, &https.borrow()) {
                     args.SetCancel(true)?;
                     crate::privacy_stats::https_upgrade(&crate::privacy_stats::host(&u), who);
                     let _ = p.send_event(Ev::Upgrade(id, secure, u));
                     return Ok(());
                 }
-                // The journal times the page from here to NavigationCompleted.
                 let _ = p.send_event(Ev::NavStart(id, u.clone()));
-                // A new document: the clicks of the old one say nothing about
-                // this one. (A navigation Lumen cancels leaves the page as it
-                // was, and its clicks still count.)
                 clicks.borrow_mut().remove(&id);
                 let clean = clean_url(&u);
                 let listed = rewrite.as_ref().and_then(|f| f(clean.as_deref().unwrap_or(&u), who));
@@ -1244,8 +930,6 @@ fn hook_page(
                     let mut s = PWSTR::null();
                     w.Source(&mut s)?;
                     let url = take(s);
-                    // A new document is loading: until it says it is done, the
-                    // redirect rule treats this page as too young to judge.
                     let mut d = d_src.borrow_mut();
                     let doc = d.entry(id).or_default();
                     doc.url = url.clone();
@@ -1257,8 +941,6 @@ fn hook_page(
             &mut token,
         );
 
-        // The other end of the journal's timing: whether the page came, and with
-        // what. The second interface carries the HTTP status when there was one.
         let p = proxy.clone();
         let d_done = docs.clone();
         let _ = core.add_NavigationCompleted(
@@ -1272,9 +954,6 @@ fn hook_page(
                 if let Ok(second) = args.cast::<ICoreWebView2NavigationCompletedEventArgs2>() {
                     let _ = second.HttpStatusCode(&mut http);
                 }
-                // The page has finished loading: from now on, a navigation of
-                // its own to another site is the page's doing. A navigation
-                // Lumen stopped did not load, and says nothing about the page.
                 if ok.as_bool()
                     && let Some(doc) = d_done.borrow_mut().get_mut(&id)
                 {
@@ -1323,8 +1002,6 @@ fn hook_page(
         );
 
         if let Ok(c15) = core.cast::<ICoreWebView2_15>() {
-            // Ask WebView2 for the icon it already downloaded, as PNG bytes.
-            // No second fetch, works offline, survives session restore.
             let p = proxy.clone();
             let _ = c15.add_FaviconChanged(
                 &FaviconChangedEventHandler::create(Box::new(move |w, _| {
@@ -1367,18 +1044,12 @@ fn hook_page(
             );
         }
 
-        // The media keys (play/pause, next, previous) and the PiP button: a small shim
-        // runs at document creation, keeping a reference to the page's own Media Session
-        // action handlers so Lumen can press them. It passes the registration through
-        // untouched, so the page's behavior is unchanged.
         if init_on("MEDIA") {
             let _ = core.AddScriptToExecuteOnDocumentCreated(
                 &HSTRING::from(crate::pagekit::MEDIA_SHIM),
                 &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(()))),
             );
         }
-        // YouTube's AV1 first: on hardware without AV1 decode the gate hands VP9 to
-        // the page instead, so the GPU decodes and the renderer keeps its cores.
         if init_on("GATE") {
             let _ = core.AddScriptToExecuteOnDocumentCreated(
                 &HSTRING::from(crate::pagekit::AV1_GATE),
@@ -1388,8 +1059,6 @@ fn hook_page(
     }
 }
 
-/// Shortcuts must work while a page has focus. Pages swallow keys,
-/// so catch them at the controller, before the page sees them.
 fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
     let controller = wv.controller();
     let mut token = 0i64;
@@ -1401,8 +1070,6 @@ fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
                 args.KeyEventKind(&mut kind)?;
                 let mut vk = 0u32;
                 args.VirtualKey(&mut vk)?;
-                // A lone Alt or F10 drops a Win32 window into menu mode, which eats the
-                // next keys. Lumen has no menu bar. Swallow them.
                 const ALT: u32 = 0x12;
                 const F10: u32 = 0x79;
                 if vk == ALT || vk == F10 {
@@ -1416,12 +1083,10 @@ fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
                 }
                 let mut status = COREWEBVIEW2_PHYSICAL_KEY_STATUS::default();
                 args.PhysicalKeyStatus(&mut status)?;
-                // Async state: the key went to the WebView2 process, so this thread never saw it.
                 let down = |k: u16| GetAsyncKeyState(k as i32) < 0;
                 let (ctrl, shift, alt) = (down(VK_CONTROL.0), down(VK_SHIFT.0), down(VK_MENU.0));
                 if let Some(a) = map_key(vk, ctrl, shift, alt) {
                     args.SetHandled(true)?;
-                    // Holding a key repeats. Only tab cycling should repeat.
                     let repeat = status.WasKeyDown.as_bool();
                     if !repeat || matches!(a, Action::NextTab | Action::PrevTab) {
                         let _ = proxy.send_event(Ev::Key(a));
@@ -1434,8 +1099,6 @@ fn hook_keys(wv: &WebView, proxy: EventLoopProxy<Ev>) {
     }
 }
 
-/// The page took keyboard focus. In a split, that is a click landing in one half
-/// of the stage: the main loop moves the pane the person is working in over there.
 fn hook_focus(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     let mut token = 0i64;
     unsafe {
@@ -1449,10 +1112,6 @@ fn hook_focus(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     }
 }
 
-// ---------------------------------------------------------------------- zoom
-
-/// WebView2 zooms by itself (Ctrl+plus, Ctrl+minus, Ctrl+0, Ctrl+wheel, pinch). This only
-/// listens: the main loop remembers the factor for the site and shows it in the address bar.
 fn hook_zoom(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     let mut token = 0i64;
     unsafe {
@@ -1471,25 +1130,19 @@ fn hook_zoom(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     }
 }
 
-/// The page's zoom factor now (1.0 is 100%).
 pub fn zoom_factor(wv: &WebView) -> Option<f64> {
     let mut f = 1.0f64;
     unsafe { wv.controller().ZoomFactor(&mut f).ok().map(|_| f) }
 }
 
-/// Zoom the page. True when WebView2 took it.
 pub fn set_zoom_factor(wv: &WebView, f: f64) -> bool {
     unsafe { wv.controller().SetZoomFactor(f).is_ok() }
 }
 
-// ------------------------------------------------------------ site data
-
-/// How many cookies this profile would send to `url`. Never blocks; 0 when it cannot be asked.
 pub fn cookie_count(wv: &WebView, url: &str, done: impl FnOnce(usize) + 'static) {
     cookie_list(wv, url, move |list| done(list.len()));
 }
 
-/// The cookies for a URL, as WebView2's objects.
 fn cookie_list(wv: &WebView, url: &str, done: impl FnOnce(Vec<ICoreWebView2Cookie>) + 'static) {
     let done = Rc::new(RefCell::new(Some(done)));
     let fire = {
@@ -1529,10 +1182,6 @@ fn cookie_list(wv: &WebView, url: &str, done: impl FnOnce(Vec<ICoreWebView2Cooki
     }
 }
 
-/// Forget what one site stored here: its cookies, and its other storage by origin (local
-/// storage, IndexedDB, caches, service workers) through the DevTools Protocol. `wv` must be a
-/// page of the profile that holds the data and never an InPrivate page: that store goes away
-/// with its last page anyway. `done` runs when the storage call has answered.
 pub fn clear_site(wv: &WebView, origin: &str, done: impl FnOnce(bool) + 'static) {
     let url = format!("{}/", origin.trim_end_matches('/'));
     let core = wv.webview();
@@ -1555,19 +1204,10 @@ pub fn clear_site(wv: &WebView, origin: &str, done: impl FnOnce(bool) + 'static)
     });
 }
 
-/// In every page when the signal is on: the property sites read the Global Privacy Control
-/// answer from, and the older Do Not Track one.
 const GPC_JS: &str = "try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:()=>true,configurable:true});Object.defineProperty(Navigator.prototype,'doNotTrack',{get:()=>'1',configurable:true})}catch(e){}";
 
-/// In every page: watch WebRTC so a peer connection that would leak the local
-/// address is counted. The Chromium switch keeps the address off the wire; this
-/// script only reports that a page tried.
 const WEBRTC_JS: &str = "try{const O=window.RTCPeerConnection;if(O){window.RTCPeerConnection=function(c,i){const pc=new O(c,i);let n=false;pc.addEventListener('icecandidate',e=>{if(!n&&e.candidate){n=true;try{window.chrome.webview.postMessage({lumen:'rtc'})}catch(_){}}});return pc};window.RTCPeerConnection.prototype=O.prototype}}catch(e){}";
 
-/// In every page: is it in a call? A live microphone, camera or screen capture, or a peer
-/// connection that is up. A call where nobody talks is silent, so `IsDocumentPlayingAudio`
-/// says no, and a hidden Discord call got frozen five minutes in. The page says yes or no
-/// when it changes; Lumen keeps such a tab awake. Top frame only.
 const CALL_JS: &str = r#"try{(()=>{if(window!==window.top)return;const W=window.chrome&&window.chrome.webview;if(!W)return;
 const live=new Set(),pcs=new Set();let last=false,tick=0;
 const up=s=>s==='connected'||s==='connecting'||s==='checking'||s==='completed'||s==='new';
@@ -1584,12 +1224,6 @@ if(P&&P.setRemoteDescription){const f=P.setRemoteDescription;P.setRemoteDescript
 if(P&&P.close){const f=P.close;P.close=function(){f.apply(this);say()}}
 })()}catch(e){}"#;
 
-// ------------------------------------------------------------- crashed pages
-
-/// A page that dies leaves a white rectangle that looks like a slow page.
-/// WebView2 says so here; the main loop turns it into "crashed" and reloads on
-/// the next click. Only the page's own renderer counts: a GPU or utility
-/// process coming and going, or one dead iframe, does not take the page with it.
 fn hook_crash(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     let mut token = 0i64;
     unsafe {
@@ -1624,7 +1258,6 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
     const F12: u32 = 0x7B;
     const ESC: u32 = 0x1B;
     const COMMA: u32 = 0xBC;
-    // The \ key. A layout may move it, but Windows keeps the code.
     const BACKSLASH: u32 = 0xDC;
     let k = |c: char| c as u32;
     Some(match (ctrl, shift, alt, vk) {
@@ -1633,7 +1266,6 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, true, false, v) if v == k('T') => Reopen,
         (true, false, false, v) if v == k('W') => CloseTab,
         (true, false, false, v) if v == k('L') => Omnibox,
-        // Ctrl+K used to open the address bar with Ctrl+L; the palette has it now.
         (true, false, false, v) if v == k('K') => Palette,
         (false, false, false, F6) => Omnibox,
         (true, false, false, TAB) => NextTab,
@@ -1660,15 +1292,12 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         (true, true, false, v) if v == k('O') => Bookmarks,
         (true, true, false, v) if v == k('R') => Report,
         (true, true, false, v) if v == k('D') => Dashboard,
-        // Not the page's own Ctrl+A: that is a text selection.
         (true, true, false, v) if v == k('A') => TabSearch,
         (true, true, false, v) if v == k('I') => DevTools,
         (true, false, true, v) if (k('1')..=k('4')).contains(&v) => Workspace((v - k('1')) as usize),
         _ => return None,
     })
 }
-
-// --------------------------------------------------------------- downloads
 
 static NEXT_DL: AtomicU64 = AtomicU64::new(1);
 
@@ -1711,9 +1340,7 @@ fn dl_state(op: &ICoreWebView2DownloadOperation, id: u64, private: bool) -> Dl {
     }
 }
 
-/// Downloads come to Lumen. WebView2's own flyout stays hidden; the Downloads page shows them.
 fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64, private: bool) {
-    // Lumen has its own downloads page. WebView2's flyout never stays open.
     if let Ok(c9) = wv.webview().cast::<ICoreWebView2_9>() {
         let mut token = 0i64;
         unsafe {
@@ -1740,7 +1367,6 @@ fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64, private: bool) {
                 let Some(args) = args else { return Ok(()) };
                 args.SetHandled(true)?;
                 let op = args.DownloadOperation()?;
-                // aria2 takes plain http(s) downloads: more connections, resume, queue.
                 let mut u = PWSTR::null();
                 let _ = op.Uri(&mut u);
                 let url = take(u);
@@ -1757,7 +1383,6 @@ fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64, private: bool) {
                             take(s)
                         })
                         .unwrap_or_default();
-                    // The page never showed anything: the link was the download. Nothing to keep.
                     let mut back = Default::default();
                     let _ = sender.as_ref().map(|w| w.CanGoBack(&mut back));
                     let orphan = !back.as_bool() && (page.is_empty() || page == "about:blank" || page == url);
@@ -1799,7 +1424,6 @@ fn hook_downloads(ctx: &Rc<Ctx>, wv: &WebView, tab: u64, private: bool) {
     }
 }
 
-/// "pause" | "resume" | "cancel" on a running download.
 pub fn dl_control(ctx: &Ctx, id: u64, action: &str) {
     let Some(op) = ctx.downloads.borrow().get(&id).cloned() else { return };
     unsafe {
@@ -1811,8 +1435,6 @@ pub fn dl_control(ctx: &Ctx, id: u64, action: &str) {
         };
     }
 }
-
-// ------------------------------------------------------------- permissions
 
 static NEXT_PERM: AtomicU64 = AtomicU64::new(1);
 
@@ -1834,7 +1456,6 @@ fn perm_name(k: COREWEBVIEW2_PERMISSION_KIND) -> &'static str {
     }
 }
 
-/// scheme://host[:port] of a URL.
 pub fn origin_of(url: &str) -> String {
     match url.split_once("://") {
         Some((scheme, rest)) => format!("{scheme}://{}", rest.split(['/', '?', '#']).next().unwrap_or("")),
@@ -1842,8 +1463,6 @@ pub fn origin_of(url: &str) -> String {
     }
 }
 
-/// Sites ask; Lumen decides. The request waits (deferral) until the main loop answers.
-/// Agent tabs in their own profile get no permissions at all.
 fn hook_permissions(ctx: &Rc<Ctx>, wv: &WebView, id: u64, isolated: bool) {
     let ctx = ctx.clone();
     let mut token = 0i64;
@@ -1870,9 +1489,6 @@ fn hook_permissions(ctx: &Rc<Ctx>, wv: &WebView, id: u64, isolated: bool) {
     }
 }
 
-/// A page tries to open an app (mailto:, zoommtg:, spotify:...). WebView2 would show a box of its
-/// own; Lumen cancels it and sends the request to the main loop, which asks the person (or
-/// remembers they said always). An agent's profile never launches anything.
 fn hook_external(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, isolated: bool) {
     let Ok(c18) = wv.webview().cast::<ICoreWebView2_18>() else { return };
     let mut token = 0i64;
@@ -1897,36 +1513,27 @@ fn hook_external(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>, isolated: boo
     }
 }
 
-// ------------------------------------------------------------- page questions
-
 static NEXT_ASK: AtomicU64 = AtomicU64::new(1);
 
-/// What a page asks the person.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ask {
     Alert(String),
     Confirm(String),
-    /// The question, and the text the box starts with.
     Prompt(String, String),
-    /// "Leave site?": the page has something it may lose.
     Leave,
-    /// HTTP basic auth, with the realm the site named (may be empty).
     SignIn(String),
 }
 
-/// A page's question, waiting for the person. Its deferral is completed with the answer.
 pub enum Waiting {
     Script(ICoreWebView2ScriptDialogOpeningEventArgs, ICoreWebView2Deferral),
     Auth(ICoreWebView2BasicAuthenticationRequestedEventArgs, ICoreWebView2Deferral),
     Menu(ICoreWebView2ContextMenuRequestedEventArgs, ICoreWebView2Deferral),
 }
 
-/// The realm out of a `Basic realm="Secure area"` challenge, or "".
 fn realm_of(challenge: &str) -> String {
     challenge.split_once("realm=").map(|(_, r)| r.trim().trim_matches('"').split('"').next().unwrap_or("").to_string()).unwrap_or_default()
 }
 
-/// A menu label without its access-key marks: "&Back" is "Back", "&&" is "&".
 fn menu_label(s: &str) -> String {
     let mut out = String::new();
     let mut it = s.chars().peekable();
@@ -1943,8 +1550,6 @@ fn menu_label(s: &str) -> String {
     out
 }
 
-/// WebView2's items for a right-click, flat: commands and separators. Submenus (Share, the
-/// spelling list) are left out; a separator never leads, trails or doubles.
 fn menu_items(list: &ICoreWebView2ContextMenuItemCollection) -> Vec<(i32, String, bool)> {
     let mut out: Vec<(i32, String, bool)> = Vec::new();
     unsafe {
@@ -1981,17 +1586,12 @@ fn menu_items(list: &ICoreWebView2ContextMenuItemCollection) -> Vec<(i32, String
     out
 }
 
-/// The person's own tabs ask the person: alerts, confirms, prompts and "leave site?" as drawn
-/// cards over the page, a sign-in as a drawn form, a right-click as Lumen's own menu. Agent tabs
-/// keep what agentkit gives them.
 fn hook_page_asks(ctx: &Rc<Ctx>, wv: &WebView, id: u64) {
     let core = wv.webview();
     unsafe {
         if let Ok(s) = core.Settings() {
             let _ = s.SetAreDefaultScriptDialogsEnabled(false);
-            // A page that does not load gets Lumen's own error page (main.rs, NavDone).
             let _ = s.SetIsBuiltInErrorPageEnabled(false);
-            // Where a link goes is Lumen's pill, not Chromium's grey bubble.
             let _ = s.SetIsStatusBarEnabled(false);
         }
         if let Ok(c12) = core.cast::<ICoreWebView2_12>() {
@@ -2083,7 +1683,6 @@ fn hook_page_asks(ctx: &Rc<Ctx>, wv: &WebView, id: u64) {
     }
 }
 
-/// An alert, confirm, prompt or "leave site?" answered: OK (or Leave) or not, and a prompt's text.
 pub fn answer_script(ctx: &Ctx, aid: u64, ok: bool, text: Option<&str>) {
     let Some(Waiting::Script(args, deferral)) = ctx.waiting.borrow_mut().remove(&aid) else { return };
     unsafe {
@@ -2097,7 +1696,6 @@ pub fn answer_script(ctx: &Ctx, aid: u64, ok: bool, text: Option<&str>) {
     }
 }
 
-/// A sign-in answered: the user and password, or None for Cancel.
 pub fn answer_sign_in(ctx: &Ctx, aid: u64, with: Option<(String, String)>) {
     let Some(Waiting::Auth(args, deferral)) = ctx.waiting.borrow_mut().remove(&aid) else { return };
     unsafe {
@@ -2114,7 +1712,6 @@ pub fn answer_sign_in(ctx: &Ctx, aid: u64, with: Option<(String, String)>) {
     }
 }
 
-/// A right-click menu closed: the WebView2 command picked, or None.
 pub fn answer_menu(ctx: &Ctx, aid: u64, cmd: Option<i32>) {
     let Some(Waiting::Menu(args, deferral)) = ctx.waiting.borrow_mut().remove(&aid) else { return };
     unsafe {
@@ -2125,7 +1722,6 @@ pub fn answer_menu(ctx: &Ctx, aid: u64, cmd: Option<i32>) {
     }
 }
 
-/// Some(true) allow, Some(false) block, None let WebView2 decide (it blocks by default).
 pub fn answer_permission(ctx: &Ctx, pid: u64, allow: Option<bool>) {
     let Some((args, deferral)) = ctx.perms.borrow_mut().remove(&pid) else { return };
     unsafe {
@@ -2138,12 +1734,6 @@ pub fn answer_permission(ctx: &Ctx, pid: u64, allow: Option<bool>) {
     }
 }
 
-// ------------------------------------------------------------- popup sensor
-
-/// The COM NewWindowRequested handler sees whether a click or key asked for the
-/// new window; wry's own handler does not. This runs first (registered after
-/// build, and wry's callback is dispatched later on the message loop), so the
-/// flag is in the queue when the wry handler asks for it.
 fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String, u64)>>>, id: u64) {
     let core = wv.webview();
     let mut token = 0i64;
@@ -2161,7 +1751,6 @@ fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String, u64
                     })
                     .unwrap_or_default();
                 let mut q = queue.borrow_mut();
-                // Bound: a page that spams window.open must not grow this forever.
                 if q.len() < 32 {
                     q.push_back((user.as_bool(), site, id));
                 }
@@ -2172,9 +1761,6 @@ fn hook_popup_sensor(wv: &WebView, queue: Rc<RefCell<VecDeque<(bool, String, u64
     }
 }
 
-/// The page's own report of what it did: the last click, and a window a script
-/// opened. Lumen needs both to tell a link the person clicked from a pop-up a
-/// page pushed.
 fn hook_popup_page(wv: &WebView, id: u64, ctx: &Rc<Ctx>) {
     let core = wv.webview();
     let mut token = 0i64;
@@ -2189,9 +1775,6 @@ fn hook_popup_page(wv: &WebView, id: u64, ctx: &Rc<Ctx>) {
                     return Ok(());
                 }
                 let Ok(msg) = serde_json::from_str::<serde_json::Value>(&take(j)) else { return Ok(()) };
-                // Only Lumen's own script may say what the page did: a page
-                // that could forge it would be able to talk itself into a
-                // window, or into a torrent.
                 if msg["t"].as_str() != Some(secret.as_str()) {
                     return Ok(());
                 }
@@ -2218,10 +1801,6 @@ fn hook_popup_page(wv: &WebView, id: u64, ctx: &Rc<Ctx>) {
     }
 }
 
-// ------------------------------------------------------------------- webrtc
-
-/// The page's WebRTC script reports a peer connection here. The Chromium switch
-/// keeps the local address off the wire; this only counts the attempt.
 fn hook_rtc(wv: &WebView, who: crate::privacy_stats::Who) {
     let core = wv.webview();
     let mut token = 0i64;
@@ -2246,7 +1825,6 @@ fn hook_rtc(wv: &WebView, who: crate::privacy_stats::Who) {
     }
 }
 
-/// The page's call script says when it is in a call, and when it is not any more.
 fn hook_call(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     let core = wv.webview();
     let mut token = 0i64;
@@ -2269,15 +1847,11 @@ fn hook_call(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     }
 }
 
-// ---------------------------------------------------------- tracking params
-
-/// Query keys that only exist to follow you around.
 const TRACKERS: &[&str] = &[
     "fbclid", "gclid", "gclsrc", "dclid", "gbraid", "wbraid", "msclkid", "mc_cid", "mc_eid", "igshid", "yclid",
     "twclid", "ttclid", "li_fat_id", "_hsenc", "_hsmi", "mkt_tok", "oly_anon_id", "oly_enc_id", "vero_id", "wickedid",
 ];
 
-/// The URL without tracking parameters, or None if it had none.
 pub fn clean_url(url: &str) -> Option<String> {
     if !url.starts_with("http") {
         return None;
@@ -2313,7 +1887,6 @@ pub fn clean_url(url: &str) -> Option<String> {
 mod tests {
     use super::{Action, clean_url, map_key, menu_label, origin_of, purge_at_start_in, purge_queue_path, queue_purge_in, realm_of, safe_key};
 
-    /// The sign-in card names the site's realm; the page menu shows labels without "&" marks.
     #[test]
     fn a_realm_and_a_menu_label_read_plainly() {
         assert_eq!(realm_of("Basic realm=\"Lumen test\""), "Lumen test");
@@ -2328,7 +1901,6 @@ mod tests {
     fn ctrl_shift_n_is_a_new_private_tab() {
         let n = 'N' as u32;
         assert!(matches!(map_key(n, true, true, false), Some(Action::NewPrivate)));
-        // Ctrl+Shift+N must not be mistaken for reopen (Ctrl+Shift+T).
         let t = 'T' as u32;
         assert!(matches!(map_key(t, true, true, false), Some(Action::Reopen)));
         assert!(map_key(n, true, false, false).is_none());
@@ -2341,7 +1913,6 @@ mod tests {
         let l = 'L' as u32;
         assert!(matches!(map_key(k, true, false, false), Some(Action::Palette)));
         assert!(matches!(map_key(l, true, false, false), Some(Action::Omnibox)));
-        // F6 still opens the address bar on its own.
         assert!(matches!(map_key(0x75, false, false, false), Some(Action::Omnibox)));
     }
 
@@ -2359,8 +1930,6 @@ mod tests {
         assert_eq!(origin_of("https://meet.example.com:8443/room?x=1"), "https://meet.example.com:8443");
     }
 
-    /// A session that ended queues its profile: the next start deletes the folder, both
-    /// WebView2's own naming and any other that ends with the profile's name.
     #[test]
     fn finished_profiles_are_deleted_at_the_next_start() {
         let dir = std::env::temp_dir().join(format!("lumen-purge-{}", std::process::id()));
@@ -2376,25 +1945,21 @@ mod tests {
             std::fs::write(d.join("Cookies"), "x").unwrap();
         }
         queue_purge_in(&dir, key);
-        // Twice: one profile is one entry.
         queue_purge_in(&dir, key);
         assert_eq!(std::fs::read_to_string(purge_queue_path(&dir)).unwrap(), format!("[\"{key}\"]"));
         purge_at_start_in(&dir, &root);
         assert!(!mine.exists(), "the ended session's folder is gone");
         assert!(its.exists() && unrelated.exists(), "no other profile was touched");
         assert!(!purge_queue_path(&dir).exists(), "the queue is emptied");
-        // A queue file that is junk does nothing at all.
         std::fs::write(purge_queue_path(&dir), "{not json").unwrap();
         purge_at_start_in(&dir, &root);
         assert!(its.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A profile key can never name a folder somewhere else.
     #[test]
     fn a_profile_key_names_one_folder() {
         assert_eq!(safe_key("a1b2"), "a1b2");
-        // Separators never survive, and ".." is a name like any other: one folder, here.
         assert_eq!(safe_key("../../windows"), "....windows");
         for bad in ["..", "../..", "a\\b", "C:/x", "", "  "] {
             let k = safe_key(bad);
@@ -2451,7 +2016,6 @@ pub fn cookie_header(wv: &WebView, url: &str, done: impl FnOnce(String) + 'stati
     }
 }
 
-/// The page's User-Agent string, so aria2 looks like the browser to the server.
 pub fn user_agent(wv: &WebView) -> String {
     unsafe {
         let Ok(s2) = wv.webview().Settings().and_then(|s| s.cast::<ICoreWebView2Settings2>()) else { return String::new() };
@@ -2460,11 +2024,6 @@ pub fn user_agent(wv: &WebView) -> String {
     }
 }
 
-// --------------------------------------------------------------- dark pages
-
-/// Put this page's Dark Reader in line with `ctx.dark_js`: take the old script off,
-/// add the current one for every future document. `now` also redoes the page showing.
-/// `then`: a URL to open once the script is in (a page built for it, not yet navigated).
 pub fn set_dark(ctx: &Ctx, wv: &WebView, tab: u64, now: bool, then: Option<String>) {
     let core = wv.webview();
     let old = ctx.dark_ids.borrow_mut().remove(&tab);
@@ -2475,7 +2034,6 @@ pub fn set_dark(ctx: &Ctx, wv: &WebView, tab: u64, now: bool, then: Option<Strin
         let js = ctx.dark_js.borrow().clone();
         match js {
             Some(js) => {
-                // Mark pending; the id arrives later.
                 ctx.dark_ids.borrow_mut().insert(tab, String::new());
                 let ids = ctx.dark_ids.clone();
                 let c = core.clone();
@@ -2489,7 +2047,6 @@ pub fn set_dark(ctx: &Ctx, wv: &WebView, tab: u64, now: bool, then: Option<Strin
                             let mut m = ids.borrow_mut();
                             match m.get_mut(&tab) {
                                 Some(slot) if slot.is_empty() => *slot = sid,
-                                // Switched off (or replaced) before the id came back.
                                 _ => {
                                     let _ = c.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(sid));
                                 }
@@ -2514,9 +2071,6 @@ pub fn set_dark(ctx: &Ctx, wv: &WebView, tab: u64, now: bool, then: Option<Strin
     }
 }
 
-// --------------------------------------------------------------- passwords
-
-/// Offer to save passwords, and fill them in. Per profile; Windows encrypts the store.
 pub fn set_passwords(wv: &WebView, on: bool) {
     unsafe {
         if let Ok(p6) = wv
@@ -2531,7 +2085,6 @@ pub fn set_passwords(wv: &WebView, on: bool) {
     }
 }
 
-/// Forget every saved password in this page's profile.
 pub fn clear_passwords(wv: &WebView) {
     unsafe {
         if let Ok(p2) = wv
@@ -2552,10 +2105,6 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Wipe WebView2's own records for one time range. `since` in unix seconds,
-/// None for everything there is. `more` also takes cookies, cache and site data;
-/// passwords and autofill are never touched. True when the call was made: the
-/// work itself is WebView2's, and it may outlive this function.
 pub fn clear_data(wv: &WebView, since: Option<u64>, more: bool) -> bool {
     let mut kinds = COREWEBVIEW2_BROWSING_DATA_KINDS_BROWSING_HISTORY | COREWEBVIEW2_BROWSING_DATA_KINDS_DOWNLOAD_HISTORY;
     if more {
@@ -2585,12 +2134,6 @@ pub fn clear_data(wv: &WebView, since: Option<u64>, more: bool) -> bool {
     }
 }
 
-// ------------------------------------------------------------------ capture
-
-// ------------------------------------------------------------ memory knobs
-
-/// Freeze a hidden page. Scripts stop, memory is trimmed hard.
-/// WebView2 resumes it by itself when shown again.
 pub fn try_suspend(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     if let Ok(c3) = wv.webview().cast::<ICoreWebView2_3>() {
         unsafe {
@@ -2602,7 +2145,6 @@ pub fn try_suspend(wv: &WebView, id: u64, proxy: EventLoopProxy<Ev>) {
     }
 }
 
-/// Thaw a page `try_suspend` froze.
 pub fn resume(wv: &WebView) {
     if let Ok(c3) = wv.webview().cast::<ICoreWebView2_3>() {
         unsafe {
@@ -2638,8 +2180,6 @@ pub fn set_tracking(wv: &WebView, level: &str) {
     }
 }
 
-/// Glass on: DWM backdrop through black client pixels, frame stretched over the client.
-/// Glass off: a plain opaque window. Cheapest thing Windows can draw.
 pub fn set_glass(hwnd: isize, on: bool) {
     use windows::Win32::{
         Graphics::{
@@ -2653,12 +2193,10 @@ pub fn set_glass(hwnd: isize, on: bool) {
     let margins = MARGINS { cxLeftWidth: m, cxRightWidth: m, cyTopHeight: m, cyBottomHeight: m };
     unsafe {
         let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-        // Erase now: tao repaints the background color only on erase, never on its own.
         let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_ERASENOW);
     }
 }
 
-/// Clip the page to rounded corners. `r` in physical pixels.
 pub fn round_corners(wv: &WebView, r: i32) {
     unsafe {
         let mut hwnd = HWND::default();
@@ -2674,14 +2212,10 @@ pub fn round_corners(wv: &WebView, r: i32) {
             return;
         }
         let rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1, r * 2, r * 2);
-        // The window owns the region after this call. Do not free it.
         SetWindowRgn(hwnd, Some(rgn), true);
     }
 }
 
-/// A page's window paints only where no sibling is above it. Without this a page that
-/// repaints all the time (a playing video) paints over the chrome's floating cards, a menu
-/// or a question, even though the chrome is above it.
 fn clip_siblings(wv: &WebView) {
     use windows::Win32::UI::WindowsAndMessaging::{GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOZORDER, SetWindowLongPtrW, WS_CLIPSIBLINGS};
     unsafe {
@@ -2697,8 +2231,6 @@ fn clip_siblings(wv: &WebView) {
     }
 }
 
-/// Bring a page's window above its siblings. The glance card sits over the
-/// chrome's dim overlay, which is itself raised over the page.
 pub fn raise(wv: &WebView) {
     unsafe {
         let mut hwnd = HWND::default();
@@ -2709,19 +2241,11 @@ pub fn raise(wv: &WebView) {
     }
 }
 
-/// Private working set of Lumen's whole process tree: the number Task Manager shows as
-/// "Memory" on the Lumen group, and what tools/vs_brave.py adds up.
 pub fn memory(_env: &ICoreWebView2Environment) -> (u64, u32) {
     let (_, total, count, _) = memory_with_cpu(None, false);
     (total, count)
 }
 
-/// One walk of the process tree, for everyone who needs a number from it:
-/// (this process alone, the whole tree, process count, the tree's CPU time in
-/// 100 ns units). `cpu` costs a `GetProcessTimes` per process, so the callers
-/// that do not need it do not ask: there is no second walk for the journal.
-/// The tree, not WebView2's list: that list leaves out the crash reporter, the
-/// strictly isolated agents' browsers and the download helper.
 pub fn memory_with_cpu(_env: Option<&ICoreWebView2Environment>, cpu: bool) -> (u64, u64, u32, u64) {
     use crate::monitor::{cpu_time, private_ws, tree};
     let me = unsafe { GetCurrentProcess() };
@@ -2748,7 +2272,6 @@ pub fn memory_with_cpu(_env: Option<&ICoreWebView2Environment>, cpu: bool) -> (u
     (own, total, count, ticks)
 }
 
-/// The key a strictly isolated agent's environment is kept under in `Ctx::own_envs`.
 pub fn own_env_key(key: &str) -> String {
     safe_key(key)
 }

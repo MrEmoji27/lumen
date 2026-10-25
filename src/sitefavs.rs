@@ -1,16 +1,11 @@
-//! A favicon for each site, kept across runs, so the new tab page's tiles have their icons
-//! the moment it opens. The icons are the ones pages already hand us for their tabs (WebView2's
-//! favicon event): nothing is fetched for this. `favicons.json` in the data folder, host to
-//! `data:image/png` URI.
+//! A favicon for each site, kept across runs, so the new tab page's tiles have their icons the.
 
 use std::collections::BTreeMap;
 
 use crate::speeddial::host_of;
 
 const FILE: &str = "favicons.json";
-/// Sites remembered. Past this a new site is not added; a known one is still refreshed.
 const MAX_SITES: usize = 300;
-/// A favicon bigger than this (as the data URI) is a picture, not an icon.
 const MAX_BYTES: usize = 48_000;
 
 pub type Favs = BTreeMap<String, String>;
@@ -29,7 +24,6 @@ pub fn save(favs: &Favs) {
     }
 }
 
-/// Remember `data_uri` as the icon of the site `url` is on. True when something changed.
 pub fn remember(favs: &mut Favs, url: &str, data_uri: &str) -> bool {
     let host = host_of(url);
     if host.is_empty() || !data_uri.starts_with("data:image/") || data_uri.len() > MAX_BYTES {
@@ -53,7 +47,6 @@ mod tests {
         let mut f = Favs::new();
         assert!(remember(&mut f, "https://www.github.com/rust-lang/rust", ICON));
         assert_eq!(f.get("github.com").map(String::as_str), Some(ICON));
-        // The same icon again is no change; a different page of the site is the same site.
         assert!(!remember(&mut f, "https://github.com/", ICON));
         assert!(remember(&mut f, "https://github.com/", "data:image/png;base64,BBBB"));
         assert_eq!(f.len(), 1);

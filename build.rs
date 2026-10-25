@@ -1,4 +1,3 @@
-// Bake the icon into the .exe. Explorer, the taskbar and Alt+Tab all read it from here.
 use std::{fs, path::Path, path::PathBuf};
 
 fn main() {
@@ -12,8 +11,6 @@ fn main() {
     version();
 }
 
-/// LUMEN_VERSION: the version people see. Cargo's three numbers, then the release number
-/// from `[package.metadata.lumen]` when it is there: 0.6.7.1.
 fn version() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     let toml = fs::read_to_string("Cargo.toml").unwrap_or_default();
@@ -22,7 +19,6 @@ fn version() {
         .split("[package.metadata.lumen]")
         .nth(1)
         .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("release").map(|r| r.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string())))
-        // Parts and dots only: "6", "6.1", "6.1.2".
         .filter(|r| r.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())));
     let v = match release {
         Some(r) => format!("{base}.{r}"),
@@ -31,9 +27,6 @@ fn version() {
     println!("cargo:rustc-env=LUMEN_VERSION={v}");
 }
 
-/// The build stamp every exe carries: the commit it was built from and that commit's
-/// date, and +dev when the tree had changes nobody committed. `lumen --version`, the
-/// Settings page and the agent door all show it, so "which build is this" has an answer.
 fn stamp() {
     println!("cargo:rerun-if-changed=.git/logs/HEAD");
     println!("cargo:rerun-if-changed=src");
@@ -50,17 +43,10 @@ fn stamp() {
     println!("cargo:rustc-env=LUMEN_BUILD={commit}{}", if dirty { " +dev" } else { "" });
 }
 
-/// Servo draws through ANGLE, which lives in two DLLs the Windows loader has to find
-/// next to the exe. Only a build with the `servo` feature wants them. They come out of
-/// mozangle's build directory, which on a first, clean build may not exist yet when
-/// this script runs (build scripts are scheduled in parallel): then this says so and
-/// the next build copies them. See docs/servo-notes.md for the manual line.
 fn angle_dlls() {
     if std::env::var_os("CARGO_FEATURE_SERVO").is_none() {
         return;
     }
-    // OUT_DIR is <target>/<profile>/build/lumen-<hash>/out, and the exe lands three
-    // levels up from it: that is where the loader looks first.
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default());
     let Some(profile) = out.ancestors().nth(3) else { return };
     let mut done = 0;
@@ -74,7 +60,6 @@ fn angle_dlls() {
                 if !from.is_file() {
                     continue;
                 }
-                // Re-run when ANGLE changes, so a fresh build is copied in.
                 println!("cargo:rerun-if-changed={}", from.display());
                 if put(&from, &profile.join(dll)) {
                     done += 1;
@@ -90,7 +75,6 @@ fn angle_dlls() {
     }
 }
 
-/// Copy `from` over `to` unless the bytes are already the same.
 fn put(from: &Path, to: &Path) -> bool {
     let Ok(want) = fs::read(from) else { return false };
     if fs::read(to).is_ok_and(|old| old == want) {

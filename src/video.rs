@@ -1,6 +1,4 @@
-//! Save the video on a page. yt-dlp (Unlicense) finds the streams and fetches them; FFmpeg
-//! (GPL, gyan.dev build) joins video and audio into one mp4. Both come down once, on first
-//! use, into `tools/`, and run only if their SHA-256 is the one written here.
+//! Save the video on a page.
 
 use std::{
     fs,
@@ -19,27 +17,20 @@ const YTDLP_SHA256: &str = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c056
 const FFMPEG_URL: &str = "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip";
 const FFMPEG_ZIP_SHA256: &str = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba";
 const FFMPEG_MEMBER: &str = "ffmpeg-9.0.2-essentials_build/bin/ffmpeg.exe";
-/// The hash of the ffmpeg.exe taken out of that zip. The zip's own hash is pinned above, but
-/// the doctor has no other way to tell a matching exe from a replaced one.
 const FFMPEG_SHA_FILE: &str = "ffmpeg.sha256";
-/// Neither file is anywhere near this. A bigger answer is not the file.
 const MAX_FETCH: u64 = 160 << 20;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// What a running grab reports.
 #[derive(Debug, Clone)]
 pub enum Up {
-    /// Setting up: "getting yt-dlp", "getting FFmpeg (once)".
     Note(String),
     Progress { done: u64, total: u64, speed: u64, file: String },
     Done(String),
     Failed(String),
 }
 
-/// The running yt-dlp of one job, so it can be stopped.
 pub type Slot = Arc<Mutex<Option<Child>>>;
 
-/// Fetch the tools if needed, then the video. Blocks; run it on its own thread.
 pub fn grab(tools: &Path, out: &Path, url: &str, ua: &str, slot: &Slot, sponsorblock: bool, send: impl Fn(Up)) {
     let _ = fs::create_dir_all(tools);
     let exe = tools.join("yt-dlp.exe");
@@ -63,7 +54,6 @@ pub fn grab(tools: &Path, out: &Path, url: &str, ua: &str, slot: &Slot, sponsorb
     cmd.args(["--no-playlist", "--newline", "--no-colors", "--progress", "--no-simulate", "--encoding", "utf-8"])
         .arg("--ffmpeg-location")
         .arg(tools)
-        // Best up to 1080p, mp4 first: it plays everywhere.
         .args(["-f", "bv*+ba/b", "-S", "res:1080,ext:mp4:m4a", "--merge-output-format", "mp4"])
         .arg("-P")
         .arg(out)
@@ -78,11 +68,9 @@ pub fn grab(tools: &Path, out: &Path, url: &str, ua: &str, slot: &Slot, sponsorb
     if !ua.is_empty() {
         cmd.arg("--user-agent").arg(ua);
     }
-    // SponsorBlock: skip sponsor segments when the setting is on.
     if sponsorblock {
         cmd.args(["--sponsorblock-remove", "sponsor"]);
     }
-    // YouTube wants a JavaScript runtime now. Node, if the machine has it.
     if has_node() {
         cmd.args(["--js-runtimes", "node"]);
     }
@@ -97,7 +85,6 @@ pub fn grab(tools: &Path, out: &Path, url: &str, ua: &str, slot: &Slot, sponsorb
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
-    // Errors arrive on stderr; keep the last one that says ERROR.
     let err_thread = stderr.map(|e| {
         std::thread::spawn(move || {
             let mut last = String::new();
@@ -126,13 +113,11 @@ pub fn grab(tools: &Path, out: &Path, url: &str, ua: &str, slot: &Slot, sponsorb
     let err = err_thread.and_then(|t| t.join().ok()).unwrap_or_default();
     match (file, status) {
         (Some(f), Some(Ok(s))) if s.success() => send(Up::Done(f)),
-        // No child left in the slot: someone stopped it.
         (_, None) => {}
         _ => send(Up::Failed(if err.is_empty() { "yt-dlp gave up".into() } else { short(&err) })),
     }
 }
 
-/// Stop a running grab. yt-dlp keeps the .part files, so the same grab later resumes.
 pub fn stop(slot: &Slot) {
     if let Some(mut c) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = c.kill();
@@ -152,7 +137,6 @@ fn parse(line: &str) -> Option<Line> {
     }
     let rest = line.strip_prefix("LUMEN|")?;
     let mut p = rest.splitn(5, '|');
-    // yt-dlp prints NA for unknown and floats for some numbers.
     let mut num = || p.next().and_then(|s| s.parse::<f64>().ok()).map(|f| f.max(0.0) as u64);
     let done = num().unwrap_or(0);
     let total = num();
@@ -162,10 +146,8 @@ fn parse(line: &str) -> Option<Line> {
     Some(Line::Progress { done, total: total.or(estimate).unwrap_or(0), speed, file })
 }
 
-/// "ERROR: [youtube] abc: Video unavailable. This video is private" -> the part after the id.
 fn short(err: &str) -> String {
     let s = err.trim_start_matches("ERROR:").trim();
-    // "[extractor] id: message" -> "message"
     let s = match s.strip_prefix('[').and_then(|r| r.split_once("] ")) {
         Some((_, r)) => r.split_once(": ").map(|(_, m)| m).unwrap_or(r),
         None => s,
@@ -183,13 +165,10 @@ fn has_node() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-// --------------------------------------------------------------- getting the tools
-
 fn verified(path: &Path, want: &str) -> bool {
     crate::aria::sha_of_file(path).as_deref() == Some(want)
 }
 
-/// Download to `<dest>.part`, hashing on the way, and move into place only if the hash is right.
 fn fetch_verified(url: &str, want: &str, dest: &Path) -> Result<(), String> {
     let part = dest.with_extension("part");
     let _ = fs::remove_file(&part);
@@ -220,8 +199,6 @@ fn stream_to(url: &str, to: &Path) -> Result<String, String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// The zip is checked, then Windows' own tar takes ffmpeg.exe out of it, streaming,
-/// so the 100 MB never sits in Lumen's memory. The zip goes away after.
 fn place_ffmpeg(tools: &Path) -> Result<(), String> {
     let zip = tools.join("ffmpeg.zip");
     fetch_verified(FFMPEG_URL, FFMPEG_ZIP_SHA256, &zip)?;
@@ -239,7 +216,6 @@ fn place_ffmpeg(tools: &Path) -> Result<(), String> {
     if !(ok && tools.join("ffmpeg.exe").exists()) {
         return Err("could not unpack".into());
     }
-    // What came out of the pinned zip is pinned in turn, so it can be checked later.
     if let Some(sha) = crate::aria::sha_of_file(&tools.join("ffmpeg.exe")) {
         let record = tools.join(FFMPEG_SHA_FILE);
         let tmp = record.with_extension("tmp");
@@ -250,18 +226,13 @@ fn place_ffmpeg(tools: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// yt-dlp.exe if it was ever fetched: None when it is not there, Some(true) when it matches
-/// the pinned hash, Some(false) when it does not.
 pub fn ytdlp_state(tools: &Path) -> Option<bool> {
     let sha = crate::aria::sha_of_file(&tools.join("yt-dlp.exe"))?;
     Some(sha == YTDLP_SHA256)
 }
 
-/// ffmpeg.exe if it was ever unpacked: None when it is not there, Some(true) when it matches
-/// the hash written beside it at unpack time, Some(false) when it does not (or the record is gone).
 pub fn ffmpeg_state(tools: &Path) -> Option<bool> {
     let sha = crate::aria::sha_of_file(&tools.join("ffmpeg.exe"))?;
-    // Unpacked before the record was kept: it was checked against the pinned zip then.
     let Ok(want) = fs::read_to_string(tools.join(FFMPEG_SHA_FILE)) else { return Some(true) };
     Some(want.trim().eq_ignore_ascii_case(&sha))
 }
@@ -276,7 +247,6 @@ mod tests {
             parse("LUMEN|130048|309288|NA|48727965.57|out\\Me at the zoo [x].f140.m4a"),
             Some(Line::Progress { done: 130048, total: 309288, speed: 48727965, file: "out\\Me at the zoo [x].f140.m4a".into() })
         );
-        // Unknown size: the estimate stands in. Unknown speed: zero.
         assert_eq!(
             parse("LUMEN|10|NA|2000.0|NA|a|b.mp4"),
             Some(Line::Progress { done: 10, total: 2000, speed: 0, file: "a|b.mp4".into() })

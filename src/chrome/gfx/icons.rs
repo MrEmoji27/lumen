@@ -1,9 +1,4 @@
 //! The icon set: Lucide (https://lucide.dev, ISC), embedded as SVG text.
-//!
-//! Callers keep using Lumen's own names ("reload", "back", ...). `TABLE` says which Lucide
-//! file each name is. `Rasterizer` turns one SVG into an alpha mask at an exact pixel size,
-//! on a small Direct2D device context (the window's own render target cannot draw SVG).
-//! The mask is tinted at draw time, so one mask serves every colour.
 
 use windows::{
     Win32::{
@@ -19,14 +14,10 @@ use windows::{
     core::Interface,
 };
 
-/// One name Lumen draws, and the Lucide file behind it.
 pub struct Entry {
     pub name: &'static str,
     svg: &'static str,
-    /// Filled instead of outlined (the bookmarked star).
     filled: bool,
-    /// Drawn this fraction of the box, centred. Lucide's square fills 18 of 24 units and
-    /// would tower over the minus and the cross beside it in the window buttons.
     pub scale: f32,
 }
 
@@ -50,7 +41,6 @@ macro_rules! lucide {
     };
 }
 
-/// Lumen name to Lucide icon. Aliases (stop and close, bookmark and star) are separate rows.
 pub static TABLE: &[Entry] = &[
     lucide!("back", "arrow-left"),
     lucide!("fwd", "arrow-right"),
@@ -97,11 +87,8 @@ pub static TABLE: &[Entry] = &[
     lucide!("next", "skip-forward"),
     lucide!("sidebar", "panel-left"),
     lucide!("split", "columns-2"),
-    // The Drive panel: a task handed to an agent.
     lucide!("send", "send"),
-    // The way back to the page a pin was made on.
     lucide!("home", "house"),
-    // The privacy report's rows, one each.
     lucide!("mask", "venetian-mask"),
     lucide!("cookie", "cookie"),
     lucide!("eraser", "eraser"),
@@ -109,13 +96,10 @@ pub static TABLE: &[Entry] = &[
     lucide!("redirect", "route-off"),
     lucide!("danger", "shield-alert"),
     lucide!("https", "shield-check"),
-    // The check-up: a check that passed, a warning that did not.
     lucide!("check", "check"),
     lucide!("alert", "triangle-alert"),
 ];
 
-/// Every name `Gfx::geometry_icon` can draw by hand. Lucide has all of them; the hand-made
-/// shapes are only the last resort when no Direct3D device can be made to rasterize SVG.
 #[cfg(test)]
 pub static GEOMETRY: &[&str] = &[
     "back", "fwd", "reload", "stop", "close", "min", "max", "restore", "plus", "search", "lock", "globe", "tab", "sliders",
@@ -126,14 +110,11 @@ pub fn find(name: &str) -> Option<(usize, &'static Entry)> {
     TABLE.iter().enumerate().find(|(_, e)| e.name == name)
 }
 
-/// True when `name` draws something: a Lucide file or hand-made geometry.
 #[cfg(test)]
 pub fn known(name: &str) -> bool {
     find(name).is_some() || GEOMETRY.contains(&name)
 }
 
-/// Stroke width on Lucide's 24-unit grid for an icon drawn `dip` DIPs wide.
-/// Lucide's own 2 is right at 24; smaller icons need more of the grid to stay readable.
 pub fn stroke24(dip: f32) -> f32 {
     if dip >= 20.0 {
         1.5
@@ -147,7 +128,6 @@ pub fn stroke24(dip: f32) -> f32 {
 }
 
 impl Entry {
-    /// The SVG text with white strokes (only the alpha is kept) and the chosen stroke width.
     pub fn source(&self, stroke: f32) -> String {
         let s = self.svg.replace("stroke-width=\"2\"", &format!("stroke-width=\"{stroke}\""));
         let s = if self.filled { s.replacen("fill=\"none\"", "fill=\"currentColor\"", 1) } else { s };
@@ -155,7 +135,6 @@ impl Entry {
     }
 }
 
-/// A Direct2D device context on a throwaway D3D11 device, only for drawing SVG into masks.
 pub struct Rasterizer {
     ctx: ID2D1DeviceContext5,
 }
@@ -163,7 +142,6 @@ pub struct Rasterizer {
 impl Rasterizer {
     pub fn new(factory: &ID2D1Factory) -> Option<Rasterizer> {
         unsafe {
-            // Hardware first; the software rasterizer when there is no usable GPU.
             let mut dev: Option<ID3D11Device> = None;
             for kind in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
                 let made = D3D11CreateDevice(
@@ -189,8 +167,6 @@ impl Rasterizer {
         }
     }
 
-    /// Draw `svg` (24-unit grid) into a `px` by `px` square and return its alpha channel, one
-    /// byte per pixel, rows `px` apart.
     pub fn alpha(&self, svg: &str, px: u32) -> Option<Vec<u8>> {
         unsafe {
             let c = &self.ctx;
@@ -221,7 +197,6 @@ impl Rasterizer {
             c.DrawSvgDocument(&doc);
             c.EndDraw(None, None).ok()?;
             c.SetTarget(None::<&ID2D1Image>);
-            // A target bitmap cannot be mapped: copy it to one the CPU may read.
             let read = c
                 .CreateBitmap(
                     size,
@@ -255,8 +230,6 @@ impl Rasterizer {
 mod tests {
     use super::*;
 
-    /// Every string in `src` that sits where an icon name goes: the first argument of `icon(`,
-    /// `button(`, `chip(`, `empty_state(`, and the name half of the tuples that feed them.
     fn names_used(src: &str) -> Vec<String> {
         let mut out = Vec::new();
         for line in src.lines() {
@@ -285,7 +258,6 @@ mod tests {
         out
     }
 
-    /// Lowercase words that sit on those lines without being icons (a state compared on the chip line).
     const NOT_ICONS: &[&str] = &["playing"];
 
     #[test]
@@ -305,7 +277,6 @@ mod tests {
                 }
             }
         }
-        // The scan must find the well-known ones, or it has stopped looking.
         assert!(seen > 20, "scan found only {seen} icon names");
         assert!(bad.is_empty(), "names with no SVG and no geometry: {bad:?}");
     }

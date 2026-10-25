@@ -1,20 +1,7 @@
 //! What lumen.exe was started with, and how a second start hands it to the first.
-//!
-//! `lumen.exe <url-or-path>...` opens each as a tab. `--private` makes them private tabs.
-//! A Lumen already running for the profile gets the list through a small file and a signal,
-//! and the second process leaves.
-//!
-//! The command Windows runs for a link or a file is `"lumen.exe" --single-argument %1`.
-//! Everything after that flag is ONE argument, taken from the raw command line, never split
-//! into words. So a crafted link such as `https://x/ --headless` is a URL with a space in it,
-//! not a URL plus a flag.
-//!
-//! Only three kinds of target are ever opened: http(s) URLs, `file:` URLs of page-like files,
-//! and paths of such files. `javascript:`, `data:`, `about:` and every other scheme are dropped.
 
 use serde::{Deserialize, Serialize};
 
-/// One tab to open.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Open {
     pub url: String,
@@ -22,32 +9,23 @@ pub struct Open {
     pub private: bool,
 }
 
-/// What the command line asked for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Parsed {
     pub opens: Vec<Open>,
-    /// `--register` / `--unregister`: write or remove the default-browser entries, then leave.
     pub register: bool,
     pub unregister: bool,
 }
 
-/// The most tabs one start may open, and the longest address taken.
 const MAX_OPENS: usize = 20;
 const MAX_URL: usize = 8192;
 
-/// File types that make sense as a page. The same list the registration claims.
 const PAGE_EXTS: &[&str] = &["html", "htm", "shtml", "xht", "xhtml", "svg", "pdf", "webp", "mht", "mhtml"];
 
-// ---------------------------------------------------------------- command line
-
-/// A word of the command line and where it ended in the raw text.
 struct Tok {
     text: String,
     end: usize,
 }
 
-/// Split like Windows does (CommandLineToArgvW): quotes group, `\"` is a quote, backslashes
-/// are literal unless they sit before a quote. The program name keeps its own simple rule.
 fn tokens(raw: &str) -> Vec<Tok> {
     let chars: Vec<(usize, char)> = raw.char_indices().collect();
     let at = |k: usize| chars.get(k).map(|c| c.1);
@@ -63,7 +41,6 @@ fn tokens(raw: &str) -> Vec<Tok> {
         }
         let mut text = String::new();
         if out.is_empty() {
-            // argv[0]: up to the closing quote, or to the next space.
             if at(k) == Some('"') {
                 k += 1;
                 while at(k).is_some_and(|c| c != '"') {
@@ -117,8 +94,6 @@ fn tokens(raw: &str) -> Vec<Tok> {
     out
 }
 
-/// The one argument after `--single-argument`: the rest of the line, as it is. One pair of
-/// quotes around the whole thing is taken off; quotes anywhere else stay (and get encoded).
 fn single_rest(rest: &str) -> &str {
     let s = rest.trim();
     match s.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
@@ -127,7 +102,6 @@ fn single_rest(rest: &str) -> &str {
     }
 }
 
-/// Read a whole raw command line (program name first).
 pub fn parse(raw: &str) -> Parsed {
     let toks = tokens(raw);
     let mut p = Parsed::default();
@@ -142,14 +116,12 @@ pub fn parse(raw: &str) -> Parsed {
         match t.text.as_str() {
             "--" => only_words = true,
             "--single-argument" => {
-                // Everything after it is one thing. Nothing after it is a flag.
                 targets.push(single_rest(&raw[t.end.min(raw.len())..]).to_string());
                 break;
             }
             "--private" | "--inprivate" | "--incognito" => private = true,
             "--register" => p.register = true,
             "--unregister" => p.unregister = true,
-            // --headless, --flag=value, -x, and anything else we do not know.
             s if s.starts_with('-') => {}
             _ => targets.push(t.text.clone()),
         }
@@ -163,13 +135,10 @@ pub fn parse(raw: &str) -> Parsed {
     p
 }
 
-/// This process's own command line.
 pub fn from_process() -> Parsed {
     parse(&raw_command_line())
 }
 
-/// The command line exactly as Windows has it. `std::env::args` has already split it into
-/// words, which is the one thing `--single-argument` must not have happen.
 fn raw_command_line() -> String {
     unsafe extern "system" {
         fn GetCommandLineW() -> *const u16;
@@ -185,10 +154,6 @@ fn raw_command_line() -> String {
     }
 }
 
-// --------------------------------------------------------------------- targets
-
-/// An address ready to load, from one argument: an http(s) URL, a `file:` URL or a path of a
-/// page-like file, or a bare host (`example.org`). None for everything else.
 pub fn target_url(arg: &str) -> Option<String> {
     let s = arg.trim();
     if s.is_empty() || s.len() > MAX_URL || s.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
@@ -197,7 +162,6 @@ pub fn target_url(arg: &str) -> Option<String> {
     let lower = s.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
         let after = &s[s.find("://")? + 3..];
-        // A host must follow: no `https:///x`, no `https://?x`.
         if after.is_empty() || after.starts_with(['/', '?', '#']) {
             return None;
         }
@@ -210,7 +174,6 @@ pub fn target_url(arg: &str) -> Option<String> {
     if let Some(url) = path_to_url(s) {
         return Some(url);
     }
-    // Any other scheme (javascript:, data:, mailto:, about:, ms-settings:) is not ours to open.
     if has_scheme(s) {
         return None;
     }
@@ -220,7 +183,6 @@ pub fn target_url(arg: &str) -> Option<String> {
     None
 }
 
-/// `name:` where name is a scheme, and what follows is not a port (`localhost:3000`).
 fn has_scheme(s: &str) -> bool {
     let Some((name, rest)) = s.split_once(':') else { return false };
     let scheme = !name.is_empty()
@@ -235,8 +197,6 @@ fn has_page_ext(path: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && PAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
-/// A Windows path of a page-like file as a `file:` URL. Relative paths are made absolute
-/// against this process's folder, so they mean the same thing to the Lumen that gets them.
 fn path_to_url(s: &str) -> Option<String> {
     if !has_page_ext(s) {
         return None;
@@ -261,7 +221,6 @@ fn path_to_url(s: &str) -> Option<String> {
     Some(url)
 }
 
-/// Percent-encode a path for a `file:` URL: only what is safe stays as it is.
 fn encode_path(p: &str) -> String {
     let mut out = String::with_capacity(p.len() + 8);
     for b in p.bytes() {
@@ -273,8 +232,6 @@ fn encode_path(p: &str) -> String {
     out
 }
 
-/// A URL with the few bytes that must not travel raw made safe: spaces, control bytes,
-/// quotes, angle brackets, backslashes. Everything else (including `%` and non-ASCII) stays.
 fn encode_url(u: &str) -> String {
     let mut out = String::with_capacity(u.len() + 8);
     for c in u.chars() {
@@ -287,29 +244,22 @@ fn encode_url(u: &str) -> String {
     out
 }
 
-// ---------------------------------------------------------------------- queue
-
-/// The folder where a second start leaves its list for the first.
 fn queue_dir() -> std::path::PathBuf {
     crate::store::data_dir().join("launch")
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct Note {
-    /// The sender wants the window in front (a headless sender does not).
     show: bool,
     opens: Vec<Open>,
 }
 
-/// What the first Lumen found waiting.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Queue {
     pub opens: Vec<Open>,
     pub show: bool,
 }
 
-/// Leave `opens` for the running Lumen. A file written whole and renamed, so the reader never
-/// sees half of it. True when the list was left.
 pub fn forward(opens: &[Open], show: bool) -> bool {
     forward_in(&queue_dir(), opens, show)
 }
@@ -327,8 +277,6 @@ fn forward_in(dir: &std::path::Path, opens: &[Open], show: bool) -> bool {
     std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &done).is_ok()
 }
 
-/// Take everything waiting. Each address goes through the same check as a command line, so a
-/// file dropped in that folder by anyone cannot open more than a command line could.
 pub fn drain() -> Queue {
     drain_in(&queue_dir())
 }
@@ -353,7 +301,6 @@ fn drain_in(dir: &std::path::Path) -> Queue {
     q
 }
 
-/// A first start sweeps notes older than a minute: left by a Lumen that never came.
 pub fn sweep() {
     let Ok(rd) = std::fs::read_dir(queue_dir()) else { return };
     for e in rd.flatten() {
@@ -384,7 +331,6 @@ mod tests {
         assert_eq!(p.opens.len(), 2);
         assert!(p.opens.iter().all(|o| o.private));
         assert!(!parse("lumen.exe https://a.com").opens[0].private);
-        // The flag may come after the address too.
         assert!(parse("lumen.exe https://a.com --private").opens[0].private);
     }
 
@@ -427,8 +373,6 @@ mod tests {
 
     #[test]
     fn double_dash_ends_the_flags() {
-        // After `--`, even something that looks like a flag is just a word (and a word that is no
-        // address is dropped), but an address after it still opens.
         let p = parse("lumen.exe -- --private https://a.com");
         assert_eq!(p.opens, [Open { url: "https://a.com".into(), private: false }]);
         let p = parse("lumen.exe --private -- https://a.com");
@@ -449,7 +393,6 @@ mod tests {
         assert_eq!(p.opens, [Open { url: "https://x.com/a%20b/c".into(), private: false }]);
         let p = parse(r#""C:\Lumen\lumen.exe" --single-argument C:\My Docs\a b.html"#);
         assert_eq!(p.opens[0].url, "file:///C:/My%20Docs/a%20b.html");
-        // One pair of quotes round the whole is taken off.
         let p = parse(r#"lumen.exe --single-argument "C:\My Docs\a.html""#);
         assert_eq!(p.opens[0].url, "file:///C:/My%20Docs/a.html");
     }
@@ -474,7 +417,6 @@ mod tests {
                 assert!(!o.url.contains(' ') && !o.url.contains('"') && !o.url.contains('\n'), "{evil}: {}", o.url);
             }
         }
-        // The space is kept, as %20: the page is requested as written, flag text and all.
         assert_eq!(urls(r#"lumen.exe --single-argument https://x/ --headless"#), ["https://x/%20--headless"]);
     }
 
@@ -553,7 +495,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let ok = Open { url: "https://ok.com/".into(), private: true };
         assert!(forward_in(&dir, std::slice::from_ref(&ok), true));
-        // A note nobody should have written: it is checked again on the way out.
         let evil = Note {
             show: false,
             opens: vec![
@@ -567,7 +508,6 @@ mod tests {
         let q = drain_in(&dir);
         assert!(q.show);
         assert_eq!(q.opens, [Open { url: "https://two.com/a%20b".into(), private: false }, ok]);
-        // Taken means gone.
         assert_eq!(drain_in(&dir), Queue::default());
         let _ = std::fs::remove_dir_all(&dir);
     }

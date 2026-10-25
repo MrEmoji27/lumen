@@ -1,39 +1,21 @@
 //! Pinned tabs that stay.
-//!
-//! A pin is a place you keep. Closing a pinned tab (x, Ctrl+W, middle click) does not
-//! throw the place away: the page is unloaded, like a discarded tab, and the pin stays in
-//! the row, dimmed. A click loads its pinned URL again. Only "Unpin" removes a pin.
-//!
-//! The pinned URL is kept apart from the current one, so a pin that wandered off can go
-//! back to where it was pinned. This file is the rules, as plain functions on plain
-//! values. The window, the views and the session live in main.rs.
 
 use crate::same_page;
 
-/// What closing a tab does.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Closing {
-    /// The tab goes.
     Remove,
-    /// The page goes, the pin stays.
     Unload,
 }
 
-/// Closing a pinned tab unloads it. Everything else is removed. A tab that leaves no
-/// trace (private, agent) is never kept, pinned or not, and a pin with nothing in it has
-/// nothing to come back to.
 pub fn closing(pinned: bool, off_record: bool, pin_url: &str, url: &str) -> Closing {
     if pinned && !off_record && !(pin_url.is_empty() && url.is_empty()) { Closing::Unload } else { Closing::Remove }
 }
 
-/// The URL a pin loads when it is clicked: where it was pinned, or, for a pin made on
-/// a blank tab that has since gone somewhere, the page it is on.
 pub fn target(pin_url: &str, url: &str) -> String {
     if pin_url.is_empty() { url.to_string() } else { pin_url.to_string() }
 }
 
-/// The pinned URL to carry after a restore. A session written before pins remembered
-/// their page has none; the page the pin was on is the best answer.
 pub fn restored_pin_url(pinned: bool, saved_pin: &str, url: &str) -> String {
     if !pinned {
         String::new()
@@ -42,35 +24,23 @@ pub fn restored_pin_url(pinned: bool, saved_pin: &str, url: &str) -> String {
     }
 }
 
-/// The tab menu offers "Back to pinned page" when a pin is somewhere else.
 pub fn offers_back(pinned: bool, pin_url: &str, url: &str) -> bool {
     pinned && !pin_url.is_empty() && !url.is_empty() && !same_page(pin_url, url)
 }
 
-/// What the next-tab choice needs to know about a tab.
 #[derive(Clone, Copy, Debug)]
 pub struct Slot {
     pub pinned: bool,
-    /// It has a page. An unloaded pin is not a place to go after closing something.
     pub loaded: bool,
-    /// An agent's tab: never where the person lands.
     pub agent: bool,
 }
 
-/// Where to go after unloading the active tab at `i`: the next tab, else the one before,
-/// skipping pins that are unloaded (landing on one would load it, the opposite of closing).
-/// None: there is nowhere, and a fresh tab takes its place.
 pub fn next_after_close(slots: &[Slot], i: usize) -> Option<usize> {
     let ok = |s: &Slot| !s.agent && !(s.pinned && !s.loaded);
     let after = (i + 1..slots.len()).find(|&n| ok(&slots[n]));
     after.or_else(|| (0..i.min(slots.len())).rev().find(|&n| ok(&slots[n])))
 }
 
-/// Where to go after the active tab at `i` was removed (`slots` is the row without it) and
-/// there is no tab the person was on before it: the nearest tab that is not pinned, after it
-/// then before it; else the nearest pin that has its page. Never an unloaded pin: landing on
-/// one would load it, and a start page closed at launch would wake a pin nobody asked for.
-/// None: nowhere, and a fresh start page takes its place.
 pub fn after_remove(slots: &[Slot], i: usize) -> Option<usize> {
     let near = |ok: &dyn Fn(&Slot) -> bool| {
         (i..slots.len()).find(|&n| ok(&slots[n])).or_else(|| (0..i.min(slots.len())).rev().find(|&n| ok(&slots[n])))
@@ -100,7 +70,6 @@ mod tests {
     #[test]
     fn an_empty_pin_has_nothing_to_come_back_to() {
         assert_eq!(closing(true, false, "", ""), Closing::Remove);
-        // A pin made on a blank tab that has since loaded something does.
         assert_eq!(closing(true, false, "", "https://a.test/"), Closing::Unload);
         assert_eq!(target("", "https://a.test/"), "https://a.test/");
     }
@@ -113,10 +82,8 @@ mod tests {
     #[test]
     fn back_is_offered_only_for_a_pin_that_left() {
         assert!(offers_back(true, "https://a.test/", "https://a.test/other"));
-        // Same page, give or take a slash and case: nothing to go back to.
         assert!(!offers_back(true, "https://a.test/", "https://A.test"));
         assert!(!offers_back(false, "https://a.test/", "https://b.test/"));
-        // Unloaded or blank, or an old pin without a remembered page.
         assert!(!offers_back(true, "https://a.test/", ""));
         assert!(!offers_back(true, "", "https://b.test/"));
     }
@@ -125,15 +92,12 @@ mod tests {
     fn an_old_session_pin_remembers_the_page_it_was_on() {
         assert_eq!(restored_pin_url(true, "", "https://a.test/x"), "https://a.test/x");
         assert_eq!(restored_pin_url(true, "https://a.test/", "https://a.test/x"), "https://a.test/");
-        // A tab that is not pinned carries no pin, whatever the file says.
         assert_eq!(restored_pin_url(false, "https://a.test/", "https://a.test/x"), "");
     }
 
     #[test]
     fn closing_the_active_tab_moves_to_the_next_one() {
-        // [pin(live)=active, pin(off), tab, tab]
         let v = [slot(true, true), slot(true, false), slot(false, true), slot(false, true)];
-        // The unloaded pin next door is skipped: it would load.
         assert_eq!(next_after_close(&v, 0), Some(2));
     }
 
@@ -145,16 +109,11 @@ mod tests {
 
     #[test]
     fn closing_the_start_page_never_wakes_an_unloaded_pin() {
-        // Launch: [pin(off), pin(off)] and the start page, now closed. Nowhere to go.
         assert_eq!(after_remove(&[slot(true, false), slot(true, false)], 2), None);
-        // A plain tab anywhere in the row wins over the pins, even one further away.
         assert_eq!(after_remove(&[slot(true, false), slot(false, false), slot(true, true)], 3), Some(1));
-        // With only pins left, one that has its page is fine.
         assert_eq!(after_remove(&[slot(true, false), slot(true, true)], 2), Some(1));
-        // The neighbour after the closed tab first, then the one before.
         assert_eq!(after_remove(&[slot(false, true), slot(false, true)], 1), Some(1));
         assert_eq!(after_remove(&[slot(false, true), slot(false, true)], 2), Some(1));
-        // An agent's tab is never where the person lands.
         assert_eq!(after_remove(&[Slot { pinned: false, loaded: true, agent: true }], 1), None);
     }
 

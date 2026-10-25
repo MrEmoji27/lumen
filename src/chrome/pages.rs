@@ -1,6 +1,4 @@
-//! Settings and Control, drawn natively. A small widget kit (segments, toggles,
-//! sliders, swatches) and two pages built from it. Settings keys are read and
-//! written through serde, so a new setting is one line in a schema.
+//! Settings and Control, drawn natively.
 
 use serde_json::{Value, json};
 
@@ -15,36 +13,27 @@ use crate::store::{CLOSE_BTNS, DATE_FORMATS, DENSITIES, LAYOUTS, MOTIONS, Settin
 #[derive(Clone, Debug, PartialEq)]
 pub enum PageHit {
     Seg(&'static str, &'static str),
-    /// The first-run picker's Start.
     FirstRunDone,
     Toggle(&'static str),
     Slider(&'static str),
     Accent,
     AccentReset,
-    /// A custom colour, by its setting key.
     Color(&'static str),
-    /// Back to the palette's own for that colour.
     ColorClear(&'static str),
-    /// A text setting, edited in a native dialog.
     Text(&'static str),
-    /// Open the searchable font list for a setting.
     Fonts(&'static str),
-    /// Choose the nth family of the list the picker last drew.
     FontPin(usize),
     FontClose,
-    /// Save the current look under a name; apply or remove a saved one.
     ThemeSave,
     ThemeApply(usize),
     ThemeDelete(usize),
     ThemeExport,
     ThemeImport,
-    /// Back to the defaults, for one group of the Appearance page.
     ResetGroup(&'static str),
     Engine(usize),
     Nav(usize),
     Done,
     Unload(u64),
-    /// A row of a list: only there so it can light up under the mouse.
     Row(u64),
     ClearPasswords,
     KdbxOpen,
@@ -55,75 +44,48 @@ pub enum PageHit {
     DlAddLink,
     DlTorrentPick,
     DlOpenFolder,
-    /// The Secret button: open the secret downloads with Windows Hello, or shut them.
     DlSecret,
-    /// A secret file's action ("file" opens it, "back" moves it back), by its place in the list.
     Secret(&'static str, usize),
     DlLimit,
     DlNote,
     PermReset(usize),
     Open(String),
     Forget(String),
-    /// A row of the Bookmarks page: click opens, drag moves, right click has the menu.
     Bm(u64),
     BmDel(u64),
-    /// A folder's header (the empty name is Unsorted): click folds it.
     BmFolder(String),
     BmNewFolder,
     BmImport,
     ClearHistory,
     ClearData,
-    /// The Drive panel: start the run, stop it, or take the tab over.
     DriveStart,
     DriveStop,
     DrivePause,
-    /// Settings: write Lumen's browser entries and open Windows' Default apps page.
     DefaultMake,
-    /// Settings: take Lumen's browser entries out again.
     DefaultOff,
-    /// Site settings: allow, block or ask one kind for one origin.
     SitePerm(String, String, &'static str),
-    /// Site settings: forget every answer a site has.
     SiteReset(String),
-    /// Site settings: clear the cookies and stored data of one site.
     SiteClear(String),
-    /// Site settings: forget the zoom a site is read at.
     SiteZoom(String),
-    /// Privacy: forget one host's https exception.
     SiteHttp(String),
-    /// Sites: put a host back under ad blocking.
     SiteAdblock(String),
-    /// Privacy: what a kind does when the site has no answer: "block" or "ask".
     PermDefault(&'static str, &'static str),
-    /// A settings button that opens another page ("sites").
     Panels(&'static str),
-    /// Settings: let this site open pop-ups of its own.
     PopupSiteAdd,
-    /// Settings: take this site off the list.
     PopupSiteDel(String),
-    /// Settings: let this site redirect the page on its own.
     RedirectSiteAdd,
-    /// Settings: take this site off the redirect list.
     RedirectSiteDel(String),
-    /// A link that opens in a tab of its own.
     OpenTab(&'static str),
-    /// A page to open in a new tab: the address is not known at build time.
     OpenUrl(String),
-    /// The problem report: to zemo, onto the clipboard, or into Downloads as a file.
     BugSend,
     BugCopy,
     BugSave,
-    /// The start page's crash note, put away without a report.
     CrashSeen,
-    /// The start page's "what is new" note, put away unread.
     SeenVersion,
-    /// The credit's big C: hovered, it spells itself out.
     BigC,
-    /// The check-up: run every check again.
     DoctorRun,
 }
 
-/// Where "Made by zemo" goes.
 pub const PORTFOLIO: &str = "https://portfolio.mremoji47.workers.dev/";
 
 #[derive(Clone, Copy)]
@@ -138,20 +100,16 @@ struct Slide {
     scale: Scale,
 }
 
-/// The font list, open over the settings page: which setting is being chosen,
-/// the filter typed so far, and the list it last showed.
 pub(super) struct FontPick {
     pub(super) key: &'static str,
     pub(super) filter: String,
     pub(super) scroll: f32,
-    /// The families the last draw showed, so a click lands on one.
     pub(super) shown: Vec<String>,
 }
 
 #[derive(Default)]
 pub struct Page {
     pub scroll: f32,
-    /// The panel the scroll offset belongs to.
     pub(super) which: &'static str,
     pub(super) max: f32,
     pub usage: Option<Value>,
@@ -159,23 +117,14 @@ pub struct Page {
     sliders: Vec<(&'static str, R, Scale)>,
     sections: Vec<f32>,
     view: R,
-    /// A short-lived note ("Copy a link or magnet first", a failed unlock).
     pub(super) flash: Option<(String, std::time::Instant)>,
-    /// Bookmark folders folded shut. Forgotten when the page closes.
     pub(super) bm_collapsed: std::collections::HashSet<String>,
-    /// A bookmark row picked up: it moves when let go over another row or folder.
     bm_drag: Option<BmDrag>,
-    /// What the last Bookmarks frame drew, for working out where a drag lands.
     bm_rows: Vec<DropRow>,
-    /// The font list, open or not.
     pub(super) font_pick: Option<FontPick>,
-    /// The name being typed for "save this look".
     pub(super) theme_name: String,
-    /// The saved looks, read from disk the first time the page needs them.
     pub(super) themes: Option<Vec<style::ThemeFile>>,
-    /// The changelog laid out for a width, so a frame does not measure it all again.
     changes: Option<(f32, Vec<ChangeBlock>)>,
-    /// The problem report broken into lines for a width: (width, text length, lines).
     bug_lines: Option<(f32, usize, Vec<String>)>,
 }
 
@@ -186,9 +135,6 @@ struct BmDrag {
 }
 
 impl Page {
-    /// Debug builds: start a page scrolled, for a screenshot of what is further
-    /// down. The content's height is only known after the first draw, and the
-    /// clamp must not eat the offset before that.
     #[cfg(debug_assertions)]
     pub(super) fn test_scroll(&mut self, px: f32) {
         self.scroll = px;
@@ -196,7 +142,6 @@ impl Page {
     }
 }
 
-/// A row or a folder header on the Bookmarks page, as the drag sees it. `id` 0 is a header.
 #[derive(Clone, Debug, PartialEq)]
 struct DropRow {
     r: R,
@@ -204,28 +149,17 @@ struct DropRow {
     id: u64,
 }
 
-// ------------------------------------------------------------------ schema
-
 pub(super) enum Item {
-    /// Palette presets and the custom colours: the whole Colours group.
     Colors,
-    /// The saved looks: save, apply, export, import.
     Themes,
     Seg(&'static str, &'static str, &'static str, &'static [(&'static str, &'static str)]),
-    /// Like Seg, but the choices wrap onto as many lines as they need. For lists
-    /// that are too long for one pill (the translation languages).
     Pick(&'static str, &'static str, &'static str, &'static [(&'static str, &'static str)]),
     Toggle(&'static str, &'static str, &'static str),
     Range(&'static str, &'static str, &'static str, Scale, &'static str),
-    /// A font: the current family, and a button opening the searchable list.
     Fonts(&'static str, &'static str, &'static str),
-    /// A text setting, typed into a native dialog.
     Text(&'static str, &'static str, &'static str),
-    /// The wallpaper file, chosen with a native open dialog.
     Wallpaper,
-    /// How the chrome is arranged: the whole Layout group, with its three shapes.
     Layout,
-    /// A group's "reset to default" line.
     Reset(&'static str, &'static str),
     Engine,
     Keys,
@@ -234,21 +168,16 @@ pub(super) enum Item {
     AgentSetup,
     SitePerms,
     DefaultBrowser,
-    /// The sites whose pop-ups are allowed: a list, with a way in and a way out.
     PopupSites,
-    /// The sites allowed to redirect the page on their own.
     RedirectSites,
 }
 
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
 const NET: &[u32] = &[32, 64, 128, 256, 512, 1024, 2048, 5120, 10240, 25600, 51200, 102400];
 const DL_SPEEDS: &[u32] = &[0, 1024, 5120, 10240];
-/// Freeze and unload stops, in minutes. 0 is Never, at the far end of the slider.
 const FREEZE_STOPS: &[u32] = &[1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 0];
 const UNLOAD_STOPS: &[u32] = &[5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 0];
-/// The clock's size, in px. 0 follows the window.
 const CLOCK_SIZES: &[u32] = &[0, 48, 64, 80, 96, 112, 128, 152, 176];
-/// The speed-dial columns. 0 follows the width.
 const DIAL_COLS: &[u32] = &[0, 3, 4, 5, 6, 7, 8];
 const ENGINES: [(&str, &str); 5] = [
     ("DuckDuckGo", "https://duckduckgo.com/?q=%s"),
@@ -287,12 +216,10 @@ const KEYS: [(&str, &str); 31] = [
     ("Darken this site / keep its colors", "Shift+F9"),
     ("Split the stage", "Ctrl+\\"),
     ("Developer tools", "F12"),
-    // The page's own keys, listed so nobody has to guess.
     ("Page: switch workspace", "Ctrl+Alt+1…4"),
     ("Page: open a link in a card", "Shift+click"),
 ];
 
-/// The zoom sizes Ctrl++ steps through in Chromium, for the default-zoom slider.
 const ZOOM_STOPS: &[u32] = &[25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500];
 
 pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
@@ -437,7 +364,6 @@ fn limits_schema() -> Vec<Item> {
     ]
 }
 
-/// The on/off switch that goes with a limit slider.
 fn limit_toggle(key: &str) -> Option<&'static str> {
     match key {
         "ram_limit_mb" => Some("ram_limit"),
@@ -446,8 +372,6 @@ fn limit_toggle(key: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
-// ------------------------------------------------------------------ values
 
 fn get(s: &Settings, k: &str) -> Value {
     serde_json::to_value(s).ok().and_then(|v| v.get(k).cloned()).unwrap_or(Value::Null)
@@ -463,8 +387,6 @@ pub(super) fn set(i: &mut Inner, k: &str, v: Value) {
     let dark = st.dark;
     if let Ok(next) = serde_json::from_value::<Settings>(all) {
         st.settings = next.clone();
-        // The look follows at once, so a drag previews as it moves: the theme,
-        // the fonts, the spacing and the motion all come from the one struct.
         let look = Look::of(&next, dark, super::motion::system_allows());
         i.theme = look.theme;
         i.look = look;
@@ -488,7 +410,6 @@ fn fmt_value(v: f32, unit: &str) -> String {
             }
         }
         "%" => format!("{}%", v as u32),
-        // Minutes: Never at 0, hours past the hour.
         "min" => match v as u32 {
             0 => "Never".to_string(),
             m if m >= 60 && m % 60 == 0 => format!("{} h", m / 60),
@@ -503,13 +424,10 @@ fn trim(v: f32) -> String {
     if (v - v.round()).abs() < 0.05 { format!("{}", v.round() as u32) } else { format!("{v:.1}") }
 }
 
-// ------------------------------------------------------------------- clearing
-
 fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Days since 1970-01-01 for a civil date. Howard Hinnant's algorithm.
 fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -519,7 +437,6 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     era as i64 * 146097 + doe as i64 - 719468
 }
 
-/// Unix seconds of local midnight today.
 fn midnight() -> u64 {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let t = unsafe { GetLocalTime() };
@@ -527,7 +444,6 @@ fn midnight() -> u64 {
     (today - local_offset()).max(0) as u64
 }
 
-/// Seconds local time is ahead of UTC. A negative number west of Greenwich.
 fn local_offset() -> i64 {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let t = unsafe { GetLocalTime() };
@@ -538,8 +454,6 @@ fn local_offset() -> i64 {
     wall - unix_now() as i64
 }
 
-/// The slice of history to clear: None = everything, Some(t) = from unix `t` on.
-/// The menu asks, and `done` runs with the answer once a row is chosen.
 fn ask_range(i: &mut Inner, done: impl FnOnce(&mut Inner, Option<u64>) + 'static) {
     let now = unix_now();
     let items: Vec<(u32, String)> = [(1u32, "Last hour"), (2, "Today"), (3, "Last 7 days"), (4, "Last 4 weeks"), (5, "Everything")]
@@ -581,11 +495,7 @@ fn value_at(scale: Scale, r: f32) -> f32 {
     }
 }
 
-// -------------------------------------------------------------------- draw
-
 pub fn draw(i: &mut Inner, st: R, s: &UiState) {
-    // Each page starts at its top. The scroll offset used to survive a change of page, so a
-    // long Settings page left Downloads and Control scrolled off the top of a short page: blank.
     if i.page.which != s.panel {
         i.page.which = s.panel;
         i.page.scroll = 0.0;
@@ -595,15 +505,12 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     }
     let first = i.hits.len();
     draw_page(i, st, s);
-    // The content can shrink under the offset (a finished row cleared, a window made taller).
-    // The height is only known after drawing, so draw once more from the clamped offset.
     if i.page.scroll > i.page.max {
         i.page.scroll = i.page.max;
         i.hits.truncate(first);
         i.gfx.round(st, i.look.page_radius, i.theme.bg);
         draw_page(i, st, s);
     }
-    // The font list sits over everything while it is open.
     draw_picker(i, st, s);
 }
 
@@ -626,20 +533,14 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
     }
 }
 
-/// The Drive page's column: wide enough for the steps and the agent's words side by side.
 const DRIVE_W: f32 = 880.0;
-/// What the Run button takes at the right of the task card.
 const DRIVE_RUN_W: f32 = 104.0;
 
-/// The task card's text part, in stage coordinates. The native text box is placed over it,
-/// so what is typed and what is drawn agree; Run sits in the rest of the card.
 pub fn drive_task_rect(st: R, s5: f32) -> R {
     let col = column(st, DRIVE_W);
     R::new(col.x + 10.0, st.y + s5 + 2.0 + 74.0, col.w - DRIVE_RUN_W - 10.0, 56.0)
 }
 
-/// Text broken into lines no wider than `w`, at spaces; a word longer than a line is cut
-/// by the drawing, not here.
 pub(super) fn wrap_lines(i: &Inner, text: &str, f: super::gfx::Font, w: f32) -> Vec<String> {
     let mut out = Vec::new();
     let mut line = String::new();
@@ -657,12 +558,10 @@ pub(super) fn wrap_lines(i: &Inner, text: &str, f: super::gfx::Font, w: f32) -> 
     out
 }
 
-/// A step's time: milliseconds while short, tenths of a second after.
 fn fmt_ms(ms: u64) -> String {
     if ms < 500 { format!("{ms} ms") } else { format!("{:.1} s", ms as f64 / 1000.0) }
 }
 
-/// A quiet button with a small square before its label, both in the live colour: Stop.
 pub(super) fn stop_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageHit) -> R {
     let th = i.theme;
     let f = i.look.body.align(Align::Center);
@@ -677,9 +576,6 @@ pub(super) fn stop_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageH
     r
 }
 
-/// The Drive panel: type a task, an agent runs it in Lumen. The steps are its tool calls in
-/// plain words, the card beside them is what it said. Stop ends the run; "Pause and take
-/// over" hands the tab to the person and only browser_handoff gets the agent back in.
 fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
     let lo = i.look.clone();
     let th = i.theme;
@@ -698,7 +594,6 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
     };
     let title_y = st.y + lo.s5 + 2.0;
     title_block(i, col, title_y, "Drive", &sub);
-    // While a run goes, its two ways out sit at the right of the title.
     if running {
         let f = lo.body.align(Align::Center);
         let stop_w = i.gfx.measure("Stop", f) + 2.0 * lo.s4 + 18.0;
@@ -710,7 +605,6 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
         }
     }
 
-    // The task card. The text box itself is a real Win32 edit placed over its left part.
     let field = drive_task_rect(st, lo.s5);
     let card = R::new(col.x, field.y, col.w, field.h);
     let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.drive_edit;
@@ -720,10 +614,8 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
     let run_w = i.gfx.measure("Run", f) + 2.0 * lo.s4;
     let run = outline_button(i, card.right() - 12.0 - run_w, card.y + (card.h - 30.0) / 2.0, "Run", PageHit::DriveStart, true);
     if running {
-        // One run at a time: Run waits, quietly, until this one is over.
         i.gfx.round(run, lo.round(run.h), th.raise.alpha(0.55));
     }
-    // Under the card, the run scrolls: clipped there, so it never slides over the task box.
     let below = R::new(st.x, card.bottom() + 2.0, st.w, (st.bottom() - card.bottom() - 2.0).max(0.0));
     i.gfx.clip(below);
     let mut y = card.bottom() + lo.s4 - i.page.scroll;
@@ -734,8 +626,6 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
             y = empty_state(i, R::new(col.x, y + lo.s4, col.w, 170.0), "send", "Nothing has run yet", hint) + lo.s4;
         }
         Some(d) => {
-            // Left: the steps, numbered, in plain words, each with its time; the one going
-            // now says so in the live colour. Right: what the agent said, in its own words.
             let gap = 14.0;
             let lw = ((col.w - gap) * 0.53).floor();
             let left = R::new(col.x, y, lw, 0.0);
@@ -789,7 +679,6 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
             y += h + lo.s5;
         }
     }
-    // What runs, and the rule it runs under.
     i.gfx.text(&format!("Command: {}", s.settings.drive_cmd), R::new(col.x + 4.0, y, col.w, 20.0), lo.small, th.faint);
     i.gfx.text("Safety: the task Lumen sends tells the agent to call browser_handoff before paying, sending or deleting.", R::new(col.x + 4.0, y + 20.0, col.w, 20.0), lo.small, th.faint);
     y += 44.0;
@@ -799,9 +688,6 @@ fn draw_drive(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-/// A setting's name and its hint, on the left. `control_w` is what the control on the right
-/// takes, so a long hint wraps to a second line instead of running under it. Returns the
-/// row's height: 54, or taller when the hint needs more lines.
 fn row_label(i: &Inner, r: R, label: &str, hint: &str, control_w: f32) -> f32 {
     let th = i.theme;
     let avail = (r.w - control_w - i.look.s5).max(r.w * 0.4);
@@ -810,7 +696,6 @@ fn row_label(i: &Inner, r: R, label: &str, hint: &str, control_w: f32) -> f32 {
         return 54.0;
     }
     i.gfx.text(label, R::new(r.x, r.y + 8.0, avail, 20.0), i.look.font(13.0, 500), th.text);
-    // Words do not fill a line to the last pixel; ask for a little more room than the sum.
     let lines = ((i.gfx.measure(hint, i.look.small) / (avail * 0.94)).ceil() as usize).clamp(1, 3);
     if lines == 1 {
         i.gfx.text(hint, R::new(r.x, r.y + 27.0, avail, 18.0), i.look.small, th.faint);
@@ -820,7 +705,6 @@ fn row_label(i: &Inner, r: R, label: &str, hint: &str, control_w: f32) -> f32 {
     28.0 + 16.0 * lines as f32 + 10.0
 }
 
-/// How wide a segmented control is.
 fn seg_width(i: &Inner, opts: &[(&str, &str)]) -> f32 {
     let f = i.look.font(13.0, 450).align(Align::Center);
     opts.iter().map(|(_, l)| i.gfx.measure(l, f) + 22.0).sum::<f32>() + 4.0
@@ -873,7 +757,6 @@ fn draw_slider(i: &mut Inner, right: f32, cy: f32, key: &'static str, scale: Sca
     i.page.sliders.push((key, track, scale));
 }
 
-/// The family a font setting names, in words a person reads.
 fn font_shown(key: &str) -> String {
     match key {
         "segoe" => "Segoe UI (Windows)".into(),
@@ -887,7 +770,6 @@ fn font_shown(key: &str) -> String {
     }
 }
 
-/// The key a font setting falls back to when the person picks "System default".
 fn font_default_key(key: &str) -> &'static str {
     match key {
         "display_font" => "instrument",
@@ -896,7 +778,6 @@ fn font_default_key(key: &str) -> &'static str {
     }
 }
 
-/// The colour a role has right now: the custom one, or the palette's own.
 fn role_color(i: &Inner, k: &str, s: &UiState) -> Color {
     let custom = get(&s.settings, k).as_str().unwrap_or("").to_string();
     if let Some(c) = Color::from_hex(&custom) {
@@ -912,7 +793,6 @@ fn role_color(i: &Inner, k: &str, s: &UiState) -> Color {
     }
 }
 
-/// The Colours group: the five palettes, the accent, then the custom colours.
 fn draw_colors(i: &mut Inner, r: R, s: &UiState) -> f32 {
     let th = i.theme;
     let right = r.right();
@@ -926,7 +806,6 @@ fn draw_colors(i: &mut Inner, r: R, s: &UiState) -> f32 {
         x += 100.0;
     }
     y += h.max(70.0);
-    // The accent, and the way back to the look's own.
     let h = row_label(i, R::new(r.x, y, r.w, 40.0), "Accent", "One colour, for what is live: a working agent, a running download, the clock's colon.", 110.0);
     let cy = y + h / 2.0;
     let sw = R::new(right - 28.0, cy - 14.0, 28.0, 28.0);
@@ -940,7 +819,6 @@ fn draw_colors(i: &mut Inner, r: R, s: &UiState) -> f32 {
         i.hit(reset, Hit::Page(PageHit::AccentReset));
     }
     y += h;
-    // The custom colours: each shows the colour in use, custom or palette's own.
     const ROLES: [(&str, &str); 5] = [
         ("bg_color", "Background"),
         ("side_color", "Sidebar and toolbar"),
@@ -963,7 +841,6 @@ fn draw_colors(i: &mut Inner, r: R, s: &UiState) -> f32 {
             let clear = R::new(chip.x - 56.0, cy - 10.0, 48.0, 20.0);
             let ch = self_hover(i, PageHit::Color(""));
             i.gfx.text("Clear", clear, i.look.small.align(Align::Right), if ch { th.text } else { th.faint });
-            // One click target: the row's Clear clears this colour.
             i.hit(clear, Hit::Page(PageHit::ColorClear(k)));
         }
         y += h;
@@ -971,7 +848,6 @@ fn draw_colors(i: &mut Inner, r: R, s: &UiState) -> f32 {
     y - r.y
 }
 
-/// A look's small picture: its ground, its search bar, its cards, its name.
 pub(super) fn look_thumb(i: &mut Inner, t: R, key: &str, name: &str, on: bool) {
     let th = i.theme;
     let hx = |h: &str| super::theme::Color::from_hex(h).unwrap_or(th.text);
@@ -982,7 +858,6 @@ pub(super) fn look_thumb(i: &mut Inner, t: R, key: &str, name: &str, on: bool) {
     };
     i.gfx.round(t, 12.0, bg);
     if key == "glass" {
-        // Its wallpaper, in two soft blooms, kept inside the picture.
         i.gfx.clip(t.inset(2.0, 2.0));
         i.gfx.bloom(t.x + t.w * 0.12, t.y, t.w * 0.7, hx("#5a43e6").alpha(0.9));
         i.gfx.bloom(t.right(), t.bottom(), t.w * 0.6, hx("#d2457e").alpha(0.8));
@@ -991,7 +866,6 @@ pub(super) fn look_thumb(i: &mut Inner, t: R, key: &str, name: &str, on: bool) {
     let k = (t.w / 92.0).max(1.0);
     let pad = 8.0 * k;
     let mut y = t.y + pad;
-    // A big picture shows each look's clock, the thing that tells them apart at a glance.
     if t.h > 100.0 {
         let size = 34.0 * k.min(1.6);
         let (face, colon) = match key {
@@ -1027,7 +901,6 @@ pub(super) fn look_thumb(i: &mut Inner, t: R, key: &str, name: &str, on: bool) {
     }
 }
 
-/// The first thing a new person sees: pick a look. Signal is chosen; Start keeps it.
 pub fn draw_first_run(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let lo = i.look.clone();
@@ -1075,7 +948,6 @@ pub fn draw_first_run(i: &mut Inner, st: R, s: &UiState) {
     i.hit(b, h);
 }
 
-/// A site's icon, the one Lumen has kept for it, or its letter on a quiet tile.
 pub(super) fn site_icon(i: &mut Inner, r: R, host: &str) {
     let th = i.theme;
     let key = super::site_key(host);
@@ -1090,19 +962,16 @@ pub(super) fn site_icon(i: &mut Inner, r: R, host: &str) {
     }
 }
 
-/// A row's hover, for the small text actions.
 fn self_hover(i: &Inner, h: PageHit) -> bool {
     i.is_hover(&Hit::Page(h))
 }
 
-/// The saved looks: save the current one, apply or remove one, export and import.
 fn draw_themes(i: &mut Inner, r: R, s: &UiState) -> f32 {
     let _ = s;
     let th = i.theme;
     let right = r.right();
     let mut y = r.y;
     i.gfx.text("Saved themes", R::new(r.x, y, r.w, 30.0), i.look.body_strong, th.text);
-    // Right to left: Export, Import, Save.
     let save_w = i.gfx.measure("Save this look…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
     let export_w = i.gfx.measure("Export…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
     let import_w = i.gfx.measure("Import…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
@@ -1110,7 +979,6 @@ fn draw_themes(i: &mut Inner, r: R, s: &UiState) -> f32 {
     let export = outline_button(i, save - i.look.s2 - export_w, y - 2.0, "Export…", PageHit::ThemeExport, false).x;
     outline_button(i, export - i.look.s2 - import_w, y - 2.0, "Import…", PageHit::ThemeImport, false);
     y += 38.0;
-    // The chips: click applies, the small × removes.
     let list = i.page.themes.clone().unwrap_or_default();
     if list.is_empty() {
         i.gfx.text("No saved looks yet. Set the colours and fonts you like, then Save.", R::new(r.x, y, r.w, 24.0), i.look.small, th.faint);
@@ -1141,7 +1009,6 @@ fn draw_themes(i: &mut Inner, r: R, s: &UiState) -> f32 {
     y + 38.0 - r.y
 }
 
-/// The Layout group: the three arrangements, each drawn as the shape it makes.
 fn draw_layout(i: &mut Inner, r: R, s: &UiState) -> f32 {
     let th = i.theme;
     let mut y = r.y;
@@ -1170,12 +1037,10 @@ fn draw_layout(i: &mut Inner, r: R, s: &UiState) -> f32 {
     y + card_h + 12.0 - r.y
 }
 
-/// The little diagram in a layout card: the chrome's strips and the page.
 fn draw_layout_shape(i: &mut Inner, a: R, kind: &str) {
     let th = i.theme;
     let chrome = th.accent.alpha(0.8);
     let dim = th.accent.alpha(0.4);
-    // The page: a step off the card, so the shape reads at a glance.
     let page = th.raise.mix(th.text, 0.06);
     let bar = (a.h * 0.16).max(6.0);
     let strip = (a.w * 0.26).max(10.0);
@@ -1197,8 +1062,6 @@ fn draw_layout_shape(i: &mut Inner, a: R, kind: &str) {
     }
 }
 
-/// The font list, over the settings page: a filter anyone can type into, and the
-/// families of this PC under it.
 pub(super) fn draw_picker(i: &mut Inner, st: R, s: &UiState) {
     let Some(pick) = i.page.font_pick.as_ref() else { return };
     let _ = s;
@@ -1211,7 +1074,6 @@ pub(super) fn draw_picker(i: &mut Inner, st: R, s: &UiState) {
         "mono_font" => "Monospace font",
         _ => "Interface font",
     };
-    // Anywhere else closes it.
     i.hit(st, Hit::Page(PageHit::FontClose));
     let card = R::new(st.x + (st.w - 540.0) / 2.0, st.y + 36.0, 540.0_f32.min((st.w - 40.0).max(200.0)), (st.h - 96.0).max(200.0));
     i.gfx.round(card.inset(-2.0, -2.0), i.look.r_lg + 2.0, th.shade.alpha(0.5));
@@ -1222,14 +1084,12 @@ pub(super) fn draw_picker(i: &mut Inner, st: R, s: &UiState) {
     let xh = self_hover(i, PageHit::FontClose);
     i.gfx.icon("close", xr.x + 6.0, xr.y + 4.0, 16.0, if xh { th.text } else { th.dim });
     i.hit(xr, Hit::Page(PageHit::FontClose));
-    // The filter: type, backspace, and the list follows.
     let field = R::new(card.x + 16.0, card.y + 40.0, card.w - 32.0, 32.0);
     i.gfx.round(field, i.look.r_md, th.bg);
     i.gfx.round_stroke(field, i.look.r_md, th.acc_soft, 1.5);
     let caret = (i.born.elapsed().as_secs_f32() * 1.6).fract() < 0.5;
     let shown_text = if filter.is_empty() { "Type to search".to_string() } else { format!("{filter}{}", if caret { "|" } else { " " }) };
     i.gfx.text(&shown_text, R::new(field.x + 10.0, field.y, field.w - 20.0, field.h), i.look.font(13.0, 450), if filter.is_empty() { th.faint } else { th.text });
-    // The list: the default first, then every family the filter lets through.
     let list = R::new(card.x + 8.0, field.bottom() + 8.0, card.w - 16.0, card.bottom() - field.bottom() - 20.0);
     i.gfx.clip(list);
     let row_h = 26.0;
@@ -1237,7 +1097,6 @@ pub(super) fn draw_picker(i: &mut Inner, st: R, s: &UiState) {
     let words: Vec<String> = filter.split_whitespace().map(|w| w.to_lowercase()).collect();
     let mut shown: Vec<String> = Vec::new();
     let mut y = list.y + 2.0 - scroll;
-    // Row 0 is always the way back to the default.
     let default_row = R::new(list.x + 4.0, y, list.w - 8.0, row_h);
     let dh = self_hover(i, PageHit::FontPin(0));
     if y + row_h > list.y && y < list.bottom() {
@@ -1274,7 +1133,6 @@ pub(super) fn draw_picker(i: &mut Inner, st: R, s: &UiState) {
     if rows == 0 {
         i.gfx.text("No font here has that name.", R::new(list.x, list.y + 8.0, list.w, 24.0), i.look.small, th.faint);
     }
-    // The filter changes what a click means: remember what was shown.
     if let Some(p) = i.page.font_pick.as_mut() {
         p.shown = shown;
     }
@@ -1292,7 +1150,6 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             let bw = i.gfx.measure("Choose…", i.look.body.align(Align::Center)) + 2.0 * i.look.s4;
             let h = row_label(i, R::new(r.x, r.y, r.w, 54.0), label, hint, bw + 150.0);
             let cy = r.y + h / 2.0;
-            // The family in use, right up against the button that changes it.
             let shown = font_shown(&cur);
             let name_w = (i.gfx.measure(&shown, i.look.font(12.5, 500)) + 16.0).min(r.w * 0.5);
             i.gfx.text(&shown, R::new(right - bw - 8.0 - name_w, cy - 10.0, name_w, 20.0), i.look.font(12.5, 500).align(Align::Right), th.dim);
@@ -1334,9 +1191,6 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             h
         }
         Item::Pick(k, label, hint, opts) => {
-            // Label and hint on their own lines, then the choices wrap across the row:
-            // a list this long does not fit in the half a Seg gets, and one pill wide
-            // enough for it would run off the page.
             let f = i.look.font(12.5, 450).align(Align::Center);
             let cur = get(&s.settings, k).as_str().unwrap_or("").to_string();
             let mut y = r.y;
@@ -1422,8 +1276,6 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             h
         }
         Item::KeePass => {
-            // A fresh note (a wrong password, an unreadable file) takes the
-            // hint line while it lasts.
             let mut note = None;
             if let Some((msg, at)) = &i.page.flash {
                 if at.elapsed().as_secs_f32() < 3.0 {
@@ -1460,7 +1312,6 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
                 Status::Listed => ("Not default", "Lumen is in Windows' list of browsers. Pick it there: Windows does not let an app pick itself.".to_string()),
                 Status::Absent => ("Not default", "Adds Lumen to Windows' list of browsers, then opens the page where you pick it.".to_string()),
             };
-            // A fresh note (what the button just did) takes the hint line while it lasts.
             if let Some((msg, at)) = &i.page.flash
                 && at.elapsed().as_secs_f32() < 4.0
             {
@@ -1497,7 +1348,6 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             y - r.y
         }
         Item::PopupSites => {
-            // The sites whose pop-ups are allowed, and the way in and out.
             let mut y = r.y;
             i.gfx.text("Sites allowed to open pop-ups", R::new(r.x, y, r.w, 20.0), i.look.font(13.0, 500), th.text);
             y += 22.0;
@@ -1514,7 +1364,6 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             for host in &s.settings.popup_sites {
                 site_icon(i, R::new(r.x, y + 4.0, 18.0, 18.0), host);
                 i.gfx.text(host, R::new(r.x + 28.0, y, r.w - 60.0, 26.0), i.look.font(12.5, 500), th.text);
-                // The x: this site is not trusted after all.
                 let x = R::new(right - 26.0, y + 1.0, 24.0, 24.0);
                 let h = Hit::Page(PageHit::PopupSiteDel(host.clone()));
                 if i.is_hover(&h) {
@@ -1529,7 +1378,6 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             y - r.y
         }
         Item::RedirectSites => {
-            // The sites allowed to send the page elsewhere on their own.
             let mut y = r.y;
             i.gfx.text("Sites allowed to redirect", R::new(r.x, y, r.w, 20.0), i.look.font(13.0, 500), th.text);
             y += 22.0;
@@ -1598,7 +1446,6 @@ pub(super) fn fmt_bytes(b: i64) -> String {
     }
 }
 
-/// "3 min left", "40 s left"; empty when it cannot be known.
 fn eta(d: &super::UiDl) -> String {
     if d.speed == 0 || d.total <= d.received {
         return String::new();
@@ -1611,8 +1458,6 @@ fn eta(d: &super::UiDl) -> String {
     }
 }
 
-/// "3 active · 4.2 MB/s down · 310 KB/s up"; empty when nothing is running.
-/// While torrents run, appends " · port open" or " · port closed".
 fn summary(active: usize, down: i64, up: i64, upnp_port_open: bool) -> String {
     if active == 0 {
         return String::new();
@@ -1626,7 +1471,6 @@ fn summary(active: usize, down: i64, up: i64, upnp_port_open: bool) -> String {
     s
 }
 
-/// The group a row falls in; the page draws them in this order, empty ones hidden.
 fn group(state: &str) -> &'static str {
     match state {
         "progress" | "paused" => "Active",
@@ -1640,7 +1484,6 @@ fn group_order() -> [&'static str; 4] {
     ["Active", "Seeding", "Done", "Failed"]
 }
 
-/// One status line per kind, per the brief: files get connections, torrents get peers.
 fn status_line(d: &UiDl) -> String {
     let host = super::host(&d.url);
     let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
@@ -1659,8 +1502,6 @@ fn status_line(d: &UiDl) -> String {
             s
         }
         "paused" => {
-            // A row with no total yet has nothing to show in bytes: the note
-            // says what it is waiting for instead.
             let mut s = format!("Paused · {}", fmt_bytes(d.received));
             if d.total > 0 {
                 s.push_str(&format!(" of {}", fmt_bytes(d.total)));
@@ -1708,7 +1549,6 @@ fn status_line(d: &UiDl) -> String {
     s
 }
 
-/// What the clipboard holds: a link aria2 can take, a magnet, or nothing useful.
 fn classify_link(text: &str) -> &'static str {
     let t = text.trim();
     if t.starts_with("magnet:?") {
@@ -1720,7 +1560,6 @@ fn classify_link(text: &str) -> &'static str {
     }
 }
 
-/// Apply an imported look: keep it among the saved ones, and put it on.
 pub(super) fn apply_theme(i: &mut Inner, t: style::ThemeFile) {
     let Some(s) = i.state.clone() else { return };
     let mut list = style::saved_themes();
@@ -1735,8 +1574,6 @@ pub(super) fn apply_theme(i: &mut Inner, t: style::ThemeFile) {
     i.page.flash = Some(("Imported".into(), std::time::Instant::now()));
 }
 
-/// The settings one "Reset" button owns. Not the layout: a look is colours,
-/// fonts, clock, sidebar shape and motion, never where the chrome lives.
 fn group_keys(group: &str) -> &'static [&'static str] {
     match group {
         "colors" => &["palette", "accent", "bg_color", "side_color", "surface_color", "text_color", "dim_color"],
@@ -1753,7 +1590,6 @@ fn group_keys(group: &str) -> &'static [&'static str] {
     }
 }
 
-/// Put one group of the Appearance page back to its defaults, in one message.
 fn reset_group(i: &mut Inner, group: &str) {
     let Some(st) = i.state.as_ref().map(|s| s.settings.clone()) else { return };
     let keys = group_keys(group);
@@ -1789,21 +1625,11 @@ fn chip_label(kbps: u32) -> &'static str {
     }
 }
 
-// ------------------------------------------------------------ page parts
-//
-// What every list page is made of: a centred column, a title with an optional line under
-// it, toolbar buttons, rows that light up under the mouse, an empty state that says what to
-// do, and a close button that stays put while the page scrolls.
-
-/// The content column of a list page: centred, capped, and never closer to the edge than
-/// the margin.
 pub(super) fn column(st: R, max_w: f32) -> R {
     let w = (st.w - 2.0 * COL_MARGIN).clamp(120.0, max_w);
     R::new(st.x + (st.w - w) / 2.0, st.y, w, st.h)
 }
 
-/// The close button, top right of the page, drawn last so it sits over whatever scrolls
-/// beneath it. Esc does the same.
 pub(super) fn close_button(i: &mut Inner, st: R) {
     let th = i.theme;
     let r = R::new(st.right() - i.look.s4 - 32.0, st.y + i.look.s4, 32.0, 32.0);
@@ -1815,8 +1641,6 @@ pub(super) fn close_button(i: &mut Inner, st: R) {
     i.hit(r, h);
 }
 
-/// Page title, and one quiet line under it when there is something to say. Returns the y
-/// the content starts at.
 pub(super) fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> f32 {
     let th = i.theme;
     let short = sub.chars().count() <= 64;
@@ -1833,8 +1657,6 @@ pub(super) fn title_block(i: &Inner, col: R, y: f32, title: &str, sub: &str) -> 
     y + 74.0
 }
 
-/// A button at (x, y), 30 high. Outlined and quiet, or (primary) filled with the accent.
-/// Returns its rectangle so the caller can step along.
 pub(super) fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: PageHit, primary: bool) -> R {
     let th = i.theme;
     let f = if primary { i.look.body_strong } else { i.look.body }.align(Align::Center);
@@ -1855,7 +1677,6 @@ pub(super) fn outline_button(i: &mut Inner, x: f32, y: f32, label: &str, hit: Pa
     r
 }
 
-/// A text action on a row, 28 high, its right edge at `right`. Returns its left edge.
 pub(super) fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: PageHit) -> f32 {
     let th = i.theme;
     let f = i.look.small_strong.align(Align::Center);
@@ -1871,7 +1692,6 @@ pub(super) fn row_action(i: &mut Inner, right: f32, y: f32, label: &str, hit: Pa
     r.x - i.look.s1
 }
 
-/// A small caps label that opens a group of rows. Returns the y after it.
 pub(super) fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -> f32 {
     let th = i.theme;
     let label = if count > 0 { format!("{}  {count}", text) } else { text.to_string() };
@@ -1879,8 +1699,6 @@ pub(super) fn group_label(i: &Inner, col: R, y: f32, text: &str, count: usize) -
     y + 28.0
 }
 
-/// What a page shows when it has nothing to list: a mark, a plain sentence, and what to do
-/// about it. Centred in `area`; returns its bottom.
 pub(super) fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint: &str) -> f32 {
     let th = i.theme;
     let cx = area.x + area.w / 2.0;
@@ -1892,8 +1710,6 @@ pub(super) fn empty_state(i: &mut Inner, area: R, icon: &str, title: &str, hint:
     area.y + 150.0
 }
 
-/// A row's hover plate. The row also registers itself, so anything drawn on it afterwards
-/// (buttons) takes the mouse first.
 pub(super) fn row_plate(i: &mut Inner, r: R, id: u64) -> bool {
     let th = i.theme;
     let h = Hit::Page(PageHit::Row(id));
@@ -1905,7 +1721,6 @@ pub(super) fn row_plate(i: &mut Inner, r: R, id: u64) -> bool {
     hov
 }
 
-/// Letters for a download's tile: its extension, or what kind of thing it is.
 fn tile_label(d: &UiDl) -> String {
     let ext = d.name.rsplit_once('.').map(|(_, e)| e).filter(|e| !e.is_empty() && e.len() <= 4 && e.chars().all(|c| c.is_ascii_alphanumeric()));
     match (ext, d.kind) {
@@ -1916,8 +1731,6 @@ fn tile_label(d: &UiDl) -> String {
     }
 }
 
-/// The secret downloads, open: a card of their files with Open and Move back, and the plain
-/// truth about what "secret" means here. Returns the y after it.
 fn draw_secret(i: &mut Inner, col: R, st: R, y: f32, s: &UiState) -> f32 {
     let th = i.theme;
     let mut y = group_label(i, col, y, "Secret", s.secret.len());
@@ -1959,7 +1772,6 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.clip(st);
     let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
 
-    // The line under the title: the short-lived "copy a link" note, else what is running.
     let mut flash_gone = false;
     let mut sub = String::new();
     if let Some((msg, at)) = &i.page.flash {
@@ -1980,7 +1792,6 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     }
     y = title_block(i, col, y, "Downloads", &sub);
 
-    // Toolbar: things to add on the left, the cap and the cleanup on the right.
     let mut x = col.x;
     let secret_label = if s.secret_open { "Lock secret" } else { "Secret" };
     for (label, hit) in [("Add link", PageHit::DlAddLink), ("Open torrent…", PageHit::DlTorrentPick), ("Open folder", PageHit::DlOpenFolder), (secret_label, PageHit::DlSecret)] {
@@ -2019,14 +1830,12 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
         }
         y += i.look.s3;
         y = group_label(i, col, y, g, rows.len());
-        // The group's card, under its rows.
         let card = R::new(col.x - 6.0, y, col.w + 12.0, rows.len() as f32 * 74.0 + 6.0 + if s.settings.torrent_note && rows.iter().any(|d| d.kind == "torrent") { 30.0 } else { 0.0 });
         if card.bottom() >= st.y && card.y <= st.bottom() {
             i.gfx.round(card, i.look.r_card, th.raise);
             i.gfx.round_stroke(card, i.look.r_card, th.line, 1.0);
         }
         y += 3.0;
-        // The firewall note rides under the first header that actually has a torrent.
         if s.settings.torrent_note && rows.iter().any(|d| d.kind == "torrent") {
             let msg = "Windows may ask to let aria2 through the firewall. Allow it for faster torrents. (click to hide)";
             let h = Hit::Page(PageHit::DlNote);
@@ -2042,12 +1851,10 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
             }
             row_plate(i, r.inset(6.0, 3.0), d.id);
             let failed = d.state == "failed";
-            // The tile: what the file is, in its own letters.
             let tile = R::new(col.x + 10.0, y + 14.0, 44.0, 44.0);
             i.gfx.round(tile, i.look.r_md, th.bg);
             i.gfx.round_stroke(tile, i.look.r_md, th.line, 1.0);
             i.gfx.text(&tile_label(d), tile, i.look.mono_at(10.0, 700).align(Align::Center), if failed { th.faint.alpha(0.7) } else { th.text });
-            // The actions, right to left; the text takes whatever they leave.
             let acts: &[(&str, &'static str)] = match d.state {
                 "progress" => &[("Pause", "pause"), ("Cancel", "cancel")],
                 "paused" => &[("Resume", "resume"), ("Cancel", "cancel")],
@@ -2077,7 +1884,6 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.text(&status_line(d), R::new(tx, y + 35.0, tw, 18.0), i.look.small, th.faint);
             if d.state == "progress" || d.state == "paused" {
                 let raw = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
-                // Readings come about once a second: the bar glides between them.
                 let pct = i.motion.tween(super::motion::Id::Dl(d.id), super::motion::Prop::Progress, raw, 600, super::motion::Ease::OutCubic);
                 let bar = R::new(tx, y + 59.0, col.right() - 10.0 - tx, 4.0);
                 i.gfx.round(bar, 2.0, th.line);
@@ -2093,7 +1899,6 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-/// History, grouped by day: one quiet list, click to open, x to remove.
 fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let col = column(st, COL_W);
@@ -2114,7 +1919,6 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
         close_button(i, st);
         return;
     }
-    // The days, in order, each its rows in one card.
     let mut days: Vec<(String, Vec<(String, String, String)>)> = Vec::new();
     for (url, title, day, time) in rows {
         match days.last_mut() {
@@ -2153,7 +1957,6 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
             let host = super::host(&url);
             site_icon(i, R::new(x, r.y + (ROW - 18.0) / 2.0, 18.0, 18.0), &host);
             x += 30.0;
-            // The host sits at the right, the title takes what is left, cut with an ellipsis.
             let hf = lo.mono_at(11.5, 450);
             let hw = (i.gfx.measure(&host, hf) + 4.0).min(240.0);
             let hx = r.right() - 18.0 - hw - if hov { 30.0 } else { 0.0 };
@@ -2172,8 +1975,6 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
             }
         }
     }
-    // The archive: the tabs nobody looked at, closed away. One click opens one
-    // again.
     if !s.archived.is_empty() {
         y += lo.s3;
         y = group_label(i, col, y, "Archived", 0);
@@ -2216,28 +2017,19 @@ fn draw_library(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-// -------------------------------------------------------------- bookmarks
-
-/// What the search box and the two buttons beside it take. The search gets the rest.
 const BM_BUTTONS_W: f32 = 270.0;
 const BM_ROW_H: f32 = 46.0;
 
-/// The search box of the Bookmarks page. Fixed under the title; the list scrolls below it.
-/// The edit control (mod.rs) sits on top of this rectangle. `top` is the space the
-/// title block takes, from the look that is drawing.
 pub fn bm_search_rect(st: R, top: f32) -> R {
     let col = column(st, COL_W);
     R::new(col.x, st.y + top + 2.0 + 68.0, (col.w - BM_BUTTONS_W).max(140.0), 34.0)
 }
 
-/// Every word typed is somewhere in the title or the address.
 fn bm_matches(q: &str, m: &super::UiMark) -> bool {
     let hay = format!("{} {}", m.title, m.url).to_lowercase();
     q.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
 }
 
-/// The page's groups, in order: Unsorted (when it holds something), then each folder. While
-/// searching, only the groups that have a match; otherwise every folder, empty ones too.
 fn bm_groups<'a>(marks: &'a [super::UiMark], folders: &'a [String], q: &str) -> Vec<(&'a str, Vec<&'a super::UiMark>)> {
     let searching = !q.trim().is_empty();
     let pick = |folder: &str| -> Vec<&'a super::UiMark> { marks.iter().filter(|m| m.folder == folder && (!searching || bm_matches(q, m))).collect() };
@@ -2255,10 +2047,6 @@ fn bm_groups<'a>(marks: &'a [super::UiMark], folders: &'a [String], q: &str) -> 
     out
 }
 
-/// Where a dragged bookmark lands when let go with the pointer at `y`: the folder, and the
-/// bookmark it goes before (None: the end of the folder). Over a header it goes to the end of
-/// that folder; over the upper half of a row, before it; over the lower half, before the next
-/// row of the same folder.
 fn bm_drop(rows: &[DropRow], y: f32) -> Option<(String, Option<u64>)> {
     let n = rows.iter().position(|d| y >= d.r.y && y < d.r.bottom())?;
     let d = &rows[n];
@@ -2285,8 +2073,6 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     let named = !s.bm_folders.is_empty();
     i.page.bm_rows.clear();
 
-    // The list first, clipped under the search row; the header is drawn after it so its
-    // buttons win the mouse wherever a half-scrolled row reaches up under them.
     i.gfx.clip(list);
     let mut y = top - i.page.scroll;
     if total == 0 && (!q.is_empty() || s.bm_folders.is_empty()) {
@@ -2302,7 +2088,6 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     let dragging = i.page.bm_drag.as_ref().filter(|d| d.moved).map(|d| d.id);
     let lo = i.look.clone();
     for (folder, rows) in &groups {
-        // A header when there is a folder to name, or Unsorted needs telling apart from them.
         if !folder.is_empty() || named {
             let label = if folder.is_empty() { "Unsorted" } else { folder };
             let h = R::new(col.x, y, col.w, 30.0);
@@ -2313,7 +2098,6 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
                 if hov {
                     i.gfx.round(h, lo.round(h.h), th.hover);
                 }
-                // A chevron: down when open, right when folded.
                 let (cx, cy) = (col.x + 12.0, y + 15.0);
                 let c = if hov { th.dim } else { th.faint };
                 if folded {
@@ -2333,7 +2117,6 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
             y += lo.s2;
             continue;
         }
-        // The folder's bookmarks, in one card.
         let card = R::new(col.x, y, col.w, rows.len().max(1) as f32 * BM_ROW_H);
         if card.bottom() >= top && card.y <= st.bottom() {
             i.gfx.round(card, lo.r_card, th.raise);
@@ -2364,7 +2147,6 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
             let host = super::host(&m.url);
             let fade = if lifted { 0.4 } else { 1.0 };
             site_icon(i, R::new(r.x + 18.0, r.y + (BM_ROW_H - 18.0) / 2.0, 18.0, 18.0), &host);
-            // The host at the right, the title takes what is left, cut with an ellipsis.
             let hf = lo.mono_at(11.5, 450);
             let hw = (i.gfx.measure(&host, hf) + 4.0).min(240.0);
             let hx = r.right() - 18.0 - hw - if hov { 30.0 } else { 0.0 };
@@ -2384,7 +2166,6 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
         }
         y += lo.s4;
     }
-    // Where a dragged row would land: a line between rows, or the folder lit.
     if dragging.is_some()
         && let Some((folder, before)) = bm_drop(&i.page.bm_rows, i.mouse.1)
     {
@@ -2405,7 +2186,6 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     i.gfx.unclip();
     i.page.max = (y + i.page.scroll - st.bottom() + 30.0).max(0.0);
 
-    // The header: title, one line under it, the search box and its two buttons.
     let flash = i.page.flash.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < 8.0).map(|(m, _)| m.clone());
     let sub = flash.unwrap_or_else(|| match s.bookmarks.len() {
         0 => "Ctrl+D, or the star in the address bar, adds one.".to_string(),
@@ -2429,11 +2209,6 @@ fn draw_bookmarks(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-// -------------------------------------------------------------- about
-
-/// One release as the What's new page lays it out: its heading, and its lines, each
-/// (text, kind): 0 a paragraph line, 1 a bullet's first line, 2 a bullet's next lines,
-/// 3 the gap after a paragraph.
 pub(super) struct ChangeBlock {
     version: String,
     date: String,
@@ -2442,7 +2217,6 @@ pub(super) struct ChangeBlock {
 
 const CHANGE_LINE: f32 = 21.0;
 
-/// The changelog, broken into lines for a card `w` wide.
 fn change_blocks(i: &Inner, w: f32) -> Vec<ChangeBlock> {
     let f = i.look.body;
     crate::changelog::releases()
@@ -2466,7 +2240,6 @@ fn change_blocks(i: &Inner, w: f32) -> Vec<ChangeBlock> {
         .collect()
 }
 
-/// What's new: the changelog that ships inside Lumen, newest first, a card per version.
 fn draw_changes(i: &mut Inner, st: R) {
     let th = i.theme;
     let lo = i.look.clone();
@@ -2515,15 +2288,11 @@ fn draw_changes(i: &mut Inner, st: R) {
     close_button(i, st);
 }
 
-/// Where the report page's "what happened" box sits, in stage coordinates. The edit control
-/// (mod.rs) is placed over it; the page's head does not scroll, so neither does the box.
 pub fn bug_story_rect(st: R, s5: f32) -> R {
     let col = column(st, COL_W);
     R::new(col.x, st.y + s5 + 2.0 + 74.0 + 40.0 + 22.0, col.w, 44.0)
 }
 
-/// Report a problem: the whole report on the page, so the person reads what it says before
-/// it goes anywhere; a box for what happened; Send, Copy, Save.
 fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let lo = i.look.clone();
@@ -2546,7 +2315,6 @@ fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
     );
     y += 40.0;
     i.label(if numbers { "A note, if you like" } else { "What happened" }, R::new(col.x + 4.0, y, col.w, 16.0), th.faint);
-    // The box itself is a real edit window over this card.
     let field = bug_story_rect(st, lo.s5);
     let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.bug_edit;
     i.gfx.round(field, lo.r_card, th.raise);
@@ -2560,7 +2328,6 @@ fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
     let sent = s.bug_sent;
     x = outline_button(i, x, y, if sent { "Sent" } else { "Send to zemo" }, PageHit::BugSend, true).right() + lo.s2;
     if sent {
-        // Sent once is enough: the button goes quiet until the page opens again.
         let r = R::new(col.x, y, x - lo.s2 - col.x, 30.0);
         i.gfx.round(r, lo.round(30.0), th.raise.alpha(0.55));
     }
@@ -2568,7 +2335,6 @@ fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
     outline_button(i, x, y, "Save to Downloads", PageHit::BugSave, false);
     y += 30.0 + lo.s4;
 
-    // The report as it will be sent, with the words from the box in it, in the monospace face.
     let below = R::new(st.x, y - 4.0, st.w, (st.bottom() - y + 4.0).max(0.0));
     i.gfx.clip(below);
     let top = y;
@@ -2598,7 +2364,6 @@ fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-/// A Settings section's icon in the menu.
 pub(super) fn section_icon(name: &str) -> &'static str {
     match name {
         "General" => "globe",
@@ -2622,16 +2387,12 @@ pub(super) fn section_icon(name: &str) -> &'static str {
     }
 }
 
-/// The Settings search box, in the menu under the title. The edit control (mod.rs) sits on
-/// top of this rectangle.
 pub fn set_search_rect(st: R) -> R {
     R::new(st.x + 14.0, st.y + 90.0, SET_NAV_W - 28.0, 34.0)
 }
 
 const SET_NAV_W: f32 = 224.0;
 
-/// The words a setting is found by: its name, its hint, its choices; for the rows that are
-/// a whole widget, what they are about.
 fn item_words(it: &Item) -> String {
     use Item::*;
     match it {
@@ -2654,14 +2415,11 @@ fn item_words(it: &Item) -> String {
     }
 }
 
-/// Every word typed is in the section's name or the setting's words.
 pub(super) fn item_matches(q: &str, section: &str, it: &Item) -> bool {
     let hay = format!("{section} {}", item_words(it)).to_lowercase();
     q.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
 }
 
-/// The name a setting shows in the command palette: the words its row is called by,
-/// for the rows that are a whole widget.
 pub(super) fn pal_label(it: &Item) -> String {
     use Item::*;
     match it {
@@ -2687,18 +2445,13 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     let lo = i.look.clone();
     let q = super::wide_text(i.set_edit).trim().to_string();
     let searching = !q.is_empty();
-    // While searching, each section keeps only the settings that match; a section with
-    // none is left out of the page and dimmed in the menu.
     let schema: Vec<(&'static str, Vec<Item>)> =
         settings_schema().into_iter().map(|(name, items)| (name, items.into_iter().filter(|it| !searching || item_matches(&q, name, it)).collect())).collect();
-    // Left: the title, the build, and the sections as a menu with icons.
     let nav = R::new(st.x, st.y, SET_NAV_W, st.h);
     i.gfx.line(nav.right(), st.y + lo.s4, nav.right(), st.bottom() - lo.s4, th.line, 1.0);
     i.gfx.text("Settings", R::new(nav.x + 24.0, nav.y + 26.0, nav.w - 32.0, 36.0), lo.font(26.0, 700), th.text);
-    // Which build this is, under the title: the question people ask before reporting a bug.
     let build = env!("LUMEN_BUILD").split_whitespace().next().unwrap_or("");
     i.label(&format!("Lumen {} · {build}", env!("LUMEN_VERSION")), R::new(nav.x + 24.0, nav.y + 64.0, nav.w - 32.0, 16.0), th.faint);
-    // The search box: a pill, the box itself is the edit control over it.
     let sr = set_search_rect(st);
     let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.set_edit;
     i.gfx.round(sr, lo.round(sr.h), th.raise);
@@ -2724,8 +2477,6 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
         i.hit(r, h);
     }
 
-    // At the foot of the menu, the credit: one quiet line. Only the name is a link, to the
-    // portfolio; nothing else about it asks to be clicked.
     let credit = R::new(nav.x + lo.s3 + 12.0, st.bottom() - 60.0, nav.w - 2.0 * lo.s3 - 12.0, 22.0);
     let last = sr.bottom() + 12.0 + schema.len() as f32 * 34.0;
     if s.settings.show_credit && credit.y > last + 8.0 {
@@ -2743,7 +2494,6 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.line(name.x, y, name.x + nw, y, th.text, 1.0);
         }
         i.hit(name, h);
-        // And under it, who juggled it. The C spells itself out under the pointer.
         let lead = "juggled by big ";
         let y2 = credit.y + 20.0;
         let lw = i.gfx.measure(lead, f);
@@ -2758,11 +2508,9 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
         i.hit(R::new(credit.x + lw, y2, cw + 2.0, credit.h), h);
     }
 
-    // Right: each section a label and a card of rows, scrolled.
     let body = R::new(nav.right() + 1.0, st.y, st.w - nav.w - 1.0, st.h);
     let col = R::new(body.x + 40.0, body.y, (body.w - 96.0).clamp(160.0, 720.0), body.h);
     let inner = |r: R| R::new(r.x + 18.0, r.y, r.w - 36.0, r.h);
-    // How tall each section's card is: its rows drawn once out of sight, their hits dropped.
     let mark = i.hits.len();
     i.gfx.clip(R::new(-10.0, -10.0, 1.0, 1.0));
     let heights: Vec<Vec<f32>> = schema
@@ -2808,18 +2556,12 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-// -------------------------------------------------------------- site settings
-
-/// What a permission row acts on: one site's answer, or the default for a kind.
 #[derive(Clone, Copy)]
 enum PermTarget<'a> {
     Site(&'a str, &'a str),
     Default(&'static str),
 }
 
-/// The Allow / Block / Ask choice of one permission row, as a segmented control centred on
-/// `cy`. `cur` is what is remembered (None = ask). A default row offers Block and Ask only:
-/// there is nothing to allow before a site asks.
 fn perm_chips(i: &mut Inner, right: f32, cy: f32, target: PermTarget<'_>, cur: Option<bool>) -> f32 {
     let th = i.theme;
     let lo = i.look.clone();
@@ -2851,7 +2593,6 @@ fn perm_chips(i: &mut Inner, right: f32, cy: f32, target: PermTarget<'_>, cur: O
     pill.x
 }
 
-/// A verdict as a chip state.
 fn chip_state(v: crate::sites::Verdict) -> Option<bool> {
     match v {
         crate::sites::Verdict::Allow => Some(true),
@@ -2860,8 +2601,6 @@ fn chip_state(v: crate::sites::Verdict) -> Option<bool> {
     }
 }
 
-/// A card of `rows` rows of `row` height at y, with hairlines between them. Returns the
-/// card; the rows are drawn by the caller, on top.
 fn rows_card(i: &mut Inner, col: R, y: f32, rows: usize, row: f32) -> R {
     let th = i.theme;
     let card = R::new(col.x, y, col.w, rows.max(1) as f32 * row);
@@ -2874,8 +2613,6 @@ fn rows_card(i: &mut Inner, col: R, y: f32, rows: usize, row: f32) -> R {
     card
 }
 
-/// Site settings: what each site may do, the zoom it is read at, and the data it left behind.
-/// The defaults come first, so the page answers "how do I stop notifications?" without a site.
 fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     let th = i.theme;
     let lo = i.look.clone();
@@ -2896,8 +2633,6 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     const ROW: f32 = 50.0;
     let inner = |r: R| R::new(r.x + 18.0, r.y, r.w - 36.0, r.h);
 
-    // What pages open at, unless a site has a zoom of its own. Measured out of sight first,
-    // so its card is drawn under it at the right height.
     y = group_label(i, col, y, "Pages open at", 0);
     let range = Item::Range(
         "default_zoom",
@@ -2915,7 +2650,6 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     draw_item(i, &range, R::new(inner(col).x, y + 5.0, inner(col).w, 54.0), s);
     y += h + 10.0 + lo.s5;
 
-    // The default answer per kind.
     y = group_label(i, col, y, "When a site has no answer", 0);
     let card = rows_card(i, col, y, crate::sites::KINDS.len(), ROW);
     for (n, kind) in crate::sites::KINDS.iter().enumerate() {
@@ -2929,7 +2663,6 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     }
     y = card.bottom() + lo.s5;
 
-    // One card per site: its name and what can be done about it, then its answers.
     y = group_label(i, col, y, "Answers remembered", origins.len());
     if origins.is_empty() {
         let card = rows_card(i, col, y, 1, 64.0);
@@ -2960,7 +2693,6 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     }
     y += lo.s5 - lo.s3;
 
-    // Zoom by site: what the person chose, and the way back to the default.
     y = group_label(i, col, y, "Zoom by site", s.zooms.len());
     let card = rows_card(i, col, y, s.zooms.len(), ROW);
     if s.zooms.is_empty() {
@@ -2978,7 +2710,6 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
     }
     y = card.bottom() + lo.s5;
 
-    // The hosts that may stay on plain http.
     if !s.settings.http_ok.is_empty() {
         y = group_label(i, col, y, "May stay on plain http", s.settings.http_ok.len());
         let card = rows_card(i, col, y, s.settings.http_ok.len(), ROW);
@@ -2993,7 +2724,6 @@ fn draw_sites(i: &mut Inner, st: R, s: &UiState) {
         y = card.bottom() + lo.s5;
     }
 
-    // The hosts where the person turned ad blocking off, and the way back.
     if !s.settings.adblock_off_sites.is_empty() {
         y = group_label(i, col, y, "Ads allowed on", s.settings.adblock_off_sites.len());
         let card = rows_card(i, col, y, s.settings.adblock_off_sites.len(), ROW);
@@ -3039,18 +2769,14 @@ fn net(bps: f64) -> String {
     }
 }
 
-/// One line of the Control table. `id` is the tab's id; 0 for the rows that are not tabs.
 struct UsageRow {
     id: u64,
     name: String,
     state: &'static str,
     mem: f64,
-    /// None until the second reading: a CPU figure is the difference of two.
     cpu: Option<f64>,
-    /// Bytes per second, or None for rows that have no network figure of their own.
     net: Option<f64>,
     live: bool,
-    /// The tab can be unloaded from here.
     unload: bool,
 }
 
@@ -3063,7 +2789,6 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
     y = title_block(i, col, y, "Control", if have { "What each tab costs, right now. Updates every second." } else { "Measuring…" });
 
-    // Four totals, side by side.
     let t = &u["total"];
     let tiles = [
         ("MEMORY", t["mem"].as_f64().map(mem), "all processes"),
@@ -3087,7 +2812,6 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     }
     y += 92.0 + i.look.s5;
 
-    // The table. Columns hang off the right edge so they line up from row to row.
     let net_r = col.right() - 80.0;
     let cpu_r = net_r - 96.0;
     let mem_r = cpu_r - 72.0;
@@ -3129,7 +2853,6 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     let (ui, core, helpers) = (&u["ui"], &u["core"], &u["helpers"]);
     for (name, state, v) in [("Lumen", "interface", ui), ("Browser core", "shared", core), ("Helpers", "downloads", helpers)] {
         let m = v["mem"].as_f64().unwrap_or(0.0);
-        // The download helper only runs when it is on: no row for nothing.
         if name == "Helpers" && m <= 0.0 {
             continue;
         }
@@ -3137,7 +2860,6 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     }
     for (n, row) in rows.iter().enumerate() {
         let r = R::new(col.x - i.look.s2, y + 2.0, col.w + 2.0 * i.look.s2, ROW_H - 4.0);
-        // Tab rows light up; the two rows that are not tabs are only there to add up.
         let hov = row.id != 0 && i.is_hover(&Hit::Page(PageHit::Row(row.id)));
         if row.id != 0 {
             i.hit(r, Hit::Page(PageHit::Row(row.id)));
@@ -3146,7 +2868,6 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.round(r, i.look.r_md, th.hover);
         }
         let c_text = if row.live { th.text } else { th.faint };
-        // A live tab with no process found yet has no figures, not zeros.
         let known = row.live && row.mem > 0.0;
         let nw = i.gfx.measure(&row.name, i.look.body).min(name_w - 90.0).max(40.0);
         i.gfx.text(&row.name, R::new(col.x, y, nw + 2.0, ROW_H), i.look.body, c_text);
@@ -3155,7 +2876,6 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.text(row.state, R::new(col.x + nw + i.look.s3, y, 90.0, ROW_H), i.look.small, c);
         }
         if known {
-            // Share of everything Lumen uses: a track and a fill, so the heavy rows show.
             let bar = R::new(bar_x, y + ROW_H / 2.0 - 2.0, 96.0, 4.0);
             i.gfx.round(bar, 2.0, th.press);
             let w = (96.0 * (row.mem / total_mem).min(1.0) as f32).max(if row.mem > 0.0 { 3.0 } else { 0.0 });
@@ -3187,7 +2907,6 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.line(col.x, y, col.right(), y, th.line.alpha(0.6), 1.0);
         }
     }
-    // The sum, set apart: what the whole browser is using.
     i.gfx.line(col.x, y, col.right(), y, th.faint.alpha(0.5), 1.0);
     i.gfx.text("Total", R::new(col.x, y, 200.0, ROW_H), i.look.body_strong, th.text);
     let totals = [t["mem"].as_f64().map(mem), t["cpu"].as_f64().map(cpu), t["net"].as_f64().map(net)];
@@ -3213,13 +2932,9 @@ fn draw_control(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-
-// ------------------------------------------------------------------- input
-
 pub fn press(i: &mut Inner, p: PageHit, x: f32, y: f32) {
     if let PageHit::Bm(id) = p {
         i.page.bm_drag = Some(BmDrag { id, y0: y, moved: false });
-        // Keep the mouse while it is down, so a drag that leaves the window still ends.
         unsafe {
             windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(i.hwnd);
         }
@@ -3242,7 +2957,6 @@ fn drag_to(i: &mut Inner, x: f32) {
 
 pub fn drag_move(i: &mut Inner, x: f32, y: f32) -> bool {
     if let Some(d) = &mut i.page.bm_drag {
-        // A few pixels of wobble is still a click.
         if !d.moved && (y - d.y0).abs() > 6.0 {
             d.moved = true;
         }
@@ -3287,7 +3001,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
         }
         PageHit::AccentReset => set(i, "accent", json!("")),
         PageHit::Accent => {
-            // The card opens under the swatch that was clicked.
             let anchor = i.hits.iter().find(|(_, h)| *h == Hit::Page(PageHit::Accent)).map(|(r, _)| *r);
             super::color::open(i, "accent", s.settings.accent.clone(), i.theme.accent, anchor);
         }
@@ -3335,7 +3048,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
             let mut next = s.settings.clone();
             t.apply(&mut next);
             set(i, "palette", json!(next.palette));
-            // set() sends one key at a time; the rest go with it in one message.
             send(&i.proxy, json!({"t": "settings", "v": serde_json::to_value(&next).unwrap_or_default()}));
         }
         PageHit::ThemeDelete(n) => {
@@ -3370,8 +3082,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::Slider(_) => {}
         PageHit::ClearPasswords => send(&i.proxy, json!({"t": "clearPasswords"})),
         PageHit::KdbxOpen => {
-            // The file card picks the .kdbx; the password form follows it. The pair
-            // crosses to the main loop on an event that is never logged.
             super::files::open(i, super::files::FileWhat::Kdbx);
         }
         PageHit::KdbxLock => send(&i.proxy, json!({"t": "kdbxLock"})),
@@ -3389,7 +3099,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
             }
         }
         PageHit::DlAddLink => {
-            // The clipboard decides: a link goes to aria2, anything else gets a note.
             let text = super::read_clipboard(i.hwnd_raw());
             match classify_link(&text) {
                 "magnet" | "url" => send(&i.proxy, json!({"t": "dl", "a": "addUrl", "url": text})),
@@ -3403,7 +3112,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
             super::files::open(i, super::files::FileWhat::Torrent);
         }
         PageHit::DlLimit => {
-            // The drawn menu of speeds aria2 accepts as max-overall-download-limit.
             let (x, y) = i.mouse;
             super::menu::open(
                 i,
@@ -3423,7 +3131,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
             );
         }
         PageHit::DlNote => {
-            // The firewall line is dismissed for good; it never comes back.
             set(i, "torrent_note", json!(false));
         }
         PageHit::Open(url) => send(&i.proxy, json!({"t": "nav", "url": url})),
@@ -3444,7 +3151,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
             super::form::open(i, "New folder", &[("Name", "")], super::form::FormAct::NewFolder);
         }
         PageHit::BmImport => {
-            // Read-only look at the other browsers' files: which are here, and how many each.
             let found = crate::bookmarks::scan();
             if found.is_empty() {
                 i.page.flash = Some(("No Chrome, Edge, Brave or Opera GX bookmarks found on this PC".into(), std::time::Instant::now()));
@@ -3473,13 +3179,11 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::DriveStop => send(&i.proxy, json!({"t": "driveStop"})),
         PageHit::DrivePause => send(&i.proxy, json!({"t": "drivePause"})),
         PageHit::ClearHistory => {
-            // One drawn menu of time ranges first, then the wipe.
             ask_range(i, |i, since| send(&i.proxy, json!({"t": "clearHistory", "since": since})));
         }
         PageHit::ClearData => {
             ask_range(i, |i, since| {
                 let (x, y) = i.mouse;
-                // Second choice: history only, or the cookies and cache with it.
                 super::menu::open(i, &[(1, "History only".into()), (2, "History, cookies and cache".into())], x, y, move |i, cmd| {
                     let more = match cmd {
                         1 => false,
@@ -3511,7 +3215,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
         PageHit::SiteZoom(host) => send(&i.proxy, json!({"t": "zoomForget", "host": host})),
         PageHit::SiteHttp(host) => send(&i.proxy, json!({"t": "httpForget", "host": host})),
         PageHit::SiteAdblock(host) => {
-            // Back under blocking: the list goes through set(), which saves and tells main.
             let mut list = s.settings.adblock_off_sites.clone();
             list.retain(|h| *h != host);
             set(i, "adblock_off_sites", json!(list));
@@ -3534,7 +3237,6 @@ pub fn click(i: &mut Inner, p: PageHit) {
             set(i, "redirect_sites", json!(list));
         }
         PageHit::Panels(which) => {
-            // Opening the changelog is reading it: the start page's note goes.
             if which == "changes" && s.settings.seen_version != env!("LUMEN_VERSION") {
                 set(i, "seen_version", json!(env!("LUMEN_VERSION")));
             }
@@ -3577,9 +3279,6 @@ pub fn wheel(i: &mut Inner, delta: i32) -> bool {
     true
 }
 
-/// A key while the font list is open: Escape closes, Backspace thins the filter,
-/// Enter takes the first family, the arrows walk the list. Everything else is
-/// swallowed so typing never reaches the browser's shortcuts.
 pub fn key(i: &mut Inner, vk: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_RETURN, VK_UP};
     let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
@@ -3622,7 +3321,6 @@ pub fn key(i: &mut Inner, vk: u32) -> bool {
     true
 }
 
-/// A typed character while the font list is open: it goes into the filter.
 pub fn pick_char(i: &mut Inner, ch: u32) -> bool {
     let Some(p) = i.page.font_pick.as_mut() else { return false };
     if let Some(c) = char::from_u32(ch)
@@ -3679,7 +3377,6 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(days_from_civil(1970, 1, 2), 1);
         assert_eq!(days_from_civil(2000, 3, 1), 11017);
-        // A leap day and a century rule that is not a leap.
         assert_eq!(days_from_civil(2024, 2, 29), days_from_civil(2024, 3, 1) - 1);
         assert_eq!(days_from_civil(1900, 3, 1), days_from_civil(1900, 2, 28) + 1);
     }
@@ -3690,20 +3387,16 @@ mod tests {
         let m = midnight();
         assert!(m <= now, "midnight is not in the future");
         assert!(now - m < 86_400, "midnight is not within the last day");
-        // Local time-of-day at midnight is 00:00, which is what the ranges need.
         assert_eq!((now - m) / 3600, ((now - m) / 3600).min(23));
     }
 
-    /// The summary line, exactly as the brief spells it.
     #[test]
     fn summary_counts_and_speeds() {
         assert_eq!(summary(3, 4_404_019, 317_440, true), "3 active · 4.2 MB/s down · 310 KB/s up · port open");
         assert_eq!(summary(3, 4_404_019, 317_440, false), "3 active · 4.2 MB/s down · 310 KB/s up · port closed");
-        // Nothing running: no line at all.
         assert_eq!(summary(0, 0, 0, true), "");
     }
 
-    /// Every state lands in a group; the page draws them in a fixed order.
     #[test]
     fn groups_cover_every_state() {
         assert_eq!(group("progress"), "Active");
@@ -3713,7 +3406,6 @@ mod tests {
         assert_eq!(group("failed"), "Failed");
     }
 
-    /// Clipboard text is a link, a magnet, or nothing aria2 wants.
     #[test]
     fn links_classify_by_scheme() {
         assert_eq!(classify_link("https://example.com/f.bin"), "url");
@@ -3724,19 +3416,17 @@ mod tests {
         assert_eq!(classify_link(""), "other");
     }
 
-    /// The seeding and torrent status lines spell out the brief's fields.
     #[test]
     fn status_lines_name_peers_and_ratio() {
         let mut d = dl("seeding", "torrent");
         d.up = 300 * 1024;
         d.ratio = 0.42;
         d.peers = 9;
-        // The host rides along at the end, like every status line on this page.
         assert_eq!(super::status_line(&d), "Seeding · up 300 KB/s · ratio 0.42 · 9 peers · example.com");
 
         let mut d = dl("progress", "torrent");
         d.received = 120 * 1048576;
-        d.total = 1_503_238_553; // 1.4 GiB
+        d.total = 1_503_238_553;
         d.speed = 4308992;
         d.peers = 23;
         d.seeds = 7;
@@ -3762,8 +3452,6 @@ mod tests {
         assert_eq!(fmt_bytes(317_440), "310 KB");
     }
 
-    /// A torrent that is still looking for its peers says so: a row of zeroes
-    /// reads as frozen, and it is not.
     #[test]
     fn a_torrent_waiting_for_its_info_says_what_it_is_doing() {
         let mut d = dl("progress", "torrent");
@@ -3772,8 +3460,6 @@ mod tests {
         assert!(s.contains("Finding peers for torrent info"), "{s}");
         assert!(!s.contains("0 B of 0 B"), "{s}");
 
-        // A paused magnet with no size yet: the note says why it waits, and
-        // no zeroes.
         let mut d = dl("paused", "torrent");
         d.note = "from example.com: press Resume to start".into();
         let s = super::status_line(&d);
@@ -3787,7 +3473,6 @@ mod tests {
         let named = |n: &str, kind: &'static str| UiDl { name: n.into(), ..dl("done", kind) };
         assert_eq!(tile_label(&named("report.pdf", "file")), "PDF");
         assert_eq!(tile_label(&named("a.tar.gz", "file")), "GZ");
-        // No extension, or one too long to be one: say the kind instead.
         assert_eq!(tile_label(&named("README", "file")), "FILE");
         assert_eq!(tile_label(&named("some file.not an ext", "file")), "FILE");
         assert_eq!(tile_label(&named("movie", "video")), "VID");
@@ -3817,12 +3502,9 @@ mod tests {
         let folders = vec!["Work".to_string(), "Empty".to_string()];
         let g = super::bm_groups(&marks, &folders, "");
         let names: Vec<(&str, usize)> = g.iter().map(|(f, r)| (*f, r.len())).collect();
-        // Every folder shows when not searching, an empty one too.
         assert_eq!(names, [("", 1), ("Work", 2), ("Empty", 0)]);
-        // Searching keeps only the groups with a match.
         let g = super::bm_groups(&marks, &folders, "c.test");
         assert_eq!(g.iter().map(|(f, r)| (*f, r.len())).collect::<Vec<_>>(), [("Work", 1)]);
-        // Nothing in Unsorted: no Unsorted group.
         let g = super::bm_groups(&marks[1..], &folders, "");
         assert_eq!(g[0].0, "Work");
     }
@@ -3832,16 +3514,11 @@ mod tests {
         use super::DropRow;
         let row = |y: f32, folder: &str, id: u64| DropRow { r: R::new(0.0, y, 100.0, 40.0), folder: folder.into(), id };
         let rows = vec![row(0.0, "", 0), row(40.0, "", 1), row(80.0, "", 2), row(120.0, "Work", 0), row(160.0, "Work", 3)];
-        // Upper half of a row: before it.
         assert_eq!(super::bm_drop(&rows, 45.0), Some(("".into(), Some(1))));
-        // Lower half: before the next row of the same folder.
         assert_eq!(super::bm_drop(&rows, 70.0), Some(("".into(), Some(2))));
-        // Lower half of the last one: the end of its folder.
         assert_eq!(super::bm_drop(&rows, 110.0), Some(("".into(), None)));
         assert_eq!(super::bm_drop(&rows, 195.0), Some(("Work".into(), None)));
-        // A header: the end of that folder.
         assert_eq!(super::bm_drop(&rows, 130.0), Some(("Work".into(), None)));
-        // Off the list: nowhere.
         assert_eq!(super::bm_drop(&rows, 500.0), None);
     }
 
@@ -3850,7 +3527,6 @@ mod tests {
         let wide = column(R::new(300.0, 0.0, 1400.0, 800.0), 760.0);
         assert_eq!(wide.w, 760.0);
         assert_eq!(wide.x, 300.0 + (1400.0 - 760.0) / 2.0);
-        // Narrow: never closer to either edge than the margin the close button needs.
         let narrow = column(R::new(0.0, 0.0, 400.0, 800.0), 760.0);
         assert!(narrow.x >= 56.0 && narrow.right() <= 400.0 - 56.0 + 0.01);
     }

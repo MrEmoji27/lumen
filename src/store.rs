@@ -3,8 +3,6 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
-/// Where everything lives. LUMEN_DATA points tests at a throwaway folder,
-/// so they never touch the real profile, settings or session.
 pub fn data_dir() -> PathBuf {
     let dir = std::env::var_os("LUMEN_DATA").map(PathBuf::from).unwrap_or_else(|| {
         dirs::data_dir()
@@ -15,8 +13,6 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
-/// Where downloads land. LUMEN_DOWNLOADS points tests at a throwaway folder,
-/// so a live test never touches the real Downloads.
 pub fn download_dir() -> PathBuf {
     let dir = std::env::var_os("LUMEN_DOWNLOADS")
         .map(PathBuf::from)
@@ -34,265 +30,126 @@ pub struct Shortcut {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Settings format. Old files lack it and read as 0, which triggers the migration.
     #[serde(default)]
     pub version: u32,
-    /// Whether the first-run "pick a look" picker has been answered. Missing from a
-    /// file means the file predates the picker: someone who already chose, so it
-    /// reads true. Only a brand-new install, with no file at all, starts false.
     #[serde(default = "yes")]
     pub first_run_done: bool,
-    /// The last version whose changes the person has seen. Behind the running one, the start
-    /// page says what is new. A file without it predates the note: it reads empty, so the
-    /// person hears about this version once. A new install starts at its own version.
     #[serde(default)]
     pub seen_version: String,
-    /// Named palette from the UI ("graphite", "sand", "slate", "moss", "rose").
     pub palette: String,
-    /// Accent color override. Empty means palette default.
     pub accent: String,
-    /// The last colours picked in the colour picker, newest first. Shown as its own
-    /// row of swatches.
     pub recent_colors: Vec<String>,
-    /// "solid" | "mica" | "acrylic". Solid is the fastest.
     pub backdrop: String,
-    /// "dark" | "light" | "system". Also drives prefers-color-scheme in pages.
     pub theme: String,
-    /// The redesign's look: "signal" (warm paper and ink, the default), "glass"
-    /// (a frosted sidebar over a colour wallpaper) or "precise" (near-black,
-    /// hairlines). Anything else clamps to "signal".
     pub look: String,
-    /// Where the chrome lives: "vertical" (the sidebar), "horizontal" (a top strip
-    /// like Chrome), or "hybrid" (a vertical tab sidebar under a top toolbar).
     pub layout: String,
-    /// Horizontal layout: the bookmarks bar under the toolbar.
     pub bm_bar: bool,
-    /// Custom color overrides, "#rrggbb". Empty means the palette's own color.
-    /// The background behind the page, the sidebar and toolbar, cards and fields,
-    /// the text and the dim text.
     pub bg_color: String,
     pub side_color: String,
     pub surface_color: String,
     pub text_color: String,
     pub dim_color: String,
-    /// "left" | "right"
     pub sidebar_side: String,
     pub sidebar_width: u32,
     pub compact: bool,
-    /// Hide the sidebar until the mouse reaches the edge of the window. The
-    /// page takes the whole width; the sidebar slides in over it.
     pub hide_sidebar: bool,
-    /// Height of one tab row in the sidebar, in px.
     pub tab_row_h: u32,
-    /// Draw the site's icon in a tab row (off: the letter tile only).
     pub show_favicons: bool,
-    /// The tab row's close button: "hover" | "always" | "off".
     pub close_btn: String,
-    /// The footer's downloads, bookmarks and settings buttons.
     pub footer_btns: bool,
-    /// The workspace switcher row at the top of the sidebar.
     pub ws_row: bool,
-    /// Space around the page, in px.
     pub gap: u32,
-    /// Corner radius of the page, in px. 0 = square.
     pub radius: u32,
-    /// "compact" | "comfortable" | "roomy": scales the spacing, not the type.
     pub density: String,
-    /// A hairline border around the page, so it is not just a hole in the window.
     pub page_border: bool,
-    /// Old on/off switch. `motion` is the real setting; this stays so files from
-    /// before it still read as off when they said off.
     pub animations: bool,
-    /// "full" | "reduced" | "off". Reduced draws no movement; off is the same,
-    /// and also stops the loading spinner from turning. A file from before the
-    /// setting was split reads as empty here, and the old switch above decides.
     #[serde(default = "missing")]
     pub motion: String,
-    /// Motion speed, percent of the default durations. 50..200.
     pub motion_speed: u32,
-    /// Follow Windows' "Show animations in Windows" (Accessibility). On: a system
-    /// that asks for less motion gets "reduced", whatever the setting says.
     pub motion_system: bool,
-    /// Search URL, `%s` is replaced by the query.
     pub search: String,
-    /// Wallpaper image URL for the new tab page. Empty = none.
     pub wallpaper: String,
-    /// Minutes a hidden tab waits before it is suspended (frozen, memory trimmed). 0 is never.
     pub sleep_after_min: u32,
-    /// Minutes a hidden tab waits before it is discarded (process freed, reload on click).
-    /// 0 is never.
     pub discard_after_min: u32,
-    /// "strict" | "balanced" | "basic" | "off"
     pub tracking: String,
-    /// Block ads and trackers at the network layer.
     pub adblock: bool,
-    /// Skip sponsor segments on YouTube (SponsorBlock).
     pub sponsorblock: bool,
-    /// Run the person's userscripts: `*.user.js` files in `userscripts\` in the data
-    /// folder, in their own tabs only, never an agent's or a private one.
     pub userscripts: bool,
-    /// On battery, or with Windows' battery saver on: hidden tabs freeze after 1 minute
-    /// and unload after 10, and the chrome's motion is reduced.
     #[serde(default = "yes")]
     pub battery_saver: bool,
-    /// Lumen opens behind a lock until Windows Hello says it is the person.
     pub lock_app: bool,
-    /// The credit at the foot of the Settings menu.
     pub show_credit: bool,
-    /// Hide ad leftovers and cookie banners (cosmetic rules).
     pub cosmetic: bool,
-    /// Count what the blocker stops, per day and per site, for the report.
     pub privacy_stats: bool,
-    /// Stop pop-ups a page opens on its own. A link the person clicked still
-    /// opens one. A file from before this setting reads as on.
     #[serde(default = "yes")]
     pub block_popups: bool,
-    /// Hosts whose pop-ups are allowed: keyed hosts, so `www.` and subdomains
-    /// count as one. Empty means no site is trusted.
     #[serde(default)]
     pub popup_sites: Vec<String>,
-    /// Stop a page that sends the person to another site on its own, a moment
-    /// after it loaded. A click, a link and a site's own login redirects stay
-    /// untouched. A file from before this setting reads as on.
     #[serde(default = "yes")]
     pub block_redirects: bool,
-    /// Hosts a page may send the person away from: keyed hosts, like the
-    /// pop-up ones. Empty means no site may.
     #[serde(default)]
     pub redirect_sites: Vec<String>,
-    /// Open every new tab of the person's as a private one: Ctrl+T, the +,
-    /// "New tab", the palette, a link in a new tab. Restored and agent tabs
-    /// keep what they were.
     #[serde(default)]
     pub private_tabs: bool,
-    /// The running "N blocked" note at the bottom of the sidebar.
     pub page_chip: bool,
     pub show_memory: bool,
-    /// The speed dial: tiles under the new tab page's search box.
     pub shortcuts: Vec<Shortcut>,
-    /// Show the speed dial. Off: the new tab page is the clock and the search box.
     pub speed_dial: bool,
-    /// Run GPU work inside the browser process. About 100 MB less. Applies on restart.
     pub gpu_in_process: bool,
-    /// Tabs of the same site share one renderer process. Fewer processes, less memory.
-    /// Applies on restart.
     pub share_processes: bool,
-    /// Trim the page you are watching when you are away from the mouse and keyboard:
-    /// full memory while it loads, then 15 s after the last input the on-screen page
-    /// goes to WebView2's low memory target, and back the moment you touch either again.
     #[serde(default = "yes")]
     pub trim_watched: bool,
-    /// Close the tabs nobody has looked at for this long into the archive:
-    /// "off" | "12h" | "1d" | "1w".
     pub archive_after: String,
-    /// Offer to save passwords and fill them in (WebView2's own, encrypted by Windows).
     pub save_passwords: bool,
-    /// Hand http(s) downloads to aria2: many connections per file, resume, queue.
     pub accelerate_downloads: bool,
-    /// Cap aria2's total download speed, in KB/s. 0 = no limit.
     pub download_limit_kbps: u32,
-    /// Share torrents back after they finish (until ratio 1.0 or one hour).
-    /// Applies on the next start.
     pub keep_seeding: bool,
-    /// The port aria2 listens on for torrents. Picked once in 20000..60000, then saved.
     pub bt_port: u16,
-    /// Open that port on the router with UPnP so peers can reach us.
     pub upnp: bool,
-    /// Show the "Windows may ask to let aria2 through the firewall" note once.
     pub torrent_note: bool,
-    /// Keep the text of opened pages so history can be searched by it.
     pub remember_text: bool,
-    /// Clear history (Lumen's, page text and WebView2's own) when Lumen closes.
     pub clear_on_exit: bool,
-    /// When Lumen is dark, darken light sites too (Dark Reader).
     pub dark_pages: bool,
-    /// Hosts Dark Reader leaves alone.
     pub dark_skip: Vec<String>,
-    /// "Translate page" (F8) target language, two letters: a Spanish page reads in
-    /// English. The pair has to be one the model registry carries.
     pub translate_to: String,
-    /// Hosts that open in Servo instead of WebView2 ("Servo sites"). Light pages,
-    /// where Servo's smaller footprint pays. Empty means everything is WebView2.
-    /// Needs a build with the `servo` feature; without it the list does nothing.
     pub servo_sites: Vec<String>,
-    /// Interface font: one of the bundled keys ("segoe", "instrument", "figtree",
-    /// "atkinson") or any installed Windows family name.
     pub ui_font: String,
-    /// Display font for the clock and page titles: "instrument" | "fraunces" |
-    /// "newsreader", or any installed Windows family name.
     pub display_font: String,
-    /// Monospace font for figures (the Control table, the memory readout):
-    /// "cascadia" for the bundled-ish default, or any installed family name.
     pub mono_font: String,
-    /// Type scale, percent. 90..130.
     pub font_scale: u32,
-    /// Weight of the display type: titles, headers, the clock. 300..800.
     pub title_weight: u32,
-    /// Show the clock on the new tab page.
     pub clock: bool,
-    /// 24-hour clock (off: 12-hour with am/pm).
     pub clock_24h: bool,
-    /// Seconds after the minutes.
     pub clock_seconds: bool,
-    /// "long" (Thursday, 17 October) | "short" (17 Oct) | "iso" (2026-10-17) | "off".
     pub date_format: String,
-    /// The clock's type: "display" (the display font) | "ui".
     pub clock_font: String,
-    /// Clock size in px; 0 follows the window's width.
     pub clock_size: u32,
-    /// A line over the clock, your own words. Empty: none.
     pub greeting: String,
-    /// New tab page background: "plain" | "wallpaper" (the file in `wallpaper`).
     pub ntp_bg: String,
-    /// Soften the wallpaper (drawn from a small, upscaled copy).
     pub wallpaper_blur: bool,
-    /// Dim the wallpaper, percent of black laid over it. 0..80.
     pub wallpaper_dim: u32,
-    /// Columns of speed-dial tiles; 0 follows the window's width.
     pub dial_cols: u32,
-    /// A speed-dial tile's size in px.
     pub dial_tile: u32,
-    /// The search box on the new tab page.
     pub ntp_search: bool,
-    /// Let AI agents browse through the built-in MCP server on localhost.
     pub agent: bool,
     pub agent_port: u32,
-    /// Agent tabs use the user's profile (logins, cookies) instead of their own.
     pub agent_shared_profile: bool,
-    /// Every agent gets its own WebView2 environment: its own user-data folder, so its
-    /// own browser process. The hardest wall between agents; costs memory per agent.
     pub agent_strict_isolation: bool,
-    /// Let agents put files into web pages (browser_upload). Off by default.
     pub agent_upload: bool,
-    /// The one folder agents may upload from. Empty means "Lumen agent uploads" in the home folder.
     pub agent_upload_dir: String,
-    /// The Drive panel's command. `{task}` is replaced by the person's task.
     pub drive_cmd: String,
-    /// Keep a local usage journal: speed, memory, crashes and errors, on this PC
-    /// only, hosts instead of URLs. Nothing is ever sent anywhere.
     pub journal: bool,
-    /// Soft RAM limit: over it, the oldest hidden tabs are unloaded.
     pub ram_limit: bool,
     pub ram_limit_mb: u32,
-    /// Hard CPU cap for the whole browser, percent of all cores (Windows Job Object).
     pub cpu_limit: bool,
     pub cpu_limit_pct: u32,
-    /// Bandwidth cap per tab, KB/s.
     pub net_limit: bool,
     pub net_limit_kbps: u32,
-    /// What a kind of permission question does when the site has no answer of its own:
-    /// "block", or absent for ask. Keys are the kinds of `sites::KINDS`.
     pub perm_defaults: std::collections::BTreeMap<String, String>,
-    /// The zoom pages open at, in percent, unless the site has a zoom of its own.
     pub default_zoom: u32,
-    /// Try https first for plain http pages, and warn when a site has none.
     pub https_first: bool,
-    /// Hosts the person said may stay on plain http.
     pub http_ok: Vec<String>,
-    /// Hosts where the person turned ad blocking off, from the switch in the site
-    /// card: keyed by `blocker::site_key`, so `www.` and subdomains count as one.
     pub adblock_off_sites: Vec<String>,
-    /// Send "Sec-GPC: 1" and tell pages not to sell or share what they know of you.
     pub gpc: bool,
 }
 
@@ -421,21 +278,15 @@ impl Default for Settings {
 }
 
 const SETTINGS_VERSION: u32 = 4;
-/// Where the torrent port may live. High enough to dodge the usual listeners.
 pub(crate) const BT_PORT_MIN: u16 = 20000;
 pub(crate) const BT_PORT_MAX: u16 = 60000;
 
-/// The Drive panel's default command: an agent CLI already installed, run once with the
-/// task. Presets for other CLIs live in the panel's settings row.
 pub const DEFAULT_DRIVE_CMD: &str = "opencode run --model opencode/mimo-v2.6-flash-free \"{task}\"";
-/// What a Drive command must not be: run with no task and no room for one.
 pub(crate) fn drive_cmd_usable(cmd: &str) -> bool {
     let c = cmd.trim();
     !c.is_empty() && c.contains("{task}") && c.len() <= 600 && !c.chars().any(char::is_control)
 }
 
-/// The task Lumen hands the Drive agent: the person's own words, plus the one rule that
-/// stands above the task. The text carries no URL and nothing about the person.
 pub fn drive_prompt(task: &str) -> String {
     let task: String = task
         .chars()
@@ -451,8 +302,6 @@ When the task is done, say what you did in one line.",
     )
 }
 
-/// A command template as a program and its arguments. Double quotes group words (they
-/// are not passed on); `{task}` becomes the full prompt. None when there is nothing to run.
 pub fn drive_command(template: &str, task: &str) -> Option<(String, Vec<String>)> {
     let line = template.replace("{task}", &drive_prompt(task));
     let mut tokens: Vec<String> = Vec::new();
@@ -477,42 +326,27 @@ pub fn drive_command(template: &str, task: &str) -> Option<(String, Vec<String>)
     Some((program, it.collect()))
 }
 
-/// The looks that may be chosen, so a bad file cannot pick a fifth one.
 pub const LAYOUTS: [(&str, &str); 3] = [("vertical", "Vertical"), ("horizontal", "Horizontal"), ("hybrid", "Hybrid")];
-/// The motion modes. Reduced means no movement; off also stops the spinner.
 pub const MOTIONS: [(&str, &str); 3] = [("full", "Full"), ("reduced", "Reduced"), ("off", "Off")];
-/// The three spacing densities.
 pub const DENSITIES: [(&str, &str); 3] = [("compact", "Compact"), ("comfortable", "Comfortable"), ("roomy", "Roomy")];
-/// The tab row's close button.
 pub const CLOSE_BTNS: [(&str, &str); 3] = [("hover", "On hover"), ("always", "Always"), ("off", "Hidden")];
-/// The date line under the clock.
 pub const DATE_FORMATS: [(&str, &str); 4] = [("long", "Thursday, 17 October"), ("short", "17 Oct"), ("iso", "2026-10-17"), ("off", "Hidden")];
-/// The three looks of the redesign: Signal (the default), Glass and Precise.
-/// The first-run picker and the Settings list show them in this order.
 pub const LOOKS: [(&str, &str); 3] = [("signal", "Signal"), ("glass", "Glass"), ("precise", "Precise")];
 
-/// A key a file from before this setting did not have: empty, so the reader can
-/// tell "not there" from "chose the default".
 fn missing() -> String {
     String::new()
 }
 
-/// What a missing `first_run_done` reads as: a settings.json without the key is
-/// someone who already chose, never a brand-new install. A new install has no
-/// file at all, so it gets Settings::default() and the picker shows.
 fn yes() -> bool {
     true
 }
 
-/// An option list holds one of its keys, or `default` when the file said
-/// something else.
 fn one_of(v: &mut String, keys: &[(&str, &str)], default: &str) {
     if !keys.iter().any(|(k, _)| *k == v.as_str()) {
         *v = default.to_string();
     }
 }
 
-/// A "#rrggbb" override, or empty. Anything else is treated as no override.
 fn clean_color(v: &mut String) {
     let s = v.trim().to_ascii_lowercase();
     let ok = s.is_empty()
@@ -520,8 +354,6 @@ fn clean_color(v: &mut String) {
     *v = if ok { s } else { String::new() };
 }
 
-/// A font name from the settings: a bundled key or an installed family. Trimmed
-/// and bounded; a name is never more than a line. Empty falls back to the default.
 fn clean_font(v: &mut String, default: &str) {
     *v = v.trim().chars().take(64).collect();
     if v.is_empty() {
@@ -530,10 +362,6 @@ fn clean_font(v: &mut String, default: &str) {
 }
 
 impl Settings {
-    /// Version 2 is the minimal redesign. Old look values were defaults, not choices.
-    /// Version 3 splits the motion switch into full/reduced/off.
-    /// Version 4 turns graphics in the browser process off: it took the GPU's video decoding
-    /// with it, and every video was decoded on the CPU. It was a default, not a choice.
     fn migrate(&mut self) {
         if self.version < 2 {
             let d = Settings::default();
@@ -548,9 +376,7 @@ impl Settings {
         self.version = SETTINGS_VERSION;
     }
 
-    /// Keep values inside sane bounds. A bad file must not break the browser.
     pub fn clamp(&mut self) {
-        // A file from before the motion setting: the old on/off switch decides.
         if self.motion.is_empty() {
             self.motion = if self.animations { "full" } else { "off" }.into();
         }
@@ -582,8 +408,6 @@ impl Settings {
         self.sidebar_width = self.sidebar_width.clamp(232, 400);
         self.gap = self.gap.clamp(0, 32);
         self.radius = self.radius.clamp(0, 20);
-        // 0 is never, for both. A real time stays in range, and an unload never comes
-        // before the freeze.
         if self.sleep_after_min != 0 {
             self.sleep_after_min = self.sleep_after_min.clamp(1, 240);
         }
@@ -596,59 +420,47 @@ impl Settings {
         self.net_limit_kbps = self.net_limit_kbps.clamp(32, 1_000_000);
         self.download_limit_kbps = self.download_limit_kbps.min(1_000_000);
         self.default_zoom = crate::sites::clamp_pct(self.default_zoom);
-        // Only "block" means anything in the defaults; ask is the absence of a line.
         self.perm_defaults.retain(|k, v| v == "block" && !k.is_empty());
         self.http_ok.iter_mut().for_each(|h| *h = h.trim().to_ascii_lowercase());
         self.http_ok.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
         self.http_ok.sort();
         self.http_ok.dedup();
         self.http_ok.truncate(500);
-        // A per-site switch stores the host the way the blocker compares it, so a
-        // hand-edited file and the site card's own copy land on the same words.
         self.adblock_off_sites.iter_mut().for_each(|h| *h = crate::blocker::site_key(h));
         self.adblock_off_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
         self.adblock_off_sites.sort();
         self.adblock_off_sites.dedup();
         self.adblock_off_sites.truncate(500);
-        // The trusted pop-up sites are hosts too, and the same words the page's
-        // own host is compared with.
         self.popup_sites.iter_mut().for_each(|h| *h = crate::blocker::site_key(h));
         self.popup_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
         self.popup_sites.sort();
         self.popup_sites.dedup();
         self.popup_sites.truncate(500);
-        // The sites a page may redirect from, the same way.
         self.redirect_sites.iter_mut().for_each(|h| *h = crate::blocker::site_key(h));
         self.redirect_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
         self.redirect_sites.sort();
         self.redirect_sites.dedup();
         self.redirect_sites.truncate(500);
-        // 0 means "never chosen"; a real port stays inside the range.
         if self.bt_port != 0 {
             self.bt_port = self.bt_port.clamp(BT_PORT_MIN, BT_PORT_MAX);
         }
         if !self.search.contains("%s") {
             self.search = Settings::default().search;
         }
-        // The translation target is a two-letter language code, or English.
         let two = self.translate_to.len() == 2 && self.translate_to.chars().all(|c| c.is_ascii_alphabetic());
         if !two {
             self.translate_to = Settings::default().translate_to;
         } else {
             self.translate_to.make_ascii_lowercase();
         }
-        // A host list is hosts: no spaces, no blanks, and not a thousand of them.
         self.servo_sites.iter_mut().for_each(|h| *h = h.trim().to_string());
         self.servo_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
         self.servo_sites.truncate(500);
-        // A Drive command without `{task}` could never run anything useful.
         if !drive_cmd_usable(&self.drive_cmd) {
             self.drive_cmd = DEFAULT_DRIVE_CMD.into();
         }
     }
 
-    /// The torrent port, chosen once and saved. 0 means it has never been chosen,
-    /// so the first call picks one and writes it; later calls return the same one.
     pub fn ensure_bt_port(&mut self) -> u16 {
         if self.bt_port == 0 {
             self.bt_port = crate::upnp::random_port();
@@ -665,57 +477,41 @@ pub struct SavedTab {
     pub title: String,
     pub favicon: String,
     pub pinned: bool,
-    /// The page a pin was pinned on. Empty in files from before pins remembered it.
     pub pin_url: String,
-    /// The tab is an Essential: it keeps the site open in every workspace.
     pub essential: bool,
-    /// How long the tab has been unseen, in milliseconds. The time Lumen was
-    /// closed does not count, so the clock only runs while it is open.
     pub idle_ms: u64,
-    /// The person locked it: its page shows only after Windows Hello.
     pub locked: bool,
 }
 
-/// A tab that was closed into the archive: what it was, and when it went.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ArchivedTab {
     pub url: String,
     pub title: String,
     pub favicon: String,
-    /// When it was archived, in seconds since the epoch.
     pub when: u64,
 }
 
-/// A named set of tabs. Saved in session.json so workspaces survive a restart.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Workspace {
     pub name: String,
     pub tabs: Vec<SavedTab>,
-    /// Index into `tabs` of the active tab in this workspace.
     pub active: usize,
-    /// The colour this workspace wears: a number in the palette, empty for none.
     pub colour: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
-    /// Kept on disk for the old single-workspace format. Populated on save from
-    /// the active workspace so a pre-workspaces build can still read the file.
     pub tabs: Vec<SavedTab>,
     pub active: usize,
     pub width: f64,
     pub height: f64,
     pub maximized: bool,
-    /// New format: one entry per workspace. Empty when the file predates workspaces.
     pub workspaces: Vec<Workspace>,
     pub active_workspace: usize,
-    /// The sites kept open in every workspace: the essentials. The same row in
-    /// every workspace, whichever one is open.
     pub essentials: Vec<SavedTab>,
-    /// The tabs that were closed away because nobody looked at them.
     pub archived: Vec<ArchivedTab>,
 }
 
@@ -730,7 +526,6 @@ fn save<T: Serialize>(name: &str, value: &T) {
     let path = data_dir().join(name);
     let tmp = path.with_extension("tmp");
     if let Ok(json) = serde_json::to_string_pretty(value) {
-        // Write then rename, so a crash never leaves half a file.
         if fs::write(&tmp, json).is_ok() {
             let _ = fs::rename(&tmp, &path);
         }
@@ -748,7 +543,6 @@ pub fn save_settings(s: &Settings) {
     save("settings.json", s);
 }
 
-/// Remembered site permissions: origin -> permission -> allowed.
 pub type Rules = std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>;
 
 pub fn load_rules() -> Rules {
@@ -759,7 +553,6 @@ pub fn save_rules(r: &Rules) {
     save("permissions.json", r);
 }
 
-/// The zoom of each site, in percent: zoom.json. Only sites that differ from the default zoom.
 pub fn load_zooms() -> crate::sites::Zooms {
     load("zoom.json")
 }
@@ -768,12 +561,10 @@ pub fn save_zooms(z: &crate::sites::Zooms) {
     save("zoom.json", z);
 }
 
-/// A finished download, kept so the Downloads page survives a restart.
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct SavedDl {
     pub url: String,
     pub path: String,
-    /// "done" | "failed"
     pub state: String,
     pub size: i64,
     #[serde(default)]
@@ -796,8 +587,6 @@ pub fn save_session(s: &Session) {
     save("session.json", s);
 }
 
-/// Set when Lumen closed with "clear history on exit" on and the WebView2 call
-/// could not be made to finish first. The next start wipes it and drops the flag.
 const CLEAR_FLAG: &str = "clear-history.flag";
 
 pub fn clear_history_pending() -> bool {
@@ -816,8 +605,6 @@ pub fn set_clear_history_pending(pending: bool) {
 mod tests {
     use super::*;
 
-    /// 0 is "never" for the freeze and the unload, and survives the clamp; a real time is
-    /// kept in range and an unload never comes before the freeze.
     #[test]
     fn never_survives_the_clamp() {
         let mut s = Settings { sleep_after_min: 0, discard_after_min: 0, ..Settings::default() };
@@ -831,8 +618,6 @@ mod tests {
         assert_eq!((s.sleep_after_min, s.discard_after_min), (0, 30));
     }
 
-    /// The chrome sends the whole Settings back as JSON when one thing changes (a new
-    /// speed-dial tile, a toggle). A value that does not read back is dropped silently.
     #[test]
     fn settings_survive_the_chrome_round_trip() {
         let mut s = Settings::default();
@@ -852,8 +637,6 @@ mod tests {
         assert!(!Settings::default().clear_on_exit);
     }
 
-    /// A settings.json from before userscripts still loads, and reads as on: the field
-    /// is new, not a choice the person made.
     #[test]
     fn an_old_settings_file_has_userscripts_on() {
         let mut v = serde_json::to_value(Settings::default()).expect("settings to json");
@@ -862,8 +645,6 @@ mod tests {
         assert!(s.userscripts);
     }
 
-    /// A settings.json from before the speed dial switch still loads, with the speed dial on
-    /// and the person's own tiles untouched.
     #[test]
     fn an_old_settings_file_shows_the_speed_dial() {
         let mut v = serde_json::to_value(Settings::default()).expect("settings to json");
@@ -874,8 +655,6 @@ mod tests {
         assert_eq!(s.shortcuts.len(), 1);
     }
 
-    /// A session.json from before pins remembered their page still loads: the pin
-    /// is there, with no pinned URL yet (the restore fills it in).
     #[test]
     fn an_old_session_with_pins_loads() {
         let old = r#"{"tabs":[{"url":"https://music.youtube.com/","title":"Music","favicon":"","pinned":true},
@@ -887,7 +666,6 @@ mod tests {
         assert_eq!(crate::pins::restored_pin_url(s.tabs[0].pinned, &s.tabs[0].pin_url, &s.tabs[0].url), "https://music.youtube.com/");
     }
 
-    /// The pinned page rides through a save and a load, apart from the page the tab is on.
     #[test]
     fn the_pinned_page_survives_the_session_file() {
         let tab = SavedTab {
@@ -901,8 +679,6 @@ mod tests {
         assert_eq!(back.url, "https://www.youtube.com/watch?v=1");
     }
 
-    /// The Drive command becomes a program and arguments, with the task inside the
-    /// prompt and the handoff rule always in it.
     #[test]
     fn a_drive_command_carries_the_task_and_the_rule() {
         let (program, args) = drive_command(DEFAULT_DRIVE_CMD, "buy the cheapest kettle").unwrap();
@@ -913,38 +689,30 @@ mod tests {
         assert!(args[3].starts_with("buy the cheapest kettle"), "{}", args[3]);
         assert!(args[3].contains("browser_handoff"), "{}", args[3]);
         assert!(args[3].contains("pay"), "{}", args[3]);
-        // A quote in the task cannot break out of the template's own quotes.
         let (program, args) = drive_command("cmdc -p \"{task}\"", "say \"hi\" now").unwrap();
         assert_eq!(program, "cmdc");
         assert_eq!(args.len(), 2, "{args:?}");
         assert!(args[1].contains("say 'hi' now"), "{:?}", args[1]);
-        // A template with nothing in it, and one with no {task}, are not runnable.
         assert!(drive_command("", "x").is_none());
         assert!(drive_command("   ", "x").is_none());
         assert!(!drive_cmd_usable("opencode run"));
         assert!(drive_cmd_usable(DEFAULT_DRIVE_CMD));
-        // The prompt never carries a newline the command line cannot hold.
         assert!(!drive_prompt("a\nb").contains('\r'));
     }
 
-    /// A settings.json written before the field existed still loads, and reads as off.
     #[test]
     fn an_old_settings_file_without_clear_on_exit_loads() {
         let mut v = serde_json::to_value(Settings::default()).expect("settings to json");
         v.as_object_mut().expect("an object").remove("clear_on_exit");
         let s: Settings = serde_json::from_value(v).expect("old file loads");
         assert!(!s.clear_on_exit);
-        // The rest of the file came through untouched.
         assert_eq!(s.search, Settings::default().search);
-        // And turning it on survives a round trip.
         let mut s = s;
         s.clear_on_exit = true;
         s.clamp();
         assert!(s.clear_on_exit);
     }
 
-    /// Graphics in the browser process cost the GPU's video decoding. A file that has it on from
-    /// the old default gets it off, once; after that the person's choice stands.
     #[test]
     fn graphics_in_the_browser_process_goes_off_once() {
         let mut s: Settings = serde_json::from_str(r#"{"version":3,"gpu_in_process":true}"#).expect("loads");
@@ -957,8 +725,6 @@ mod tests {
         assert!(!Settings::default().gpu_in_process);
     }
 
-    /// A file from before every customization field still loads: the layout is
-    /// vertical, the fonts are the defaults, the clock is on, motion is full.
     #[test]
     fn an_old_settings_file_gets_vertical_and_the_default_look() {
         let old = r#"{"version":2,"palette":"moss","theme":"dark","sidebar_width":300,"gap":4,"radius":0,
@@ -981,18 +747,14 @@ mod tests {
         assert!(s.footer_btns && s.ws_row);
         assert_eq!(s.density, "comfortable");
         assert!(!s.page_border && !s.bm_bar);
-        // The choices that were in the file are still the person's.
         assert_eq!(s.palette, "moss");
         assert_eq!(s.sidebar_width, 300);
         assert_eq!(s.ui_font, "figtree");
         assert!(!s.speed_dial);
-        // The custom colours are unset, so the palette paints.
         assert!(s.bg_color.is_empty() && s.side_color.is_empty() && s.surface_color.is_empty());
         assert!(s.text_color.is_empty() && s.dim_color.is_empty());
     }
 
-    /// The old animations switch still speaks: a file that said off reads as
-    /// motion off; a file that said on reads as full.
     #[test]
     fn the_old_animations_switch_migrates_to_motion() {
         for (animations, want) in [(false, "off"), (true, "full")] {
@@ -1002,7 +764,6 @@ mod tests {
             s.clamp();
             assert_eq!(s.motion, want, "animations={animations}");
         }
-        // A file that already has a motion choice keeps it.
         let old = r#"{"version":2,"animations":false,"motion":"reduced"}"#;
         let mut s: Settings = serde_json::from_str(old).expect("old file loads");
         s.migrate();
@@ -1010,7 +771,6 @@ mod tests {
         assert_eq!(s.motion, "reduced");
     }
 
-    /// Every customization survives a save and a load.
     #[test]
     fn the_customization_round_trips() {
         let mut s = Settings::default();
@@ -1085,8 +845,6 @@ mod tests {
         assert!(!back.motion_system);
     }
 
-    /// Nonsense in the file is clamped, never trusted: a layout that is not one
-    /// of the three becomes vertical, colours that are not colours go away.
     #[test]
     fn a_bad_file_is_clamped() {
         let old = r##"{"layout":"diagonal","motion":"warp","density":"huge","close_btn":"sometimes",
@@ -1112,9 +870,6 @@ mod tests {
         assert_eq!(s.ntp_bg, "plain");
     }
 
-    /// A brand-new install has no settings.json at all, so it reads the struct
-    /// defaults: the first-run picker has not been answered, and the look is
-    /// Signal, the redesign's default.
     #[test]
     fn a_new_install_starts_at_the_first_run_picker() {
         let s = Settings::default();
@@ -1122,9 +877,6 @@ mod tests {
         assert_eq!(s.look, "signal");
     }
 
-    /// Anyone who already has a settings.json chose long ago, so they never see
-    /// the picker: the missing key reads as done. A missing look reads as the
-    /// default, Signal.
     #[test]
     fn an_old_settings_file_never_sees_the_picker() {
         let mut v = serde_json::to_value(Settings::default()).expect("settings to json");
@@ -1136,8 +888,6 @@ mod tests {
         assert_eq!(s.look, "signal");
     }
 
-    /// A look that is not one of the three is no choice at all: it clamps to
-    /// Signal. The three real ones are the person's and are kept.
     #[test]
     fn a_bad_look_clamps_to_signal() {
         let mut s: Settings = serde_json::from_str(r#"{"look":"neon"}"#).expect("file loads");
@@ -1150,8 +900,6 @@ mod tests {
         }
     }
 
-    /// The chosen look and the answered first-run flag survive a save and a load.
-    /// A flag that is false is a value, not a missing key: it stays false.
     #[test]
     fn the_look_and_first_run_round_trip() {
         let mut s = Settings::default();

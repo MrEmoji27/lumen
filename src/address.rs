@@ -1,19 +1,9 @@
 //! What the address bar was handed: a place to go, or words to search for.
-//!
-//! Only the shape of one word is judged here. `youtube.music` has a dot but its
-//! last label is not a top-level domain anyone can register under, so it is a
-//! search. `example.co.uk`, `localhost:3000` and `192.168.1.1` are places.
-//!
-//! The TLD list is built in and short on purpose: every country code, plus the
-//! generic ones people actually type. A real but rare TLD missing from it costs
-//! one search instead of one page, and `https://` in front always wins.
 
 use std::net::Ipv4Addr;
 
-/// Every country-code TLD in use, two letters each.
 const CC: &str = "ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bm bn bo br bs bt bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu cv cw cx cy cz de dj dk dm do dz ec ee eg er es et eu fi fj fk fm fo fr ga gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu id ie il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls lt lu lv ly ma mc md me mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sk sl sm sn so sr ss st su sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug uk us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw";
 
-/// The generic TLDs worth knowing.
 const GENERIC: &[&str] = &[
     "academy", "agency", "app", "art", "asia", "biz", "blog", "cafe", "cash", "center", "chat", "city", "click", "club", "cloud", "codes", "com",
     "company", "computer", "coop", "dev", "digital", "directory", "domains", "download", "earth", "edu", "email", "energy", "engineer", "events",
@@ -24,23 +14,17 @@ const GENERIC: &[&str] = &[
     "tech", "technology", "tel", "today", "tools", "top", "university", "vip", "website", "wiki", "work", "works", "world", "xyz", "zone",
 ];
 
-/// Whether `label` is a TLD a person can really be going to.
 pub fn known_tld(label: &str) -> bool {
     let l = label.to_ascii_lowercase();
     if l.len() == 2 {
         return CC.split_ascii_whitespace().any(|c| c == l);
     }
-    // Internationalised TLDs are written xn--something in a URL.
     l.starts_with("xn--") || GENERIC.contains(&l.as_str())
 }
 
-/// One word with no scheme, such as `github.com/rust-lang`, `localhost:3000`,
-/// `192.168.1.1` or `[::1]:8080`. True when it names a place; false when it is
-/// just a word with a dot in it.
 pub fn looks_like_host(word: &str) -> bool {
     let lower = word.to_ascii_lowercase();
     let host = lower.split(['/', '?', '#']).next().unwrap_or("");
-    // user:pass@host is still a host. Take what is after the last @.
     let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
     if host.starts_with('[') && host.contains(']') {
         return true;

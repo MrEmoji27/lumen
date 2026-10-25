@@ -1,6 +1,4 @@
-//! What an agent's tab has that a person's tab does not: a record of console messages,
-//! errors, dialogs and network requests, and a line to the page's DevTools Protocol, which
-//! is how an agent clicks and types like a person (trusted input, not synthetic events).
+//! What an agent's tab has that a person's tab does not.
 
 use std::{
     cell::RefCell,
@@ -21,29 +19,21 @@ use windows::{
 };
 use wry::{WebView, WebViewExtWindows};
 
-/// Kept per tab. Old lines fall off the front.
 const KEEP: usize = 300;
 
 #[derive(Default)]
 pub struct Log {
     pub console: VecDeque<String>,
     pub net: VecDeque<Net>,
-    /// How the next dialogs are answered: accept, and the text for a prompt.
     pub accept: bool,
     pub prompt_text: Option<String>,
-    /// When the page last fetched anything. Network idle is measured from here.
     pub last_net: Option<std::time::Instant>,
-    /// Execution contexts by frame: frameId -> contextId. Same-process iframes are
-    /// entered through these; a cross-origin one has a target of its own instead.
     pub contexts: HashMap<String, u64>,
-    /// The last drag the page started, intercepted: what a native HTML5 drop carries.
     pub drag: Option<Value>,
-    /// The hooks this log listens to (`record`). Older ones are ignored.
     pub hooks: u64,
 }
 
 impl Log {
-    /// Nothing in flight and quiet for `idle`: the page has stopped fetching.
     pub fn net_idle(&self, idle: std::time::Duration) -> bool {
         let pending = self.net.iter().any(|n| n.status == 0 && n.failed.is_empty());
         !pending && self.last_net.is_none_or(|t| t.elapsed() >= idle)
@@ -58,7 +48,6 @@ pub struct Net {
     pub kind: String,
     pub status: u32,
     pub failed: String,
-    /// Response Content-Type, for browser_network_body: text or bytes.
     pub mime: String,
 }
 
@@ -80,7 +69,6 @@ fn push<T>(q: &mut VecDeque<T>, v: T) {
     q.push_back(v);
 }
 
-/// One DevTools Protocol call. `done` gets the result object, or the error.
 pub fn cdp(wv: &WebView, method: &str, params: &Value, done: impl FnOnce(Result<Value, String>) + 'static) {
     let done = Rc::new(RefCell::new(Some(done)));
     let d2 = done.clone();
@@ -105,8 +93,6 @@ pub fn cdp(wv: &WebView, method: &str, params: &Value, done: impl FnOnce(Result<
     }
 }
 
-/// One DevTools call inside a target of its own (a cross-origin iframe): the flattened
-/// session id from `Target.attachToTarget`.
 pub fn cdp_session(wv: &WebView, session: &str, method: &str, params: &Value, done: impl FnOnce(Result<Value, String>) + 'static) {
     let done = Rc::new(RefCell::new(Some(done)));
     let d2 = done.clone();
@@ -165,7 +151,6 @@ fn on_event(wv: &WebView, name: &str, f: impl Fn(Value) + 'static) {
     }
 }
 
-/// Text of one console argument, as DevTools would show it.
 fn arg_text(a: &Value) -> String {
     match &a["value"] {
         Value::String(s) => s.clone(),
@@ -178,21 +163,14 @@ fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
 }
 
-/// Which set of hooks a tab's log answers to. A tab lent, taken back and lent again is
-/// hooked again; the old hooks see a number that is no longer theirs and record nothing.
 static HOOKS: AtomicU64 = AtomicU64::new(1);
 
-/// Run `f` on a tab's log, if the hooks calling are the ones it listens to now.
 fn with_log(l: &Logs, tab: u64, hooks: u64, f: impl FnOnce(&mut Log)) {
     if let Some(log) = l.borrow_mut().get_mut(&tab).filter(|log| log.hooks == hooks) {
         f(log);
     }
 }
 
-/// Start recording a tab: its network requests (bodies kept for browser_network_body) and
-/// the browser's own log. `console` adds the page's console and uncaught errors; that takes
-/// Runtime.enable, which a page can detect, so a tab the person lent goes without it. What
-/// was recorded before stays; the hooks are new.
 pub fn record(wv: &WebView, tab: u64, logs: &Logs, console: bool) -> u64 {
     let hooks = HOOKS.fetch_add(1, Ordering::Relaxed);
     logs.borrow_mut().entry(tab).or_default().hooks = hooks;
@@ -200,7 +178,6 @@ pub fn record(wv: &WebView, tab: u64, logs: &Logs, console: bool) -> u64 {
     if console {
         fire(wv, "Runtime.enable");
     }
-    // Response bodies are kept for browser_network_body: a few MB of them, no more.
     cdp(wv, "Network.enable", &json!({"maxTotalBufferSize": 32 * 1024 * 1024, "maxResourceBufferSize": 4 * 1024 * 1024, "maxPostDataSize": 65536}), |_| {});
     if console {
         let l = logs.clone();
@@ -266,9 +243,6 @@ pub fn record(wv: &WebView, tab: u64, logs: &Logs, console: bool) -> u64 {
     hooks
 }
 
-/// Stop recording a tab the person took back, and forget what it recorded. The byte count
-/// and the bandwidth cap may still want the Network domain: then it stays on, with no
-/// bodies kept.
 pub fn stop(wv: Option<&WebView>, tab: u64, logs: &Logs, keep_net: bool) {
     logs.borrow_mut().remove(&tab);
     let Some(wv) = wv else { return };
@@ -280,16 +254,12 @@ pub fn stop(wv: Option<&WebView>, tab: u64, logs: &Logs, keep_net: bool) {
     }
 }
 
-/// Start recording for an agent's tab, console too, and take over its dialogs (accept by
-/// default), since a modal alert would freeze every script the agent runs.
 pub fn watch(wv: &WebView, tab: u64, logs: &Logs) {
     let fresh = !logs.borrow().contains_key(&tab);
     let hooks = record(wv, tab, logs, true);
     if fresh && let Some(log) = logs.borrow_mut().get_mut(&tab) {
         log.accept = true;
     }
-    // Same-process iframes run in execution contexts of this renderer. Their frameId is
-    // what an entry in the snapshot's frame list is entered through.
     let l = logs.clone();
     on_event(wv, "Runtime.executionContextCreated", move |v| {
         let c = &v["context"];
@@ -303,13 +273,10 @@ pub fn watch(wv: &WebView, tab: u64, logs: &Logs) {
         let Some(id) = v["executionContextId"].as_u64() else { return };
         with_log(&l, tab, hooks, |log| log.contexts.retain(|_, c| *c != id));
     });
-    // A drag the page started (HTML5 draggable): the browser holds it until we say
-    // where it goes, or let it go.
     let l = logs.clone();
     on_event(wv, "Input.dragIntercepted", move |v| {
         with_log(&l, tab, hooks, |log| log.drag = Some(v["data"].clone()));
     });
-    // Dialogs: Lumen answers them, the agent reads what they said.
     unsafe {
         if let Ok(s) = wv.webview().Settings() {
             let _ = s.SetAreDefaultScriptDialogsEnabled(false);
@@ -378,7 +345,6 @@ mod tests {
         logs.borrow_mut().insert(7, Log { hooks: 3, ..Default::default() });
         stop(None, 7, &logs, false);
         assert!(logs.borrow().is_empty());
-        // A hook still attached to the page finds no log, and writes none.
         with_log(&logs, 7, 3, |log| push(&mut log.console, "after".into()));
         assert!(logs.borrow().is_empty());
     }

@@ -1,6 +1,4 @@
-//! The drawn menu: rows at the click point, kept inside the window, the chrome's own
-//! row style, separators, hover and the keyboard. It is state on the chrome, and the
-//! chosen id runs the pending action the caller left with it.
+//! The drawn menu.
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
 
@@ -9,11 +7,8 @@ use super::{
     gfx::{Align, R},
 };
 
-/// What a chosen id runs: each call site keeps its own match here.
 type Chosen = Box<dyn FnOnce(&mut Inner, u32)>;
 
-/// One row: an id (0 is a separator), a label, its shortcut hint when the label
-/// carried one after a tab, and whether it can be chosen at all.
 struct Row {
     id: u32,
     label: String,
@@ -24,18 +19,14 @@ struct Row {
 pub struct MenuCard {
     rows: Vec<Row>,
     act: Option<Chosen>,
-    /// What closing without a pick does, when that is not nothing (a page's menu must answer).
     on_cancel: Option<Box<dyn FnOnce(&mut Inner)>>,
-    /// Where it was drawn, and each row's rectangle, in chrome DIPs.
     rect: R,
     row_rects: Vec<R>,
-    /// The row the keyboard is on.
     sel: usize,
 }
 
 const ROW_H: f32 = 30.0;
 const PAD: f32 = 6.0;
-/// Room above and below a separator's hairline.
 const SEP_GAP: f32 = 5.0;
 const MIN_W: f32 = 170.0;
 
@@ -52,7 +43,6 @@ fn rows_of(items: &[(u32, String, bool)]) -> Vec<Row> {
         .collect()
 }
 
-/// Where the menu sits: at the click point, kept inside the window; and each row.
 fn geometry(i: &Inner, rows: &[Row], x: f32, y: f32) -> (R, Vec<R>) {
     let (w_win, h_win) = i.size_dip();
     let lo = &i.look;
@@ -73,7 +63,6 @@ fn geometry(i: &Inner, rows: &[Row], x: f32, y: f32) -> (R, Vec<R>) {
     let x = x.min(w_win - w - PAD - 2.0).max(4.0);
     let y = y.min(h_win - h - PAD - 2.0).max(4.0);
     let rect = R::new(x, y, w, h);
-    // One rectangle per row, separators included, so a hit's index is a row's index.
     let mut rects = Vec::new();
     let mut ry = rect.y + PAD;
     for r in rows {
@@ -88,18 +77,15 @@ fn geometry(i: &Inner, rows: &[Row], x: f32, y: f32) -> (R, Vec<R>) {
     (rect, rects)
 }
 
-/// Open a menu of (id, label) items; a label may carry its shortcut after a tab.
 pub fn open(i: &mut Inner, items: &[(u32, String)], x: f32, y: f32, act: impl FnOnce(&mut Inner, u32) + 'static) {
     let rows: Vec<(u32, String, bool)> = items.iter().map(|(id, l)| (*id, l.clone(), true)).collect();
     open_rows(i, &rows, x, y, act);
 }
 
-/// The same, with rows that can be greyed out.
 pub fn open_rows(i: &mut Inner, items: &[(u32, String, bool)], x: f32, y: f32, act: impl FnOnce(&mut Inner, u32) + 'static) {
     open_with(i, items, x, y, Box::new(act), None);
 }
 
-/// The same, and `on_cancel` runs when it closes without a pick.
 pub fn open_rows_or(i: &mut Inner, items: &[(u32, String, bool)], x: f32, y: f32, act: impl FnOnce(&mut Inner, u32) + 'static, on_cancel: impl FnOnce(&mut Inner) + 'static) {
     open_with(i, items, x, y, Box::new(act), Some(Box::new(on_cancel)));
 }
@@ -117,7 +103,6 @@ fn open_with(i: &mut Inner, items: &[(u32, String, bool)], x: f32, y: f32, act: 
     i.invalidate();
 }
 
-/// Close without a choice.
 pub fn cancel(i: &mut Inner) {
     let Some(card) = i.menu.take() else { return };
     unsafe {
@@ -129,17 +114,14 @@ pub fn cancel(i: &mut Inner) {
     i.invalidate();
 }
 
-/// The keyboard left the chrome (Alt-Tab, another window): the menu goes with it.
 pub fn blur(i: &mut Inner) {
     cancel(i);
 }
 
-/// A row was clicked: its action runs, the menu closes.
 pub fn click(i: &mut Inner, n: usize) {
     pick_row(i, n);
 }
 
-/// Up and Down walk the rows, Enter takes the one it is on, Escape closes.
 pub fn key(i: &mut Inner, vk: u32) -> bool {
     let Some(card) = i.menu.as_mut() else { return false };
     match vk {
@@ -155,7 +137,6 @@ pub fn key(i: &mut Inner, vk: u32) -> bool {
         v if v == VK_DOWN.0 as u32 || v == VK_UP.0 as u32 => {
             let n = card.rows.len();
             let step: isize = if v == VK_DOWN.0 as u32 { 1 } else { -1 };
-            // Land only on a row that can be chosen.
             for k in 1..=n {
                 let at = (card.sel as isize + step * k as isize).rem_euclid(n as isize) as usize;
                 if card.rows[at].id != 0 && card.rows[at].enabled {
@@ -170,20 +151,17 @@ pub fn key(i: &mut Inner, vk: u32) -> bool {
     }
 }
 
-/// The pointer came up: on a row it chooses, anywhere else it closes.
 pub fn clicked_outside(i: &mut Inner, h: &Option<Hit>) {
     if i.menu.is_some() && !matches!(h, Some(Hit::MenuCard | Hit::MenuRow(_))) {
         cancel(i);
     }
 }
 
-/// Run the n-th row's action, if it has one.
 fn pick_row(i: &mut Inner, n: usize) {
     let Some(mut card) = i.menu.take() else { return };
     let row = match card.rows.get(n) {
         Some(r) if r.enabled && r.id != 0 => r.id,
         Some(_) => {
-            // Greyed out: the menu stays.
             i.menu = Some(card);
             return;
         }
@@ -198,7 +176,6 @@ fn pick_row(i: &mut Inner, n: usize) {
     }
 }
 
-/// Draw the menu: the card, then a row per item.
 pub fn draw(i: &mut Inner, _s: &UiState) {
     let Some(card) = i.menu.take() else { return };
     let lo = i.look.clone();

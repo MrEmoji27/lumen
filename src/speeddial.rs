@@ -1,27 +1,20 @@
-//! The new tab page's speed dial: tiles you keep, in a grid, and what to suggest when
-//! you keep none. Plain functions on plain values; the drawing is in chrome/mod.rs.
+//! The new tab page's speed dial: tiles you keep, in a grid, and what to suggest when you keep none.
 
 use crate::store::Shortcut;
 
-/// The most tiles the page holds.
 pub const MAX_TILES: usize = 16;
-/// Tiles per row: as many as fit, never fewer than four nor more than six.
 const MIN_COLS: usize = 4;
 const MAX_COLS: usize = 6;
-/// A cell is the tile and its name under it. These are DIPs.
 const MIN_CELL: f32 = 88.0;
 const MAX_CELL: f32 = 112.0;
 const GAP: f32 = 12.0;
-/// A row of cells: the tile, the name, and air.
 pub const ROW_H: f32 = 104.0;
 
-/// Where the cells go: `n` of them, centred in a width.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grid {
     pub cols: usize,
     pub cell_w: f32,
     pub n: usize,
-    /// Left edge of the first cell, relative to the left edge of the space.
     pub x0: f32,
 }
 
@@ -34,8 +27,6 @@ impl Grid {
         self.rows() as f32 * ROW_H
     }
 
-    /// The top-left of cell `i`, relative to the space's left edge and the grid's top. A last
-    /// row that is not full is centred, so three tiles under a wide row do not hug the left.
     pub fn origin(&self, i: usize) -> (f32, f32) {
         let (row, col) = (i / self.cols, i % self.cols);
         let in_row = if row + 1 == self.rows() { self.n - row * self.cols } else { self.cols };
@@ -45,7 +36,6 @@ impl Grid {
         (lead + col as f32 * (self.cell_w + GAP), row as f32 * ROW_H)
     }
 
-    /// Which cell a point is over (relative to the same origin), if any.
     pub fn index_at(&self, x: f32, y: f32) -> Option<usize> {
         if y < 0.0 {
             return None;
@@ -57,8 +47,6 @@ impl Grid {
     }
 }
 
-/// Lay out `n` cells in `width` DIPs: four to six columns as the width allows, the cells as
-/// wide as the room gives, but not wider than a tile wants to be.
 pub fn grid(width: f32, n: usize) -> Grid {
     let fit = ((width + GAP) / (MIN_CELL + GAP)).floor() as usize;
     let cols = fit.clamp(MIN_COLS, MAX_COLS);
@@ -66,14 +54,12 @@ pub fn grid(width: f32, n: usize) -> Grid {
     Grid { cols, cell_w, n, x0: 0.0 }
 }
 
-/// `grid` for the cells a page has, and where its left edge is in a space starting at `left`.
 pub fn grid_in(left: f32, width: f32, n: usize) -> Grid {
     let g = grid(width, n);
     let full_w = g.cols as f32 * g.cell_w + (g.cols - 1) as f32 * GAP;
     Grid { x0: left + (width - full_w).max(0.0) / 2.0, ..g }
 }
 
-/// A web address from what was typed: a bare host gets https. None for nothing usable.
 pub fn clean_url(raw: &str) -> Option<String> {
     let t = raw.trim();
     if t.is_empty() || t.contains(char::is_whitespace) {
@@ -87,7 +73,6 @@ pub fn clean_url(raw: &str) -> Option<String> {
     Some(url)
 }
 
-/// The host without `www.`, lowercased.
 pub fn host_of(url: &str) -> String {
     let rest = url.split("://").nth(1).unwrap_or("");
     let h = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -95,13 +80,10 @@ pub fn host_of(url: &str) -> String {
     h.strip_prefix("www.").unwrap_or(h).to_lowercase()
 }
 
-/// What a tile is called: its title, else its site.
 pub fn label(sc: &Shortcut) -> String {
     if sc.title.trim().is_empty() { host_of(&sc.url) } else { sc.title.trim().to_string() }
 }
 
-/// Add a tile. False (and nothing changes) when the address is not one, the page is full, or
-/// that site is already a tile.
 pub fn add(tiles: &mut Vec<Shortcut>, title: &str, url: &str) -> bool {
     let Some(url) = clean_url(url) else { return false };
     if tiles.len() >= MAX_TILES || tiles.iter().any(|t| same_site_page(&t.url, &url)) {
@@ -111,8 +93,6 @@ pub fn add(tiles: &mut Vec<Shortcut>, title: &str, url: &str) -> bool {
     true
 }
 
-/// Change a tile's name and address. False when the new address is not one, or is another
-/// tile's.
 pub fn edit(tiles: &mut [Shortcut], i: usize, title: &str, url: &str) -> bool {
     let Some(url) = clean_url(url) else { return false };
     if i >= tiles.len() || tiles.iter().enumerate().any(|(n, t)| n != i && same_site_page(&t.url, &url)) {
@@ -122,7 +102,6 @@ pub fn edit(tiles: &mut [Shortcut], i: usize, title: &str, url: &str) -> bool {
     true
 }
 
-/// Take tile `from` out and put it where `to` is: the tile that was there moves along.
 pub fn reorder(tiles: &mut Vec<Shortcut>, from: usize, to: usize) {
     if from >= tiles.len() || to >= tiles.len() || from == to {
         return;
@@ -136,16 +115,11 @@ fn same_site_page(a: &str, b: &str) -> bool {
     key(a) == key(b)
 }
 
-/// One page seen before: its address, title and how often.
 #[derive(Clone, Debug)]
 pub struct Seen {
-    /// The address of a page seen; the front page of its site is what gets suggested.
     pub url: String,
 }
 
-/// What to show when there are no tiles: the sites seen most, best first (`seen` is already in
-/// that order), one per site, each as the site's front page, nothing that is already a tile,
-/// and nothing that is not a place (search results, local files, other schemes).
 pub fn suggest(seen: &[Seen], tiles: &[Shortcut], limit: usize) -> Vec<Shortcut> {
     let mut have: Vec<String> = tiles.iter().map(|t| host_of(&t.url)).collect();
     let mut out = Vec::new();
@@ -167,7 +141,6 @@ pub fn suggest(seen: &[Seen], tiles: &[Shortcut], limit: usize) -> Vec<Shortcut>
     out
 }
 
-/// A search results page is not somewhere you go back to.
 fn is_search(url: &str, host: &str) -> bool {
     let q = url.contains("?q=") || url.contains("&q=") || url.contains("/search?");
     q && ["google.", "bing.", "duckduckgo.", "brave.", "startpage.", "yahoo."].iter().any(|s| host.contains(s))
@@ -198,7 +171,6 @@ mod tests {
         let g = grid(1000.0, 8);
         assert_eq!(g.cell_w, MAX_CELL);
         let g = grid(400.0, 8);
-        // Four columns and three gaps share the width.
         assert!((g.cell_w * 4.0 + GAP * 3.0 - 400.0).abs() < 0.01);
     }
 
@@ -216,7 +188,6 @@ mod tests {
         let (first, _) = g.origin(0);
         let (last, _) = g.origin(5);
         let right = last + g.cell_w;
-        // Equal air on both sides of the row.
         assert!((first - 100.0 - (900.0 - right)).abs() < 0.01);
     }
 
@@ -226,7 +197,6 @@ mod tests {
         let (full0, _) = g.origin(0);
         let (alone, y) = g.origin(6);
         assert_eq!(y, ROW_H);
-        // One tile in the second row sits under the middle of the first, not at the left edge.
         assert!(alone > full0 + g.cell_w);
     }
 
@@ -272,7 +242,6 @@ mod tests {
         assert!(!edit(&mut t, 1, "B", "https://a.test"));
         assert!(edit(&mut t, 1, "Bee", "bee.test"));
         assert_eq!(t[1], sc("Bee", "https://bee.test"));
-        // Saving a tile under its own address is fine.
         assert!(edit(&mut t, 0, "Alpha", "https://a.test/"));
         assert!(!edit(&mut t, 9, "", "https://z.test"));
     }
@@ -306,7 +275,6 @@ mod tests {
         ];
         let got = suggest(&s, &[], 10);
         let urls: Vec<&str> = got.iter().map(|g| g.url.as_str()).collect();
-        // Each site once, as its front page, in the order seen.
         assert_eq!(urls, ["https://music.youtube.com/", "https://github.com/", "https://news.ycombinator.com/"]);
     }
 

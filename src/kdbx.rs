@@ -1,12 +1,9 @@
-//! KeePass: open a .kdbx from this PC, keep it in memory only, fill logins
-//! from it. Nothing here writes to disk and nothing here logs. The vault
-//! lives in the App and is dropped after ten idle minutes.
+//! KeePass: open a .kdbx from this PC, keep it in memory only, fill logins from it.
 
 use std::path::Path;
 
 use keepass::{Database, DatabaseKey, error::DatabaseOpenError};
 
-/// One login. Holds the password only while the vault is open.
 pub struct Entry {
     pub title: String,
     pub username: String,
@@ -14,13 +11,11 @@ pub struct Entry {
     pub password: String,
 }
 
-/// The unlocked database. Dropping it clears it; nothing is ever persisted.
 pub struct Vault {
     entries: Vec<Entry>,
 }
 
 impl std::fmt::Debug for Vault {
-    /// Redacted on purpose: it must never print what it holds.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Vault").field("entries", &self.entries.len()).finish()
     }
@@ -30,8 +25,6 @@ impl Vault {
     pub fn open(path: &Path, password: &str) -> Result<Vault, String> {
         let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let db = Database::open(&mut file, DatabaseKey::new().with_password(password)).map_err(|e| {
-            // A wrong password is counted; anything else (missing file, not a
-            // .kdbx, a corrupt body) is not a guess and is not counted.
             if matches!(e, DatabaseOpenError::Key(keepass::error::DatabaseKeyError::IncorrectKey)) {
                 crate::privacy_stats::wrong_password();
             }
@@ -54,8 +47,6 @@ impl Vault {
         self.entries.len()
     }
 
-    /// The entries whose URL belongs to `page_url`, best match first: an
-    /// exact host beats a parent domain, a parent beats nothing.
     pub fn matches(&self, page_url: &str) -> Vec<usize> {
         let mut hits: Vec<(u32, usize)> = self
             .entries
@@ -67,7 +58,6 @@ impl Vault {
         hits.into_iter().map(|(_, i)| i).collect()
     }
 
-    /// What the chip and the menu show: the title, and the username with it.
     pub fn label(&self, i: usize) -> String {
         let e = &self.entries[i];
         if e.username.is_empty() {
@@ -82,31 +72,24 @@ impl Vault {
     }
 }
 
-/// The host of a URL: no scheme, credentials, port, path, or "www.". A bare
-/// host ("example.com/login") works too — KeePass entries are often stored
-/// that way.
 pub fn host_of(url: &str) -> String {
     let rest = url.split("://").nth(1).unwrap_or(url);
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.rsplit('@').next().unwrap_or("");
     let host = host.split(':').next().unwrap_or("");
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    // A space means this was never a host name.
     if host.contains(char::is_whitespace) {
         return String::new();
     }
     host.strip_prefix("www.").unwrap_or(&host).to_string()
 }
 
-/// Same site: equal hosts, or one is a subdomain of the other. How specific
-/// the entry is, for sorting: 2 exact, 1 parent domain.
 fn score(entry_url: &str, page_url: &str) -> Option<u32> {
     let e = host_of(entry_url);
     let p = host_of(page_url);
     if e.is_empty() || p.is_empty() {
         return None;
     }
-    // A password never goes into a page anyone on the wire can read or rewrite.
     let local = p == "localhost" || p == "127.0.0.1";
     if !page_url.trim().to_ascii_lowercase().starts_with("https://") && !local {
         return None;
@@ -120,17 +103,11 @@ fn score(entry_url: &str, page_url: &str) -> Option<u32> {
     None
 }
 
-/// Same host, or one a subdomain of the other. Kept for the tests and for
-/// whatever the integrator wires next; the chips use `matches`.
 #[allow(dead_code)]
 pub fn host_matches(entry_url: &str, page_url: &str) -> bool {
     score(entry_url, page_url).is_some()
 }
 
-/// The script that puts a login into the form on screen. It finds the
-/// password box (the focused one, else the first on the page), the username
-/// field before it, and sets both through the native value setter so pages
-/// see the change. Values ride in as JSON strings: quotes and all.
 pub fn fill_js(username: &str, password: &str) -> String {
     let (u, p) = (js_str(username), js_str(password));
     format!(
@@ -165,7 +142,6 @@ pub fn fill_js(username: &str, password: &str) -> String {
     )
 }
 
-/// A string, quoted and escaped the way JavaScript wants it.
 fn js_str(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
@@ -190,9 +166,7 @@ mod tests {
         assert!(!host_matches("https://example.com/", "https://example.org/"));
         assert!(!host_matches("", "https://example.com/"));
         assert!(!host_matches("https://example.com/", ""));
-        // A suffix that is not a label boundary is not a match.
         assert!(!host_matches("https://ample.com/", "https://example.com/"));
-        // Entries stored without a scheme still match.
         assert!(host_matches("example.com/login", "https://www.example.com/"));
         assert!(!host_matches("example.com/login", "https://example.org/"));
     }
@@ -242,9 +216,6 @@ mod tests {
             db::fields,
         };
 
-        // A real KDBX4 file, written by the same crate that reads it. AES-KDF
-        // with few rounds: the default Argon2 wants a gigabyte of memory, and
-        // this test opens one little vault, not the user's.
         let mut cfg = DatabaseConfig::default();
         cfg.kdf_config = KdfConfig::Aes { rounds: 600 };
         let mut db = Database::with_config(cfg);
@@ -253,12 +224,10 @@ mod tests {
             let mut e = root.add_entry();
             e.set_unprotected(fields::TITLE, "Example");
             e.set_unprotected(fields::USERNAME, "ann@example.com");
-            // Protected in the file, like KeePass writes it.
             e.set_protected(fields::PASSWORD, "s3cret");
             e.set_unprotected(fields::URL, "https://example.com/login");
         }
         {
-            // No password: nothing to fill, so it is not offered.
             let mut root = db.root_mut();
             let mut e = root.add_entry();
             e.set_unprotected(fields::TITLE, "Notes only");
@@ -272,14 +241,11 @@ mod tests {
 
         let v = Vault::open(&path, "master").expect("the file opens");
         assert_eq!(v.len(), 1);
-        // Out of a protected field, in the clear, with its user name.
         assert_eq!(v.get(0), Some(("ann@example.com", "s3cret")));
         assert_eq!(v.label(0), "Example · ann@example.com");
         assert_eq!(v.matches("https://example.com/somewhere-else"), vec![0]);
 
-        // A wrong password is an error, not an empty vault.
         assert!(Vault::open(&path, "wrong").is_err());
-        // So is something that is not a .kdbx at all.
         assert!(Vault::open(Path::new("does-not-exist.kdbx"), "master").is_err());
         let _ = std::fs::remove_file(&path);
     }

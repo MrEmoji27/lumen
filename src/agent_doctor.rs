@@ -11,13 +11,10 @@ pub enum Level {
     Warn,
 }
 
-/// One finding: how it came out, what was found, what to do.
 pub type Finding = (Level, String, &'static str);
 
-/// Over this, the agents' own browsers and downloads are worth a look.
 const AGENT_SPACE_WARN: u64 = 2 * 1024 * 1024 * 1024;
 
-/// The version an exe carries in its build stamp: "0.6.7.7 (b2ce5c9 2026-10-25)".
 pub fn exe_version(bytes: &[u8]) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
@@ -40,7 +37,6 @@ pub fn exe_version(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// The bridge beside Lumen, and whether it is the same build.
 pub fn bridge(lumen: &str, agent: Option<&str>) -> Finding {
     match agent {
         None => (Level::Warn, "lumen-agent.exe is not next to lumen.exe".into(), "Agents need it: reinstall Lumen."),
@@ -53,7 +49,6 @@ pub fn bridge(lumen: &str, agent: Option<&str>) -> Finding {
     }
 }
 
-/// Which agents have Lumen registered, and whether the exe each one starts is still there.
 pub fn registrations(home: &Path) -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
     if let Some(cmd) = json_command(&home.join(".claude.json"), &["mcpServers", "lumen", "command"]) {
@@ -97,7 +92,6 @@ fn toml_command(file: &Path, table: &str) -> Option<String> {
     None
 }
 
-/// The registrations, as one finding.
 pub fn mcp(regs: &[(&'static str, bool)]) -> Finding {
     if regs.is_empty() {
         return (Level::Ok, "not set up with any agent (optional)".into(), "");
@@ -115,7 +109,6 @@ pub fn mcp(regs: &[(&'static str, bool)]) -> Finding {
     }
 }
 
-/// The agents' strictly isolated browsers and their downloads, in bytes.
 pub fn agent_bytes(data: &Path) -> u64 {
     [data.join("agent_envs"), data.join("Agent downloads")].iter().map(|d| dir_bytes(d)).sum()
 }
@@ -140,7 +133,6 @@ pub fn space(bytes: u64) -> Finding {
     }
 }
 
-/// lumen-agent.exe beside the running Lumen.
 pub fn bridge_path() -> Option<PathBuf> {
     std::env::current_exe().ok().map(|e| e.with_file_name("lumen-agent.exe")).filter(|p| p.is_file())
 }

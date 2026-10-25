@@ -1,22 +1,4 @@
-//! Watching an agent's tab. When the person clicks an agent tab, its view moves into the
-//! window (see `stage.rs`) and three small windows go over the page:
-//!
-//! - the **shield**: the size of the page, all but invisible (alpha 1 of 255), taking the
-//!   person's mouse and wheel so a stray click cannot knock the agent off;
-//! - the **cursor**: the agent's pointer, an arrow in its colour with its name beside it,
-//!   gliding to each point the agent clicks, hovers or types at, with a ring on a click;
-//! - the **pill**: at the bottom of the page, the agent's name and last step, **Message**,
-//!   and **Take over**, which hands the tab to the person until they press **Give back**.
-//!
-//! A tab the person lent to agents ("Let agents use this tab") gets the cursor and the pill
-//! too, while an agent works in it, but no shield: it is the person's tab, their mouse stays
-//! theirs. Its pill's button is **Stop**, which takes the tab back from every agent.
-//!
-//! The cursor and the pill are drawn with Direct2D into windows with per-pixel alpha
-//! (UpdateLayeredWindow): smooth edges, soft shadows, real text. They are popups owned by
-//! the main window, not children: they sit above it and the page, never take focus, and
-//! Lumen moves them when the window moves. Nothing is made until the first watch, and
-//! nothing draws when no agent tab is watched.
+//! Watching an agent's tab.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -41,13 +23,10 @@ use crate::engine::Ev;
 const GLIDE: Duration = Duration::from_millis(160);
 const RING: Duration = Duration::from_millis(420);
 const TIMER: usize = 7;
-/// Not in the windows crate's list: the pointer left a window that asked to be told.
 const WM_MOUSELEAVE: u32 = 0x02A3;
-/// The cursor window, in DIPs, and where the tip sits in it: room for the ring around it.
 const CUR_W: f32 = 240.0;
 const CUR_H: f32 = 64.0;
 const TIP: f32 = 18.0;
-/// The pill: its height, and the room around it for its shadow.
 const PILL_H: f32 = 40.0;
 const PAD: f32 = 10.0;
 const FONT: &str = "Segoe UI Variable Text";
@@ -65,12 +44,9 @@ fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
 }
 
-/// One Direct2D factory, one DirectWrite factory and one DC render target for every
-/// overlay: they draw on the UI thread, one at a time.
 struct Kit {
     d2d: ID2D1Factory,
     dw: IDWriteFactory,
-    /// What everything draws on: the DC target below, or (in the sample test) a bitmap.
     rt: ID2D1RenderTarget,
     dc: Option<ID2D1DCRenderTarget>,
 }
@@ -96,7 +72,6 @@ fn kit() -> Option<Rc<Kit>> {
                     minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
                 };
                 let dc = d2d.CreateDCRenderTarget(&props).ok()?;
-                // On a see-through surface ClearType's coloured fringes show: grey-scale text.
                 dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
                 let rt: ID2D1RenderTarget = dc.cast().ok()?;
                 Some(Rc::new(Kit { d2d, dw, rt, dc: Some(dc) }))
@@ -107,8 +82,6 @@ fn kit() -> Option<Rc<Kit>> {
     })
 }
 
-/// Draw into a window with per-pixel alpha: `draw` gets the target in DIPs (the scale is
-/// the target's DPI), the window goes to (x, y) on screen with the given size in pixels.
 fn present(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f32, draw: impl FnOnce(&Kit)) {
     let Some(k) = kit() else { return };
     let Some(dc) = k.dc.clone() else { return };
@@ -169,7 +142,6 @@ fn rr(x: f32, y: f32, w: f32, h: f32, r: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h }, radiusX: r, radiusY: r }
 }
 
-/// A text format: one line, centred vertically, ellipsis when it does not fit.
 fn format(k: &Kit, size: f32, weight: i32) -> Option<IDWriteTextFormat> {
     unsafe {
         let f = k
@@ -186,7 +158,6 @@ fn format(k: &Kit, size: f32, weight: i32) -> Option<IDWriteTextFormat> {
     }
 }
 
-/// How wide a line of text is, in DIPs.
 fn measure(k: &Kit, s: &str, size: f32, weight: i32) -> f32 {
     let Some(f) = format(k, size, weight) else { return 0.0 };
     let w: Vec<u16> = s.encode_utf16().collect();
@@ -211,13 +182,10 @@ fn text(k: &Kit, s: &str, x: f32, y: f32, w: f32, h: f32, size: f32, weight: i32
     }
 }
 
-// ------------------------------------------------------------------- the cursor
-
 struct Cursor {
     hwnd: HWND,
     color: Rgb,
     name: String,
-    /// Where the tip is, and where it is gliding to, in screen pixels.
     at: (f32, f32),
     from: (f32, f32),
     to: (f32, f32),
@@ -227,8 +195,6 @@ struct Cursor {
     scale: f32,
 }
 
-/// The arrow, tip at (0, 0), in DIPs: a little larger than the system's, so it reads as the
-/// agent's and not the person's.
 const ARROW: [(f32, f32); 7] = [(0.0, 0.0), (0.0, 21.0), (5.3, 16.1), (9.0, 24.0), (12.5, 22.5), (9.0, 14.7), (15.7, 14.7)];
 
 fn arrow(k: &Kit, dx: f32, dy: f32) -> Option<ID2D1PathGeometry> {
@@ -256,11 +222,9 @@ fn draw_cursor(c: &Cursor) {
     present(c.hwnd, x, y, w, h, k, |kit| paint_cursor(kit, c, ring, caret));
 }
 
-/// The cursor's picture, the window's top-left at (0, 0), in DIPs.
 fn paint_cursor(kit: &Kit, c: &Cursor, ring: Option<f32>, caret: Option<f32>) {
     unsafe {
         let rt = &kit.rt;
-        // The ring of a click: grows and fades.
         if let Some(t) = ring {
             let e = 1.0 - (1.0 - t).powi(2);
             if let Some(b) = brush(kit, c.color.d2d(0.75 * (1.0 - t))) {
@@ -268,7 +232,6 @@ fn paint_cursor(kit: &Kit, c: &Cursor, ring: Option<f32>, caret: Option<f32>) {
                 rt.DrawEllipse(&el, &b, 2.2, None);
             }
         }
-        // A soft shadow: the arrow twice, offset and faint.
         for (o, a) in [(2.4, 0.10), (1.4, 0.18)] {
             if let (Some(g), Some(b)) = (arrow(kit, TIP + o * 0.4, TIP + o), brush(kit, rgba(0.0, 0.0, 0.0, a))) {
                 rt.FillGeometry(&g, &b, None);
@@ -282,13 +245,11 @@ fn paint_cursor(kit: &Kit, c: &Cursor, ring: Option<f32>, caret: Option<f32>) {
                 rt.DrawGeometry(&g, &b, 1.5, None);
             }
         }
-        // Typing: a caret blink beside the tip.
         if let Some(t) = caret
             && let Some(b) = brush(kit, c.color.d2d(1.0 - t))
         {
             rt.FillRoundedRectangle(&rr(TIP + 20.0, TIP - 2.0, 2.0, 18.0, 1.0), &b);
         }
-        // The name on a tag of its colour, dark text: the agent colours are light.
         if !c.name.is_empty() {
             let tw = measure(kit, &c.name, 11.5, 600).min(CUR_W - TIP - 30.0);
             let (tx, ty) = (TIP + 14.0, TIP + 21.0);
@@ -303,27 +264,21 @@ fn paint_cursor(kit: &Kit, c: &Cursor, ring: Option<f32>, caret: Option<f32>) {
     }
 }
 
-// ------------------------------------------------------------------- the pill
-
 struct Pill {
     hwnd: HWND,
     color: Rgb,
     name: String,
     step: String,
     taken: bool,
-    /// Over a tab the person lent: Stop in place of Take over, and no shield.
     lent: bool,
     proxy: EventLoopProxy<Ev>,
     scale: f32,
-    /// Where it is on screen (pixels), and where its two buttons are in it (DIPs).
     at: (i32, i32, i32, i32),
     message: (f32, f32),
     take: (f32, f32),
     hover: Option<u8>,
 }
 
-/// Lay the pill out for this page width (pixels): its window rectangle on screen, and the
-/// spans of its buttons.
 fn layout_pill(p: &mut Pill, page: RECT) {
     let Some(k) = kit() else { return };
     let s = p.scale;
@@ -347,11 +302,9 @@ fn draw_pill(p: &Pill) {
     present(p.hwnd, x, y, w, h, p.scale, |kit| paint_pill(kit, p, width));
 }
 
-/// The pill's picture, the window's top-left at (0, 0), in DIPs; `width` is the pill's own.
 fn paint_pill(kit: &Kit, p: &Pill, width: f32) {
     unsafe {
         let rt = &kit.rt;
-        // Shadow, then the pill: dark glass that reads on any page.
         for g in [6.0f32, 4.5, 3.0, 1.5] {
             if let Some(b) = brush(kit, rgba(0.0, 0.0, 0.0, 0.035)) {
                 rt.FillRoundedRectangle(&rr(PAD - g, PAD - g + 2.0, width + 2.0 * g, PILL_H + 2.0 * g, PILL_H / 2.0 + g), &b);
@@ -363,7 +316,6 @@ fn paint_pill(kit: &Kit, p: &Pill, width: f32) {
         if let Some(b) = brush(kit, rgba(1.0, 1.0, 1.0, 0.09)) {
             rt.DrawRoundedRectangle(&rr(PAD + 0.5, PAD + 0.5, width - 1.0, PILL_H - 1.0, PILL_H / 2.0), &b, 1.0, None);
         }
-        // The agent's dot, its name, what it did last.
         if let Some(b) = brush(kit, p.color.d2d(1.0)) {
             rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: PAD + 19.0, Y: PAD + PILL_H / 2.0 }, radiusX: 4.5, radiusY: 4.5 }, &b);
         }
@@ -373,7 +325,6 @@ fn paint_pill(kit: &Kit, p: &Pill, width: f32) {
         text(kit, &p.name, left, PAD, name_w + 1.0, PILL_H, 13.0, 600, rgba(0.96, 0.95, 0.93, 1.0), false);
         let says = pill_says(p);
         text(kit, &says, left + name_w + 10.0, PAD, (room - name_w - 10.0).max(0.0), PILL_H, 13.0, 400, rgba(0.70, 0.69, 0.66, 1.0), false);
-        // Message: quiet. Take over: the agent's colour. Give back: white.
         let chip = |(cx, cw): (f32, f32), label: &str, fill: D2D1_COLOR_F, ink: D2D1_COLOR_F, hot: bool| {
             if let Some(b) = brush(kit, fill) {
                 rt.FillRoundedRectangle(&rr(PAD + cx, PAD + 6.0, cw, PILL_H - 12.0, (PILL_H - 12.0) / 2.0), &b);
@@ -392,7 +343,6 @@ fn paint_pill(kit: &Kit, p: &Pill, width: f32) {
     }
 }
 
-/// The pill's second button.
 fn take_label(p: &Pill) -> &'static str {
     if p.lent {
         "Stop"
@@ -403,7 +353,6 @@ fn take_label(p: &Pill) -> &'static str {
     }
 }
 
-/// The words after the agent's name.
 fn pill_says(p: &Pill) -> String {
     if p.taken {
         "the tab is yours".into()
@@ -414,7 +363,6 @@ fn pill_says(p: &Pill) -> String {
     }
 }
 
-/// Which button of the pill is at this client point (pixels): 0 Message, 1 Take over.
 fn pill_hit(p: &Pill, x: i32, y: i32) -> Option<u8> {
     let (x, y) = (x as f32 / p.scale - PAD, y as f32 / p.scale - PAD);
     if !(6.0..PILL_H - 6.0).contains(&y) {
@@ -429,14 +377,11 @@ fn pill_hit(p: &Pill, x: i32, y: i32) -> Option<u8> {
     }
 }
 
-// ------------------------------------------------------------------- the watch
-
 pub struct Watch {
     owner: HWND,
     shield: HWND,
     cursor: Rc<RefCell<Cursor>>,
     pill: Rc<RefCell<Pill>>,
-    /// The page area on screen, physical pixels: where the shield is.
     page: Cell<RECT>,
     shown: Cell<bool>,
 }
@@ -479,7 +424,6 @@ impl Watch {
         };
         let shield = make(w!("LumenShield"), WINDOW_EX_STYLE::default());
         let pill_h = make(w!("LumenWatchPill"), WINDOW_EX_STYLE::default());
-        // The cursor never takes a click: it is a picture, the shield is under it.
         let cursor_h = make(w!("LumenAgentCursor"), WS_EX_TRANSPARENT);
         unsafe {
             let _ = SetLayeredWindowAttributes(shield, COLORREF(0), 1, LWA_ALPHA);
@@ -516,9 +460,6 @@ impl Watch {
         Watch { owner, shield, cursor, pill, page: Cell::new(RECT::default()), shown: Cell::new(false) }
     }
 
-    /// Over this page area (client coordinates of the main window, logical pixels), for this
-    /// agent: its name, its colour (r, g, b), its last step, whether the person has it, and
-    /// whether the tab is the person's own, lent (no shield, a Stop button).
     pub fn show(&self, page: (f64, f64, f64, f64), name: &str, rgb: (u8, u8, u8), step: &str, taken: bool, lent: bool) {
         let scale = unsafe { GetDpiForWindow(self.owner) }.max(96) as f32 / 96.0;
         let mut o = POINT::default();
@@ -559,7 +500,6 @@ impl Watch {
             c.color = color;
             c.scale = scale;
             if first {
-                // The first look: the cursor waits in the middle until the agent moves.
                 let mid = ((r.left + r.right) as f32 / 2.0, (r.top + r.bottom) as f32 / 3.0);
                 (c.at, c.from, c.to) = (mid, mid, mid);
             }
@@ -576,7 +516,6 @@ impl Watch {
             } else if moved || !IsWindowVisible(self.shield).as_bool() {
                 let _ = SetWindowPos(self.shield, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
-            // Order: shield, pill, cursor on top.
             let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
             let _ = SetWindowPos(self.pill.borrow().hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags);
             let _ = SetWindowPos(self.cursor.borrow().hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags);
@@ -602,8 +541,6 @@ impl Watch {
         self.shown.get()
     }
 
-    /// The agent's pointer went to (x, y), CSS pixels in the page, at this zoom (percent).
-    /// `kind`: "move", "press" (a click: the ring) or "type" (a caret blink).
     pub fn point(&self, x: f64, y: f64, zoom: u32, kind: &str) {
         if !self.shown.get() {
             return;
@@ -641,9 +578,7 @@ impl Drop for Watch {
 unsafe extern "system" fn shield_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
         match m {
-            // A click on the shield never takes focus from the window.
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-            // Every click and wheel stops here: the agent's page is not to be touched.
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MOUSEWHEEL | WM_MOUSEHWHEEL => LRESULT(0),
             _ => DefWindowProcW(h, m, w, l),
         }
@@ -659,7 +594,6 @@ unsafe extern "system" fn cursor_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> 
                     let Some(c) = c.borrow().clone() else { return };
                     let mut c = c.borrow_mut();
                     let t = (c.since.elapsed().as_secs_f32() / GLIDE.as_secs_f32()).min(1.0);
-                    // Ease out: quick to leave, gentle to arrive.
                     let e = 1.0 - (1.0 - t).powi(3);
                     c.at = (c.from.0 + (c.to.0 - c.from.0) * e, c.from.1 + (c.to.1 - c.from.1) * e);
                     draw_cursor(&c);
@@ -681,7 +615,6 @@ unsafe extern "system" fn pill_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LR
         match m {
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_SETCURSOR => {
-                // A hand over a button, an arrow elsewhere.
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
                 let _ = ScreenToClient(h, &mut pt);
@@ -697,7 +630,6 @@ unsafe extern "system" fn pill_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LR
                         if p.borrow().hover != hot {
                             p.borrow_mut().hover = hot;
                             draw_pill(&p.borrow());
-                            // Leaving the window clears the hover.
                             let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
                             let _ = TrackMouseEvent(&mut tme);
                         }
@@ -746,8 +678,6 @@ mod tests {
     use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx};
     use windows::Win32::System::Com::StructuredStorage::IPropertyBag2;
 
-    /// Draws the cursor (mid-click, typing) and both pills over a white and a dark page, and
-    /// saves `%TEMP%\lumen-watch-sample.png`. Not a check: a picture to look at.
     #[test]
     #[ignore = "writes a picture to look at"]
     fn sample() {
@@ -771,7 +701,6 @@ mod tests {
             rt.BeginDraw();
             let half = w as f32 / k / 2.0;
             let full_h = h as f32 / k;
-            // Two pages: white, with a form; dark.
             for (n, bg, ink) in [(0.0, rgba(1.0, 1.0, 1.0, 1.0), rgba(0.1, 0.1, 0.1, 1.0)), (1.0, rgba(0.07, 0.07, 0.08, 1.0), rgba(0.9, 0.9, 0.9, 1.0))] {
                 let x0 = n * half;
                 rt.FillRectangle(&D2D_RECT_F { left: x0, top: 0.0, right: x0 + half, bottom: full_h }, &brush(&kit, bg).unwrap());

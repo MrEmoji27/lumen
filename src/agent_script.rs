@@ -1,19 +1,4 @@
-//! Luau scripts: a batch with loops and ifs. The person writes them, as `.luau` files in
-//! `scripts\` in the Lumen data folder; agents list them (`browser_scripts`) and run them
-//! (`browser_script_run`). No tool runs Lua source an agent sends.
-//!
-//! A script is no more than its agent. Every `lumen.call` goes through `run`, so it is
-//! authorized, and asks for consent, exactly as if the agent had made the call itself. The VM
-//! is Luau in its sandbox: no io, no os, no require, no loadstring, no debug. A fresh VM per
-//! run, 60 s, 32 MB, 200 calls. It runs on the agent's own request thread, never the UI's.
-//!
-//! A script's head says what it is and what it takes:
-//!
-//! ```lua
-//! --- Every link on each page of a list.
-//! --@input urls: list of URLs
-//! --@input match: only links with this in them (optional)
-//! ```
+//! Luau scripts: a batch with loops and ifs.
 
 use super::*;
 use mlua::{Function, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Value as LuaValue, VmState};
@@ -22,21 +7,16 @@ use std::{cell::RefCell, rc::Rc};
 const MAX_CALLS: usize = 200;
 const MEMORY: usize = 32 << 20;
 const SCRIPT_TIME: Duration = Duration::from_secs(60);
-/// A script file bigger than this is not a script.
 const MAX_SOURCE: u64 = 256 << 10;
 
-/// The person's scripts folder.
 pub fn dir() -> PathBuf {
     crate::store::data_dir().join("scripts")
 }
 
-/// A script's name as a file in that folder. Letters, digits, dash and underscore only, so a
-/// name cannot walk out of it.
 fn file(name: &str) -> Option<PathBuf> {
     clean_name(name.trim_end_matches(".luau")).map(|n| dir().join(format!("{n}.luau")))
 }
 
-/// What a script's head says: its first `---` line, and its `--@input` lines.
 pub fn head(src: &str) -> (String, Vec<String>) {
     let mut about = String::new();
     let mut inputs = Vec::new();
@@ -52,7 +32,6 @@ pub fn head(src: &str) -> (String, Vec<String>) {
     (about, inputs)
 }
 
-/// `browser_scripts`: name, what it does, what it takes.
 pub fn list() -> Result<Vec<Value>, String> {
     let mut names: Vec<PathBuf> = std::fs::read_dir(dir())
         .map(|r| r.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "luau")).collect())
@@ -74,7 +53,6 @@ pub fn list() -> Result<Vec<Value>, String> {
     Ok(text(out))
 }
 
-/// `browser_script_run`: the script's return value as JSON, after one line per call it made.
 pub fn run_script(sh: &Arc<Shared>, who: &Who, args: &Value) -> Result<Vec<Value>, String> {
     let name = args["name"].as_str().unwrap_or("");
     let path = file(name).ok_or("give the script's name (browser_scripts lists them)")?;
@@ -97,7 +75,6 @@ pub fn run_script(sh: &Arc<Shared>, who: &Who, args: &Value) -> Result<Vec<Value
     }
 }
 
-/// One run: a fresh, sandboxed VM, the `lumen` table, the input, the source.
 fn execute(sh: &Arc<Shared>, who: &Who, src: &str, name: &str, input: &Value, calls: &Rc<RefCell<Vec<Done>>>) -> Result<Value, String> {
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH | StdLib::BIT | StdLib::BUFFER, LuaOptions::default())
         .map_err(|e| e.to_string())?;
@@ -111,19 +88,14 @@ fn execute(sh: &Arc<Shared>, who: &Who, src: &str, name: &str, input: &Value, ca
     });
     let g = lua.globals();
     let e = |e: mlua::Error| e.to_string();
-    // What Luau's base library has that a script must not: code from strings, other files,
-    // reaching into environments.
     for gone in ["loadstring", "require", "getfenv", "setfenv", "collectgarbage", "load", "dofile"] {
         g.set(gone, LuaValue::Nil).map_err(e)?;
     }
     let lumen = lua.create_table().map_err(e)?;
 
-    // lumen.call(tool, args): the tool's answer as text; a refusal or failure is a Lua error.
     let call_fn = tool_fn(&lua, sh, who, calls, deadline, true).map_err(e)?;
     lumen.set("call", call_fn).map_err(e)?;
-    // lumen.try(tool, args): ok, text. For when a failure is part of the plan.
     lumen.set("try", tool_fn(&lua, sh, who, calls, deadline, false).map_err(e)?).map_err(e)?;
-    // lumen.open(url): the new tab's id, and its answer.
     let open = lua
         .create_function(|lua, url: String| {
             let call: Function = lua.globals().get::<mlua::Table>("lumen")?.get("call")?;
@@ -135,7 +107,6 @@ fn execute(sh: &Arc<Shared>, who: &Who, src: &str, name: &str, input: &Value, ca
         })
         .map_err(e)?;
     lumen.set("open", open).map_err(e)?;
-    // lumen.ref(snapshot, word, ...): the ref of the first control line with every word.
     let find_ref = lua
         .create_function(|_, (snap, words): (String, mlua::Variadic<String>)| {
             Ok(snap.lines().filter(|l| l.contains("[ref=") && words.iter().all(|w| l.contains(w.as_str()))).find_map(|l| {
@@ -145,7 +116,6 @@ fn execute(sh: &Arc<Shared>, who: &Who, src: &str, name: &str, input: &Value, ca
         })
         .map_err(e)?;
     lumen.set("ref", find_ref).map_err(e)?;
-    // lumen.log(...): lines that come back with the answer, under the calls.
     let log = calls.clone();
     let log_fn = lua
         .create_function(move |_, parts: MultiValue| {
@@ -155,7 +125,6 @@ fn execute(sh: &Arc<Shared>, who: &Who, src: &str, name: &str, input: &Value, ca
         })
         .map_err(e)?;
     lumen.set("log", log_fn).map_err(e)?;
-    // lumen.sleep(ms): at most 5 s at a time, and never past the deadline.
     let sleep = lua
         .create_function(move |_, ms: u64| {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -189,13 +158,11 @@ fn execute(sh: &Arc<Shared>, who: &Who, src: &str, name: &str, input: &Value, ca
     g.set("lumen", lumen).map_err(e)?;
     let none = json!({});
     g.set("input", lua.to_value(if input.is_null() { &none } else { input }).map_err(e)?).map_err(e)?;
-    // Globals read-only from here, and the script's own in a table of its own.
     lua.sandbox(true).map_err(e)?;
     let out: LuaValue = lua.load(src).set_name(format!("={name}")).eval().map_err(|e| script_error(&e))?;
     lua.from_value::<Value>(out).map_err(|e| format!("its answer is not JSON: {e}"))
 }
 
-/// `lumen.call` (`raise`: an error is a Lua error) or `lumen.try` (an error is `false, text`).
 fn tool_fn(lua: &Lua, sh: &Arc<Shared>, who: &Who, calls: &Rc<RefCell<Vec<Done>>>, deadline: Instant, raise: bool) -> mlua::Result<Function> {
     let (sh, who, calls) = (sh.clone(), who.clone(), calls.clone());
     lua.create_function(move |lua, (tool, args): (String, Option<LuaValue>)| {
@@ -203,7 +170,6 @@ fn tool_fn(lua: &Lua, sh: &Arc<Shared>, who: &Who, calls: &Rc<RefCell<Vec<Done>>
             Some(a) => lua.from_value(a)?,
             None => json!({}),
         };
-        // An empty Lua table reads as a list: arguments are always an object.
         let args = if args.as_object().is_some() { args } else { json!({}) };
         let n = calls.borrow().iter().filter(|d| !d.tool.starts_with("log: ")).count();
         let d = if n >= MAX_CALLS {
@@ -227,7 +193,6 @@ fn tool_fn(lua: &Lua, sh: &Arc<Shared>, who: &Who, calls: &Rc<RefCell<Vec<Done>>
     })
 }
 
-/// A script's error as one line with its line number: `links:12: attempt to index nil`.
 fn script_error(e: &mlua::Error) -> String {
     let s = match e {
         mlua::Error::CallbackError { cause, .. } => return script_error(cause),
@@ -242,7 +207,6 @@ fn script_error(e: &mlua::Error) -> String {
 mod tests {
     use super::*;
 
-    /// A VM like a run's, with no browser behind it: what the sandbox lets through.
     fn bare(src: &str) -> Result<Value, String> {
         let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH | StdLib::BIT | StdLib::BUFFER, LuaOptions::default()).unwrap();
         let _ = lua.set_memory_limit(MEMORY);

@@ -1,23 +1,16 @@
-//! The secret downloads: files the person moved out of their Downloads folder into a hidden
-//! folder of Lumen's, listed only after Windows Hello.
-//!
-//! Hidden, not encrypted. It keeps a file out of the Downloads folder, out of Lumen's lists
-//! and out of sight of someone using Lumen; anyone signed in to Windows as the person can
-//! still find the folder. The page says so.
+//! The secret downloads.
 
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
-/// One file in the secret folder.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SecretFile {
     pub name: String,
     pub size: u64,
 }
 
-/// The folder, made and marked hidden the first time it is wanted.
 pub fn dir() -> PathBuf {
     folder(&crate::store::data_dir())
 }
@@ -31,7 +24,6 @@ fn folder(data: &Path) -> PathBuf {
     d
 }
 
-/// Mark the folder hidden, so it does not sit in plain view in Lumen's data.
 fn hide(p: &Path) {
     use windows::{
         Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW},
@@ -42,18 +34,15 @@ fn hide(p: &Path) {
     }
 }
 
-/// Move a file in. A name already there gets " (2)", " (3)" before its extension.
 pub fn move_in(file: &Path) -> std::io::Result<PathBuf> {
     move_into(file, &dir())
 }
 
-/// Move a file back out, into the Downloads folder, under a name nothing there has.
 pub fn move_out(name: &str) -> std::io::Result<PathBuf> {
     let from = dir().join(plain(name)?);
     move_into(&from, &crate::store::download_dir())
 }
 
-/// The secret folder's files, by name.
 pub fn list() -> Vec<SecretFile> {
     list_in(&dir())
 }
@@ -71,12 +60,10 @@ fn list_in(d: &Path) -> Vec<SecretFile> {
     v
 }
 
-/// The path of a file in the folder, for opening it.
 pub fn path_of(name: &str) -> std::io::Result<PathBuf> {
     Ok(dir().join(plain(name)?))
 }
 
-/// A bare file name, never a path: what comes back from the page may not climb out.
 fn plain(name: &str) -> std::io::Result<&str> {
     let ok = !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':']);
     if ok { Ok(name) } else { Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file name")) }
@@ -85,7 +72,6 @@ fn plain(name: &str) -> std::io::Result<&str> {
 fn move_into(file: &Path, to: &Path) -> std::io::Result<PathBuf> {
     let name = file.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
     let dest = free_name(to, &name.to_string_lossy());
-    // Another drive: a rename cannot cross it, so copy, then remove the original.
     if fs::rename(file, &dest).is_err() {
         fs::copy(file, &dest)?;
         fs::remove_file(file)?;
@@ -93,7 +79,6 @@ fn move_into(file: &Path, to: &Path) -> std::io::Result<PathBuf> {
     Ok(dest)
 }
 
-/// `name` in `dir`, or "name (2).ext" and on, whichever is free.
 fn free_name(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
@@ -131,7 +116,6 @@ mod tests {
         let inside = move_into(&f, &secret).unwrap();
         assert!(!f.exists() && inside.exists());
         assert_eq!(list_in(&secret), vec![SecretFile { name: "report.pdf".into(), size: 3 }]);
-        // The same name already in Downloads: the file comes back beside it, not over it.
         fs::write(&f, b"new").unwrap();
         let back = move_into(&inside, &downloads).unwrap();
         assert_eq!(back.file_name().unwrap(), "report (2).pdf");

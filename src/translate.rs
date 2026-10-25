@@ -1,16 +1,4 @@
 //! Offline page translation: Mozilla's Bergamot, Marian NMT compiled to WebAssembly.
-//!
-//! Nothing leaves the machine. The engine is bundled (MPL-2.0, assets/bergamot/)
-//! and written under data_dir()/bergamot/ on first use; the model for a language
-//! pair is fetched once from Mozilla's model bucket into data_dir()/models/<pair>/
-//! and checked against the SHA-256 the registry publishes.
-//!
-//! The wasm does not run in the page being read: a page's own CSP may forbid
-//! workers and WebAssembly, and its text would have to be handed over anyway.
-//! A hidden WebView2 of Lumen's own does the work instead. It loads Lumen's page
-//! over a host name nothing resolves, mapped to data_dir(), so the engine and the
-//! model files are read from disk; it is dropped as soon as the texts come back,
-//! which takes the worker and its model memory with it.
 
 use std::{
     fs,
@@ -28,35 +16,22 @@ use wry::{Rect, WebView, WebViewExtWindows};
 
 use crate::engine::{Ctx, Ev};
 
-/// The Bergamot engine, as Firefox Translations 1.3.4 ships it (bergamot-translator
-/// v0.4.4, MPL-2.0, assets/bergamot/LICENSE). Both files are pinned here; a change
-/// in the assets folder is caught by `bundled_engine_matches_its_pins`.
 const GLUE: &str = include_str!("../assets/bergamot/bergamot-translator-worker.js");
 const WASM: &[u8] = include_bytes!("../assets/bergamot/bergamot-translator-worker.wasm");
 const GLUE_SHA256: &str = "8dbe289945fc7f175d48385bc7cdef7122ef6073e77c4355d8cd724da365834c";
 const WASM_SHA256: &str = "dad40ec05e6e26f6df56aa37f0d3a208adcd5d35d3347e0f9a8a267c89d4f947";
 
-/// Where the registry says the models are. HTTPS, and every file is checked
-/// against the registry before it is kept.
 const MODELS_ROOT: &str = "https://storage.googleapis.com/bergamot-models-sandbox/0.3.4";
-/// The host name data_dir() answers on inside the translator page. ".invalid" is
-/// reserved and never resolves, so a failed mapping cannot reach a real server.
 const HOST: &str = "lumen-data.invalid";
-/// The biggest model in the registry is 17 MB. Twice that is not a model.
 const MAX_FETCH: u64 = 64 << 20;
-/// One pair's model download, from a connection that may be slow.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// One file of a language pair, as Firefox Translations' registry lists it.
 pub struct M {
     pub name: &'static str,
     pub bytes: u64,
     pub sha256: &'static str,
 }
 
-/// A language pair Lumen can translate: `src` into `dst`, two-letter codes, and the
-/// three files a Bergamot model is. Names, sizes and hashes are from the registry
-/// (model/modelRegistry.js of the shipped add-on, MPL-2.0).
 pub struct P {
     pub src: &'static str,
     pub dst: &'static str,
@@ -64,14 +39,11 @@ pub struct P {
 }
 
 impl P {
-    /// The pair's name the way the registry and the engine call it: "esen".
     pub fn name(&self) -> String {
         format!("{}{}", self.src, self.dst)
     }
 }
 
-/// Every pair the registry carries with English on one side. Generated from
-/// modelRegistry.js; the pairs the registry has no complete entry for are left out.
 const PAIRS: &[P] = &[
     P { src: "bg", dst: "en", files: [
         M { name: "model.bgen.intgemm.alphas.bin", bytes: 17140899, sha256: "71900847a98cf66bd1d05eaafc23a794c8c1285fb3f0e2ecd2849e6f81c79d53" },
@@ -215,15 +187,10 @@ const PAIRS: &[P] = &[
     ] },
 ];
 
-/// The pair for `src` read as `dst`, if Lumen carries it.
 pub fn pair(src: &str, dst: &str) -> Option<&'static P> {
     PAIRS.iter().find(|p| p.src == src && p.dst == dst)
 }
 
-/// What "Translate pages into" can be set to, as (code, English name): English, plus
-/// every language the registry has a pair from English into. The registry knows a few
-/// languages only as a source (Catalan, Icelandic, Norwegian) — a Norwegian page reads
-/// in English, but there is no English page read in Norwegian — so they are not here.
 pub const TARGETS: &[(&str, &str)] = &[
     ("en", "English"),
     ("bg", "Bulgarian"),
@@ -240,8 +207,6 @@ pub const TARGETS: &[(&str, &str)] = &[
     ("ru", "Russian"),
 ];
 
-/// The two-letter code in a lang attribute: "es-419", "EN_us" and "en" are
-/// "es", "en", "en". Empty when there is nothing to read.
 pub fn lang_code(raw: &str) -> String {
     raw.trim()
         .to_ascii_lowercase()
@@ -253,8 +218,6 @@ pub fn lang_code(raw: &str) -> String {
         .collect()
 }
 
-/// What language the page is in. A page that does not say gets the person's own
-/// Windows language: there is no text detector here, and that is the honest guess.
 pub fn page_lang(html_lang: &str) -> String {
     let said = lang_code(html_lang);
     if said.chars().count() == 2 {
@@ -264,7 +227,6 @@ pub fn page_lang(html_lang: &str) -> String {
     }
 }
 
-/// The Windows user interface language, from kernel32. Empty when it cannot be had.
 fn system_lang() -> String {
     use windows::core::{PCSTR, w};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -281,20 +243,14 @@ fn system_lang() -> String {
     }
 }
 
-/// The folder the translator page is served from: data_dir()/bergamot.
 pub fn folder() -> PathBuf {
     crate::store::data_dir().join("bergamot")
 }
 
-/// Where a pair's model files live: data_dir()/models/<pair>.
 pub fn model_dir(p: &P) -> PathBuf {
     crate::store::data_dir().join("models").join(p.name())
 }
 
-/// Put the engine and Lumen's own scripts under data_dir()/bergamot/. The two
-/// bundled files are checked against their pins and rewritten when they differ;
-/// Lumen's own three change with the build and are always written. True when the
-/// folder is ready to serve.
 pub fn install() -> bool {
     let dir = folder();
     if fs::create_dir_all(&dir).is_err() {
@@ -311,8 +267,6 @@ pub fn install() -> bool {
         && fs::write(dir.join("index.html"), PAGE).is_ok()
 }
 
-/// Write `bytes` unless the file already holds exactly them. tmp + rename, so a
-/// crash never leaves half an engine behind.
 fn put(path: &Path, bytes: &[u8], sha: &str) -> bool {
     if fs::read(path).is_ok_and(|old| hex(&old) == sha) {
         return true;
@@ -330,18 +284,12 @@ fn hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Every file of this pair is on disk and hashes right. The UI does not ask: the
-/// fetch step already skips what is there, and hashing 20 MB on the UI thread to
-/// find that out is the one thing it must not do.
 #[allow(dead_code)]
 pub fn ready(p: &P) -> bool {
     let dir = model_dir(p);
     p.files.iter().all(|f| fs::read(dir.join(f.name)).is_ok_and(|b| hex(&b) == f.sha256))
 }
 
-/// Fetch whatever of the pair is missing or wrong, checking each file against the
-/// registry before it is kept. Blocks: run it on its own thread. The first use of a
-/// pair costs 15-25 MB of download.
 pub fn fetch(p: &'static P) -> Result<(), String> {
     let dir = model_dir(p);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -352,15 +300,12 @@ pub fn fetch(p: &'static P) -> Result<(), String> {
         }
         let url = format!("{MODELS_ROOT}/{}/{name}", p.name(), name = f.name);
         fetch_verified(&url, &path, f).inspect_err(|_| {
-            // A file that did not check out is not left where it could be used.
             let _ = fs::remove_file(&path);
         })?;
     }
     Ok(())
 }
 
-/// One model file: streamed to a .part beside it, hashed on the way, kept only when
-/// its size and SHA-256 are the registry's. Returns the bytes read.
 fn fetch_verified(url: &str, dest: &Path, f: &M) -> Result<u64, String> {
     let part = dest.with_extension("part");
     let _ = fs::remove_file(&part);
@@ -393,18 +338,11 @@ fn stream_to(url: &str, to: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
-/// The hidden page that runs the wasm for one translation. Dropping it takes the
-/// worker, its model memory and a whole renderer process with it, which is what
-/// "tear the worker down after" means here.
 pub struct Page {
     view: WebView,
 }
 
 impl Page {
-    /// Open the translator page for a pair. It reads the engine and the model files
-    /// off the disk, so the caller waits for it to say "ready" (`Ev::TrMsg`, once the
-    /// model is up) before handing it text. None when there is no page of Lumen's own
-    /// to build it from, or the folder cannot be served.
     pub fn open(ctx: &Rc<Ctx>, p: &'static P) -> Option<Page> {
         if !install() {
             eprintln!("lumen: translation: could not write {}", folder().display());
@@ -415,9 +353,6 @@ impl Page {
             size: LogicalSize::new(480.0, 360.0).into(),
         };
         let view = crate::engine::build_hidden(ctx, bounds)?;
-        // The page reads the engine and the models off the disk through a host name
-        // mapped to data_dir(). DENY: only pages of that host may look. The mapping
-        // has to be in place before the navigation, or the page never arrives.
         let mapped = unsafe {
             view.webview()
                 .cast::<ICoreWebView2_3>()
@@ -450,15 +385,12 @@ impl Page {
                 &mut token,
             );
         }
-        // The pair and its file names travel in the query string: the page has
-        // everything it needs to fetch the model before it says a word.
         let name = p.name();
         let url = format!(
             "https://{HOST}/bergamot/index.html?dir=%2Fmodels%2F{name}%2F&model={}&lex={}&vocab={}&precision={}",
             p.files[0].name,
             p.files[1].name,
             p.files[2].name,
-            // The registry's own rule: the "intgemm8" models want the other kernel.
             if p.files[0].name.ends_with("intgemm8.bin") { "int8shiftAll" } else { "int8shiftAlphaAll" },
         );
         if view.load_url(&url).is_err() {
@@ -468,26 +400,17 @@ impl Page {
         Some(Page { view })
     }
 
-    /// Hand the page a JSON array of texts. It answers with `Ev::TrMsg` progress
-    /// and then the translations, in the same order.
     pub fn run(&self, texts_json: &str) {
         let _ = self.view.evaluate_script(&format!("window.lumenTranslate({texts_json})"));
     }
 }
 
-/// What a page does with F8: the text it will translate, and the way back.
 pub const COLLECT: &str = COLLECT_JS;
-/// Put the translations in, in the order they were collected.
 pub fn apply(texts_json: &str) -> String {
     format!("window.__lumenTrApply({texts_json})")
 }
-/// Back to the page as it was.
 pub const RESTORE: &str = "try{window.__lumenTrRestore&&window.__lumenTrRestore()}catch(e){}";
 
-/// Runs in the page being read. Collects the text nodes worth translating and
-/// leaves behind what it takes to put them back: the originals, and the whitespace
-/// around each one, which is what keeps inline markup from running together.
-/// Scripts, code, form controls and anything marked translate="no" are left alone.
 const COLLECT_JS: &str = r##"(()=>{try{
 if(window.__lumenTr&&window.__lumenTr.nodes&&window.__lumenTr.nodes.length)
   return {lang:window.__lumenTr.lang,texts:window.__lumenTr.texts,again:1};
@@ -534,9 +457,6 @@ window.__lumenTrRestore=()=>{
 return {lang:lang,texts:texts};
 }catch(e){return {lang:'',texts:[],err:String(e)}}})()"##;
 
-/// The worker behind the translator page: Mozilla's glue, the bundled wasm and the
-/// model files, driven the way Firefox Translations itself drives them. Batches
-/// keep one huge call from taking minutes without a word to the page.
 const WORKER: &str = r##"// Lumen's Bergamot worker. The glue comes in with importScripts, the wasm and the
 // model files are fetched over Lumen's own host name, and the model is handed to
 // the engine as aligned wasm memory.
@@ -626,14 +546,10 @@ onmessage=async e=>{
 };
 "##;
 
-/// The page itself. Nothing but the driver; there is no markup to show.
 const PAGE: &str = r##"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>Lumen translate</title></head><body><script src="lumen-translate.js"></script></body></html>
 "##;
 
-/// The translator page's own script: the host's one call, and the worker's
-/// messages on the way back to it. Where the model files are came in the query
-/// string, so nothing has to be said before the engine is up.
 const DRIVER: &str = r##"// Lumen's translator page. The host hands it text with window.lumenTranslate(texts)
 // once it says it is ready; nothing here talks to the network on its own.
 const W=window.chrome&&window.chrome.webview;
@@ -671,12 +587,10 @@ boot();
 mod tests {
     use super::*;
 
-    /// The bundled engine is the one the pins describe. A swapped file fails here.
     #[test]
     fn bundled_engine_matches_its_pins() {
         assert_eq!(hex(GLUE.as_bytes()), GLUE_SHA256);
         assert_eq!(hex(WASM), WASM_SHA256);
-        // Whatever the registry says a file is, it is a file we can name.
         assert!(WASM.len() as u64 > 1_000_000);
     }
 
@@ -693,20 +607,15 @@ mod tests {
                 assert!(f.sha256.chars().all(|c| c.is_ascii_hexdigit()));
                 assert!(f.bytes > 100_000, "{} is not a model file", f.name);
             }
-            // Model, shortlist, vocabulary: the worker's load config is in this order.
             assert!(p.files[0].name.starts_with("model.") && p.files[0].name.ends_with(".bin"), "{}", p.files[0].name);
             assert!(p.files[1].name.starts_with("lex."), "{}", p.files[1].name);
             assert!(p.files[2].name.starts_with("vocab."), "{}", p.files[2].name);
-            // No pair twice.
             assert!(PAIRS.iter().filter(|q| q.name() == p.name()).count() == 1);
         }
-        // The pair the tests translate with is really there.
         let p = pair("es", "en").expect("spanish to english");
         assert_eq!(p.files[0].name, "model.esen.intgemm.alphas.bin");
     }
 
-    /// The settings offer exactly what can really be a target: English and whatever
-    /// the registry has a pair from English into, and nothing else.
     #[test]
     fn every_offered_target_has_a_pair() {
         assert_eq!(TARGETS[0].0, "en", "English is the default and comes first");
@@ -730,7 +639,6 @@ mod tests {
         assert_eq!(lang_code(" fr "), "fr");
         assert_eq!(lang_code("nonsense"), "no");
         assert_eq!(lang_code(""), "");
-        // A page that says nothing gets the system language, whatever that is.
         let guess = page_lang("");
         assert!(guess.is_empty() || guess.chars().count() == 2);
         assert_eq!(page_lang("de-DE"), "de");
@@ -746,7 +654,6 @@ mod tests {
         assert!(PAGE.contains("lumen-translate.js"));
     }
 
-    /// A pair's files go under data_dir()/models/<pair>/, where the page finds them.
     #[test]
     fn model_files_live_under_the_pair_folder() {
         let p = pair("fr", "en").expect("french to english");

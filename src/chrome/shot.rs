@@ -1,10 +1,4 @@
 //! Debug builds only: save what the chrome draws as a PNG, and seed it with sample data.
-//!
-//! `LUMEN_TEST_SHOT=<dir>` writes `<dir>/<name>.png` about 600 ms after the last paint
-//! that left nothing moving. `LUMEN_TEST_NAME` names the file (default: the open panel,
-//! or "chrome"). `LUMEN_TEST_CROP=x,y,w,h` (DIPs) cuts out the part worth looking at.
-//! `LUMEN_TEST_FAKE=tabs,dl,hist` adds sample tabs, downloads and history rows so the
-//! pages can be judged full as well as empty. None of this exists in a release build.
 
 use std::{
     path::PathBuf,
@@ -26,9 +20,6 @@ fn fake_has(what: &str) -> bool {
     std::env::var("LUMEN_TEST_FAKE").is_ok_and(|v| v.split(',').any(|x| x.trim() == what))
 }
 
-/// A count in the fake data: `LUMEN_TEST_FAKE=tabs:8` asks for eight plain tabs,
-/// `pins:3` for three pinned ones. A layout can then be looked at with a known
-/// number of tabs in it.
 fn fake_count(what: &str) -> Option<usize> {
     let v = std::env::var("LUMEN_TEST_FAKE").ok()?;
     v.split(',')
@@ -37,13 +28,10 @@ fn fake_count(what: &str) -> Option<usize> {
         .and_then(|(_, n)| n.trim().parse().ok())
 }
 
-/// After a real paint: if nothing is moving, arm the one-shot timer. Every paint resets it,
-/// so the file always holds the last settled frame.
 pub fn after_paint(i: &Inner) {
     if dir().is_none() {
         return;
     }
-    // Armed once, not reset by every paint: a spinner paints every 33 ms and would starve it.
     if i.animating || ARMED.swap(true, Ordering::Relaxed) {
         return;
     }
@@ -88,15 +76,11 @@ pub fn capture(i: &mut Inner) {
     eprintln!("lumen: shot {name} {w}x{h} dpi {} ok={ok}", i.gfx.dpi);
 }
 
-/// The name the next shot should carry, set by a `shot` script step.
 static NEXT_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// WM_APP + 1: a script step asks the chrome for a shot of what it shows now (after a short wait).
 pub const WM_SHOT: u32 = 0x8001;
-/// WM_APP + 2: a script step puts the pointer at a point and leaves it there.
 pub const WM_HOVER: u32 = 0x8002;
 
-/// A script step wants a shot: remember its name and arm the timer.
 pub fn requested(i: &Inner) {
     unsafe {
         ARMED.store(true, Ordering::Relaxed);
@@ -104,11 +88,6 @@ pub fn requested(i: &Inner) {
     }
 }
 
-/// `LUMEN_TEST_SCRIPT="1500 key sidebar;2500 shot compact;3000 click 40 300;3500 wheel 800 400 -120"`:
-/// steps at milliseconds after start, run on a thread, delivered the way a person's input is
-/// (messages to the main loop or to the chrome window). So the paths under test are the real ones.
-/// Steps: `key <action>`, `ui <json>`, `shot <name>`, `move x y`, `click x y`, `rclick x y`,
-/// `wheel x y delta`, `vk <code>` (x, y in chrome pixels).
 pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: windows::Win32::Foundation::HWND) {
     use crate::engine::{Action, Ev};
     use windows::Win32::{
@@ -163,8 +142,6 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         let _ = PostMessageW(Some(hwnd), WM_SHOT, WPARAM(0), LPARAM(0));
                     }
                     "hover" => {
-                        // A mouse move that stays: the real one asks Windows to say when the
-                        // pointer leaves, and a pointer that is not really there leaves at once.
                         let (x, y) = xy(&args);
                         let _ = PostMessageW(Some(hwnd), WM_HOVER, WPARAM(0), LPARAM((y << 16) | (x & 0xffff)));
                     }
@@ -191,8 +168,6 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         let _ = PostMessageW(Some(hwnd), WM_MOUSEWHEEL, WPARAM(((delta & 0xffff) << 16) as usize), lp);
                     }
                     "evk" => {
-                        // A key into an edit box by its id, as typing there would:
-                        // "evk 9" is the address bar (101), "evk 110 9" the first form box.
                         let (id, vk) = match args.len() {
                             1 => (101, args[0].parse().unwrap_or(0)),
                             _ => (args[0].parse().unwrap_or(101), args.get(1).and_then(|v| v.parse().ok()).unwrap_or(0)),
@@ -202,13 +177,9 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         }
                     }
                     "killfocus" => {
-                        // The keyboard left the app, as Alt-Tab takes it: a menu must close.
                         let _ = PostMessageW(Some(hwnd), WM_KILLFOCUS, WPARAM(0), LPARAM(0));
                     }
                     "focus" => {
-                        // Say which window has the keyboard: proof that Tab walked the form.
-                        // The chrome's own thread, not the foreground one: a headless run
-                        // is nobody's foreground.
                         let tid = GetWindowThreadProcessId(hwnd, None);
                         let mut info = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
                         if GetGUIThreadInfo(tid, &mut info).is_ok() {
@@ -217,7 +188,6 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         }
                     }
                     "drag" => {
-                        // Press at (x1, y1), walk to (x2, y2) in a few steps, let go there.
                         let n: Vec<isize> = args.iter().filter_map(|v| v.parse().ok()).collect();
                         if n.len() == 4 {
                             let at = |x: isize, y: isize| LPARAM((y << 16) | (x & 0xffff));
@@ -233,13 +203,11 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         }
                     }
                     "bmq" => {
-                        // Words into the Bookmarks search box (ID 103), as typing there would.
                         if let Ok(edit) = GetDlgItem(Some(hwnd), 103) {
                             let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(rest.trim()));
                         }
                     }
                     "etext" => {
-                        // Words into any edit box by its ID, as typing there would: "etext 101 rust".
                         let (id, words) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
                         if let Some(id) = id.parse::<i32>().ok()
                             && let Ok(edit) = GetDlgItem(Some(hwnd), id)
@@ -248,8 +216,6 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         }
                     }
                     "ekey" => {
-                        // A key into an edit box by its ID: "ekey 102 13" is Enter in the start
-                        // page's box.
                         let id: i32 = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                         let vk: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
                         if let Ok(edit) = GetDlgItem(Some(hwnd), id) {
@@ -257,8 +223,6 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         }
                     }
                     "etype" => {
-                        // Letters into an edit box by its ID, one keypress each, as typing
-                        // there would: "etype 101 yout".
                         let (id, words) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
                         if let Some(id) = id.parse::<i32>().ok()
                             && let Ok(edit) = GetDlgItem(Some(hwnd), id)
@@ -269,7 +233,6 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         }
                     }
                     "setq" => {
-                        // Words into the Settings search box (ID 107).
                         if let Ok(edit) = GetDlgItem(Some(hwnd), 107) {
                             let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(rest.trim()));
                         }
@@ -279,7 +242,6 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
                         let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(vk), LPARAM(0));
                     }
                     "char" => {
-                        // A character to the chrome window, as typing would send it.
                         let ch: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                         let _ = PostMessageW(Some(hwnd), WM_CHAR, WPARAM(ch), LPARAM(0));
                     }
@@ -290,14 +252,11 @@ pub fn script(proxy: tao::event_loop::EventLoopProxy<crate::engine::Ev>, hwnd: w
     });
 }
 
-/// What the sample tabs cost, so a shot shows the tab rows' memory: one light, one heavy,
-/// one past a gigabyte.
 pub fn fake_mem() -> Vec<(u64, u64)> {
     const MB: u64 = 1024 * 1024;
     if fake_has("tabs") { vec![(9004, 212 * MB), (9006, 640 * MB), (9012, 1400 * MB), (9010, 88 * MB)] } else { Vec::new() }
 }
 
-/// Sample data, appended to what the browser really has.
 pub fn fake(s: &mut UiState) {
     let t = |id: u64, title: &str, url: &str| UiTab {
         id,
@@ -326,25 +285,21 @@ pub fn fake(s: &mut UiState) {
         owner: String::new(),
         owner_name: String::new(),
     };
-    // A known number of plain tabs, for a layout that has to hold them.
     if let Some(n) = fake_count("tabs") {
         for i in 0..n {
             s.tabs.push(t(9500 + i as u64, &format!("Tab {}", i + 1), &format!("https://site{}.example/", i + 1)));
         }
     }
-    // A known number of essentials: the sites kept open in every workspace.
     if let Some(n) = fake_count("essentials") {
         for i in 0..n {
             s.essentials.push(UiEssential { url: format!("https://site{}.example/", i + 1), title: format!("Site {}", i + 1), away: false, tab: 0 });
         }
     }
-    // And a known number of pinned ones.
     if let Some(n) = fake_count("pins") {
         for i in 0..n {
             s.tabs.push(UiTab { pinned: true, ..t(9600 + i as u64, &format!("Pin {}", i + 1), &format!("https://pin{}.example/", i + 1)) });
         }
     }
-    // Pins that wandered from the page they were made on.
     if let Some(n) = fake_count("pinaway") {
         for i in 0..n {
             s.tabs.push(UiTab { pinned: true, pin_away: true, ..t(9700 + i as u64, &format!("Away {}", i + 1), &format!("https://elsewhere{}.example/", i + 1)) });
@@ -368,13 +323,11 @@ pub fn fake(s: &mut UiState) {
             UiTab { split: true, translated: true, ..t(9022, "Split right page", "https://split.example.com/right") },
         ];
         s.tabs.append(&mut v);
-        // The Lo-fi tab has sound: the footer's now-playing card follows it.
         s.media = Some(9006);
     }
     if fake_has("battery") {
         s.battery = true;
     }
-    // A locked tab: its row says nothing, and its card is where the page would be.
     if fake_has("lock") {
         if let Some(t) = s.tabs.iter_mut().find(|t| t.id == 9004) {
             t.locked = true;
@@ -383,7 +336,6 @@ pub fn fake(s: &mut UiState) {
         s.lock = Some(super::UiLock { app: false, hello: Some(true), note: String::new() });
         s.full = true;
     }
-    // The secret downloads, opened.
     if fake_has("secret") {
         s.secret_open = true;
         s.secret = vec![
@@ -391,14 +343,11 @@ pub fn fake(s: &mut UiState) {
             super::UiSecret { name: "passport-scan.jpg".into(), size: 3_210_000 },
         ];
     }
-    // Lumen's own lock, over the whole window.
     if fake_has("applock") {
         s.lock = Some(super::UiLock { app: true, hello: Some(true), note: "Not unlocked. Try again when you are ready.".into() });
         s.full = true;
     }
     if fake_has("page") {
-        // The active tab is a secure, bookmarked page: lock, star and the offer chips show.
-        // The blocker has caught a few things on it, for the site menu's count.
         s.blocked = 23;
         let id = s.active;
         if let Some(t) = s.tabs.iter_mut().find(|t| t.id == id) {
@@ -453,16 +402,12 @@ pub fn fake(s: &mut UiState) {
         s.handoff = Some(("claude-code".into(), "Log in to the shop with your account, then press Done and I carry on.".into()));
     }
     if fake_has("cardcolor") && s.settings.recent_colors.is_empty() {
-        // A few colours picked before, so the recents row is full. Only once: the
-        // real list, as the picker updates it, must not be overwritten on a state push.
         s.settings.recent_colors = vec!["#2f6bff".into(), "#13a36b".into(), "#f0a070".into(), "#5a43e6".into(), "#c4241c".into(), "#3c6e71".into()];
     }
     if fake_has("prompt") {
         s.prompt = Some((1, "https://meet.example.com".into(), "camera"));
     }
     if fake_has("redirect") || fake_has("popup") {
-        // The note over a page, for its two looks. `full` is off so the bar is
-        // drawn at all: a shot has no page under it.
         let redirect = fake_has("redirect");
         s.tabs.push(t(9800, "A story", "https://news.example.com/story"));
         s.active = 9800;
@@ -483,7 +428,6 @@ pub fn fake(s: &mut UiState) {
         s.zooms = vec![("doc.rust-lang.org".into(), 125), ("news.ycombinator.com".into(), 110)];
     }
     if let Some(mb) = fake_count("mem") {
-        // A given load, in megabytes: "mem:1500" is 1.5 GB.
         s.mem = Some((mb as u64 * 1024 * 1024, 9));
         s.settings.show_memory = true;
     } else if fake_has("mem") {
@@ -528,8 +472,6 @@ pub fn fake(s: &mut UiState) {
             v("https://example.org/", "", "Yesterday", "09:00"),
         ]);
     }
-    // Only while the page has nothing: after a real reset the numbers must be the
-    // real, empty ones.
     if fake_has("report") && s.report.as_ref().is_none_or(|r| r.all.blocked() == 0) {
         use crate::privacy_stats::{Bar, Counts, SiteRow, Snapshot};
         let day = |n: u64, blocked: u64, bytes: u64| Bar { day: format!("2026-10-{n:02}"), blocked, bytes };

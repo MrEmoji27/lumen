@@ -1,6 +1,4 @@
-//! Read aloud. Windows' own speech engine (SAPI, SpVoice), one sentence at a
-//! time, so the reader page can highlight the sentence being spoken. The audio
-//! never leaves the machine: there is no network anywhere in this file.
+//! Read aloud.
 
 use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -10,13 +8,8 @@ use windows::Win32::Media::Speech::{ISpVoice, SPRS_DONE, SPVOICESTATUS, SVSFlags
 use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx};
 use windows::core::{GUID, PCWSTR};
 
-/// How often the voice is asked whether the sentence finished.
 const POLL: Duration = Duration::from_millis(50);
 
-/// The system's speech object, by CLSID. The windows crate's Speech bindings
-/// do not carry the class id, so it is named here (CLSID_SpVoice from the SAPI
-/// headers). A wrong id is not a loud failure: CoCreateInstance says "class not
-/// registered" and every call becomes a no-op, so `aloud::live` checks it.
 const CLSID_SPVOICE: GUID = GUID::from_u128(0x96749377_3391_11D2_9EE3_00C04F797396);
 
 enum Cmd {
@@ -36,9 +29,6 @@ struct Job {
     end: Box<dyn Fn() + Send>,
 }
 
-/// The speaker thread, born on the first call. None means: no voice on this
-/// machine (no SAPI, or the build of Windows has none) — every call becomes a
-/// no-op and the chip in the sidebar just does nothing when pressed.
 fn tx() -> Option<&'static Sender<Cmd>> {
     static TX: OnceLock<Option<Sender<Cmd>>> = OnceLock::new();
     TX.get_or_init(|| {
@@ -52,8 +42,6 @@ fn tx() -> Option<&'static Sender<Cmd>> {
     .as_ref()
 }
 
-/// Start reading. `line(n)` fires as sentence `n` starts; `end` fires once the
-/// last one is done (not after Stop — the caller already knows).
 pub fn speak(sentences: Vec<String>, line: impl Fn(usize) + Send + 'static, end: impl Fn() + Send + 'static) -> bool {
     let Some(t) = tx() else { return false };
     t.send(Cmd::Play {
@@ -90,11 +78,8 @@ fn voice_loop(rx: Receiver<Cmd>) {
     let mut job: Option<Job> = None;
     let mut at = 0usize;
     let mut paused = false;
-    // The sentence in the voice has been queued; its status is worth polling.
     let mut said = false;
     loop {
-        // A command answers at once; between them, poll the voice.
-        // recv() reports a closed channel as RecvError; same meaning here.
         let cmd = if job.is_some() {
             rx.recv_timeout(POLL)
         } else {
@@ -130,7 +115,6 @@ fn voice_loop(rx: Receiver<Cmd>) {
                 }
             }
             Ok(Cmd::Stop) => {
-                // ISpVoice has no Stop: purging the queue stops the voice.
                 if let Some(v) = &voice {
                     say(v, "");
                 }
@@ -165,18 +149,12 @@ fn voice_loop(rx: Receiver<Cmd>) {
     }
 }
 
-/// Queue one sentence. Async, so the loop keeps answering commands while it
-/// speaks.
 fn say(v: &ISpVoice, text: &str) {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    // Purge whatever was queued, speak as plain text (a sentence may contain
-    // a stray "<" that SAPI would otherwise read as XML markup).
     const FLAGS: u32 = (SVSFlagsAsync.0 | SVSFPurgeBeforeSpeak.0 | SVSFIsNotXML.0) as u32;
     unsafe {
         let _ = v.Speak(PCWSTR(wide.as_ptr()), FLAGS, None);
     }
-    // SAPI queues the text, then starts the audio. Reading the status right
-    // away would say "done" before a sound came out.
     std::thread::sleep(Duration::from_millis(30));
 }
 
@@ -185,12 +163,6 @@ fn finished(v: &ISpVoice) -> bool {
     unsafe { v.GetStatus(&mut st, std::ptr::null_mut()).is_ok() && st.dwRunningState == SPRS_DONE.0 as u32 }
 }
 
-// ------------------------------------------------------------- page scripts
-
-/// Split the reader page's visible text into sentences, in the page itself.
-/// Returns [[start, end, text], …] over one flat character index across all
-/// text nodes, so Rust can speak the text and the page can find it again for
-/// the highlight.
 pub fn prep_script() -> String {
     r#"(()=>{
   const w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,{
@@ -229,8 +201,6 @@ pub fn prep_script() -> String {
         .to_string()
 }
 
-/// Highlight one sentence (or none, to wipe it) with the CSS Custom Highlight
-/// API. Degrades to nothing where the API is missing.
 pub fn highlight_script(n: Option<usize>) -> String {
     let n = n.map(|k| k as i64).unwrap_or(-1);
     format!(
@@ -280,9 +250,6 @@ mod tests {
     }
 }
 
-/// Against the machine's own engine. `cargo test -- --ignored`, and it makes
-/// no sound: it only proves the class id is a real voice and not a typo, which
-/// is otherwise a silent no-op at runtime.
 #[cfg(test)]
 mod live {
     use super::*;

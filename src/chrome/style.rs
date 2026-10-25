@@ -1,8 +1,4 @@
-//! The style every screen draws from. One `Look`, derived from the settings,
-//! carries the theme, the type scale, the spacing, the radii, the sidebar's
-//! metrics, the new tab page's knobs and the motion config. Drawing code reads
-//! it and never invents a colour, a font size, a radius or a spacing step
-//! itself: changing a setting changes what every page draws, live.
+//! The style every screen draws from.
 
 use super::{
     gfx::{Face, Font},
@@ -12,7 +8,6 @@ use super::{
 };
 use crate::store::Settings;
 
-/// The tab row's close button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CloseBtn {
     Hover,
@@ -20,7 +15,6 @@ pub enum CloseBtn {
     Off,
 }
 
-/// The date line under the clock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DateFmt {
     Off,
@@ -29,53 +23,36 @@ pub enum DateFmt {
     Iso,
 }
 
-/// What the new tab page's background is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NtpBg {
     Plain,
     Wallpaper,
 }
 
-/// Everything drawing reads. Cheap to build (once per state push) and cheap to
-/// copy around inside a frame.
 #[derive(Clone, Debug)]
 pub struct Look {
     pub theme: Theme,
-    /// The layout: where the chrome lives.
     pub kind: Kind,
-    /// The bookmarks bar under the toolbar (horizontal layout).
     pub bm_bar: bool,
-    /// The sidebar is folded to icons (Ctrl+B).
     pub compact: bool,
 
-    // Spacing, scaled by the density setting.
     pub s1: f32,
     pub s2: f32,
     pub s3: f32,
     pub s4: f32,
     pub s5: f32,
-    // Radii: small controls, rows and fields, cards.
     pub r_sm: f32,
     pub r_md: f32,
     pub r_lg: f32,
-    /// The page's own corner radius (its own setting).
     pub page_radius: f32,
-    /// A hairline border around the page.
     pub page_border: bool,
-    /// Which look: Signal, Glass or Precise.
     pub style: Style,
-    /// Cards: the start page's numbers and tiles, settings groups, list blocks.
     pub r_card: f32,
-    /// Rows, fields and buttons are full pills (Signal and Glass) or square-ish (Precise).
     pub pill: bool,
-    /// The small uppercase labels over sections, in the look's label face, spaced out.
     pub label: Font,
-    /// How far apart the letters of a label are, in DIPs.
     pub label_track: f32,
-    /// The start page's clock face.
     pub clock_font: Font,
 
-    // Type, scaled by the size setting.
     pub scale: f32,
     pub title: Font,
     pub h2: Font,
@@ -87,7 +64,6 @@ pub struct Look {
     pub caption: Font,
     pub mono_strong: Font,
 
-    // Sidebar.
     pub tab_row_h: f32,
     pub show_favicons: bool,
     pub close_btn: CloseBtn,
@@ -95,13 +71,11 @@ pub struct Look {
     pub footer_btns: bool,
     pub ws_row: bool,
 
-    // Clock and new tab page.
     pub clock: bool,
     pub clock_24h: bool,
     pub clock_seconds: bool,
     pub date_fmt: DateFmt,
     pub clock_display_face: bool,
-    /// Clock size in px; 0 follows the window.
     pub clock_size: u32,
     pub greeting: String,
     pub ntp_bg: NtpBg,
@@ -110,7 +84,6 @@ pub struct Look {
     pub dial_cols: u32,
     pub ntp_search: bool,
 
-    // Motion.
     pub motion: motion::Config,
 }
 
@@ -121,8 +94,6 @@ impl Default for Look {
 }
 
 impl Look {
-    /// The settings, read as a style. `dark` is the resolved theme (the system's
-    /// own choice included), `system_allows` Windows' "Show animations".
     pub fn of(s: &Settings, dark: bool, system_allows: bool) -> Look {
         let custom = Custom::from_hex(&s.bg_color, &s.side_color, &s.surface_color, &s.text_color, &s.dim_color);
         let style = style_of(s);
@@ -136,7 +107,6 @@ impl Look {
         let scale = s.font_scale as f32 / 100.0;
         let f = |size: f32, weight: u32| Font::ui(size * scale, weight);
         let mono = |size: f32, weight: u32| Font { face: Face::Mono, ..Font::ui(size * scale, weight) };
-        // Titles are the sans, bold; the display serif is gone from the chrome. Glass is lighter.
         let tw = if style == Style::Glass { 600 } else { 700 };
         let sf = |size: f32| Font::ui(size * scale, tw);
         let (r_sm, r_md, r_lg, r_card, pill) = match style {
@@ -144,7 +114,6 @@ impl Look {
             Style::Glass => (8.0, 11.0, 14.0, 16.0, true),
             Style::Precise => (5.0, 7.0, 8.0, 10.0, false),
         };
-        // Signal and Precise label in monospace capitals; Glass in its own sans.
         let label = if style == Style::Glass { f(10.5, 600) } else { mono(10.5, 500) };
         let clock_font = match style {
             Style::Signal => mono(104.0, 700),
@@ -214,30 +183,25 @@ impl Look {
         }
     }
 
-    /// A row's or a button's corner: a full pill, or the look's square-ish radius.
     pub fn round(&self, h: f32) -> f32 {
         if self.pill { h / 2.0 } else { self.r_md }
     }
 
-    /// A monospace font at `size` (Glass has none: its sans).
     pub fn mono_at(&self, size: f32, weight: u32) -> Font {
         let f = Font::ui(size * self.scale, weight);
         if self.style == Style::Glass { f } else { Font { face: Face::Mono, ..f } }
     }
 
-    /// The chrome's own heights for this look.
     pub fn metrics(&self) -> Metrics {
         Metrics::new(self.kind, self.compact, self.bm_bar)
     }
 
-    /// A UI-face font at `size`, scaled.
     pub fn font(&self, size: f32, weight: u32) -> Font {
         Font::ui(size * self.scale, weight)
     }
 
 }
 
-/// Which look the settings ask for. Debug builds can force one with LUMEN_LOOK for shots.
 pub fn style_of(s: &Settings) -> Style {
     if cfg!(debug_assertions)
         && let Ok(v) = std::env::var("LUMEN_LOOK")
@@ -247,19 +211,14 @@ pub fn style_of(s: &Settings) -> Style {
     Style::of(look_setting(s))
 }
 
-/// The look setting: signal, glass or precise.
 fn look_setting(s: &Settings) -> &str {
     &s.look
 }
 
-/// The content column of the list pages, and its least side margin. Layout, not
-/// style: a page is a fixed column whatever the person picks.
 pub const ROW_H: f32 = 40.0;
 pub const COL_W: f32 = 760.0;
 pub const COL_MARGIN: f32 = 56.0;
 
-/// A named look: the colours, fonts and shape of the chrome, as JSON. What
-/// "Save as a theme" keeps, and what Export writes and Import reads.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ThemeFile {
@@ -290,7 +249,6 @@ impl Default for ThemeFile {
 }
 
 impl ThemeFile {
-    /// What the settings say about the look.
     pub fn of(s: &Settings) -> ThemeFile {
         ThemeFile {
             name: String::new(),
@@ -314,8 +272,6 @@ impl ThemeFile {
         }
     }
 
-    /// Lay it over the settings. Only the look: layout, tabs and everything else
-    /// are the person's, not the theme's.
     pub fn apply(&self, s: &mut Settings) {
         s.palette = self.palette.clone();
         s.accent = self.accent.clone();
@@ -337,25 +293,20 @@ impl ThemeFile {
         s.clamp();
     }
 
-    /// Pretty JSON, for Export.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
-    /// A look from an imported file. A file that is not one is refused.
     pub fn from_json(text: &str) -> Option<ThemeFile> {
         let t: ThemeFile = serde_json::from_str(text).ok()?;
-        // A file with nothing recognizable in it is not a theme.
         (t != ThemeFile::default() || text.contains("palette")).then_some(t)
     }
 }
 
-/// Where the saved looks live.
 fn themes_path() -> std::path::PathBuf {
     crate::store::data_dir().join("themes.json")
 }
 
-/// Every saved look, in order. An unreadable file reads as none.
 pub fn saved_themes() -> Vec<ThemeFile> {
     #[derive(Default, serde::Serialize, serde::Deserialize)]
     #[serde(default)]
@@ -369,7 +320,6 @@ pub fn saved_themes() -> Vec<ThemeFile> {
         .unwrap_or_default()
 }
 
-/// Write the saved looks, atomically like every other file.
 pub fn save_themes(list: &[ThemeFile]) {
     #[derive(serde::Serialize)]
     struct File<'a> {
@@ -384,7 +334,6 @@ pub fn save_themes(list: &[ThemeFile]) {
     }
 }
 
-/// The private-tab mark: a muted violet, never the accent.
 pub fn private_mark(dark: bool) -> Color {
     super::theme::oklch(if dark { 0.74 } else { 0.52 }, 0.14, 300.0)
 }
@@ -399,12 +348,10 @@ mod tests {
         assert_eq!(lo.style, Style::Signal);
         assert_eq!(lo.theme.bg, Theme::styled(Style::Signal, true, "", &Custom::default()).bg);
         assert_eq!(lo.theme.side, lo.theme.bg);
-        // The spacing, and Signal's shape: round rows, soft cards.
         assert_eq!((lo.s1, lo.s2, lo.s3, lo.s4, lo.s5), (4.0, 8.0, 12.0, 16.0, 24.0));
         assert_eq!((lo.r_sm, lo.r_md, lo.r_lg, lo.r_card), (8.0, 12.0, 16.0, 18.0));
         assert!(lo.pill);
         assert_eq!(lo.round(34.0), 17.0);
-        // The type: one sans, titles bold; figures and labels in the monospace.
         assert_eq!(lo.body.size10, 130);
         assert_eq!(lo.body.weight, 450);
         assert_eq!(lo.small.size10, 120);
@@ -415,7 +362,6 @@ mod tests {
         assert_eq!(lo.big_num.face, Face::Mono);
         assert_eq!(lo.label.face, Face::Mono);
         assert_eq!(lo.mono_strong.face, Face::Mono);
-        // The other defaults, as they were.
         assert_eq!(lo.kind, Kind::Vertical);
         assert_eq!(lo.tab_row_h, 32.0);
         assert_eq!(lo.page_radius, 10.0);
@@ -477,10 +423,8 @@ mod tests {
         let lo = Look::of(&s, true, true);
         assert_eq!(lo.kind, Kind::Hybrid);
         assert!(lo.bm_bar);
-        // The density moved the spacing, not the type.
         assert_eq!(lo.s3, 15.0);
         assert_eq!(lo.s5, 30.0);
-        // The type scale did move the type.
         assert_eq!(lo.body.size10, 169);
         assert_eq!(lo.title.size10, 390);
         assert_eq!(lo.theme.side, Color::from_hex("#1c2024").unwrap());
@@ -527,7 +471,6 @@ mod tests {
         assert_eq!(Look::of(&s, true, true).metrics().top(), 96.0);
         s.layout = "hybrid".into();
         assert_eq!(Look::of(&s, true, true).metrics().top(), 34.0);
-        // The bookmarks bar is a horizontal-layout thing.
         assert_eq!(Look::of(&s, true, false).metrics().bm_h, 0.0);
     }
 }

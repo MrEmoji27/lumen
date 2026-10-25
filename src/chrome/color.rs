@@ -1,7 +1,4 @@
-//! The colour picker's card: a saturation/value square and a hue strip, presets, the
-//! last colours picked, and a hex box. It opens under the swatch that was clicked and
-//! is live: every move sets the setting, so the whole chrome previews it. Escape puts
-//! back the colour it had; Done or a click outside keeps it.
+//! The colour picker's card.
 
 use serde_json::json;
 use windows::Win32::UI::{
@@ -17,7 +14,6 @@ use super::{
     theme::Color,
 };
 
-/// The card's width, and the parts that do not move.
 const W: f32 = 264.0;
 const PAD: f32 = 14.0;
 const SV_H: f32 = 148.0;
@@ -25,9 +21,6 @@ const HUE_H: f32 = 12.0;
 const SW: f32 = 26.0;
 const GAP: f32 = 8.0;
 
-/// The colour being picked: hue 0..360, saturation and value 0..1, and what it
-/// changes. `was` is the setting's own text on open, so Escape can put it back
-/// (an empty string is the palette's own colour, not a hex).
 pub struct ColorCard {
     key: String,
     was: String,
@@ -35,30 +28,23 @@ pub struct ColorCard {
     h: f32,
     s: f32,
     v: f32,
-    /// What the pointer is dragging: 0 the square, 1 the hue strip.
     drag: Option<u8>,
-    /// The swatch it opened under; None puts it at the right edge of the window.
     anchor: Option<R>,
-    /// Filled every frame: the card, and the two drag areas.
     rect: R,
     sv: R,
     hue: R,
 }
 
 impl ColorCard {
-    /// The hex box, in the card's own coordinates. The edit child sits inside it, so
-    /// the two have to agree; both go through here.
     pub fn hex_box(&self) -> R {
         R::new(self.rect.x + PAD, self.rect.bottom() - PAD - 26.0, 130.0, 26.0)
     }
 }
 
-/// The preset swatches: each look's accent, then the neutrals the chrome is made of.
 fn presets() -> [&'static str; 7] {
     ["#e8322b", "#ff7ab8", "#8b7bff", "#141414", "#8e8a80", "#f1efe9", "#ffffff"]
 }
 
-/// What the card calls the setting it edits.
 fn title(key: &str) -> &'static str {
     match key {
         "accent" => "Accent",
@@ -71,9 +57,6 @@ fn title(key: &str) -> &'static str {
     }
 }
 
-// ------------------------------------------------------------------- conversions
-
-/// RGB to hue (0..360), saturation and value (0..1). A grey has no hue: 0.
 pub fn rgb_to_hsv(c: Color) -> (f32, f32, f32) {
     let (r, g, b) = (c.0.clamp(0.0, 1.0), c.1.clamp(0.0, 1.0), c.2.clamp(0.0, 1.0));
     let max = r.max(g).max(b);
@@ -93,7 +76,6 @@ pub fn rgb_to_hsv(c: Color) -> (f32, f32, f32) {
     (h, s, max)
 }
 
-/// Hue (0..360, wrapped), saturation and value to RGB.
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
     let h = (h.rem_euclid(360.0)) / 60.0;
     let (s, v) = (s.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
@@ -111,10 +93,6 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
     Color(r + m, g + m, b + m, 1.0)
 }
 
-// ----------------------------------------------------------------------- state
-
-/// Open the card for a setting. `was` is what the setting held (possibly empty);
-/// `anchor` is the swatch it should sit under.
 pub fn open(i: &mut Inner, key: &str, was: String, color: Color, anchor: Option<R>) {
     let (h, s, v) = rgb_to_hsv(color);
     i.color = Some(ColorCard { key: key.to_string(), was, color, h, s, v, drag: None, anchor, rect: R::default(), sv: R::default(), hue: R::default() });
@@ -130,7 +108,6 @@ pub fn open(i: &mut Inner, key: &str, was: String, color: Color, anchor: Option<
     i.invalidate();
 }
 
-/// Close, either keeping the colour (`keep`) or putting the old setting back.
 pub fn close(i: &mut Inner, keep: bool) {
     let Some(card) = i.color.take() else { return };
     if !keep {
@@ -145,7 +122,6 @@ pub fn close(i: &mut Inner, keep: bool) {
     i.invalidate();
 }
 
-/// Done: keep the colour, and remember it among the last picked.
 pub fn done(i: &mut Inner) {
     let Some(card) = i.color.as_ref() else { return };
     remember(i, &card.color.hex());
@@ -153,26 +129,22 @@ pub fn done(i: &mut Inner) {
     close(i, true);
 }
 
-/// Escape: the setting goes back to what it held, and the colour is not remembered.
 pub fn cancel(i: &mut Inner) {
     close(i, false);
 }
 
-/// A click on one of the preset swatches.
 pub fn pick_preset(i: &mut Inner, n: usize) {
     if let Some(hex) = presets().get(n) {
         pick(i, hex);
     }
 }
 
-/// A click on one of the last six.
 pub fn pick_recent(i: &mut Inner, n: usize) {
     if let Some(hex) = i.state.as_ref().and_then(|s| s.settings.recent_colors.get(n)).cloned() {
         pick(i, &hex);
     }
 }
 
-/// A click on a preset or a recent swatch: apply it, remember it, close.
 fn pick(i: &mut Inner, hex: &str) {
     let Some(c) = Color::from_hex(hex) else { return };
     if let Some(card) = i.color.as_mut() {
@@ -185,7 +157,6 @@ fn pick(i: &mut Inner, hex: &str) {
     close(i, true);
 }
 
-/// The pointer went down in the square or on the strip: start dragging there.
 pub fn press(i: &mut Inner, which: u8, x: f32, y: f32) {
     if let Some(card) = i.color.as_mut() {
         card.drag = Some(which);
@@ -196,7 +167,6 @@ pub fn press(i: &mut Inner, which: u8, x: f32, y: f32) {
     drag_move(i, x, y);
 }
 
-/// A drag is going: the pointer moved, so the colour follows it. True while one is.
 pub fn drag_move(i: &mut Inner, x: f32, y: f32) -> bool {
     let mut changed = false;
     if let Some(card) = i.color.as_mut() {
@@ -223,7 +193,6 @@ pub fn drag_move(i: &mut Inner, x: f32, y: f32) -> bool {
     changed
 }
 
-/// The pointer came up: the drag is over, the colour stays.
 pub fn drag_end(i: &mut Inner) -> bool {
     let Some(card) = i.color.as_mut() else { return false };
     if card.drag.take().is_none() {
@@ -236,7 +205,6 @@ pub fn drag_end(i: &mut Inner) -> bool {
     true
 }
 
-/// Escape cancels, Enter is Done. True while the card is open.
 pub fn key(i: &mut Inner, vk: u32) -> bool {
     if i.color.is_none() {
         return false;
@@ -254,7 +222,6 @@ pub fn key(i: &mut Inner, vk: u32) -> bool {
     }
 }
 
-/// The hex box changed: a whole, readable colour moves the picker with it.
 pub fn typed(i: &mut Inner) {
     let text = super::wide_text(i.color_edit);
     let Some(c) = Color::from_hex(&text) else { return };
@@ -272,12 +239,10 @@ pub fn typed(i: &mut Inner) {
     i.invalidate();
 }
 
-/// The live part: the setting takes the new colour at once, so the chrome previews it.
 fn live(i: &mut Inner) {
     let Some(card) = i.color.as_ref() else { return };
     let (key, hex) = (card.key.clone(), card.color.hex());
     super::pages::set(i, &key, json!(hex));
-    // The box follows the square, unless it is the person's own typing.
     if unsafe { GetFocus() } != i.color_edit {
         unsafe {
             let _ = SetWindowTextW(i.color_edit, &HSTRING::from(hex));
@@ -285,7 +250,6 @@ fn live(i: &mut Inner) {
     }
 }
 
-/// Move the picked colour to the front of the last six.
 fn remember(i: &mut Inner, hex: &str) {
     let Some(s) = i.state.as_mut() else { return };
     let hex = hex.to_lowercase();
@@ -294,23 +258,17 @@ fn remember(i: &mut Inner, hex: &str) {
     s.settings.recent_colors.truncate(6);
 }
 
-/// Send the settings after a commit, so the recent colours are kept too.
 fn save(i: &mut Inner) {
     if let Some(s) = &i.state {
         send(&i.proxy, json!({"t": "settings", "v": serde_json::to_value(&s.settings).unwrap_or_default()}));
     }
 }
 
-// ----------------------------------------------------------------------- drawing
-
-/// The card's height: its parts, and the recents row only when there is one.
 fn height(s: &UiState) -> f32 {
     let recents = if s.settings.recent_colors.is_empty() { 0.0 } else { 16.0 + 12.0 + 4.0 + SW };
     PAD + 14.0 + 10.0 + SV_H + 12.0 + HUE_H + 16.0 + 12.0 + 4.0 + SW + recents + 16.0 + 26.0 + PAD
 }
 
-/// Where the card sits: under the swatch, kept inside the window; above it when
-/// there is no room below. The anchorless (test) case sits at the right edge.
 fn rect_of(i: &Inner, s: &UiState, anchor: Option<R>) -> R {
     let (w, h) = i.size_dip();
     let rh = height(s);
@@ -326,7 +284,6 @@ fn rect_of(i: &Inner, s: &UiState, anchor: Option<R>) -> R {
     R::new(x, y, W, rh)
 }
 
-/// Draw the card, its parts, and where a click lands.
 pub fn draw(i: &mut Inner, s: &UiState) {
     let Some(mut card) = i.color.take() else { return };
     let lo = i.look.clone();
@@ -337,7 +294,6 @@ pub fn draw(i: &mut Inner, s: &UiState) {
     i.label(title(&card.key), R::new(rect.x + PAD, rect.y + PAD + 1.0, 200.0, 14.0), th.faint);
     i.hit(rect, Hit::ColorCard);
 
-    // The square: the hue across, white to colour; then black down, see-through to solid.
     let sv = R::new(rect.x + PAD, rect.y + PAD + 14.0 + 10.0, W - 2.0 * PAD, SV_H);
     card.sv = sv;
     let pure = hsv_to_rgb(card.h, 1.0, 1.0);
@@ -351,7 +307,6 @@ pub fn draw(i: &mut Inner, s: &UiState) {
     i.gfx.ring(kx, ky, 7.5, 7.5, th.shade.alpha(0.5), 1.0);
     i.hit(sv, Hit::ColorArea);
 
-    // The hue strip: the six spokes of the wheel, end to end.
     let hue = R::new(sv.x, sv.bottom() + 12.0, sv.w, HUE_H);
     card.hue = hue;
     let spoke = |n: f32| hsv_to_rgb(n * 60.0, 1.0, 1.0);
@@ -362,7 +317,6 @@ pub fn draw(i: &mut Inner, s: &UiState) {
     i.gfx.ring(hx, hue.y + HUE_H / 2.0, 6.0, 6.0, th.shade.alpha(0.5), 1.0);
     i.hit(R::new(hue.x, hue.y - 4.0, hue.w, hue.h + 8.0), Hit::ColorHue);
 
-    // Presets and the last six picked: two labelled rows of swatches.
     let mut y = hue.bottom() + 16.0;
     i.label("Presets", R::new(sv.x, y, 100.0, 12.0), th.faint);
     y += 12.0 + 4.0;
@@ -387,8 +341,6 @@ pub fn draw(i: &mut Inner, s: &UiState) {
         y += SW;
     }
 
-    // The hex box, with its edit child over it, and Done. The value is drawn under
-    // the child the same way every other box does it: the child paints over it.
     y += 16.0;
     let hex_rect = card.hex_box();
     i.gfx.round(hex_rect, 6.0, th.bg);
@@ -400,7 +352,6 @@ pub fn draw(i: &mut Inner, s: &UiState) {
     i.color = Some(card);
 }
 
-/// One swatch: its colour, a hairline, and a ring when it is the colour in hand.
 fn swatch(i: &mut Inner, r: R, c: Color, hex: &str, current: String) {
     let th = i.theme;
     i.gfx.round(r, 7.0, c);
@@ -428,7 +379,6 @@ mod tests {
         close(rgb_to_hsv(Color(0.0, 1.0, 0.0, 1.0)), (120.0, 1.0, 1.0));
         close(rgb_to_hsv(Color(0.0, 0.0, 1.0, 1.0)), (240.0, 1.0, 1.0));
         close(rgb_to_hsv(Color(1.0, 1.0, 0.0, 1.0)), (60.0, 1.0, 1.0));
-        // Magenta wraps past the seam: 300, not -60.
         close(rgb_to_hsv(Color(1.0, 0.0, 1.0, 1.0)), (300.0, 1.0, 1.0));
     }
 
@@ -446,7 +396,6 @@ mod tests {
             let (h, s, v) = rgb_to_hsv(c);
             assert_eq!(hsv_to_rgb(h, s, v).hex(), hex, "{hex} did not come back");
         }
-        // Whole-wheel hues land where they should.
         assert_eq!(hsv_to_rgb(0.0, 1.0, 1.0).hex(), "#ff0000");
         assert_eq!(hsv_to_rgb(120.0, 1.0, 1.0).hex(), "#00ff00");
         assert_eq!(hsv_to_rgb(240.0, 1.0, 1.0).hex(), "#0000ff");

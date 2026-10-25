@@ -1,12 +1,4 @@
 //! The privacy report: what Lumen stopped, by day and by site.
-//!
-//! The numbers come from `privacy_stats::Snapshot`, filled into `UiState.report` only while
-//! this page is open. Every number on it is a count of something that happened: no
-//! estimates, so no "data saved" or "time saved".
-//!
-//! One layout, three skins. The hero, the panels and the chart each ask the look how to be
-//! drawn: Signal is paper and ink with red only for today, Glass is frosted with a glow and a
-//! ring, Precise is a ledger of hairlines, square cells and one violet rule.
 
 use serde_json::json;
 
@@ -22,23 +14,16 @@ use super::{
 };
 use crate::privacy_stats::{Counts, SiteRow, Snapshot};
 
-/// What can be clicked on the report page.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Click {
-    /// A range: "today" | "7" | "30" | "all".
     Range(&'static str),
-    /// A row of the top sites: show that site alone.
     Site(String),
-    /// Back from one site to the whole range.
     AllSites,
-    /// Forget every count.
     Reset,
 }
 
 const RANGES: [(&str, &str); 4] = [("today", "Today"), ("7", "7 days"), ("30", "30 days"), ("all", "All time")];
 
-/// A small trend for one number against the period before it. None for "all",
-/// or when there is nothing to compare.
 fn trend(now: u64, prev: u64, range: &str) -> Option<String> {
     if range == "all" || (now == 0 && prev == 0) {
         return None;
@@ -56,14 +41,10 @@ fn trend(now: u64, prev: u64, range: &str) -> Option<String> {
     }
 }
 
-/// What the hero counts as stopped: every blocked request and every pop-up. Ads include
-/// YouTube's, which a scriptlet stops inside the page instead of at the network.
 fn stopped(c: &Counts) -> u64 {
     c.ads + c.scriptlets + c.trackers + c.other + c.popups
 }
 
-/// The hero's composition: the kinds of what was stopped, the ones that happened, largest
-/// first is not wanted here: the order is fixed, so a kind keeps its place and its shade.
 fn parts(c: &Counts) -> Vec<(&'static str, u64)> {
     [("Ads", c.ads + c.scriptlets), ("Trackers", c.trackers), ("Pop-ups", c.popups), ("Other", c.other)]
         .into_iter()
@@ -71,19 +52,14 @@ fn parts(c: &Counts) -> Vec<(&'static str, u64)> {
         .collect()
 }
 
-/// The shades the composition is drawn in, one per kind, in the look's own ink.
 fn shades(th: &Theme, style: Style) -> [Color; 4] {
     match style {
-        // Ink on paper: the darkest is the most. The red stays for what is live.
         Style::Signal => [th.text, th.text.alpha(0.55), th.text.alpha(0.32), th.text.alpha(0.16)],
-        // Lit glass: the accent first, then white at falling strength.
         Style::Glass => [th.accent, Color(1.0, 1.0, 1.0, 0.72), Color(1.0, 1.0, 1.0, 0.42), Color(1.0, 1.0, 1.0, 0.2)],
-        // One violet, then the greys of the ledger.
         Style::Precise => [th.accent, th.accent.alpha(0.5), th.dim, th.faint],
     }
 }
 
-/// The look's own surface for a block of the report.
 pub(super) fn panel(i: &mut Inner, r: R) {
     let th = i.theme;
     match i.look.style {
@@ -99,7 +75,6 @@ pub(super) fn panel(i: &mut Inner, r: R) {
     }
 }
 
-/// The big number of a look: Signal's heavy mono, Glass's thin sans, Precise's tabular mono.
 fn numeral(i: &Inner, size: f32) -> super::gfx::Font {
     match i.look.style {
         Style::Signal => i.look.mono_at(size, 700),
@@ -108,9 +83,6 @@ fn numeral(i: &Inner, size: f32) -> super::gfx::Font {
     }
 }
 
-/// Blocked: the total, one stacked bar of what it was, and a legend of
-/// columns with each kind's number under its name. Each look skins it: Signal's bar is ink,
-/// Glass's is lit with a glow under its biggest part, Precise's is square and adds shares.
 fn blocked_panel(i: &mut Inner, col: R, y: f32, c: &Counts, prev: &Counts, range: &str, one_site: bool) -> f32 {
     let th = i.theme;
     let style = i.look.style;
@@ -121,16 +93,13 @@ fn blocked_panel(i: &mut Inner, col: R, y: f32, c: &Counts, prev: &Counts, range
     panel(i, r);
     let pad = 24.0;
     if style == Style::Precise {
-        // The ledger's one rule: violet, down the left edge, like its active tab.
         i.gfx.fill(R::new(r.x + 1.0, r.y + 14.0, 2.0, r.h - 28.0), th.accent);
     }
     let inner = R::new(r.x + pad, r.y + 18.0, r.w - 2.0 * pad, r.h - 36.0);
-    // "52  total", and the trend at the right.
     let big = numeral(i, 44.0);
     let num = group_digits(total);
     let w = i.gfx.measure(&num, big);
     if style == Style::Glass && total > 0 {
-        // Light behind the number, the way Glass lights its clock.
         i.gfx.bloom(inner.x + w / 2.0, inner.y + 26.0, (w * 0.9).max(70.0), th.accent.alpha(0.28));
     }
     i.gfx.text(&num, R::new(inner.x - 1.0, inner.y, w + 4.0, 52.0), big, th.text);
@@ -151,14 +120,12 @@ fn blocked_panel(i: &mut Inner, col: R, y: f32, c: &Counts, prev: &Counts, range
         _ => shade[3],
     };
     let of = |n: u64| n as f32 / total as f32;
-    // The bar: one piece per kind, side by side, in the look's shape.
     let (bh, rad, gap) = match style {
         Style::Signal => (14.0, 7.0, 3.0),
         Style::Glass => (12.0, 6.0, 3.0),
         Style::Precise => (8.0, 0.0, 1.0),
     };
     let bar = R::new(inner.x, inner.y + 66.0, inner.w, bh);
-    // The bar fills from the left the first time the page is drawn.
     let grow = i.motion.enter(Id::Named("report-blocked"), Prop::Progress, 0.0, 1.0, 520, Ease::OutQuint);
     let usable = (bar.w - gap * (kinds.len() as f32 - 1.0)) * grow;
     let mut x = bar.x;
@@ -170,7 +137,6 @@ fn blocked_panel(i: &mut Inner, col: R, y: f32, c: &Counts, prev: &Counts, range
         i.gfx.round(R::new(x, bar.y, w, bh), rad, tone(name));
         x += w + gap;
     }
-    // The legend: a column per kind, its mark and name, its number under them.
     let cw = (inner.w / kinds.len().max(3) as f32).min(200.0);
     for (k, (name, n)) in kinds.iter().enumerate() {
         let lx = inner.x + k as f32 * cw;
@@ -193,8 +159,6 @@ fn blocked_panel(i: &mut Inner, col: R, y: f32, c: &Counts, prev: &Counts, range
     r.bottom() + i.look.s4
 }
 
-/// A panel of rows, for Other statistics: an icon in a rounded square,
-/// a name, a line under it, the number at the right. Rows with nothing to say are left out.
 fn rows_panel(i: &mut Inner, col: R, y: f32, title: &str, rows: &[(&str, &str, String, &str)]) -> f32 {
     let th = i.theme;
     if rows.is_empty() {
@@ -228,7 +192,6 @@ fn rows_panel(i: &mut Inner, col: R, y: f32, title: &str, rows: &[(&str, &str, S
     r.bottom() + i.look.s4
 }
 
-/// Everything else Lumen did quietly, the ones that happened.
 fn other_rows(c: &Counts) -> Vec<(&'static str, &'static str, String, &'static str)> {
     [
         ("redirect", "Redirects blocked", c.redirects, "Pages that tried to send you to another site on their own."),
@@ -255,7 +218,6 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     let mut y = st.y + i.look.s5 + 2.0 - i.page.scroll;
     y = title_block(i, col, y, "Privacy report", "What Lumen stopped, counted as it happened.");
 
-    // The range, as a row of small pills.
     let mut x = col.x;
     for (key, label) in RANGES {
         let on = snap.range == key || (snap.range.is_empty() && key == "today");
@@ -299,7 +261,6 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         return;
     }
 
-    // The counts for the range, or the one site picked. Trends only for the range.
     let c = snap.site.as_ref().map(|r| r.counts).unwrap_or(snap.totals);
     let range = if snap.site.is_some() { "all" } else { &snap.range };
     let prev = snap.prev;
@@ -307,7 +268,6 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         y = draw_site_head(i, col, y, site);
     }
     y = blocked_panel(i, col, y, &c, &prev, range, snap.site.is_some());
-    // Where an estimate of data and time saved used to be: what blocking means, no number.
     if stopped(&c) > 0 {
         let line = "A blocked request is one your PC never downloaded and the page never waited for.";
         i.gfx.text(line, R::new(col.x, y - i.look.s2, col.w, 18.0), i.look.small, th.dim);
@@ -329,7 +289,6 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         y += 28.0;
     }
 
-    // Reset, quiet, at the end.
     let label = "Reset statistics";
     let f = i.look.small_strong.align(Align::Center);
     let r = R::new(col.x, y + i.look.s2, i.gfx.measure(label, f) + 2.0 * i.look.s3, 28.0);
@@ -348,8 +307,6 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     close_button(i, st);
 }
 
-/// Blocked requests per day, oldest at the left, today lit. Signal: ink bars, today in its red.
-/// Glass: soft bars, today glowing. Precise: thin stems on a hairline grid, today violet.
 fn draw_bars(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     let th = i.theme;
     let style = i.look.style;
@@ -362,10 +319,8 @@ fn draw_bars(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     panel(i, frame);
     let inner = R::new(frame.x + 20.0, frame.y + 18.0, frame.w - 40.0, 112.0);
     let top = bars.iter().map(|b| b.blocked).max().unwrap_or(0).max(1) as f32;
-    // The days rise from the baseline the first time the page is drawn.
     let rise = i.motion.enter(Id::Named("report-days"), Prop::Progress, 0.0, 1.0, 620, Ease::OutQuint);
     if style == Style::Precise {
-        // The grid: a baseline and two quiet lines at a third and two thirds.
         for k in 0..3 {
             let gy = inner.y + inner.h * k as f32 / 3.0;
             i.gfx.line(inner.x, gy, inner.right(), gy, th.line.alpha(0.6), 1.0);
@@ -404,7 +359,6 @@ fn draw_bars(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
             }
         }
     }
-    // The dates at both ends, and today's count under its bar.
     let (first, last_day) = (&bars[0].day, &bars[last].day);
     let foot = inner.bottom() + 10.0;
     let f = if style == Style::Glass { i.look.caption } else { i.look.mono_at(10.5, 500) };
@@ -414,7 +368,6 @@ fn draw_bars(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     frame.bottom() + i.look.s4
 }
 
-/// Sites where the most was blocked; a click shows one site alone.
 fn draw_sites(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     let th = i.theme;
     if snap.sites.is_empty() {
@@ -443,7 +396,6 @@ fn draw_sites(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     y + i.look.s4
 }
 
-/// Tracker domains stopped most often.
 fn draw_domains(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     let th = i.theme;
     if snap.domains.is_empty() {
@@ -460,7 +412,6 @@ fn draw_domains(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     y + i.look.s4
 }
 
-/// One site picked: the way back, and its name, above the hero.
 fn draw_site_head(i: &mut Inner, col: R, y: f32, site: &SiteRow) -> f32 {
     let th = i.theme;
     let f = i.look.small_strong.align(Align::Center);
@@ -478,7 +429,6 @@ fn draw_site_head(i: &mut Inner, col: R, y: f32, site: &SiteRow) -> f32 {
     y + 44.0
 }
 
-/// One site picked: when it was last seen. Its counts are all in the panels above.
 fn draw_site_rest(i: &mut Inner, col: R, y: f32, site: &SiteRow) -> f32 {
     if site.last.is_empty() {
         return y;
@@ -488,7 +438,6 @@ fn draw_site_rest(i: &mut Inner, col: R, y: f32, site: &SiteRow) -> f32 {
     y + 32.0 + i.look.s4
 }
 
-/// A click on the page, sent to the main loop.
 pub fn click(i: &mut Inner, c: Click) {
     let p = &i.proxy;
     match c {
@@ -496,7 +445,6 @@ pub fn click(i: &mut Inner, c: Click) {
         Click::Site(h) => send(p, json!({"t": "report", "site": h})),
         Click::AllSites => send(p, json!({"t": "report", "site": ""})),
         Click::Reset => {
-            // The drawn question; its Reset sends the wipe on the way out.
             super::confirm::open(i, super::confirm::ConfirmKind::ResetStats);
         }
     }
@@ -516,8 +464,6 @@ mod tests {
         assert_eq!(trend(9, 3, "all"), None, "all time has no previous period");
     }
 
-    /// The hero counts every blocked request and every pop-up, and its composition keeps a
-    /// fixed order, so a kind keeps its shade from one range to the next.
     #[test]
     fn the_hero_counts_what_was_stopped_and_what_it_was() {
         let c = Counts { ads: 10, scriptlets: 2, trackers: 5, popups: 0, other: 1, cookies: 9, ..Default::default() };

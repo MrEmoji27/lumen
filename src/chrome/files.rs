@@ -1,7 +1,4 @@
-//! The drawn file card: the one picker for a torrent, a KeePass file, a wallpaper, a
-//! theme. A path row you can type into, the places beside it, the folder's entries with
-//! their size and date, and a name box in save mode. Reading a folder runs off the UI
-//! thread: a slow network folder shows "Reading…", never a hang.
+//! The drawn file card: the one picker for a torrent, a KeePass file, a wallpaper, a theme.
 
 use std::{
     path::{Path, PathBuf},
@@ -29,19 +26,12 @@ use super::{
     gfx::{Align, R},
 };
 
-/// Which picker this is: what it takes, and what a pick does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileWhat {
-    /// A .torrent, read and handed to aria2.
     Torrent,
-    /// A .kdbx; the master password is asked next.
     Kdbx,
-    /// A wallpaper image.
     Image,
-    /// Save this look; the file's text is kept with the card. `suggested` is the name
-    /// box's starting text.
     ThemeSave { text: String, suggested: String },
-    /// Import a saved look.
     ThemeOpen,
 }
 
@@ -58,7 +48,6 @@ impl FileWhat {
     fn save(&self) -> bool {
         matches!(self, FileWhat::ThemeSave { .. })
     }
-    /// Whether a file passes the picker's filter.
     fn takes(&self, name: &str) -> bool {
         let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
         match self {
@@ -68,7 +57,6 @@ impl FileWhat {
             FileWhat::ThemeSave { .. } | FileWhat::ThemeOpen => ext == "json",
         }
     }
-    /// The folder the card opens at.
     fn start(&self) -> PathBuf {
         let wanted = match self {
             FileWhat::Torrent => FOLDERID_Downloads,
@@ -80,7 +68,6 @@ impl FileWhat {
     }
 }
 
-/// One row of the folder: its name, and what the columns say.
 #[derive(Clone, Debug)]
 struct Entry {
     name: String,
@@ -89,7 +76,6 @@ struct Entry {
     date: String,
 }
 
-/// One place in the left column: a known folder.
 pub struct Place {
     name: &'static str,
     pub(super) dir: PathBuf,
@@ -98,20 +84,14 @@ pub struct Place {
 pub struct FileCard {
     pub(super) what: FileWhat,
     pub(super) dir: PathBuf,
-    /// The folder's entries once a read lands; None while it is being read.
     entries: Option<Vec<Entry>>,
-    /// Why a read failed, in words.
     note: Option<String>,
-    /// The read the card is waiting for: a late answer for an older folder is dropped.
     seq: u64,
-    /// The entry the keyboard or the pointer is on, and the list's scroll.
     sel: usize,
     scroll: f32,
-    /// Letters typed: they jump to the first name that starts with them.
     jump: String,
     jump_at: Instant,
     pub(super) places: Vec<Place>,
-    /// Filled every frame.
     pub(super) rect: R,
     rows: Vec<R>,
     place_rects: Vec<R>,
@@ -129,7 +109,6 @@ const PAD: f32 = 14.0;
 const ROW_H: f32 = 26.0;
 const LEFT_W: f32 = 160.0;
 
-/// Known folders by their Windows ids.
 fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     unsafe {
         let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
@@ -139,7 +118,6 @@ fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     }
 }
 
-/// The places column: the folders a person actually uses.
 fn places() -> Vec<Place> {
     let mut out = Vec::new();
     for (name, id) in [
@@ -157,9 +135,7 @@ fn places() -> Vec<Place> {
     out
 }
 
-/// The drives Windows has, as "C:" and so on.
 fn drives() -> Vec<String> {
-    /// DRIVE_NO_ROOT_DIR: the letter has no volume behind it.
     const NO_ROOT: u32 = 1;
     unsafe {
         let mask = GetLogicalDrives();
@@ -177,7 +153,6 @@ fn drives() -> Vec<String> {
     }
 }
 
-/// 12 KB, 1.2 MB: a size read at a glance.
 fn fmt_size(n: u64) -> String {
     let f = n as f64;
     if n < 1024 {
@@ -191,11 +166,9 @@ fn fmt_size(n: u64) -> String {
     }
 }
 
-/// The file's date, in the machine's own time, as YYYY-MM-DD HH:MM.
 fn fmt_date(t: std::time::SystemTime) -> String {
     use std::time::UNIX_EPOCH;
     let Ok(since) = t.duration_since(UNIX_EPOCH) else { return String::new() };
-    // 1601 to 1970, in seconds; a FILETIME counts 100 ns ticks.
     let ticks = (since.as_secs() + 11_644_473_600) * 10_000_000 + since.subsec_nanos() as u64 / 100;
     let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
     unsafe {
@@ -208,7 +181,6 @@ fn fmt_date(t: std::time::SystemTime) -> String {
     }
 }
 
-/// Read a folder on a thread of its own; the answer comes back as a "fileList" message.
 fn start_read(i: &Inner, dir: &Path, seq: u64) {
     let (proxy, dir) = (i.proxy.clone(), dir.to_path_buf());
     let _ = std::thread::Builder::new().name("lumen-files".into()).spawn(move || {
@@ -234,13 +206,11 @@ fn start_read(i: &Inner, dir: &Path, seq: u64) {
     });
 }
 
-/// Open the card for one kind of file.
 pub fn open(i: &mut Inner, what: FileWhat) {
     let dir = what.start();
     open_at(i, what, dir);
 }
 
-/// The same, at a folder of the caller's choosing (the shots use one of Lumen's own).
 pub fn open_at(i: &mut Inner, what: FileWhat, dir: PathBuf) {
     i.close_cards();
     let suggested = match &what {
@@ -280,7 +250,6 @@ pub fn open_at(i: &mut Inner, what: FileWhat, dir: PathBuf) {
     i.invalidate();
 }
 
-/// Close without a pick.
 pub fn cancel(i: &mut Inner) {
     if i.files.take().is_none() {
         return;
@@ -296,12 +265,10 @@ pub fn cancel(i: &mut Inner) {
     i.invalidate();
 }
 
-/// Show a folder: the places, the drives and Up all land here.
 pub fn nav_to(i: &mut Inner, dir: PathBuf) {
     nav(i, dir);
 }
 
-/// The card's Open or Save: the picked entry, or whatever the boxes name.
 pub fn go(i: &mut Inner) {
     let Some(card) = i.files.as_ref() else { return };
     if card.what.save() {
@@ -326,7 +293,6 @@ pub fn go(i: &mut Inner) {
     open_entry(i, sel);
 }
 
-/// Show another folder: the read goes off the thread, the list shows "Reading…".
 fn nav(i: &mut Inner, dir: PathBuf) {
     let Some(card) = i.files.as_mut() else { return };
     card.dir = dir.clone();
@@ -343,7 +309,6 @@ fn nav(i: &mut Inner, dir: PathBuf) {
     i.invalidate();
 }
 
-/// A read landed from the worker thread. A late answer for another folder is dropped.
 pub fn list_landed(i: &mut Inner, m: &Value) {
     let Some(card) = i.files.as_mut() else { return };
     if m["seq"].as_u64() != Some(card.seq) {
@@ -364,7 +329,6 @@ pub fn list_landed(i: &mut Inner, m: &Value) {
                 .collect()
         })
         .unwrap_or_default();
-    // Folders first, then by name, as every file list does.
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     card.note = m["note"].as_str().map(|s| s.to_string()).filter(|s| !s.is_empty());
     card.entries = Some(entries);
@@ -372,13 +336,11 @@ pub fn list_landed(i: &mut Inner, m: &Value) {
     i.invalidate();
 }
 
-/// What the card shows, in the order drawn: folders a file never hides behind.
 fn shown(card: &FileCard) -> Vec<&Entry> {
     let Some(entries) = &card.entries else { return Vec::new() };
     entries.iter().filter(|e| e.dir || card.what.takes(&e.name)).collect()
 }
 
-/// Walk into a folder, or take a file.
 fn open_entry(i: &mut Inner, n: usize) {
     let Some(card) = i.files.as_ref() else { return };
     let list = shown(card);
@@ -394,7 +356,6 @@ fn open_entry(i: &mut Inner, n: usize) {
     pick(i, &dir.join(name));
 }
 
-/// Take the file the path or name box names.
 fn pick(i: &mut Inner, path: &Path) {
     let Some(card) = i.files.as_ref() else { return };
     let path = path.to_path_buf();
@@ -415,7 +376,6 @@ fn pick(i: &mut Inner, path: &Path) {
         FileWhat::Kdbx => {
             let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             cancel(i);
-            // The title stays short (the label face is wide); the box says which file.
             super::form::open_fields(
                 i,
                 "KeePass vault",
@@ -430,7 +390,6 @@ fn pick(i: &mut Inner, path: &Path) {
         FileWhat::ThemeSave { text, .. } => {
             let text = text.clone();
             if path.exists() {
-                // Already there: the question, drawn by the confirm card, over this one.
                 super::confirm::open_over(i, super::confirm::ConfirmKind::Replace { path: path.to_string_lossy().to_string(), text });
             } else {
                 write_theme(i, &path, &text);
@@ -450,7 +409,6 @@ fn pick(i: &mut Inner, path: &Path) {
     }
 }
 
-/// Write the exported look, and say so.
 pub fn write_theme(i: &mut Inner, path: &Path, text: &str) {
     let note = match std::fs::write(path, text) {
         Ok(()) => format!("Exported to {}", path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
@@ -465,7 +423,6 @@ fn send(proxy: &tao::event_loop::EventLoopProxy<crate::engine::Ev>, v: Value) {
     let _ = proxy.send_event(crate::engine::Ev::Ui(v.to_string()));
 }
 
-/// Escape closes, Enter opens the picked entry or takes it, Up and Down move.
 pub fn key(i: &mut Inner, vk: u32) -> bool {
     if i.files.is_none() {
         return false;
@@ -496,7 +453,6 @@ pub fn key(i: &mut Inner, vk: u32) -> bool {
     }
 }
 
-/// A letter typed: it jumps to the first name that starts with what is typed so far.
 pub fn typed_char(i: &mut Inner, ch: u32) {
     let Some(card) = i.files.as_mut() else { return };
     let Some(c) = char::from_u32(ch) else { return };
@@ -517,7 +473,6 @@ pub fn typed_char(i: &mut Inner, ch: u32) {
     i.invalidate();
 }
 
-/// The wheel over the list: the card scrolls, not the page under it.
 pub fn wheel(i: &mut Inner, x: f32, y: f32, delta: i32) -> bool {
     let Some(card) = i.files.as_ref() else { return false };
     if !card.rect.contains(x, y) {
@@ -535,8 +490,6 @@ pub fn wheel(i: &mut Inner, x: f32, y: f32, delta: i32) -> bool {
     true
 }
 
-/// The pointer came up: on a row it may open or take it, anywhere else closes the card.
-/// A question card over this one owns the click while it is open.
 pub fn clicked_outside(i: &mut Inner, h: &Option<Hit>) {
     if i.files.is_none() || i.confirm.is_some() {
         return;
@@ -559,7 +512,6 @@ pub fn clicked_outside(i: &mut Inner, h: &Option<Hit>) {
     }
 }
 
-/// A row was clicked: the first click picks it; a second, or Enter, opens it.
 pub fn click_row(i: &mut Inner, n: usize) {
     let Some(card) = i.files.as_ref() else { return };
     let was = card.sel;
@@ -572,7 +524,6 @@ pub fn click_row(i: &mut Inner, n: usize) {
     i.invalidate();
 }
 
-/// Where the card and its parts sit: the middle of the window, so the list has room.
 fn geometry(i: &Inner, card: &FileCard) -> (R, Vec<R>, Vec<R>, Vec<(String, R)>, R, R, R, R, R) {
     let (w_win, h_win) = i.size_dip();
     let x = ((w_win - W) / 2.0).clamp(8.0, (w_win - W - 8.0).max(8.0));
@@ -580,7 +531,6 @@ fn geometry(i: &Inner, card: &FileCard) -> (R, Vec<R>, Vec<R>, Vec<(String, R)>,
     let rect = R::new(x, y, W, H);
     let path_box = R::new(rect.x + PAD, rect.y + PAD + 14.0 + 10.0, W - 2.0 * PAD - 52.0, 30.0);
     let up = R::new(path_box.right() + 8.0, path_box.y, 44.0, 30.0);
-    // The label band sits right under the path row; the columns start under it.
     let label_y = path_box.bottom() + 8.0;
     let cols_top = label_y + 18.0;
     let cancel = R::new(rect.right() - PAD - 84.0, rect.bottom() - PAD - 28.0, 84.0, 28.0);
@@ -607,7 +557,6 @@ fn geometry(i: &Inner, card: &FileCard) -> (R, Vec<R>, Vec<R>, Vec<(String, R)>,
     }
     let mut drive_rects = Vec::new();
     let mut dx = rect.x + PAD;
-    // Room for the "Drives" label, as the columns leave room for theirs.
     py += 8.0 + 18.0;
     for name in drives() {
         if dx + 44.0 > rect.x + PAD + LEFT_W {
@@ -621,7 +570,6 @@ fn geometry(i: &Inner, card: &FileCard) -> (R, Vec<R>, Vec<R>, Vec<(String, R)>,
 }
 
 impl FileCard {
-    /// Keep the picked row inside the drawn window.
     fn scroll_to(&mut self) {
         let rows = self.rows.len() as f32;
         let at = self.sel as f32 * ROW_H;
@@ -633,7 +581,6 @@ impl FileCard {
     }
 }
 
-/// Draw the card: title, path row, places, drives, the entries, the buttons.
 pub fn draw(i: &mut Inner, _s: &UiState) {
     let Some(mut card) = i.files.take() else { return };
     let lo = i.look.clone();
@@ -652,7 +599,6 @@ pub fn draw(i: &mut Inner, _s: &UiState) {
     i.hit(rect, Hit::FileCard);
     i.label(card.what.title(), R::new(rect.x + PAD, rect.y + PAD + 1.0, W - 2.0 * PAD, 14.0), th.faint);
 
-    // The path row: the box, its value drawn under the edit child, and Up.
     i.gfx.round(path_box, 6.0, th.bg);
     i.gfx.round_stroke(path_box, 6.0, th.line, 1.0);
     let path = card.dir.to_string_lossy().to_string();
@@ -664,7 +610,6 @@ pub fn draw(i: &mut Inner, _s: &UiState) {
     i.gfx.text("Up", up, lo.font(12.0, 500).align(Align::Center), if hov { th.text } else { th.dim });
     i.hit(up, Hit::FileUp);
 
-    // The places, and the drives under them.
     i.label("Places", R::new(rect.x + PAD, path_box.bottom() + 8.0, LEFT_W, 12.0), th.faint);
     for (n, (p, r)) in card.places.iter().zip(card.place_rects.iter()).enumerate() {
         let here = card.dir == p.dir;
@@ -689,7 +634,6 @@ pub fn draw(i: &mut Inner, _s: &UiState) {
         i.hit(*r, Hit::FileDrive(n));
     }
 
-    // The folder's entries: folders first, a size and a date beside each.
     let list = shown(&card);
     match &card.entries {
         None => {
@@ -730,7 +674,6 @@ pub fn draw(i: &mut Inner, _s: &UiState) {
         }
     }
 
-    // Save mode: the name box, its value drawn under its edit child.
     if card.what.save() {
         let name = super::wide_text(i.file_name_edit);
         i.gfx.round(name_box, 6.0, th.bg);

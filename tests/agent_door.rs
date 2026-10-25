@@ -1,19 +1,4 @@
 //! The agent door, end to end: real (headless) Lumens, real HTTP.
-//!
-//! Slow, and it starts browsers, so it is ignored by a plain `cargo test`:
-//!
-//!     cargo test -j 2 --test agent_door -- --ignored --nocapture
-//!
-//! What it starts, one after the other (never two at once):
-//!   1. a Lumen with the agent switch off,
-//!   2. a Lumen with the defaults and a short session timeout, where most of the checks run,
-//!   3. a Lumen with uploads on and the profile shared.
-//! Each has its own LUMEN_DATA and LUMEN_DOWNLOADS under %TEMP%, its own port, and a settings.json
-//! of its own. Pages come from a tiny listener in this file, never from the internet. Only
-//! processes this test started are ever killed.
-//!
-//! The debug build of Lumen has four test tools (browser_test_crash, _done, _state, _grant). They
-//! stand in for what a person does with a mouse, and a release build does not have them.
 
 use std::{
     collections::HashMap,
@@ -31,13 +16,10 @@ use serde_json::{Value, json};
 const LUMEN: &str = env!("CARGO_BIN_EXE_lumen");
 const LUMEN_AGENT: &str = env!("CARGO_BIN_EXE_lumen-agent");
 
-// -------------------------------------------------------------------- helpers
-
 fn say(s: &str) {
     eprintln!("  {s}");
 }
 
-/// A step's title, with the seconds since the test began.
 fn head(s: &str) {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     eprintln!("[{:>4} s] {s}", START.get_or_init(Instant::now).elapsed().as_secs());
@@ -61,11 +43,6 @@ fn tmp(name: &str) -> PathBuf {
     dir
 }
 
-/// This build's stamp, exactly as the bridge sends it at `initialize`. A raw client
-/// that sends anything else (including nothing) gets the "reconnect the MCP server"
-/// note on every reply, which is the handshake working — so send the right one.
-/// (`lumen.exe --version` borrows the parent console and misses a pipe; the bridge
-/// prints to stdout.)
 fn bridge_stamp() -> String {
     static S: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     S.get_or_init(|| {
@@ -89,7 +66,6 @@ impl Resp {
     }
 }
 
-/// One HTTP request, one response. Whatever the server does with the connection afterwards.
 fn http(port: u16, head: &str, body: &str, declared_len: Option<usize>) -> Resp {
     let t0 = Instant::now();
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("the door is not listening");
@@ -113,7 +89,6 @@ fn http(port: u16, head: &str, body: &str, declared_len: Option<usize>) -> Resp 
     Resp { code, headers, body: body.to_string() }
 }
 
-/// The door of one Lumen: where it listens and the token it wants.
 #[derive(Clone)]
 struct Door {
     port: u16,
@@ -143,7 +118,6 @@ impl Door {
         format!("Bearer {}", self.token)
     }
 
-    /// A well-formed POST with the right token, optionally in a session.
     fn post(&self, sid: Option<&str>, body: &Value) -> Resp {
         let head = self.head("POST", "/mcp", &self.host(), Some(&self.auth()), None, sid);
         http(self.port, &head, &body.to_string(), None)
@@ -153,7 +127,6 @@ impl Door {
         self.post(sid, &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
     }
 
-    /// initialize, with a label, and the session id Lumen answers with.
     fn init(&self, label: &str) -> String {
         let r = self.rpc(
             None,
@@ -165,7 +138,6 @@ impl Door {
         r.headers.get("mcp-session-id").cloned().expect("initialize gave no Mcp-Session-Id")
     }
 
-    /// A tool call. Ok(text) or Err(the tool's error text). A transport failure is a panic.
     fn tool(&self, sid: &str, name: &str, args: Value) -> Result<String, String> {
         let began = Instant::now();
         let r = self.rpc(Some(sid), "tools/call", json!({"name": name, "arguments": args}));
@@ -182,13 +154,11 @@ impl Door {
         self.rpc(Some(sid), "ping", json!({})).code
     }
 
-    /// Open a page in a new tab of this session, in the background. The tab id.
     fn open(&self, sid: &str, url: &str) -> u64 {
         let t = self.tool(sid, "browser_open", json!({"url": url, "background": true})).unwrap_or_else(|e| panic!("open {url}: {e}"));
         t.lines().next().and_then(|l| l.strip_prefix("tab ")).and_then(|n| n.trim().parse().ok()).unwrap_or_else(|| panic!("no tab id in: {t}"))
     }
 
-    /// The tabs this session can see, as browser_tabs reports them.
     fn tabs(&self, sid: &str) -> Vec<Value> {
         let t = self.tool(sid, "browser_tabs", json!({})).expect("browser_tabs");
         serde_json::from_str::<Value>(&t).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default()
@@ -198,34 +168,26 @@ impl Door {
         self.tabs(sid).iter().any(|t| t["tab"] == tab)
     }
 
-    /// Every tab in the browser, whoever's. Test tool.
     fn state(&self, sid: &str) -> Vec<Value> {
         let t = self.tool(sid, "browser_test_state", json!({})).expect("browser_test_state");
         serde_json::from_str::<Value>(&t).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default()
     }
 }
 
-/// A Lumen this test started. It dies with the value.
 struct Lumen {
     child: Child,
     dir: PathBuf,
     downloads: PathBuf,
-    /// The extra environment the first start was given, for a relaunch.
     env: Vec<(String, String)>,
-    /// aria2c.exe was put in place, so downloads should work here.
     aria_seeded: bool,
     door: Door,
 }
 
 impl Lumen {
-    /// Settings go in settings.json (agent and agent_port are filled in); `tabs` are restored as
-    /// the person's own tabs; `env` is extra environment.
     fn start(name: &str, port: u16, mut settings: Value, tabs: &[String], env: &[(&str, &str)], seed_aria: bool) -> Lumen {
         let dir = tmp(name);
         let downloads = dir.join("dl");
         std::fs::create_dir_all(&downloads).unwrap();
-        // aria2 is fetched on first start, over the internet. A test needs none of that: if the
-        // person's copy of the program is there, put a copy of just the program in this folder.
         let mut aria_seeded = false;
         if seed_aria && let Some(exe) = dirs::data_dir().map(|p| p.join("Lumen").join("aria2").join("aria2c.exe")).filter(|p| p.is_file()) {
             let to = dir.join("aria2");
@@ -233,7 +195,6 @@ impl Lumen {
         }
         settings["agent_port"] = json!(port);
         std::fs::write(dir.join("settings.json"), settings.to_string()).unwrap();
-        // A userscript the person put in: it marks every test page it matches.
         std::fs::create_dir_all(dir.join("userscripts")).unwrap();
         std::fs::write(
             dir.join("userscripts").join("mark.user.js"),
@@ -262,8 +223,6 @@ impl Lumen {
         l
     }
 
-    /// Close it and start it again on the same data folder, as a person would. The next
-    /// start deletes whatever the last run left queued.
     fn relaunch(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -283,7 +242,6 @@ impl Lumen {
         self.wait_for_door();
     }
 
-    /// The token appears with the first start; the door answers (200 on, 503 off) when it is up.
     fn wait_for_door(&mut self) {
         let start = Instant::now();
         loop {
@@ -311,7 +269,6 @@ impl Lumen {
 
 impl Drop for Lumen {
     fn drop(&mut self) {
-        // Ours, started above: its path is inside this worktree's target folder.
         let _ = self.child.kill();
         let _ = self.child.wait();
         thread::sleep(Duration::from_millis(1500));
@@ -323,12 +280,8 @@ impl Drop for Lumen {
     }
 }
 
-// ------------------------------------------------------------------ the site
-
-/// What the test pages saw: (page's name for itself, Cookie header) per probe.
 type Probes = Arc<Mutex<Vec<(String, String)>>>;
 
-/// Two origins (two ports) serving the same few pages. Returns the ports and the probe log.
 fn site() -> (u16, u16, Probes) {
     let probes: Probes = Arc::new(Mutex::new(Vec::new()));
     let mut ports = Vec::new();
@@ -358,12 +311,9 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
     let mut extra = String::new();
     let (ctype, body): (&str, Vec<u8>) = match path {
         "/page" => {
-            // Each role sets a cookie of its own and keeps asking /probe, so the log shows
-            // which cookies a page of each profile carries, before and after the other one.
             match role.as_str() {
                 "normal" => extra += "Set-Cookie: n=1; Path=/\r\n",
                 "agent" => extra += "Set-Cookie: a=1; Path=/\r\n",
-                // Any other role gets a cookie named after itself: one agent = one role.
                 _ if !role.is_empty() => extra += &format!("Set-Cookie: {role}=1; Path=/\r\n"),
                 _ => {}
             }
@@ -378,8 +328,6 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
         }
         "/plain" => ("text/html", b"<title>Plain page</title><h1>Hello</h1><button>Go</button>".to_vec()),
         "/frames" => {
-            // Two iframes: one of this origin, one of the other server (cross-origin,
-            // so WebView2 gives it a target of its own).
             let other: u16 = query.split('&').find_map(|kv| kv.strip_prefix("other=")).and_then(|v| v.parse().ok()).unwrap_or(0);
             (
                 "text/html",
@@ -402,8 +350,6 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
             ("text/html", b"<title>State page</title><script>localStorage.setItem('who','agent')</script>".to_vec())
         }
         "/upload" => ("text/html", b"<title>Upload page</title><input type=file id=f name=f aria-label=Pick><div id=out></div>".to_vec()),
-        // One button that changes its own name, one that adds a button, and a link that
-        // stays: a page for the snapshot-diff checks.
         "/steps" => (
             "text/html",
             b"<title>Steps</title><h1>Steps</h1>\
@@ -416,7 +362,6 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
             extra += "Content-Disposition: attachment; filename=\"file.bin\"\r\n";
             ("application/octet-stream", vec![7u8; 4096])
         }
-        // Three products in a list: the page browser_extract reads.
         "/list" => (
             "text/html",
             b"<title>Products</title><h1>Products</h1><ul>\
@@ -441,10 +386,7 @@ fn serve_page(mut s: TcpStream, probes: &Probes) {
     let _ = s.write_all(&body);
 }
 
-// ------------------------------------------------------------------ scenarios
-
 fn random_hex48() -> String {
-    // Not secret, only unlike any real id: time and a counter, stretched.
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     format!("{n:024x}{:024x}", n.wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
@@ -455,11 +397,8 @@ fn the_agent_door() {
     let (p1, p2, probes) = site();
     let page = |port: u16, path: &str| format!("http://127.0.0.1:{port}{path}");
 
-    // --------------------------------------------------------------- 1. switch off
     head("1. agent switch off");
     {
-        // A Lumen whose switch is off listens only if it was on once in this run: the debug hook
-        // opens the door and shuts it again, as turning the switch off in Settings does.
         let off = Lumen::start("off", 47631, json!({"agent": true}), &[], &[("LUMEN_TEST_AGENT_OFF", "1")], false);
         let d = &off.door;
         let init = d.rpc(None, "initialize", json!({"protocolVersion": "2025-06-18", "clientInfo": {"name": "x"}}));
@@ -468,12 +407,10 @@ fn the_agent_door() {
         assert_eq!(d.rpc(Some("whatever"), "tools/call", json!({"name": "browser_tabs", "arguments": {}})).code, 503, "tools/call with the door shut");
         assert_eq!(d.rpc(None, "ping", json!({})).code, 503);
         say("initialize, tools/list, tools/call and ping all get 503");
-        // Wrong token and shut door: the shut door speaks first, and says nothing about the token.
         let head = d.head("POST", "/mcp", &d.host(), Some("Bearer nope"), None, None);
         assert_eq!(http(d.port, &head, "{}", None).code, 503);
     }
 
-    // ------------------------------------------------------- 2. the defaults, short timeout
     let normal_tab = page(p1, "/page?role=normal");
     let lumen = Lumen::start("main", 47632, json!({"agent": true}), &[normal_tab], &[("LUMEN_AGENT_SESSION_SECS", "10")], true);
     let d = lumen.door.clone();
@@ -519,7 +456,6 @@ fn the_agent_door() {
         for id in [&a, &b] {
             assert!(id.len() >= 32 && id.chars().all(|c| c.is_ascii_hexdigit()), "session id {id}");
         }
-        // Not a session: no header, a label, a guess, a well-formed stranger.
         let no_header = d.rpc(None, "tools/list", json!({}));
         assert_eq!(no_header.code, 400, "{}", no_header.body);
         assert_eq!(d.rpc(None, "ping", json!({})).code, 200, "ping needs no session");
@@ -546,13 +482,11 @@ fn the_agent_door() {
         d.tool(&a, "browser_test_grant", json!({"tab": person_tab})).unwrap();
         let snap = d.tool(&a, "browser_snapshot", json!({"tab": person_tab})).expect("the person's page");
         assert!(snap.contains("Userscript ran"), "the userscript did not run in the person's page:\n{snap}");
-        // The same page as an agent's own tab: no userscript there.
         let mine = d.open(&a, &page(p1, "/page?role=normal"));
         let snap = d.tool(&a, "browser_snapshot", json!({"tab": mine})).unwrap();
         assert!(!snap.contains("Userscript ran"), "a userscript ran in an agent's tab:\n{snap}");
         say("the script marked the person's page, and stayed out of the agent's tab");
         d.tool(&a, "browser_close", json!({"tab": mine})).unwrap();
-        // The grant goes back, as scenario 8 tests it from the start.
         d.tool(&a, "browser_test_grant", json!({"tab": person_tab})).unwrap();
     }
 
@@ -580,7 +514,6 @@ fn the_agent_door() {
         }
         let still = d.tool(&a, "browser_snapshot", json!({"tab": a_tab})).expect("A still has its tab");
         assert!(still.contains("Plain page"), "{still}");
-        // Naming A's session in a new initialize does not make it A's.
         let head = d.head("POST", "/mcp", &d.host(), Some(&d.auth()), None, Some(&a));
         let init = http(d.port, &head, &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "claude-code"}}}).to_string(), None);
         let c = init.headers.get("mcp-session-id").cloned().unwrap();
@@ -633,9 +566,7 @@ fn the_agent_door() {
         poll("the person's page to ask /probe", 60, || probes.lock().unwrap().iter().any(|(who, c)| who == "normal" && c.contains("n=1")));
         let before = probes.lock().unwrap().len();
         let tab = d.open(&a, &page(p1, "/page?role=agent"));
-        // A page in a hidden tab asks about once a second; wait for a few asks, not one.
         poll("the agent's page to ask /probe", 45, || probes.lock().unwrap().iter().filter(|(who, _)| who == "agent").count() >= 3);
-        // Let the person's page keep asking after the agent's cookie exists.
         let seen = probes.lock().unwrap().len();
         poll("the person's page to ask again", 40, || {
             d.ping(&a);
@@ -659,7 +590,6 @@ fn the_agent_door() {
         let two = d.init("agent-two");
         alive.add(&one);
         alive.add(&two);
-        // Both log into the same site, each in a tab of its own.
         let t1 = d.open(&one, &page(p1, "/page?role=one"));
         let t2 = d.open(&two, &page(p1, "/page?role=two"));
         let cookie = |sid: &str, tab: u64| d.tool(sid, "browser_eval", json!({"tab": tab, "script": "return document.cookie"})).unwrap_or_default();
@@ -667,7 +597,6 @@ fn the_agent_door() {
         poll("agent two's cookie", 30, || cookie(&two, t2).contains("two=1"));
         assert!(!cookie(&one, t1).contains("two=1"), "one carries two's cookie: {}", cookie(&one, t1));
         assert!(!cookie(&two, t2).contains("one=1"), "two carries one's cookie: {}", cookie(&two, t2));
-        // The wire says the same: each agent's requests carry its own cookie and no other's.
         poll("both agents' probes", 45, || {
             let log = probes.lock().unwrap();
             log.iter().any(|(w, c)| w == "one" && c.contains("one=1")) && log.iter().any(|(w, c)| w == "two" && c.contains("two=1"))
@@ -679,7 +608,6 @@ fn the_agent_door() {
             assert!(!c.contains(other), "{who} carried {other}: {c}");
         }
         say(&format!("{} probes: two agents, two cookie jars, no cookie of the other's", mine.len()));
-        // Their files land in folders of their own: this one's downloads, not the other's.
         let pdf = |sid: &str, tab: u64| -> String {
             let out = d.tool(sid, "browser_pdf", json!({"tab": tab})).expect("pdf");
             out.strip_prefix("saved ").and_then(|s| s.rsplit_once(" (")).map(|(p, _)| p.to_string()).unwrap_or_else(|| panic!("{out}"))
@@ -691,7 +619,6 @@ fn the_agent_door() {
         assert!(Path::new(&f2).starts_with(&root), "{f2} is not under {}", root.display());
         assert_ne!(Path::new(&f1).parent(), Path::new(&f2).parent(), "two agents, two folders: {f1} and {f2}");
         say(&format!("pdfs went to {} and {} — one folder each", Path::new(&f1).parent().unwrap().display(), Path::new(&f2).parent().unwrap().display()));
-        // Ending a session deletes its profile folder.
         let prof = d.tool(&two, "browser_test_profile", json!({"tab": t2})).expect("profile");
         let prof: Value = serde_json::from_str(&prof).unwrap_or(Value::Null);
         let path = prof["path"].as_str().unwrap_or_default().to_string();
@@ -699,19 +626,14 @@ fn the_agent_door() {
         let head = d.head("DELETE", "/mcp", &d.host(), Some(&d.auth()), None, Some(&two));
         assert_eq!(http(d.port, &head, "", None).code, 200, "goodbye");
         assert_eq!(d.ping(&two), 404, "an ended session is unknown");
-        // Its cookies, storage and cache are wiped at once (WebView2's own clearing), and
-        // the folder itself is queued: the browser holds a live profile's files for its
-        // whole life, so the folder goes at the next start (scenario 17 proves that).
         let key = &two[..12];
         poll("the ended profile to be queued for deletion", 20, || {
             std::fs::read_to_string(lumen.state_file("agent_purge.json")).map(|t| t.contains(key)).unwrap_or(false)
         });
         assert!(!d.tabs(&a).is_empty(), "the other agent is untouched");
         say(&format!("ending agent two wiped its profile data now and queued {path} for deletion at the next start"));
-        // Agent one is untouched: still logged in, its own folder still there.
         assert!(cookie(&one, t1).contains("one=1"), "agent one lost its cookie with agent two's folder");
         assert!(Path::new(&f1).exists());
-        // A named session keeps its profile: log in once, come back logged in.
         let run = |args: &[&str]| -> (i32, String) {
             let out = Command::new(LUMEN_AGENT).args(args).env("LUMEN_DATA", &lumen.dir).stdin(Stdio::null()).output().expect("lumen-agent");
             (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr))
@@ -722,7 +644,6 @@ fn the_agent_door() {
         let kt = tab_of(&out);
         let (_, seen) = run(&["--session", "kept", "eval", &format!("tab={kt}"), "script=return document.cookie"]);
         assert!(seen.contains("keep=1"), "the kept session logged in: {seen}");
-        // The session ends (the CLI files id goes with it), and the profile stays.
         let id_file = lumen.state_file("agent_sessions").join("kept.id");
         let kept_id = std::fs::read_to_string(&id_file).expect("the named session's id file").trim().to_string();
         let head = d.head("DELETE", "/mcp", &d.host(), Some(&d.auth()), None, Some(&kept_id));
@@ -742,14 +663,10 @@ fn the_agent_door() {
 
     head("7c. frames, response bodies, saved state, popups, records, pause");
     {
-        // Frames: the snapshot walks into a same-origin and a cross-origin iframe, and
-        // a ref of theirs acts inside that frame.
         let f = d.open(&a, &format!("{}?other={p2}", page(p1, "/frames")));
         let snap = d.tool(&a, "browser_snapshot", json!({"tab": f})).expect("snapshot with frames");
         assert!(snap.contains("Frame 1:") && snap.contains("Frame 2:"), "both frames are in it:\n{snap}");
         assert!(snap.contains("Card number"), "{snap}");
-        // The frame of this test site's own port: its storage is the page's own, so what
-        // happens in it can be seen from the page. The other one is p2's (cross-origin).
         let mine = snap
             .lines()
             .find(|l| l.starts_with("Frame ") && l.contains(&format!(":{p1}/inner")))
@@ -769,16 +686,12 @@ fn the_agent_door() {
             .find(|l| l.contains("button \"Pay\"") && l.contains(&format!("[ref=f{num}e")))
             .unwrap_or_else(|| panic!("no Pay button in frame {num}:\n{again}"));
         let pref = pay.split("[ref=").nth(1).unwrap().trim_end_matches(']').to_string();
-        // The tab is in the background (opened that way): a mouse action brings it to the
-        // front by itself, because Chromium drops mouse input to a page that is not
-        // rendering. No browser_show needed here on purpose: this checks that.
         d.tool(&a, "browser_click", json!({"tab": f, "ref": pref})).expect("click in a frame");
         let clicked = d.tool(&a, "browser_eval", json!({"tab": f, "script": "return localStorage.getItem('clicked')"})).unwrap_or_default();
         assert!(clicked.contains("yes"), "the frame's button ran: {clicked}");
         say("the snapshot entered a same-origin and a cross-origin iframe; typing and clicking by a frame ref worked");
         d.tool(&a, "browser_close", json!({"tab": f})).unwrap();
 
-        // Response bodies: the JSON one fetch asked for, by the #number browser_network gave it.
         let fetch = d.open(&a, &page(p1, "/fetch"));
         poll("the fetch to be recorded", 20, || {
             d.tool(&a, "browser_network", json!({"tab": fetch})).unwrap_or_default().contains("/api")
@@ -798,7 +711,6 @@ fn the_agent_door() {
         say(&format!("browser_network_body #{num}: {}", body.lines().next().unwrap_or("")));
         d.tool(&a, "browser_close", json!({"tab": fetch})).unwrap();
 
-        // A saved state moves a login into another session of its own.
         let st = d.open(&a, &page(p1, "/state"));
         let saved = d.tool(&a, "browser_state_save", json!({"tab": st, "name": "logged-in"})).expect("save state");
         assert!(saved.contains("cookies") && saved.contains("storage"), "{saved}");
@@ -808,7 +720,6 @@ fn the_agent_door() {
         poll("the loader to have its own cookie", 20, || {
             d.tool(&loader, "browser_eval", json!({"tab": st2, "script": "return document.cookie"})).unwrap_or_default().contains("s=1")
         });
-        // It starts from a fresh profile: forget that cookie, then load the saved state.
         d.tool(&loader, "browser_eval", json!({"tab": st2, "script": "document.cookie='s=; Max-Age=0; path=/'; localStorage.clear(); return 1"})).unwrap();
         let loaded = d.tool(&loader, "browser_state_load", json!({"tab": st2, "name": "logged-in"})).expect("load state");
         assert!(loaded.contains("cookies loaded") && loaded.contains("storage keys"), "{loaded}");
@@ -821,7 +732,6 @@ fn the_agent_door() {
         d.tool(&loader, "browser_close", json!({"tab": st2})).unwrap();
         d.tool(&a, "browser_close", json!({"tab": st})).unwrap();
 
-        // A popup a page opens is reported and is the agent's tab.
         let pop = d.open(&a, &page(p1, "/popup"));
         let snap = d.tool(&a, "browser_snapshot", json!({"tab": pop})).unwrap();
         let bref = snap.lines().find(|l| l.contains("Open one")).and_then(|l| l.split("[ref=").nth(1)).map(|r| r.trim_end_matches(']').to_string()).unwrap_or_else(|| panic!("{snap}"));
@@ -839,7 +749,6 @@ fn the_agent_door() {
         d.tool(&a, "browser_close", json!({"tab": new_tab})).unwrap();
         d.tool(&a, "browser_close", json!({"tab": pop})).unwrap();
 
-        // Record and replay: the same calls, on tabs the replay opens again.
         d.tool(&a, "browser_record_start", json!({"name": "checkout"})).expect("record");
         let rec_tab = d.open(&a, &page(p1, "/plain"));
         let snap = d.tool(&a, "browser_snapshot", json!({"tab": rec_tab})).unwrap();
@@ -849,7 +758,6 @@ fn the_agent_door() {
         assert!(stopp.contains("checkout.json") && stopp.contains("3 steps"), "{stopp}");
         let replayed = d.tool(&a, "browser_replay", json!({"name": "checkout"})).expect("replay");
         assert!(replayed.contains("replayed 3 steps"), "{replayed}");
-        // The replay opened its own tab: the recording's tab id was mapped onto it.
         assert!(d.tabs(&a).len() >= 2, "the replay's tab is here");
         say("three recorded calls replayed onto a tab the replay opened itself");
         for t in d.tabs(&a) {
@@ -859,7 +767,6 @@ fn the_agent_door() {
             }
         }
 
-        // Pause and take over: a paused run may only ask for the tab back.
         let pz = d.init("paused-run");
         alive.add(&pz);
         let pt = d.open(&pz, &page(p1, "/plain"));
@@ -868,7 +775,6 @@ fn the_agent_door() {
             let e = d.tool(&pz, tool, args).expect_err(tool);
             assert!(e.contains("paused") && e.contains("browser_handoff"), "{tool}: {e}");
         }
-        // browser_handoff still gets through, and Done hands the tab back.
         let waiter = {
             let (d, pz) = (d.clone(), pz.clone());
             thread::spawn(move || d.tool(&pz, "browser_handoff", json!({"tab": pt, "message": "may I have it back?"})))
@@ -898,17 +804,14 @@ fn the_agent_door() {
         assert!(diff.contains(&format!("+ button \"Step 1\" [ref={step}]")), "the change keeps the same ref: {diff}");
         assert!(diff.contains("lines unchanged") && !diff.contains("Title:"), "only the change comes back: {diff}");
         say(&format!("one click, one line: {diff:?}"));
-        // The ref from the snapshot before the click still clicks: it is the same button.
         d.tool(&a, "browser_click", json!({"tab": tab, "ref": step})).expect("the same ref again");
         let diff = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true, "diff": true})).expect("diff again");
         assert!(diff.contains("+ button \"Step 2\""), "{diff}");
-        // A new element gets a number of its own: never the one an older snapshot used.
         d.tool(&a, "browser_click", json!({"tab": tab, "ref": add})).expect("add a button");
         let added = d.tool(&a, "browser_snapshot", json!({"tab": tab, "interactive": true, "diff": true})).expect("diff after adding");
         assert!(added.contains("0 removed, 1 added") && added.contains("+ button \"Extra\""), "{added}");
         assert!(!added.contains(&format!("button \"Extra\" [ref={step}]")), "a new element took an old ref: {added}");
         say("an added button got a number no snapshot had used");
-        // A page that went somewhere is not a diff: the whole page comes, and says so.
         d.tool(&a, "browser_navigate", json!({"tab": tab, "url": page(p1, "/plain")})).expect("navigate");
         let moved = d.tool(&a, "browser_snapshot", json!({"tab": tab, "diff": true})).expect("diff after a navigation");
         assert!(moved.contains("full snapshot") && moved.contains("Plain page"), "{moved}");
@@ -929,13 +832,11 @@ fn the_agent_door() {
         assert!(out.contains("\"name\":\"Kettle Two\"") && out.contains("\"price\":\"21.99\""), "{out}");
         assert!(out.contains(&format!("\"href\":\"http://127.0.0.1:{p1}/item/2\"")), "href comes back absolute: {out}");
         say(&format!("three items as JSON: {}", out.lines().next().unwrap_or("")));
-        // No items: one object, every match listed, a field that finds nothing is null.
         let one = d.tool(&a, "browser_extract", json!({"tab": tab, "fields": {"heading": "h1", "names": {"selector": "a", "all": true}, "none": ".nope"}})).expect("one object");
         assert!(one.contains("\"heading\":\"Products\""), "{one}");
         assert!(one.contains("\"names\":[\"Kettle One\",\"Kettle Two\",\"Kettle Three\"]"), "{one}");
         assert!(one.contains("\"none\":null"), "{one}");
         say("without items: one object; all=true lists every match, a miss is null");
-        // The arguments are checked before any page work.
         for bad in [json!({"tab": tab}), json!({"tab": tab, "fields": {}}), json!({"tab": tab, "fields": {"x": {"attr": "href"}}})] {
             let e = d.tool(&a, "browser_extract", bad).expect_err("bad extract");
             assert!(e.contains("fields") || e.contains("selector"), "{e}");
@@ -967,13 +868,11 @@ fn the_agent_door() {
         }
         assert!(d.tool(&a, "browser_find", json!({"tab": n, "text": "Page"})).is_ok());
         say("granted tab: snapshot and find work; eval, upload, close, resize are refused");
-        // Another site ends the grant.
         let _ = d.tool(&a, "browser_navigate", json!({"tab": n, "url": page(p2, "/plain")}));
         poll("the grant to end", 20, || d.state(&a).iter().any(|t| t["id"] == n && t["granted"] == false && t["url"].as_str().unwrap_or("").contains(&p2.to_string())));
         let e = d.tool(&a, "browser_snapshot", json!({"tab": n})).expect_err("the grant ended with the site");
         assert!(e.contains("no tab"), "{e}");
         say("moving the tab to another site ended the grant");
-        // And the person can take it back by hand.
         d.tool(&a, "browser_test_grant", json!({"tab": n})).unwrap();
         assert!(d.tool(&a, "browser_snapshot", json!({"tab": n})).is_ok());
         d.tool(&a, "browser_test_grant", json!({"tab": n})).unwrap();
@@ -988,7 +887,6 @@ fn the_agent_door() {
             let (d, h) = (d.clone(), h.clone());
             thread::spawn(move || d.tool(&h, "browser_handoff", json!({"tab": tab, "message": "log in please"})))
         };
-        // Done is pressed once the handoff is really waiting.
         poll("the handoff to be waiting", 20, || d.tool(&b, "browser_test_done", json!({})).is_ok());
         let got = waiter.join().unwrap().expect("handoff");
         assert!(got.contains("the person pressed Done") && got.contains("Plain page") && got.contains(&format!(":{p1}/plain")), "{got}");
@@ -1062,11 +960,9 @@ fn the_agent_door() {
         let file = lumen.state_file("agent_sessions").join("t1.id");
         let id = std::fs::read_to_string(&file).expect("the issued id is kept in a file").trim().to_string();
         assert!(id.len() >= 32 && id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
-        // The name itself is no key.
         for fake in ["cli-t1", "t1", "cli"] {
             assert_eq!(d.rpc(Some(fake), "tools/list", json!({})).code, 404, "{fake}");
         }
-        // The file's id is the key: with it, the tab is there.
         assert!(d.has_tab(&id, tab));
         say("the CLI session lives in agent_sessions/t1.id; the name alone gets 404");
         let _ = d.tool(&id, "browser_close", json!({"tab": tab}));
@@ -1084,7 +980,6 @@ fn the_agent_door() {
             let (d, h) = (d.clone(), h.clone());
             thread::spawn(move || d.tool(&h, "browser_handoff", json!({"tab": ht, "message": "waiting"})))
         };
-        // A real bridge (lumen-agent mcp) opens a tab, then goes quiet too.
         let mut bridge = Bridge::start(&lumen.dir);
         bridge.ask(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "bridge-test", "version": "1"}}));
         bridge.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
@@ -1093,14 +988,12 @@ fn the_agent_door() {
         thread::sleep(Duration::from_millis(1000));
         let tab_ids = |d: &Door| -> Vec<u64> { d.state(&keeper).iter().filter_map(|t| t["id"].as_u64()).collect() };
         assert!(tab_ids(&d).contains(&xt) && tab_ids(&d).contains(&bridge_tab));
-        // X says nothing from here on, as if its bridge was killed. The keeper keeps asking.
         let start = Instant::now();
         poll("the silent session's tab to close", 60, || !tab_ids(&d).contains(&xt));
         let took = start.elapsed();
         assert!(took >= Duration::from_secs(5), "it expired too soon: {took:?}");
         assert_eq!(d.ping(&x), 404, "the expired session is unknown now");
         poll("the quiet bridge's tab to close as well", 30, || !tab_ids(&d).contains(&bridge_tab));
-        // The bridge's next call finds its session gone, opens a new one and goes on.
         let after = bridge.call(3, "browser_tabs", json!({}));
         assert_eq!(after.trim(), "[]", "a fresh session has no tabs: {after}");
         let reopened = bridge.call(4, "browser_open", json!({"url": page(p1, "/plain"), "background": true}));
@@ -1108,7 +1001,6 @@ fn the_agent_door() {
         say("a quiet bridge came back to a new session by itself (404, initialize again, retry)");
         drop(bridge);
         say(&format!("the silent session's tab closed after about {} s (limit 10 s in this run)", took.as_secs() + 1));
-        // The handoff has waited longer than the limit by now, or soon will; give it the time.
         thread::sleep(Duration::from_secs(11).saturating_sub(start.elapsed()));
         assert!(tab_ids(&d).contains(&ht), "a session that waits on a handoff must keep its tab");
         assert_eq!(d.ping(&h), 200, "and its session");
@@ -1116,7 +1008,6 @@ fn the_agent_door() {
         let got = waiter.join().unwrap().expect("the handoff finished");
         assert!(got.contains("the person pressed Done"), "{got}");
         say("a handoff waiting longer than the limit kept its session and tab");
-        // After Done the session is quiet like any other, and goes the same way.
         poll("the finished session's tab to close", 60, || !tab_ids(&d).contains(&ht));
     }
 
@@ -1144,7 +1035,6 @@ fn the_agent_door() {
     drop(alive);
     drop(lumen);
 
-    // ------------------------------------------------------- 3. uploads on, profile shared
     head("15. uploads on, profile shared");
     {
         let root = tmp("up-files");
@@ -1188,20 +1078,16 @@ fn the_agent_door() {
         say(&format!("{} paths outside the folder (.., UNC, verbatim, junction, the folder itself): all refused", refused.len()));
         let ok = try_upload(up.join("ok.txt").display().to_string()).expect("a file inside the folder");
         assert!(ok.contains("1 file"), "{ok}");
-        // Shared profile: eval is refused and says which setting.
         let e = d.tool(&s, "browser_eval", json!({"tab": tab, "script": "return 1"})).expect_err("eval with a shared profile");
         assert!(e.contains("agent_shared_profile"), "{e}");
-        // A relative name resolves inside the folder.
         try_upload("ok.txt".into()).expect("a name inside the folder");
         say("uploaded ok.txt (absolute and by name); eval refused under the shared profile");
-        // The person's own tabs are still not the agent's, even with the shared profile.
         for t in d.state(&s).iter().filter(|t| t["agent"] == false) {
             assert!(d.tool(&s, "browser_snapshot", json!({"tab": t["id"]})).is_err(), "the shared profile must not open the person's tabs");
         }
         say("shared profile: the person's tabs stay shut");
     }
 
-    // ------------------------------------------------------- 4. strict isolation
     head("16. strict isolation: an agent gets a browser of its own, and it goes with the session");
     {
         let strict = Lumen::start("strict", 47634, json!({"agent": true, "agent_strict_isolation": true}), &[], &[], false);
@@ -1211,11 +1097,9 @@ fn the_agent_door() {
         let prof = d.tool(&s, "browser_test_profile", json!({"tab": tab})).expect("profile");
         let prof: Value = serde_json::from_str(&prof).unwrap_or(Value::Null);
         let path = prof["path"].as_str().unwrap_or_default().to_string();
-        // Its own environment: the default profile inside a user-data folder of its own.
         assert_eq!(prof["profile"].as_str().unwrap_or("x"), "", "an own environment uses its default profile: {prof}");
         let want = strict.dir.join("agent_envs");
         assert!(Path::new(&path).starts_with(&want), "{path} is not under {}", want.display());
-        // Another agent gets another folder: two environments, side by side.
         let s2 = d.init("strict-agent-two");
         let tab2 = d.open(&s2, &page(p1, "/page?role=s2"));
         let prof2 = d.tool(&s2, "browser_test_profile", json!({"tab": tab2})).expect("profile");
@@ -1224,12 +1108,10 @@ fn the_agent_door() {
         assert!(Path::new(&path2).starts_with(&want) && path2 != path, "a second environment of its own: {path2}");
         assert!(Path::new(&path).is_dir() && Path::new(&path2).is_dir());
         say(&format!("two strict agents, two user-data folders:\n    {path}\n    {path2}"));
-        // Each has its own cookies, as in the shared environment's profiles.
         let cookie = |sid: &str, tab: u64| d.tool(sid, "browser_eval", json!({"tab": tab, "script": "return document.cookie"})).unwrap_or_default();
         poll("the second strict agent's cookie", 30, || cookie(&s2, tab2).contains("s2=1"));
         let c1 = cookie(&s, tab);
         assert!(!c1.contains("s2=1"), "the first strict agent carries the second's cookie: {c1}");
-        // Ending a session takes its whole folder with it.
         let head = d.head("DELETE", "/mcp", &d.host(), Some(&d.auth()), None, Some(&s));
         assert_eq!(http(d.port, &head, "", None).code, 200);
         poll("the strict agent's folder to go", 40, || !Path::new(&path).exists());
@@ -1237,7 +1119,6 @@ fn the_agent_door() {
         say("ending the session deleted the agent's whole user-data folder; the other's stayed");
     }
 
-    // ------------------------------------- 5. an ephemeral profile, across a restart
     head("17. an ephemeral session's profile folder is gone after the next start");
     {
         let mut purge = Lumen::start("purge", 47635, json!({"agent": true}), &[], &[], false);
@@ -1250,8 +1131,6 @@ fn the_agent_door() {
         assert!(Path::new(&path).is_dir(), "{prof}");
         let head = d.head("DELETE", "/mcp", &d.host(), Some(&d.auth()), None, Some(&s));
         assert_eq!(http(d.port, &head, "", None).code, 200);
-        // The browser holds the live profile's files, so the folder waits for the next
-        // start; the queue file names it.
         poll("the profile to be queued", 20, || {
             std::fs::read_to_string(purge.state_file("agent_purge.json")).map(|t| t.contains(&s[..12])).unwrap_or(false)
         });
@@ -1270,7 +1149,6 @@ fn read_journal(dir: &Path) -> Vec<Value> {
     out
 }
 
-/// `lumen-agent mcp` as an agent's client runs it: JSON lines on stdin and stdout.
 struct Bridge {
     child: Child,
     lines: std::sync::mpsc::Receiver<String>,
@@ -1304,7 +1182,6 @@ impl Bridge {
         stdin.flush().unwrap();
     }
 
-    /// A request and its answer (the next line).
     fn ask(&mut self, id: u64, method: &str, params: Value) -> Value {
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         let line = self.lines.recv_timeout(Duration::from_secs(90)).unwrap_or_else(|_| panic!("the bridge did not answer {method}"));
@@ -1313,7 +1190,6 @@ impl Bridge {
         v
     }
 
-    /// A tool call; the text of its answer.
     fn call(&mut self, id: u64, tool: &str, args: Value) -> String {
         let v = self.ask(id, "tools/call", json!({"name": tool, "arguments": args}));
         assert!(v["error"].is_null() && v["result"]["isError"] != true, "{tool}: {v}");
@@ -1328,8 +1204,6 @@ impl Drop for Bridge {
     }
 }
 
-/// Keeps sessions alive while the test waits on something slow. A session this test means to
-/// let expire is never added.
 struct Alive {
     ids: Arc<Mutex<Vec<String>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,

@@ -1,23 +1,14 @@
-//! What Lumen knows about a site, apart from its pages: the answers it remembers to
-//! permission questions, how loud each kind of question is by default, the zoom a site is
-//! read at, and whether plain http may be used. Pure data and small decisions, so the rules
-//! can be tested without a window.
+//! What Lumen knows about a site, apart from its pages.
 
 use std::collections::{BTreeMap, HashSet};
 
 use crate::store::Rules;
 
-/// One thing a site can ask for. `key` is what permissions.json stores, and what the
-/// permission prompt says; `label` is what the Site settings page shows.
 pub struct Kind {
     pub key: &'static str,
     pub label: &'static str,
 }
 
-/// Every kind there is, the common ones first. The popover under the lock shows the first
-/// `COMMON` of them for any site; the rest only appear once a site has been given an answer.
-/// The app launcher's own rules ("open mailto", see `extlink`) are not here: they are per
-/// scheme, they are listed with the site's other answers, and only that page edits them.
 pub const KINDS: &[Kind] = &[
     Kind { key: "camera", label: "Camera" },
     Kind { key: "microphone", label: "Microphone" },
@@ -33,11 +24,8 @@ pub const KINDS: &[Kind] = &[
     Kind { key: "autoplay", label: "Sound autoplay" },
 ];
 
-/// How many of `KINDS` the lock's popover always lists.
 pub const COMMON: usize = 5;
 
-/// The words for a kind, or the key itself for one Lumen does not know. An "open <scheme>"
-/// answer, which the app launcher writes, reads as the app it opens.
 pub fn label(key: &str) -> String {
     if let Some(scheme) = key.strip_prefix("open ") {
         return format!("Open with {}", crate::extlink::app_name(scheme));
@@ -45,16 +33,13 @@ pub fn label(key: &str) -> String {
     KINDS.iter().find(|k| k.key == key).map_or_else(|| key.to_string(), |k| k.label.to_string())
 }
 
-/// What happens when a site asks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Allow,
     Block,
-    /// Nothing is remembered and the default is to ask: the sidebar asks the person.
     Ask,
 }
 
-/// What a kind does when a site has no answer of its own: "block", or anything else (ask).
 pub fn default_for(defaults: &BTreeMap<String, String>, kind: &str) -> Verdict {
     match defaults.get(kind).map(String::as_str) {
         Some("block") => Verdict::Block,
@@ -62,7 +47,6 @@ pub fn default_for(defaults: &BTreeMap<String, String>, kind: &str) -> Verdict {
     }
 }
 
-/// The site's own answer wins; without one, the default for the kind.
 pub fn verdict(rules: &Rules, defaults: &BTreeMap<String, String>, origin: &str, kind: &str) -> Verdict {
     match rules.get(origin).and_then(|r| r.get(kind)) {
         Some(true) => Verdict::Allow,
@@ -71,7 +55,6 @@ pub fn verdict(rules: &Rules, defaults: &BTreeMap<String, String>, origin: &str,
     }
 }
 
-/// Remember an answer. `Ask` forgets it, and a site with nothing left is dropped.
 pub fn set_rule(rules: &mut Rules, origin: &str, kind: &str, v: Verdict) {
     match v {
         Verdict::Ask => {
@@ -88,13 +71,11 @@ pub fn set_rule(rules: &mut Rules, origin: &str, kind: &str, v: Verdict) {
     }
 }
 
-/// The answer a site has for a kind: Some(allowed), or None for "ask".
 #[allow(dead_code)]
 pub fn answer(rules: &Rules, origin: &str, kind: &str) -> Option<bool> {
     rules.get(origin).and_then(|r| r.get(kind)).copied()
 }
 
-/// The pairs of origin and its host as the pages show it (no www.), for the lock popover.
 pub fn host_of(url: &str) -> String {
     let rest = url.split("://").nth(1).unwrap_or("");
     let h = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -102,7 +83,6 @@ pub fn host_of(url: &str) -> String {
     h.to_string()
 }
 
-/// A default-behaviour map from the pairs the Settings page edits.
 pub fn set_default(defaults: &mut BTreeMap<String, String>, kind: &str, v: Verdict) {
     if v == Verdict::Block {
         defaults.insert(kind.to_string(), "block".into());
@@ -111,12 +91,8 @@ pub fn set_default(defaults: &mut BTreeMap<String, String>, kind: &str, v: Verdi
     }
 }
 
-// ------------------------------------------------------------------- zoom
-
-/// Zoom by host, in percent. Only hosts that differ from the default zoom are kept.
 pub type Zooms = BTreeMap<String, u32>;
 
-/// Chromium's range: a quarter to five times.
 pub const ZOOM_MIN: u32 = 25;
 pub const ZOOM_MAX: u32 = 500;
 
@@ -124,19 +100,16 @@ pub fn clamp_pct(p: u32) -> u32 {
     p.clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
-/// The host a zoom belongs to: the lower-cased name of an http(s) page, no port.
 pub fn zoom_host(url: &str) -> Option<String> {
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return None;
     }
     let h = host_of(&lower);
-    // [::1]:8080 keeps its brackets; a name loses :8080.
     let h = if h.starts_with('[') { h.split_once(']').map_or(h.clone(), |(a, _)| format!("{a}]")) } else { h.split(':').next().unwrap_or("").to_string() };
     (!h.is_empty()).then_some(h)
 }
 
-/// WebView2's factor (1.25) as a whole percent (125).
 pub fn pct_of(factor: f64) -> u32 {
     clamp_pct((factor * 100.0).round().max(0.0) as u32)
 }
@@ -145,14 +118,10 @@ pub fn factor_of(pct: u32) -> f64 {
     clamp_pct(pct) as f64 / 100.0
 }
 
-/// The zoom a page of `host` opens at.
 pub fn zoom_for(zooms: &Zooms, default_pct: u32, host: &str) -> u32 {
     zooms.get(host).copied().map_or(clamp_pct(default_pct), clamp_pct)
 }
 
-/// A person changed the zoom of `host` to `pct`. Returns whether the map changed. A zoom equal
-/// to the default is no entry at all, so changing the default moves every site that never
-/// had a choice of its own.
 pub fn remember_zoom(zooms: &mut Zooms, default_pct: u32, host: &str, pct: u32) -> bool {
     let pct = clamp_pct(pct);
     if pct == clamp_pct(default_pct) {
@@ -162,23 +131,15 @@ pub fn remember_zoom(zooms: &mut Zooms, default_pct: u32, host: &str, pct: u32) 
     }
 }
 
-// ------------------------------------------------------------------ https
-
-/// What the address bar and links are allowed to do with plain http.
 #[derive(Default, Clone)]
 pub struct HttpsPolicy {
     pub on: bool,
-    /// Hosts the person chose to keep on http, for good (settings.json).
     pub exceptions: HashSet<String>,
-    /// Hosts the person chose to open once; they last until Lumen closes.
     pub passes: HashSet<String>,
 }
 
-/// Names that only mean something on a home or office network: no public certificate exists
-/// for them, so upgrading would only break them.
 const LOCAL_SUFFIXES: &[&str] = &[".local", ".lan", ".internal", ".home", ".home.arpa", ".localdomain", ".intranet", ".corp", ".private", ".localhost"];
 
-/// Hosts that never go to https: this machine, numbers, a one-word name, a private-network name.
 pub fn is_local_host(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     let h = h.trim_end_matches('.');
@@ -189,9 +150,6 @@ pub fn is_local_host(host: &str) -> bool {
         || LOCAL_SUFFIXES.iter().any(|s| h.ends_with(s))
 }
 
-/// An http page that should be tried as https first: the https address, or None when the page
-/// is not plain http, is on a local network, has a port of its own (a dev server), or the
-/// person said http is fine for the host.
 pub fn https_upgrade(url: &str, p: &HttpsPolicy) -> Option<String> {
     if !p.on {
         return None;
@@ -219,18 +177,13 @@ pub fn https_upgrade(url: &str, p: &HttpsPolicy) -> Option<String> {
     Some(format!("https://{cleaned}{tail}"))
 }
 
-/// Whether a site answers where https lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Probe {
-    /// Something listens on the https port: go there. A bad certificate is the browser's to report.
     Open,
-    /// The name exists and the https port is shut or silent: this site has no https.
     Shut,
-    /// The name did not resolve, or there is no network: not the site's fault. Let https show why.
     Unknown,
 }
 
-/// Try the https port of `host_port` ("example.com:443"). Blocks up to `wait`; call it from a thread.
 pub fn probe(host_port: &str, wait: std::time::Duration) -> Probe {
     use std::net::{TcpStream, ToSocketAddrs};
     let Ok(addrs) = host_port.to_socket_addrs() else { return Probe::Unknown };
@@ -244,7 +197,6 @@ pub fn probe(host_port: &str, wait: std::time::Duration) -> Probe {
     if tried { Probe::Shut } else { Probe::Unknown }
 }
 
-/// The host of an http URL, lower-cased, without port: the key exceptions use.
 pub fn exception_host(url: &str) -> Option<String> {
     zoom_host(url)
 }
@@ -253,8 +205,6 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// The page shown when a site would not talk https. Plain words, two ways forward, one way out.
-/// The links use a scheme of Lumen's own, which the navigation hook picks up.
 pub fn interstitial_html(http_url: &str, dark: bool) -> String {
     let host = esc(&host_of(http_url));
     let url = esc(http_url);
@@ -274,7 +224,6 @@ Over plain http, anyone on the way can read what you send and change what comes 
     )
 }
 
-/// What a click on the page above means.
 #[derive(Debug, PartialEq)]
 pub enum HttpChoice {
     Back,
@@ -282,7 +231,6 @@ pub enum HttpChoice {
     Always(String),
 }
 
-/// Read one of the page's links, if it is one.
 pub fn parse_http_choice(link: &str) -> Option<HttpChoice> {
     let rest = link.strip_prefix("lumen-http:")?;
     if rest == "back" {
@@ -299,9 +247,6 @@ pub fn parse_http_choice(link: &str) -> Option<HttpChoice> {
     }
 }
 
-/// The page shown when a top-level navigation hits a host on the malware or
-/// phishing lists. Plain words, two ways forward. The links use a scheme of
-/// Lumen's own, which the navigation hook picks up.
 pub fn danger_html(url: &str, dark: bool) -> String {
     let host = esc(&host_of(url));
     let url = esc(url);
@@ -320,8 +265,6 @@ If you did not mean to go here, go back.</p>\
     )
 }
 
-/// Lumen's page for a page that did not load: what went wrong, in words, and Try again. It
-/// takes the place of Chromium's own error page. `err` is WebView2's WebErrorStatus.
 pub fn error_html(url: &str, err: i32, dark: bool, back: bool) -> String {
     let host = esc(&host_of(url));
     let (title, words) = error_words(err, &host);
@@ -340,7 +283,6 @@ a.go{{background:{accent};border-color:{accent};color:{bg};font-weight:600}}a:ho
     )
 }
 
-/// The title and words for a WebErrorStatus. The host is already escaped.
 fn error_words(err: i32, host: &str) -> (String, String) {
     match err {
         13 => (format!("Lumen could not find {host}"), "Check the address for a typo. If it is right, the site may be down, or this PC may be offline.".into()),
@@ -357,14 +299,12 @@ fn error_words(err: i32, host: &str) -> (String, String) {
     }
 }
 
-/// A click on the error page above.
 #[derive(Debug, PartialEq)]
 pub enum ErrorChoice {
     Back,
     Retry(String),
 }
 
-/// Read one of the error page's links. Only http(s) may be retried.
 pub fn parse_error_choice(link: &str) -> Option<ErrorChoice> {
     let rest = link.strip_prefix("lumen-error:")?;
     if rest == "back" {
@@ -374,15 +314,12 @@ pub fn parse_error_choice(link: &str) -> Option<ErrorChoice> {
     url.to_ascii_lowercase().starts_with("http").then(|| ErrorChoice::Retry(url.to_string()))
 }
 
-/// What a click on the page above means.
 #[derive(Debug, PartialEq)]
 pub enum DangerChoice {
     Back,
     Continue(String),
 }
 
-/// Read one of the page's links, if it is one. Only http(s) may be continued:
-/// a page cannot smuggle a file or script through the link.
 pub fn parse_danger_choice(link: &str) -> Option<DangerChoice> {
     let rest = link.strip_prefix("lumen-danger:")?;
     if rest == "back" {
@@ -416,7 +353,6 @@ mod tests {
         let r = rules();
         assert_eq!(verdict(&r, &d, "https://meet.example", "camera"), Verdict::Allow);
         assert_eq!(verdict(&r, &d, "https://meet.example", "microphone"), Verdict::Block);
-        // No answer for this site: the default for the kind decides.
         assert_eq!(verdict(&r, &d, "https://other.example", "camera"), Verdict::Block);
         assert_eq!(verdict(&r, &d, "https://other.example", "location"), Verdict::Ask);
     }
@@ -429,7 +365,6 @@ mod tests {
         assert_eq!(answer(&r, "https://meet.example", "microphone"), Some(false));
         set_rule(&mut r, "https://meet.example", "microphone", Verdict::Ask);
         assert!(r.is_empty());
-        // Forgetting what was never there is nothing.
         set_rule(&mut r, "https://nobody.example", "camera", Verdict::Ask);
         assert!(r.is_empty());
     }
@@ -444,7 +379,6 @@ mod tests {
         let back: crate::store::Settings = serde_json::from_str(&serde_json::to_string(&s).expect("settings to json")).expect("settings from json");
         assert_eq!(default_for(&back.perm_defaults, "notifications"), Verdict::Block);
         assert_eq!(default_for(&back.perm_defaults, "camera"), Verdict::Ask);
-        // Back to asking leaves nothing behind.
         let mut d = back.perm_defaults;
         set_default(&mut d, "notifications", Verdict::Ask);
         assert!(d.is_empty());
@@ -466,7 +400,6 @@ mod tests {
         }
         assert_eq!(label("camera"), "Camera");
         assert_eq!(label("something"), "something");
-        // The app launcher's per-scheme answers read as the app they open.
         assert_eq!(label("open mailto"), "Open with your mail app");
         assert_eq!(label("open spotify"), "Open with Spotify");
     }
@@ -487,12 +420,9 @@ mod tests {
         assert!(remember_zoom(&mut z, 100, "a.test", 150));
         assert_eq!(zoom_for(&z, 100, "a.test"), 150);
         assert_eq!(zoom_for(&z, 100, "b.test"), 100);
-        // The same value again changes nothing.
         assert!(!remember_zoom(&mut z, 100, "a.test", 150));
-        // Back to the default: the entry goes.
         assert!(remember_zoom(&mut z, 100, "a.test", 100));
         assert!(z.is_empty());
-        // With a default of 125, a site read at 100 is a choice and is kept; at 125 it is not.
         assert!(remember_zoom(&mut z, 125, "c.test", 100));
         assert_eq!(zoom_for(&z, 125, "c.test"), 100);
         assert_eq!(zoom_for(&z, 125, "d.test"), 125);
@@ -528,25 +458,21 @@ mod tests {
     #[test]
     fn https_first_leaves_alone_what_it_cannot_help() {
         let p = policy();
-        // Already secure, or not http at all.
         assert_eq!(https_upgrade("https://example.com/", &p), None);
         assert_eq!(https_upgrade("data:text/html,hi", &p), None);
         assert_eq!(https_upgrade("about:blank", &p), None);
         assert_eq!(https_upgrade("file:///c:/a.html", &p), None);
-        // This machine, numbers, one-word names, home networks, dev servers.
         for u in [
             "http://localhost/", "http://localhost:3000/", "http://127.0.0.1:8080/", "http://192.168.1.10/", "http://[::1]/", "http://nas/",
             "http://printer.local/", "http://router.lan/", "http://example.com:8080/", "http://app.localhost/",
         ] {
             assert_eq!(https_upgrade(u, &p), None, "{u}");
         }
-        // A host the person said http is fine for, and one they opened once.
         assert_eq!(https_upgrade("http://old.example/x", &p), None);
         let mut p = policy();
         p.passes.insert("once.example".into());
         assert_eq!(https_upgrade("http://once.example/x", &p), None);
         assert!(https_upgrade("http://other.example/x", &p).is_some());
-        // Off means off.
         p.on = false;
         assert_eq!(https_upgrade("http://other.example/x", &p), None);
     }
@@ -558,9 +484,7 @@ mod tests {
         let open = listener.local_addr().expect("its address").to_string();
         assert_eq!(probe(&open, Duration::from_secs(2)), Probe::Open);
         drop(listener);
-        // The port was just given back: nothing listens now.
         assert_eq!(probe(&open, Duration::from_secs(2)), Probe::Shut);
-        // A name that cannot exist says nothing about the site.
         assert_eq!(probe("no-such-host.invalid:443", Duration::from_secs(2)), Probe::Unknown);
     }
 
@@ -572,7 +496,6 @@ mod tests {
         assert_eq!(parse_http_choice("lumen-http:back"), Some(HttpChoice::Back));
         assert_eq!(parse_http_choice("lumen-http:once:http://old.example/a?x=1&y=2"), Some(HttpChoice::Once("http://old.example/a?x=1&y=2".into())));
         assert_eq!(parse_http_choice("lumen-http:always:http://old.example/"), Some(HttpChoice::Always("http://old.example/".into())));
-        // Nothing that is not http can be smuggled through the link.
         assert_eq!(parse_http_choice("lumen-http:once:file:///c:/secret"), None);
         assert_eq!(parse_http_choice("lumen-http:once:javascript:alert(1)"), None);
         assert_eq!(parse_http_choice("https://example.com/"), None);
@@ -591,7 +514,6 @@ mod tests {
         assert_eq!(parse_danger_choice("lumen-danger:back"), Some(DangerChoice::Back));
         assert_eq!(parse_danger_choice("lumen-danger:continue:https://evil.example.com/steal?x=1&y=2"), Some(DangerChoice::Continue("https://evil.example.com/steal?x=1&y=2".into())));
         assert_eq!(parse_danger_choice("lumen-danger:continue:http://evil.example.com/"), Some(DangerChoice::Continue("http://evil.example.com/".into())));
-        // A page cannot smuggle a file or script through the link.
         assert_eq!(parse_danger_choice("lumen-danger:continue:file:///c:/secret"), None);
         assert_eq!(parse_danger_choice("lumen-danger:continue:javascript:alert(1)"), None);
         assert_eq!(parse_danger_choice("lumen-danger:allow:https://x.example/"), None);

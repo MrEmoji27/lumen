@@ -1,9 +1,5 @@
 #![windows_subsystem = "windows"]
 
-//! Lumen. A small browser shell.
-//! One window. A slim UI page for the sidebar. Pages beside it.
-//! Rust decides who lives, who sleeps, and when the UI hears about it.
-
 mod address;
 mod archive;
 mod aria;
@@ -86,56 +82,28 @@ use engine::{Action, Ctx, Ev};
 use store::{ArchivedTab, SavedTab, Session, Settings};
 
 const TICK: Duration = Duration::from_secs(3);
-/// How often the archive looks for tabs nobody has looked at.
 const ARCHIVE_TICK: Duration = Duration::from_secs(60);
-/// How many closed-away tabs the archive keeps.
 const MAX_ARCHIVED: usize = 200;
 const STAGE_IDLE: Duration = Duration::from_secs(30);
-/// How long a torrent may look for its peers before the row says so plainly:
-/// after this, nobody is answering, and the person should know that.
 const METADATA_PATIENCE: Duration = Duration::from_secs(120);
-/// How long a magnet waits for the page to say whether the person clicked it.
-/// The page's report lands a moment after the navigation.
 const MAGNET_SETTLE: Duration = Duration::from_millis(400);
-/// A hidden tab keeps its caches this long, so flipping back is instant.
 const TRIM_AFTER: Duration = Duration::from_secs(30);
-/// The person away from mouse and keyboard this long, and the page on screen
-/// goes to the low memory target. `GetLastInputInfo`'s clock, Windows-wide.
 const WATCH_TRIM_AWAY: Duration = Duration::from_secs(15);
-/// That check's cadence while the page is trimmed: one input read a second. At the keys,
-/// the next read waits until the 15 s could be up.
 const WATCH_POLL: Duration = Duration::from_secs(1);
-/// Nothing waits: the loop sleeps this long instead of waking every TICK forever.
 const IDLE_TICK: Duration = Duration::from_secs(30);
-/// The sidebar memory readout, on its own slow clock. Reading it walks every
-/// WebView2 process, so it does not run on the tick.
 const MEM_TICK: Duration = Duration::from_secs(5);
 const MAX_CLOSED: usize = 25;
-/// How many sites may be kept in the essentials row.
 const MAX_ESSENTIALS: usize = 12;
 const COMPACT_W: f64 = 56.0;
-/// Control page refresh. Only runs while the page is open.
 const SAMPLE: Duration = Duration::from_millis(1000);
-/// A CPU figure is the difference of two readings. The second comes this soon after the
-/// page opens, so it does not sit on a dash for a whole second.
 const SAMPLE_FIRST: Duration = Duration::from_millis(400);
-/// How often each tab's memory is taken while Control is shut: for the tab rows' hover and
-/// the sleep policy. Only while some tab of the person's has a page.
 const TAB_MEM_EVERY: Duration = Duration::from_secs(60);
-/// A hidden tab whose page holds more than this is unloaded after HEAVY_AFTER hidden,
-/// instead of the normal discard time. The figure is the one `tab_mem` already keeps
-/// for Control: a feed that scrolled forever should not hold a gigabyte for half an hour.
 const HEAVY_MEM: u64 = 500 * 1024 * 1024;
 const HEAVY_AFTER: Duration = Duration::from_secs(300);
-/// "Never", as a sleep time: longer than any run. Nothing is due at it and nothing wakes for it.
 const NEVER: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
-/// Readings the network rate is taken over: about five seconds.
 const NET_WINDOW: usize = 5;
-/// How long the agent's cursor and pill stay over a lent tab after the agent's last click
-/// or key there. An agent that has moved on leaves the person's own tab bare again.
 const LENT_SHOW: Duration = Duration::from_secs(8);
 
-/// The last agent that clicked or typed in a tab the person lent it.
 struct Lent {
     tab: u64,
     session: String,
@@ -154,18 +122,13 @@ enum Panel {
     Drive,
     Report,
     Dashboard,
-    /// What each site may do, and the zoom and http choices kept per site.
     Sites,
-    /// What's new: the changelog built into the exe.
     Changes,
-    /// Report a problem: a plain-text report to read, copy or save.
     Bug,
-    /// The check-up: what is wrong with this Lumen, and what to do.
     Doctor,
 }
 
 impl Panel {
-    /// Pages that show live numbers: the process sampling runs only while one is open.
     fn live(self) -> bool {
         matches!(self, Panel::Control | Panel::Dashboard)
     }
@@ -189,7 +152,6 @@ impl Panel {
     }
 }
 
-/// One line of a Drive CLI's output, without the colors a terminal would read.
 fn clean_line(line: &str) -> String {
     let mut out = String::new();
     let mut in_escape = false;
@@ -211,8 +173,6 @@ fn clean_line(line: &str) -> String {
     out.trim_end().to_string()
 }
 
-/// One of a Drive CLI's pipes, read a line at a time into the run's log. The flag says
-/// the pipe is done, which is how the run notices its CLI has ended.
 fn drive_pipe(pipe: impl std::io::Read + Send + 'static, out: Arc<Mutex<std::collections::VecDeque<String>>>, done: Arc<AtomicBool>) {
     let reader = std::io::BufReader::new(pipe);
     for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
@@ -229,28 +189,19 @@ fn drive_pipe(pipe: impl std::io::Read + Send + 'static, out: Arc<Mutex<std::col
     done.store(true, Ordering::Relaxed);
 }
 
-/// One Drive run: the agent CLI Lumen started with the person's task, its output, and
-/// where the run is. Every run is its own MCP session, in its own profile.
 struct Drive {
-    /// The name this run's session keeps (`drive-3`): the CLI's label, its profile and
-    /// the folder its downloads land in.
     name: String,
     task: String,
     child: std::process::Child,
-    /// What the CLI printed, newest last: the agent's own messages.
     out: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
-    /// The reader threads are done: the CLI has ended.
     finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
     started: Instant,
-    /// The MCP session, once the CLI has opened one.
     session: Option<String>,
-    /// The person took the tab over: only browser_handoff gets the agent back in.
     paused: bool,
     exit: Option<i32>,
 }
 
 impl Drive {
-    /// How long the run has been going, for the panel's title line.
     fn ago(&self) -> String {
         let s = self.started.elapsed().as_secs();
         if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m", s / 60) } else { format!("{}h {:02}m", s / 3600, (s % 3600) / 60) }
@@ -266,92 +217,50 @@ struct Tab {
     back: bool,
     fwd: bool,
     pinned: bool,
-    /// The page a pin was pinned on. Closing the tab unloads it back to this; the current
-    /// `url` may have wandered. Empty when not pinned.
     pin_url: String,
-    /// An Essential: the site stays in the row above the tabs, in every workspace.
     essential: bool,
-    /// How long the tab has been unseen, in milliseconds, and since when. The
-    /// time Lumen was closed does not count.
     idle_ms: u64,
     idle_at: Option<Instant>,
     audio: bool,
     muted: bool,
-    /// Lumen's error page is up: the tab keeps the address that failed until a real page comes.
     error_shown: bool,
-    /// Questions this page asked since it loaded, and whether the person said to stop them.
     asks_n: u32,
     asks_off: bool,
-    /// In a call: a live microphone, camera or screen capture, or a connected peer. Never
-    /// frozen, unloaded or trimmed, sound or no sound.
     call: bool,
     suspended: bool,
     trimmed: bool,
-    /// Opened by an AI agent. Marked in the sidebar, never saved in the session.
     agent: bool,
-    /// Its page died. Clicking the tab reloads it.
     crashed: bool,
-    /// Showing reader view of this URL.
     reader: Option<String>,
-    /// Showing the page in the target language. What it said before is in the page.
     translated: Option<String>,
-    /// A translation is being worked on: the models, the engine or the words.
     translating: bool,
-    /// Opened by a page (window.open, target=_blank).
     popup: bool,
-    /// Which workspace this tab belongs to (index into `App::workspaces`).
     workspace: usize,
-    /// InPrivate. Nothing here is written anywhere: no history, no page text,
-    /// no session, no download row, no cookies once the last private page goes.
     private: bool,
-    /// For agent tabs: the MCP session that owns it, and its client's name.
     owner: String,
     owner_name: String,
-    /// For agent tabs: the profile key its own WebView2 profile is named after
-    /// (`agent-<profile>`), so its cookies and storage never meet another agent's.
     profile: String,
-    /// For agent tabs: its own folder under "Agent downloads".
     downloads: String,
-    /// The session asked for strict isolation: its own environment, its own browser
-    /// process. Cleared if WebView2 will not make one, so the tab still opens.
     own_env: bool,
-    /// For a tab of the person's: the site (scheme://host) they said agents may use it on.
-    /// Ends with a move to another site and with the tab.
     agent_ok: Option<String>,
-    /// The person locked this tab: its page shows only after Windows Hello, each time the
-    /// tab is come back to. Saved with the session.
     locked: bool,
-    /// Windows Hello said yes for this visit. Leaving the tab locks it again.
     unlocked: bool,
     view: Option<WebView>,
-    /// A Servo page, for the hosts in the "Servo sites" list. The other engine.
     #[cfg(feature = "servo")]
     servo: Option<servo_engine::Page>,
     hidden_at: Option<Instant>,
-    /// Last navigation result: (ok, WebView2 error code, HTTP status).
     last_nav: Option<(bool, i32, i32)>,
-    /// An agent tab's stage view, put to sleep by the idle clock: not painting.
     stage_idle: bool,
-    /// A navigation is on its way: since an agent asked for one, or since the page began
-    /// one (a click, a form). Ends at NavigationCompleted. Agents wait on this, not on a clock.
     nav_pending: Option<Instant>,
-    /// The pending navigation has really started (NavigationStarting came).
     nav_started: bool,
-    /// Its page window is on screen right now.
     visible: bool,
-    /// Typed in the address bar as a bare host and not yet answered. See `Typed`.
     typed: Option<Typed>,
-    /// The zoom the page is at, in percent.
     zoom: u32,
-    /// A zoom Lumen just set itself: the change event that follows is not the person's.
     zoom_set: Option<u32>,
-    /// Showing the "this site does not use https" page for this http address.
     no_https: Option<String>,
-    /// Showing the danger warning for this address. Same shape as `no_https`.
     no_danger: Option<String>,
 }
 
-/// What the sleep policy needs to know about a hidden tab.
 #[derive(Clone, Copy)]
 struct SleepState {
     audio: bool,
@@ -359,27 +268,19 @@ struct SleepState {
     trimmed: bool,
     suspended: bool,
     pinned: bool,
-    /// Its page holds more than `HEAVY_MEM`. It goes after `HEAVY_AFTER` hidden instead of
-    /// the normal discard time, if that is sooner.
     heavy: bool,
 }
 
-/// A tab as the unload rules see it: Windows short of memory, or the RAM cap reached.
 struct Unloadable {
-    /// On screen: the active tab or the split's other half.
     shown: bool,
-    /// It has a page to unload.
     live: bool,
     pinned: bool,
     audio: bool,
     call: bool,
-    /// An agent tab whose agent is working (its stage view is awake).
     agent_busy: bool,
     hidden_at: Option<Instant>,
 }
 
-/// The hidden tab looked at longest ago that may be unloaded: never one on screen, one with
-/// sound or a call, a pinned tab's live page, or a working agent's tab.
 fn unload_victim(tabs: &[Unloadable], now: Instant) -> Option<usize> {
     tabs.iter()
         .enumerate()
@@ -388,24 +289,18 @@ fn unload_victim(tabs: &[Unloadable], now: Instant) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// How often the power state is read. A plug pulled shows within this.
 const POWER_EVERY: Duration = Duration::from_secs(30);
-/// While Windows stays short of memory, one more tab goes every this long.
 const LOW_MEMORY_EVERY: Duration = Duration::from_secs(5);
 
-/// On battery, or with Windows' battery saver on.
 fn on_battery() -> bool {
     use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
     let mut p = SYSTEM_POWER_STATUS::default();
     if unsafe { GetSystemPowerStatus(&mut p) }.is_err() {
         return false;
     }
-    // ACLineStatus 0 is battery; SystemStatusFlag 1 is battery saver.
     p.ACLineStatus == 0 || p.SystemStatusFlag & 1 != 0
 }
 
-/// Windows' low-memory signal, waited on by a thread of its own: while it is set, the loop
-/// hears about it every LOW_MEMORY_EVERY. Nothing polls on the UI thread.
 fn watch_low_memory(proxy: tao::event_loop::EventLoopProxy<Ev>) {
     use windows::Win32::System::{
         Memory::{CreateMemoryResourceNotification, LowMemoryResourceNotification},
@@ -427,28 +322,18 @@ fn watch_low_memory(proxy: tao::event_loop::EventLoopProxy<Ev>) {
     });
 }
 
-/// One thing the sleep policy does to a hidden tab.
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum SleepStep {
-    /// Lower the memory target. The page keeps running.
     Trim,
-    /// Freeze it.
     Suspend,
-    /// Drop the page, keep the tab.
     Discard,
 }
 
-/// The freeze and unload times from the settings, in minutes, 0 for never.
 fn sleep_durations(sleep_min: u32, discard_min: u32) -> (Duration, Duration) {
     let d = |m: u32| if m == 0 { NEVER } else { Duration::from_secs(m as u64 * 60) };
     (d(sleep_min), d(discard_min))
 }
 
-/// The step a hidden tab is owed `idle` after it was hidden, if any. A tab that
-/// is playing audio is trimmed and nothing more: frozen or dropped, the music
-/// would stop. Its clock restarts when the audio does (see `Ev::Audio`). A tab in
-/// a call is left alone entirely: a call is quiet whenever nobody talks. A tab
-/// whose page is heavy is dropped sooner than the normal time, but never pinned.
 fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Duration) -> Option<SleepStep> {
     if t.call {
         return None;
@@ -456,7 +341,6 @@ fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Dura
     if t.audio {
         return (idle >= TRIM_AFTER && !t.trimmed).then_some(SleepStep::Trim);
     }
-    // A heavy page is dropped at HEAVY_AFTER, or at the normal time when that is first.
     let discard = if t.heavy && discard < NEVER { discard.min(HEAVY_AFTER) } else { discard };
     if idle >= discard && !t.pinned {
         Some(SleepStep::Discard)
@@ -469,9 +353,6 @@ fn due_sleep_step(t: &SleepState, idle: Duration, sleep: Duration, discard: Dura
     }
 }
 
-/// How long since the last mouse click or key press, anywhere in Windows.
-/// `GetLastInputInfo` keeps that clock for the whole session; the tick count
-/// wraps every 49 days and subtracting wrapped is still the right gap.
 fn input_idle() -> Duration {
     use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
@@ -488,9 +369,7 @@ fn input_idle() -> Duration {
     }
 }
 
-/// How long after hiding the tab's next step comes, for the loop's next wake.
 fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> Option<Duration> {
-    // The same line the drop uses: HEAVY_AFTER, or the normal time when that is first.
     let discard = if t.heavy && discard < NEVER { discard.min(HEAVY_AFTER) } else { discard };
     if t.call {
         None
@@ -499,31 +378,21 @@ fn next_sleep_step_after(t: &SleepState, sleep: Duration, discard: Duration) -> 
     } else if t.audio {
         None
     } else if !t.suspended {
-        // The heavy drop may come before the freeze: wake for whichever is first.
         Some(if t.heavy && !t.pinned { sleep.min(discard) } else { sleep })
     } else if !t.pinned {
         Some(discard)
     } else {
-        // Pinned and frozen: nothing left to do to it.
         None
     }
 }
 
-/// A bare host typed in the address bar (`youtube.musik`, not a link, not a
-/// search). If the name does not exist, the person meant words: search for them.
 struct Typed {
-    /// What was typed, for the search.
     raw: String,
-    /// The URL it was turned into.
     url: String,
-    /// The page load for that URL has started. Anything else loading first
-    /// (a link, a script) means the typed page was never the answer.
     started: bool,
 }
 
 impl Tab {
-    /// The agent kit records this page: an agent's own, or one the person lent. The byte
-    /// count and the bandwidth cap leave its Network domain as the kit set it.
     fn recorded(&self) -> bool {
         self.agent || self.agent_ok.is_some()
     }
@@ -583,7 +452,6 @@ impl Tab {
         }
     }
 
-    /// The session's record of this tab.
     fn saved(&self) -> SavedTab {
         SavedTab {
             url: self.url.clone(),
@@ -597,18 +465,14 @@ impl Tab {
         }
     }
 
-    /// Locked and not opened with Windows Hello on this visit: its page stays hidden.
     fn veiled(&self) -> bool {
         self.locked && !self.unlocked
     }
 
-    /// How long the tab has been unseen.
     fn idle(&self, now: Instant) -> Duration {
         archive::idle(self.idle_ms, self.idle_at, now)
     }
 
-    /// What the sleep policy looks at. `mem` is what the page last cost, from `tab_mem`:
-    /// a page over `HEAVY_MEM` leaves sooner, unless an agent is working in its tab.
     fn sleep_state(&self, mem: Option<u64>) -> SleepState {
         SleepState {
             audio: self.audio,
@@ -616,12 +480,10 @@ impl Tab {
             trimmed: self.trimmed,
             suspended: self.suspended,
             pinned: self.pinned,
-            // No figure yet is not heavy. A busy agent's tab is not the sleep policy's to drop.
             heavy: mem.is_some_and(|b| b > HEAVY_MEM) && (!self.agent || self.stage_idle),
         }
     }
 
-    /// The tab has a live page, of whichever engine. A Servo tab has no WebView2.
     fn has_page(&self) -> bool {
         if self.view.is_some() {
             return true;
@@ -644,23 +506,16 @@ impl Tab {
     }
 }
 
-/// A reader-view article being read aloud: which tab, where each sentence
-/// starts and ends in the page's text, and whether the voice is running.
 struct Aloud {
     tab: u64,
     ranges: Vec<(usize, usize)>,
     playing: bool,
 }
 
-/// A note over the page about something Lumen stopped: a pop-up, or a page
-/// sending the person to another site. One per tab; the newest replaces the old.
 struct BlockNote {
     kind: chrome::NoteKind,
-    /// The host the page wanted to go to, as the note shows it.
     target: String,
-    /// The host of the page that asked. "Allow on <site>" adds this one.
     site: String,
-    /// The whole address a redirect wanted to load: "Go anyway" loads it once.
     url: String,
     at: Instant,
 }
@@ -670,256 +525,133 @@ struct App {
     chrome: chrome::Chrome,
     blocker: Rc<blocker::Blocker>,
     tabs: Vec<Tab>,
-    /// Named tab groups. `tab_ids` for the active workspace mirrors the live Tab IDs.
     workspaces: Vec<workspaces::WorkspaceData>,
     active_workspace: usize,
-    /// Shift+clicked links open here: (tab id, url, view). Dropped on Escape.
     glance: Option<(u64, String, WebView)>,
     active: u64,
-    /// Tab ids newest-first: where the person was, so closing a tab goes back
-    /// there instead of to the neighbour in the row. See mru.rs.
     mru: mru::Mru,
     closed: Vec<SavedTab>,
-    /// The essentials: the sites kept open in every workspace, the same row in
-    /// all of them.
     essentials: Vec<SavedTab>,
-    /// The tabs that were closed away because nobody looked at them.
     archived: Vec<ArchivedTab>,
-    /// Debug only: every tab looks as if it had been idle for this long, so the
-    /// archive can be seen without waiting a day.
     test_idle: Option<Duration>,
     settings: Settings,
     panel: Panel,
-    /// The report page's range tile: "today" | "7" | "30" | "all".
     report_range: String,
-    /// The site whose row was clicked on the report page.
     report_site: Option<String>,
     peek: bool,
-    /// The command palette is open: its rows need the history and bookmark lists.
     pal_open: bool,
-    /// The last tab that played sound: the media keys and the footer card act on it.
     media_tab: Option<u64>,
-    /// Questions pages are waiting on (ask id, tab, origin, what), oldest first. The active
-    /// tab's first one is the card on screen.
     page_asks: Vec<(u64, u64, String, engine::Ask)>,
-    /// On battery (or Windows' battery saver is on), as last read; read every POWER_EVERY.
     on_battery: bool,
     power_at: Instant,
     page_fs: bool,
     user_fs: bool,
     ui_ready: bool,
-    /// Something changed. The UI hears once per frame, not once per event.
     ui_dirty: bool,
-    /// Favicons are big. They travel alone, only when they change.
     fav_queue: Vec<u64>,
-    /// One favicon per site, for the speed dial's tiles. Kept in favicons.json.
     site_favs: sitefavs::Favs,
     site_favs_dirty: bool,
-    /// Sidebar color reported by the UI. Paints the gaps around the page.
     bg: (u8, u8, u8),
-    /// Two pages side by side: the tab in the other half of the stage.
     split: Option<u64>,
-    /// The active tab sits in the right half of the split.
     pane_right: bool,
-    /// Where the divider sits, as a fraction of the stage width.
     split_at: f64,
-    /// The strip between the two panes.
     divider: split::Divider,
-    /// Colors the divider was last given. Only re-sent when they change.
     div_colors: ((u8, u8, u8), (u8, u8, u8)),
-    /// Last page sizes that got rounded corners. Skip the work when nothing moved.
     rounded: HashMap<u64, (u32, u32)>,
     was_max: bool,
     shown: bool,
     dirty: bool,
     mem: Option<(u64, u32)>,
-    /// The problem report, made when its page opens.
     bug_report: Option<String>,
-    /// "problem", or "crash" when the page was opened from the start page's crash note.
     bug_kind: &'static str,
-    /// This report has gone: Send does not send it twice.
     bug_sent: bool,
-    /// The check-up's answer. None while it is still being made.
     doctor: Option<doctor::Report>,
-    /// The run before this one never said goodbye: the start page offers a report, once.
     unclean_last: bool,
     born: Instant,
-    /// When the tick next wants to run. TICK apart, so a step that is not
-    /// ready cannot wake the loop again on the same deadline.
     next_tick: Instant,
-    /// When the archive looks for tabs nobody has looked at.
     next_archive: Instant,
-    /// When the sidebar memory readout next wants a fresh number.
     next_mem: Instant,
-    /// When the journal's next `sample` is due. Not a deadline of its own: it is
-    /// checked on the memory read the loop already makes, so an idle Lumen never
-    /// wakes for the journal and the journal never adds a timer.
     journal_at: Instant,
-    /// The window is minimized. Nobody is looking: the journal stands still.
     minimized: bool,
     exit: bool,
-    /// The browser tree's Job Object. The CPU cap lives here.
     job: Option<monitor::Job>,
-    /// Control page bookkeeping.
     next_sample: Option<Instant>,
-    /// What each tab's page costs, bytes, from the last sample (Control's, or the slow one).
     tab_mem: HashMap<u64, u64>,
-    /// The slow per-tab sample. None while no tab of the person's has a page.
     next_tab_mem: Option<Instant>,
-    /// The watch on mouse and keyboard: when the input check next runs. Armed
-    /// only while an on-screen page is load-done and trimmable; None otherwise,
-    /// so the loop keeps sleeping.
     next_trim: Option<Instant>,
     prev_cpu: HashMap<u32, u64>,
     prev_at: Instant,
     net: monitor::NetBytes,
-    /// The last few readings of bytes per tab, and the seconds each covered. Pages fetch
-    /// in bursts (a video takes a few seconds of it at a time), so a one-second rate
-    /// jumps between nothing and a lot; the rate shown is over these.
     net_hist: std::collections::VecDeque<(HashMap<u64, u64>, f64)>,
     watches: HashMap<u64, monitor::NetWatch>,
     cores: f64,
-    /// Newest first. Kept for this session.
     downloads: Vec<engine::Dl>,
     agent: agent::Agent,
-    /// Last time an agent did something. Drives the "Agent working" chip.
     agent_seen: Option<Instant>,
-    /// Last time any agent asked for anything. A Lumen started headless for agents
-    /// leaves when they have been quiet a while.
     agent_last: Instant,
-    /// Off-screen stage window hosting agent tabs' views. Made with the first agent tab.
     stage: Option<stage::Stage>,
-    /// The shield, the agent's cursor and the pill over a watched agent tab. Made with
-    /// the first watch.
     watch: Option<watch::Watch>,
-    /// Agent sessions whose tab the person took over from the watch pill: the shield is
-    /// off and the agent may only ask for the tab back until the person gives it back.
     taken: std::collections::HashSet<String>,
-    /// An agent at work in one of the person's own tabs, lent to agents: it gets the cursor
-    /// and the pill like an agent tab, for LENT_SHOW after its last click or key.
     lent: Option<Lent>,
-    /// Modifier keys as the main window last saw them.
     mods: ModifiersState,
-    /// Remembered permission answers, and requests waiting for the user.
     rules: store::Rules,
-    /// The zoom each site is read at, in percent. Only sites that differ from the default.
     zooms: sites::Zooms,
-    /// Hosts that answered on the https port this run, so the probe is made once.
     probed: HashSet<String>,
-    /// How many cookies the active tab's site has: (tab, count), asked for when the lock opens.
     site_cookies: Option<(u64, usize)>,
     prompts: Vec<(u64, u64, String, &'static str)>,
-    /// Which "open this app?" questions are on screen or were just refused.
     ext_gate: extlink::Gate,
-    /// History and bookmarks.
     library: library::Library,
-    /// aria2 and its jobs: gid -> download id in the list.
     aria: std::sync::Arc<aria::Aria>,
     aria_ids: HashMap<String, u64>,
-    /// Session-restored jobs have been put in the list once.
     aria_adopted: bool,
-    /// The aria2 poll thread. Asleep until a download gives it work.
     aria_poll: std::sync::Arc<aria::Poll>,
-    /// UPnP port mapping for the torrent port.
     upnp: upnp::Upnp,
-    /// Page text for searching history by content.
     recall: recall::Recall,
-    /// Console, network and dialog records of agent tabs.
     agent_logs: agentkit::Logs,
-    /// An agent waiting for the person: (tab, agent name, message, where to say Done).
     handoff: Option<(u64, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,
-    /// A consent the agent asked the person for: (tab, agent name, kind, message, reply).
     consent: Option<(u64, String, String, String, std::sync::mpsc::Sender<Result<Value, String>>)>,
-    /// URLs agents asked to download, and the session folder each belongs to: they land
-    /// in "Agent downloads\<folder>" and show in browser_downloads of that agent only.
     agent_dl: HashMap<String, String>,
-    /// Strict-isolation agent tabs waiting for their browser to be made.
     pending_own: Vec<u64>,
-    /// The Drive panel's run, if there is one.
     drive: Option<Drive>,
-    /// How many Drive runs this Lumen has started: run N is `drive-N`.
     drive_n: u32,
-    /// When the run next wants a look (its output, its session, its end).
     next_drive: Instant,
-    /// What aria2 was given per gid, so a failed download can be tried again.
     aria_meta: HashMap<String, (String, Vec<String>, Option<String>)>,
-    /// Gids the person started: a paused one with its metadata in gets
-    /// un-paused once (pause-metadata stops it after the metadata arrives).
-    /// A Pause by the person removes the gid: their Pause is never undone.
     aria_person: HashSet<String>,
-    /// Page-started adds (Handoff, page magnets): the torrent they spawn
-    /// waits for Resume. Plain files never spawn one, so the mark is inert.
     aria_page: HashSet<String>,
-    /// Why a page-started row waits: gid -> the note its paused row shows.
     aria_hold: HashMap<String, String>,
-    /// When each torrent started looking for its peers: gid -> the moment.
-    /// A torrent that has been looking for a long time with nobody answering
-    /// is the swarm's doing, and the row says so.
     aria_since: HashMap<String, Instant>,
-    /// A pop-up or a redirect Lumen stopped, by tab: what it wanted, the site
-    /// that asked, and when. One notice per tab: the newest replaces the old.
     block_notes: HashMap<u64, BlockNote>,
-    /// The translator page is open. Only alive while a translation is in the air.
     translator: Option<translate::Page>,
-    /// Servo, when the feature is compiled in and a Servo tab has been opened.
     #[cfg(feature = "servo")]
     servo: Option<servo_engine::Engine>,
-    /// The tab being translated right now.
     tr_busy: Option<u64>,
-    /// The pair chosen for it, and its text, waiting for the models and the engine.
     tr_pair: Option<&'static translate::P>,
     tr_texts: Option<String>,
-    /// Next download id for aria2, video and remembered rows. Never reused.
     dl_seq: u64,
-    /// Finished downloads changed; write downloads.json on the next tick.
     dl_dirty: bool,
-    /// A download finished or started seeding while the Downloads page was closed.
-    /// Drives the dot on the footer button until the page is opened.
     dl_unseen: bool,
-    /// Debug test hook: LUMEN_TEST_MAGNET adds one magnet on the first aria2 tick.
     test_magnet: bool,
-    /// The test magnet is on its way to aria2; its gid arrives in AriaAdded.
     test_pending: bool,
-    /// Debug test hook: (gid, when to cancel it). LUMEN_TEST_CANCEL seconds, default 60.
     test_dl: Option<(String, Instant)>,
-    /// Debug test hook: LUMEN_TEST_TRANSLATE translates the first page that loads.
     test_translate: bool,
-    /// Video grabs: download id -> (page url, user agent, running yt-dlp).
     videos: HashMap<u64, (String, String, video::Slot)>,
-    /// "Clear history on exit" owed a WebView2 clear it could not make in time.
-    /// Done at the next start, as soon as a page exists to ask.
     clear_pending: bool,
-    /// Read aloud: the reader-view tab being spoken, if any.
     aloud: Option<Aloud>,
-    /// The sidebar's width right now, and where it is gliding to (compact, peek,
-    /// or the person's own width). `from, to, when it started`.
     side_w: f64,
     side_anim: Option<(f64, f64, Instant)>,
-    /// SponsorBlock: a fetched skip script waiting for its tab to finish
-    /// loading, so it lands in the new document and not the one going away.
     spb: HashMap<u64, String>,
-    /// The open KeePass database: memory only, dropped after ten idle minutes.
     vault: Option<kdbx::Vault>,
-    /// When the vault was last used; the idle lock counts from here.
     vault_seen: Instant,
-    /// "Lock Lumen with Windows Hello": nothing shows until it says yes.
     app_locked: bool,
-    /// Whether this PC has Windows Hello. None until Windows has said.
     hello: Option<bool>,
-    /// The last word on an unlock that did not open: shown on the lock card.
     hello_note: String,
-    /// The secret downloads were opened with Windows Hello, for as long as Lumen runs.
     secret_open: bool,
 }
 
-/// Headless: a real Lumen whose window lives off-screen, never takes focus, has no taskbar
-/// button and makes no sound. For tests and for agents working while someone uses the PC.
-/// `--headless` or LUMEN_HEADLESS=1.
 pub fn headless() -> bool {
     HEADLESS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// How long a headless Lumen waits for agents before it leaves. LUMEN_AGENT_IDLE seconds, default 600.
 fn agent_idle() -> Duration {
     static D: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *D.get_or_init(|| Duration::from_secs(std::env::var("LUMEN_AGENT_IDLE").ok().and_then(|v| v.parse().ok()).unwrap_or(600)))
@@ -927,10 +659,6 @@ fn agent_idle() -> Duration {
 
 static HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// One Lumen per profile. The first one owns a named event; a later start sets it and
-/// leaves, and the first one comes to the front. Returns the event if we are the first.
-/// A later start that was given addresses leaves them in a note first (see `launch.rs`), and
-/// the first one opens them when it wakes. A headless later start never brings a window up.
 fn claim_instance(opens: &[launch::Open]) -> Option<windows::Win32::Foundation::HANDLE> {
     use windows::Win32::{
         Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
@@ -938,14 +666,11 @@ fn claim_instance(opens: &[launch::Open]) -> Option<windows::Win32::Foundation::
         UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow},
     };
     let dir = store::data_dir().to_string_lossy().to_lowercase();
-    // FNV-1a: a short, stable name for this profile folder.
     let h = dir.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
     let name = windows::core::HSTRING::from(format!("Local\\Lumen-{h:016x}"));
     unsafe {
         let ev = CreateEventW(None, false, false, &name).ok()?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            // A headless start (an agent asking) has nothing to show; a normal one does.
-            // Addresses always travel, and only a normal start asks for the window.
             let sent = !opens.is_empty() && launch::forward(opens, !headless());
             if !headless() || sent {
                 if !headless() {
@@ -959,7 +684,6 @@ fn claim_instance(opens: &[launch::Open]) -> Option<windows::Win32::Foundation::
     }
 }
 
-/// `lumen.exe --register`: write the entries, tell the person what is left to do.
 fn register_from_cli() -> String {
     let Some(reg) = defaultapp::Reg::current() else { return "Could not find the Lumen exe.".into() };
     match reg.ensure() {
@@ -968,9 +692,6 @@ fn register_from_cli() -> String {
     }
 }
 
-/// Say a line on the console: the borrowed parent console, or the handle stdout was pointed
-/// at when someone redirects it (`lumen --doctor > report.txt`). A windowless program has
-/// neither until one of those.
 fn say_on_console(msg: &str) {
     use std::io::Write;
     let text = crlf(msg);
@@ -991,7 +712,6 @@ fn say_on_console(msg: &str) {
     }
 }
 
-/// True when stdout was pointed at a file or a pipe rather than a console.
 fn redirected() -> bool {
     use windows::Win32::{
         Storage::FileSystem::{FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType},
@@ -1004,7 +724,6 @@ fn redirected() -> bool {
     }
 }
 
-/// The text with Windows line ends, so a captured report reads as separate lines in Notepad.
 fn crlf(msg: &str) -> String {
     let text = msg.replace("\r\n", "\n");
     let body = text.strip_suffix('\n').unwrap_or(&text);
@@ -1016,7 +735,6 @@ fn crlf(msg: &str) -> String {
     out
 }
 
-/// Show the main window: normally, or, headless, out of sight and without stealing focus.
 fn show_window(w: &tao::window::Window) {
     if !headless() {
         w.set_visible(true);
@@ -1025,16 +743,11 @@ fn show_window(w: &tao::window::Window) {
     use windows::Win32::UI::WindowsAndMessaging::{HWND_BOTTOM, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowPos, ShowWindow};
     let h = HWND(w.hwnd() as _);
     unsafe {
-        // Show first: showing puts a window back at its last place. Then move it out of sight.
-        // (-32000 means "minimized" to Windows, so not that.)
         let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(h, Some(HWND_BOTTOM), -10000, -10000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
     }
 }
 
-/// Hide the main window at once. tao's own set_visible goes through the event
-/// loop, and by the time Lumen is on its way out there is no event loop left to
-/// carry the message.
 fn hide_window(w: &tao::window::Window) {
     use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
     let h = HWND(w.hwnd() as _);
@@ -1043,25 +756,20 @@ fn hide_window(w: &tao::window::Window) {
     }
 }
 
-/// Which Lumen this is: the version, then the commit it was built from and its date.
 pub const VERSION: &str = concat!(env!("LUMEN_VERSION"), " (", env!("LUMEN_BUILD"), ")");
 
-/// When this run began, for the startup lines below.
 static BORN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
-/// LUMEN_PROFILE_PAINT=1: one startup step on stderr, "lumen: startup fonts 6.2 ms".
 pub fn startup_line(what: &str, ms: f64) {
     if std::env::var_os("LUMEN_PROFILE_PAINT").is_some() {
         eprintln!("lumen: startup {what} {ms:.1} ms");
     }
 }
 
-/// Milliseconds since this run began.
 pub fn since_born() -> f64 {
     BORN.get().map_or(0.0, |b| b.elapsed().as_secs_f64() * 1000.0)
 }
 
-/// How long ago, in words: "now", "12m ago", "2h ago", "3d ago".
 fn ago(when: u64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(when);
     let mins = now.saturating_sub(when) / 60;
@@ -1075,13 +783,10 @@ fn ago(when: u64) -> String {
 
 fn main() {
     let _ = BORN.set(Instant::now());
-    // `lumen.exe --version`: say which build this is, then done. No window.
     if std::env::args().any(|a| a == "--version") {
         say_on_console(&format!("Lumen {VERSION}"));
         return;
     }
-    // `lumen.exe --doctor`: the self-check, then 0 or 1. No window, and it runs beside
-    // another Lumen: it never claims the instance or starts the engine.
     if std::env::args().any(|a| a == "--doctor") {
         let report = doctor::run(&doctor::Live::default());
         say_on_console(&report.text());
@@ -1092,7 +797,6 @@ fn main() {
         std::sync::atomic::Ordering::Relaxed,
     );
     let cli = launch::from_process();
-    // `lumen.exe --register` / `--unregister`: the default-browser entries, then done. No window.
     if cli.register || cli.unregister {
         let said = if cli.unregister { defaultapp::unregister() } else { register_from_cli() };
         say_on_console(&said);
@@ -1102,35 +806,22 @@ fn main() {
     launch::sweep();
     defaultapp::startup_check();
     install_panic_hook();
-    // No WebView2 Runtime: say so in a window of Lumen's own, offer Microsoft's download,
-    // and leave. Nothing below can work without it. A headless Lumen just leaves (the shot
-    // hook still draws the window, for a look at it).
     if !engine::webview2_present() {
         if !headless() || std::env::var_os("LUMEN_TEST_SHOT").is_some() {
             chrome::nowebview::show();
         }
         return;
     }
-    // Before WebView2 starts: its processes must be born inside the job.
     let job = monitor::Job::adopt_self();
     let mut settings = store::load_settings();
-    // (Debug shots of the picker keep it with LUMEN_TEST_FIRSTRUN.)
     if headless() && !(cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_FIRSTRUN").is_some()) {
         settings.first_run_done = true;
     }
     let session = store::load_session();
-    // Agent profiles whose sessions ended while Lumen was running: their folders are
-    // deleted now, before WebView2 touches any profile.
     engine::purge_at_start();
-    // The journal opens before anything else runs, so a run that never gets a
-    // window up still says hello. Also the one place old journals are cleaned.
     let unclean = journal::start(&settings, restored_tabs(&session));
 
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
-    // Lumen never reads a raw device event. By default tao registers for raw mouse
-    // and keyboard input while the window has focus, and wakes the loop once per
-    // mouse sample (125 to 1000 a second) for events nobody looks at. This is what
-    // the journal's `wake` storms were: wakes follow the pointer, not the page.
     event_loop.set_device_event_filter(DeviceEventFilter::Always);
     let (w, h) = if session.width >= 720.0 && session.height >= 480.0 {
         (session.width, session.height)
@@ -1139,11 +830,8 @@ fn main() {
     };
     let window = WindowBuilder::new()
         .with_title("Lumen")
-        // Icon resource 1, baked in by build.rs from assets/lumen.ico.
         .with_window_icon(Icon::from_resource(1, None).ok())
         .with_decorations(false)
-        // Opaque window. Glass mode gets its backdrop from the extended DWM frame and
-        // black client pixels, not from window transparency, which costs a composite.
         .with_transparent(false)
         .with_background_color((0, 0, 0, 255))
         .with_undecorated_shadow(true)
@@ -1156,7 +844,6 @@ fn main() {
         .expect("window");
 
     let dark = resolve_dark(&settings, window.theme());
-    // The secret the page script keeps, so a page cannot forge what it says.
     let popup_token = popup::token();
     let popup_js = popup::script(&popup_token);
     let ctx = Rc::new(Ctx {
@@ -1201,7 +888,6 @@ fn main() {
     });
 
     {
-        // A second lumen.exe sets the event: come forward.
         let (ev, proxy) = (instance.0 as isize, ctx.proxy.clone());
         std::thread::Builder::new()
             .name("lumen-instance".into())
@@ -1228,20 +914,14 @@ fn main() {
         ctx.on_built.replace(Some(Box::new(move |wv: &WebView, who| b.attach(wv, who))));
     }
 
-    // The browser chrome: a native child window. No webview until a page needs one.
     let chrome = chrome::Chrome::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
-    // The split divider: a strip of its own between the two panes.
     let divider = split::Divider::new(HWND(ctx.window.hwnd() as _), ctx.proxy.clone());
 
 let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
-    // Read before the struct literal moves `settings` into the app.
     let keep_seeding = settings.keep_seeding;
     let dl_limit = settings.download_limit_kbps;
-    // The sidebar starts at its width; folding and peeking glide from here.
     let side_w = if settings.compact { COMPACT_W } else { settings.sidebar_width as f64 };
-    // Ensure the torrent port is chosen (picks once, saves, returns it).
     let bt_port = settings.ensure_bt_port();
-    // Start UPnP mapping for the torrent port if enabled.
     let upnp = upnp::Upnp::start(bt_port, settings.upnp);
     watch_low_memory(ctx.proxy.clone());
     let mut app = App {
@@ -1372,8 +1052,6 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         secret_open: false,
     };
     app.unclean_last = unclean;
-    // Locked with Windows Hello: the window opens on the lock screen. Never a headless run,
-    // which is the agents' and has no one to look at a prompt.
     app.app_locked = app.settings.lock_app && !headless();
     {
         let proxy = app.ctx.proxy.clone();
@@ -1381,15 +1059,11 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             let _ = proxy.send_event(Ev::HelloReady(ok));
         });
     }
-    // aria2 starts when a download wants it. Only work it left unfinished (a download to
-    // resume, a torrent to seed) starts it with Lumen.
     if aria::Aria::has_session(&store::data_dir()) {
         app.aria.wake();
     }
     app.ctx.aria_on.set(app.settings.accelerate_downloads);
     {
-        // One small thread asks aria2 about its jobs. It sleeps on a condvar
-        // until a download gives it something to ask about.
         let (aria, poll, proxy) = (app.aria.clone(), app.aria_poll.clone(), app.ctx.proxy.clone());
         std::thread::Builder::new()
             .name("lumen-aria-poll".into())
@@ -1403,18 +1077,11 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             .ok();
     }
     app.agent.set(app.settings.agent, app.settings.agent_port, &app.ctx.proxy);
-    // Test hook: LUMEN_TEST_AGENT_OFF=1 opens the door and shuts it again, the state of a Lumen
-    // whose switch was turned off while it ran: it listens and answers 503 to everything.
     if cfg!(debug_assertions) && app.settings.agent && std::env::var_os("LUMEN_TEST_AGENT_OFF").is_some() {
         app.agent.set(false, app.settings.agent_port, &app.ctx.proxy);
     }
-    // The last run closed with "clear history on exit" and could not finish wiping
-    // WebView2's own history. It happens as soon as there is a page to ask.
     app.clear_pending = store::clear_history_pending();
     app.apply_backdrop();
-    // Test hook for the backdrop measurement (docs/briefs/ui-backdrop.md):
-    // LUMEN_TEST_BACKDROP=acrylic|mica puts Windows' own frost on the window at
-    // start, so a headless run can be measured against one started without it.
     if cfg!(debug_assertions)
         && let Ok(v) = std::env::var("LUMEN_TEST_BACKDROP")
     {
@@ -1433,7 +1100,6 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     app.refresh_dark();
     app.load_downloads();
     app.restore(session);
-    // Addresses on the command line open on top of the restored tabs.
     for o in &cli.opens {
         app.open_launched(o);
     }
@@ -1444,9 +1110,6 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
     if !headless() {
         app.focus_page();
     }
-    // Test hooks for the chrome screenshots (LUMEN_TEST_SHOT, see chrome/shot.rs):
-    // LUMEN_TEST_COMPACT=1 starts with the icon-only sidebar, LUMEN_TEST_PANEL=
-    // downloads|control|history|bookmarks|settings|report opens that page.
     if cfg!(debug_assertions) {
         if std::env::var_os("LUMEN_TEST_COMPACT").is_some() {
             app.settings.compact = true;
@@ -1469,12 +1132,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         if panel != Panel::None || app.settings.compact {
             app.set_panel(panel);
         }
-        // LUMEN_TEST_SCRIPT: timed key/click/shot steps, see chrome/shot.rs.
         #[cfg(debug_assertions)]
         chrome::test_script(app.ctx.proxy.clone(), app.chrome.hwnd);
     }
-    // Test hook: LUMEN_TEST_EXT="spotify:track:1|spotify:track:2" makes the active page try to
-    // open those apps, as if clicked, from LUMEN_TEST_EXT_ORIGIN (default open.spotify.com).
     if cfg!(debug_assertions)
         && let Ok(list) = std::env::var("LUMEN_TEST_EXT")
     {
@@ -1483,10 +1143,6 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             let _ = app.ctx.proxy.send_event(Ev::ExternalUri { tab: app.active, origin: origin.clone(), uri: uri.to_string(), user: true });
         }
     }
-    // Test hook: LUMEN_TEST_PRIVATE=1 opens one normal and one private tab, so a
-    // headless run can prove a private tab leaves no trace in session.json. The
-    // private tab gets a url of its own: its Nav line in the log is the proof the
-    // InPrivate page built.
     if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_PRIVATE").is_some() {
         app.new_tab(Some("https://example.com/".into()), None);
         let id = app.new_private_tab();
@@ -1495,10 +1151,6 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             app.ensure_view(i);
         }
     }
-    // Test hook: LUMEN_TEST_SPLIT=1 opens two pages and splits the stage with them,
-    // so a headless run can prove the panes were laid out and the divider placed.
-    // LUMEN_TEST_TRANSLATE=1 translates the first page that finishes loading, and
-    // prints what the page said afterwards.
     if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_SPLIT").is_some() {
         app.new_tab(Some("https://example.com/".into()), None);
         app.new_tab(Some("https://example.org/".into()), None);
@@ -1510,29 +1162,20 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         app.test_translate = true;
         app.new_tab(Some("https://es.wikipedia.org/wiki/Wikipedia:Portada".into()), None);
     }
-    // Test hook: LUMEN_TEST_IDLE_HOURS=99 makes every tab look as if nobody had
-    // opened it for that long, so the archive can be seen without waiting a day.
     if cfg!(debug_assertions)
         && let Some(h) = std::env::var("LUMEN_TEST_IDLE_HOURS").ok().and_then(|v| v.parse::<u64>().ok())
     {
         app.test_idle = Some(Duration::from_secs(h * 3600));
-        // The archive does its work on its own minute, so the pages have loaded
-        // by the time it looks.
         app.next_archive = Instant::now() + ARCHIVE_TICK;
     }
-    // Test hook: LUMEN_TEST_MAGNET=1 adds one public-domain torrent magnet on the
-    // first aria2 tick, then cancels it after LUMEN_TEST_CANCEL seconds (default 60).
     if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_MAGNET").is_some() {
         app.test_magnet = true;
     }
 
     event_loop.run(move |event, _, cf| {
-        // The journal's wake count: one atomic add per loop turn, and only while
-        // there is something to watch. An idle Lumen counts nothing.
         if matches!(&event, Event::NewEvents(_)) && app.journal_busy() {
             journal::wake();
         }
-        // Servo works off its own clock: give it a turn whenever the loop wakes.
         #[cfg(feature = "servo")]
         if let Some(e) = &app.servo {
             e.spin();
@@ -1540,7 +1183,6 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 let now = Instant::now();
-                // The sidebar's width glides: a step is what wakes for it.
                 if app.side_anim.is_some() {
                     app.layout();
                 }
@@ -1560,25 +1202,18 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 if app.tick_due(now) {
                     app.tick();
                 }
-                // The person away from mouse and keyboard: one input read a
-                // second while an on-screen page is trimmable, nothing otherwise.
                 app.trim_poll(now);
             }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::Moved(_) => app.sync_watch(),
                 WindowEvent::Resized(size) => {
                     if size.width == 0 || size.height == 0 {
-                        // Minimized. Nobody is looking. Trim the active page too, unless
-                        // it is a call: somebody is still listening.
                         app.minimized = true;
                         if let Some(v) = app.active_tab().filter(|t| !t.call).and_then(|t| t.view.as_ref()) {
                             let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
                         }
                     } else {
                         app.minimized = false;
-                        // Shown again: full memory — the person just touched the
-                        // machine to bring the window back. The watch rule trims it
-                        // again 15 s after they stop.
                         if let Some(t) = app.active_tab()
                             && let Some(v) = t.view.as_ref()
                         {
@@ -1596,10 +1231,8 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                     app.rounded.clear();
                     app.layout();
                 }
-                // Alt+Tab lands focus on the bare window. Hand it on, or keys go nowhere.
                 WindowEvent::Focused(true) => {
                     app.focus_page();
-                    // Back from Windows' Default apps page: the Settings page re-reads the pick.
                     if app.panel == Panel::Settings {
                         app.push();
                     }
@@ -1610,13 +1243,9 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
                 }
                 WindowEvent::CloseRequested => app.exit = true,
                 WindowEvent::ModifiersChanged(m) => app.mods = m,
-                // Closing a tab drops focus onto the bare window until the next page takes it.
-                // Keys typed in that gap land here; handle them instead of losing them.
                 WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                     let m = app.mods;
                     if let Some(vk) = vk_of(event.physical_key) {
-                        // A bare-window glance takes Escape and Enter; the card
-                        // view normally has focus and catches them itself.
                         if app.glance.is_some() {
                             match vk {
                                 0x1B if !m.shift_key() => app.close_glance(),
@@ -1637,16 +1266,11 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             Event::UserEvent(ev) => app.on_event(ev),
             Event::MainEventsCleared => {
                 app.flush();
-                // Whatever the blocker counted reaches the disk at most a minute
-                // apart, and only when the loop had nothing left to do.
                 privacy_stats::flush_if_due();
             }
             _ => {}
         }
         if app.exit {
-            // The windows go first: the rest of the way out (aria2 saying
-            // goodbye) can take a few seconds, and the person has already
-            // closed Lumen. Nothing after this needs the window on screen.
             hide_window(&app.ctx.window);
             app.chrome.set_visible(false);
             if let Some(w) = &app.watch {
@@ -1656,29 +1280,19 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             app.clear_on_exit();
             app.save_session();
             app.upnp.release();
-            // aria2 goes out the clean way, so it writes its DHT table and its
-            // session: the next start knows the swarm.
             app.aria.shutdown();
-            // The journal's goodbye: a run with this line is a run that ended.
             journal::stop(true, app.born.elapsed());
             privacy_stats::flush();
             *cf = ControlFlow::Exit;
         } else {
             let now = Instant::now();
-            // A deadline that is already past must not turn into a spin.
             *cf = ControlFlow::WaitUntil(pacing::clamp_wake(now, app.next_wake(now)));
         }
     });
 }
 
-// ------------------------------------------------------------------- sleeping
-
-/// The session as it was last written. A panic hook writes it back out before the
-/// process goes, so a crash loses nothing the user had not already lost.
 static LAST_SESSION: std::sync::Mutex<Option<Session>> = std::sync::Mutex::new(None);
 
-/// Where a panic goes, and what it saves. Without this, a Rust panic in release is
-/// an abort with no trace: the user sees Lumen vanish and learns nothing.
 fn install_panic_hook() {
     let plain = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1686,9 +1300,7 @@ fn install_panic_hook() {
         let why = info.payload().downcast_ref::<String>().cloned().unwrap_or(what);
         let at = info.location().map_or_else(String::new, |l| format!("{}:{}", l.file().rsplit(['\\', '/']).next().unwrap_or(l.file()), l.line()));
         let _ = write_crash(&format!("{why}  at {at}"));
-        // The journal is the one place the next session reads without a console.
         journal::panic(&format!("{why}  at {at}"));
-        // The session on disk goes back to what we last had. It is the user's tabs.
         if let Ok(g) = LAST_SESSION.lock()
             && let Some(s) = g.as_ref()
         {
@@ -1698,7 +1310,6 @@ fn install_panic_hook() {
     }));
 }
 
-/// One line in `data_dir()/crash.log`. The file is kept small: it is a log, not a history.
 fn write_crash(line: &str) -> std::io::Result<()> {
     use std::io::Write;
     let (at, clock) = local_day_time(
@@ -1707,7 +1318,6 @@ fn write_crash(line: &str) -> std::io::Result<()> {
     let path = store::data_dir().join("crash.log");
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
     writeln!(f, "{at} {clock}  {line}")?;
-    // Past a page of it, keep only the tail: the newest crash is the one that matters.
     const MAX: u64 = 32 << 10;
     if f.metadata().map(|m| m.len()).unwrap_or(0) > 2 * MAX {
         let old = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1723,9 +1333,6 @@ fn write_crash(line: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-// ------------------------------------------------------------------- helpers
-
-/// yt-dlp part files are "name.f<format>.<ext>". Audio parts are m4a/webm audio.
 fn part_kind(file: &str) -> Option<&'static str> {
     let (stem, ext) = file.rsplit_once('.')?;
     let fmt = stem.rsplit_once(".f")?.1;
@@ -1735,12 +1342,10 @@ fn part_kind(file: &str) -> Option<&'static str> {
     Some(if matches!(ext, "m4a" | "opus" | "mp3" | "aac") { "audio" } else { "video" })
 }
 
-/// "https://a.b.c/x" -> "a.b.c"
 fn host_of(url: &str) -> String {
     url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).map(|h| h.rsplit('@').next().unwrap_or(h)).unwrap_or("").to_string()
 }
 
-/// The http-to-https rules the navigation hook reads, from the settings.
 fn https_policy(s: &Settings) -> sites::HttpsPolicy {
     sites::HttpsPolicy { on: s.https_first, exceptions: s.http_ok.iter().cloned().collect(), passes: HashSet::new() }
 }
@@ -1766,7 +1371,6 @@ fn logical_size(ctx: &Ctx) -> (f64, f64) {
     (s.width as f64 / f, s.height as f64 / f)
 }
 
-/// Site searches, after DuckDuckGo's !bangs. `!yt cats` searches YouTube.
 const BANGS: &[(&str, &str)] = &[
     ("g", "https://www.google.com/search?q=%s"),
     ("ddg", "https://duckduckgo.com/?q=%s"),
@@ -1787,7 +1391,6 @@ const BANGS: &[(&str, &str)] = &[
     ("tr", "https://translate.google.com/?sl=auto&tl=en&text=%s"),
 ];
 
-/// A known bang anywhere in the text, and the words around it.
 fn bang(s: &str) -> Option<String> {
     let words: Vec<&str> = s.split_whitespace().collect();
     let (pos, url) = words.iter().enumerate().find_map(|(i, w)| {
@@ -1798,14 +1401,10 @@ fn bang(s: &str) -> Option<String> {
     Some(url.replace("%s", &url_encode(&q.join(" "))))
 }
 
-/// Omnibox text in, URL out. A bang: that site. Looks like an address: go there. Else: search.
 fn resolve_input(raw: &str, search: &str) -> Option<String> {
     classify_input(raw, search).map(|(url, _)| url)
 }
 
-/// Like `resolve_input`, and says whether the text was a bare host (`github.com`,
-/// `localhost:3000`): the one kind of typing that may turn out to be a typo, and
-/// so the one that gets a search if the name does not exist.
 fn classify_input(raw: &str, search: &str) -> Option<(String, bool)> {
     let s = raw.trim();
     if s.is_empty() {
@@ -1823,42 +1422,28 @@ fn classify_input(raw: &str, search: &str) -> Option<(String, bool)> {
         let host = lower.split(['/', '?', '#']).next().unwrap_or("");
         let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
         let plain = host.rsplit_once(':').map_or(host, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host });
-        // Local and numeric hosts have no certificate to speak of: plain http.
         let local = plain == "localhost" || plain.parse::<std::net::Ipv4Addr>().is_ok() || plain.starts_with('[');
         return Some((format!("{}://{s}", if local { "http" } else { "https" }), true));
     }
     Some((search.replace("%s", &url_encode(s)), false))
 }
 
-/// The same page, give or take case and a trailing slash.
 fn same_page(a: &str, b: &str) -> bool {
     a.trim_end_matches('/').eq_ignore_ascii_case(b.trim_end_matches('/'))
 }
 
-/// Whether a tab about to be opened is private.
-///
-/// `setting` is "Open new tabs as private", and `asked` is a request that named
-/// privacy itself: Ctrl+Shift+N, or the page menu's private tab. An agent's tab
-/// is never made private by the setting. Tabs restored from the session do not
-/// come through here at all: they keep what they were saved as.
 fn opens_private(setting: bool, asked: bool, agent: bool) -> bool {
     !agent && (asked || setting)
 }
 
-/// What a typed host's answer means.
 #[derive(Debug, PartialEq)]
 enum TypedVerdict {
-    /// Not the answer to this typing (or not yet): keep waiting.
     Wait,
-    /// It loaded, or failed some way a search would not mend: let go.
     Forget,
-    /// The name does not exist: search for the words.
     Search,
 }
 
-/// WebView2's web error status for a name that did not resolve.
 const ERR_NAME_NOT_RESOLVED: i32 = 13;
-/// ... and for a load another load cut short.
 const ERR_CANCELED: i32 = 14;
 
 fn typed_verdict(started: bool, ok: bool, err: i32) -> TypedVerdict {
@@ -1880,7 +1465,6 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-/// The `dn=` display name out of a magnet link, percent-decoded. Empty when absent.
 fn magnet_name(url: &str) -> String {
     let Some(q) = url.split_once("?").map(|(_, q)| q) else { return String::new() };
     for kv in q.split('&') {
@@ -1923,7 +1507,6 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Why a page-started magnet waits, in words: which page asked for it.
 fn magnet_hold(page_url: &str) -> String {
     let h = host_of(page_url);
     if h.is_empty() {
@@ -1933,8 +1516,6 @@ fn magnet_hold(page_url: &str) -> String {
     }
 }
 
-/// The name a magnet's row carries until aria2 knows the real one: the `dn=`
-/// name, or "Torrent" and a short piece of the magnet's own hash.
 fn magnet_label(url: &str, gid: &str) -> String {
     let name = magnet_name(url);
     if !name.is_empty() {
@@ -1946,10 +1527,6 @@ fn magnet_label(url: &str, gid: &str) -> String {
     format!("Torrent {short}")
 }
 
-/// What a torrent's row says while aria2 is still looking for its peers: the
-/// metadata phase. Nothing is downloading yet, and the row must not read as
-/// frozen. After a while with nobody answering it says so plainly: the swarm
-/// is not answering, and that is nobody's fault at the keyboard.
 fn metadata_note(torrent: bool, peers: u32, looking: Duration) -> String {
     if !torrent {
         return String::new();
@@ -1961,24 +1538,14 @@ fn metadata_note(torrent: bool, peers: u32, looking: Duration) -> String {
     format!("Finding peers for torrent info · {peers} peers")
 }
 
-/// A person-started torrent pause-metadata stopped once its metadata is in:
-/// start it. `partial` keeps the rule off finished torrents, so an aria2
-/// seed-limit pause is not undone. A page-started one (not in the person
-/// set) waits for Resume; a Pause by the person removes the gid, so their
-/// Pause is never undone either.
 fn should_auto_resume(person: bool, status: &str, named: bool, partial: bool) -> bool {
     person && status == "paused" && named && partial
 }
 
-/// Events that fire in a stream (download progress, aria2 polls) would drown the
-/// debug log in repeats. Everything else is worth one line.
 fn quiet_event(ev: &Ev) -> bool {
-    // Vault events carry a master password or the secrets behind it: never
-    // let the debug log see them.
     matches!(ev, Ev::Download(_) | Ev::AriaJobs(_) | Ev::Usage(_) | Ev::VaultOpen(..) | Ev::VaultReady(_))
 }
 
-/// Debug builds only: append every engine event to %APPDATA%\Lumen\debug.log.
 fn debug_log(ev: &Ev) {
     use std::io::Write;
     let mut line = format!("{ev:?}");
@@ -1995,8 +1562,6 @@ fn debug_log(ev: &Ev) {
     }
 }
 
-/// The tabs that go into session.json. Private tabs and agent tabs leave no
-/// trace; an empty new tab page is only worth keeping while it is the active one.
 fn ui_mark(b: library::Bookmark) -> chrome::UiMark {
     chrome::UiMark { id: b.id, url: b.url, title: b.title, folder: b.folder }
 }
@@ -2005,7 +1570,6 @@ fn keepable(tabs: &[Tab], active: u64) -> Vec<&Tab> {
     tabs.iter().filter(|t| !t.agent && !t.private && (!t.url.is_empty() || t.id == active)).collect()
 }
 
-/// How many tabs the session is bringing back, for the journal's `start` line.
 fn restored_tabs(session: &Session) -> usize {
     if session.workspaces.is_empty() {
         session.tabs.len()
@@ -2014,7 +1578,6 @@ fn restored_tabs(session: &Session) -> usize {
     }
 }
 
-/// Whether this tab runs in Servo. Always false in a build without the feature.
 fn is_servo(t: &Tab) -> bool {
     #[cfg(feature = "servo")]
     {
@@ -2027,7 +1590,6 @@ fn is_servo(t: &Tab) -> bool {
     }
 }
 
-/// Virtual-key code for the keys Lumen has shortcuts on.
 fn vk_of(k: KeyCode) -> Option<u32> {
     use KeyCode::*;
     let letter = |c: char| Some(c as u32);
@@ -2060,16 +1622,13 @@ fn vk_of(k: KeyCode) -> Option<u32> {
         F6 => Some(0x75),
         F11 => Some(0x7A),
         F12 => Some(0x7B),
-        // F8: translate the page, or put the original text back.
         F8 => Some(0x77),
         Comma => Some(0xBC),
-        // Ctrl+\ puts two pages side by side.
         Backslash => Some(0xDC),
         _ => None,
     }
 }
 
-/// Unix seconds to ("Today" / "Yesterday" / "Monday 12 October", "14:05"), local time.
 fn local_day_time(secs: u64) -> (String, String) {
     use windows::Win32::{
         Foundation::{FILETIME, SYSTEMTIME},
@@ -2100,7 +1659,6 @@ fn local_day_time(secs: u64) -> (String, String) {
     (day, format!("{:02}:{:02}", t.wHour, t.wMinute))
 }
 
-/// Open a downloaded file, or show it selected in Explorer.
 fn open_path(path: &str, folder: bool) {
     use windows::{Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL}, core::HSTRING};
     unsafe {
@@ -2127,8 +1685,6 @@ fn resize_dir(d: &str) -> Option<ResizeDirection> {
     })
 }
 
-// ----------------------------------------------------------------------- app
-
 impl App {
     fn idx(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
@@ -2146,9 +1702,6 @@ impl App {
         self.page_fs || self.user_fs
     }
 
-    /// Fullscreen as the layout sees it: the page fills the window. A panel (Downloads,
-    /// Control...) is drawn by the chrome, which fullscreen hides, so with one open the
-    /// window shows the chrome and its inset stage instead of a blank screen.
     fn fullscreen_view(&self) -> bool {
         self.fullscreen() && self.panel == Panel::None
     }
@@ -2157,8 +1710,6 @@ impl App {
         self.tabs.iter().filter(|t| t.pinned).count()
     }
 
-    /// Keep a site in the row above the tabs: it stays open in every
-    /// workspace. A private or an agent's tab never does.
     fn add_essential(&mut self, id: u64) {
         if self.essentials.len() >= MAX_ESSENTIALS {
             return;
@@ -2174,7 +1725,6 @@ impl App {
         }
         let title = t.title.clone();
         let favicon = t.favicon.clone();
-        // The address it is kept at: the home it goes back to.
         self.essentials.push(SavedTab { url: url.clone(), title, favicon, pin_url: url.clone(), ..Default::default() });
         self.tabs[i].essential = true;
         self.tabs[i].pin_url = url;
@@ -2182,7 +1732,6 @@ impl App {
         self.push();
     }
 
-    /// Take a site out of the essentials. The tab stays a tab.
     fn remove_essential(&mut self, url: &str) {
         self.essentials.retain(|e| e.url != url);
         for t in self.tabs.iter_mut() {
@@ -2194,8 +1743,6 @@ impl App {
         self.push();
     }
 
-    /// Show an essential's tab, in whichever workspace is open: the one that is
-    /// already open, or a new one here.
     fn show_essential(&mut self, url: &str) {
         if let Some(i) = self.tabs.iter().position(|t| t.url == url && !t.agent && !t.private) {
             let id = self.tabs[i].id;
@@ -2210,20 +1757,14 @@ impl App {
         self.push();
     }
 
-    /// The sidebar's width right now: folded, peeked open, or the person's own.
-    /// The value glides (Compact, Ctrl+B, a peek) instead of jumping.
     fn sidebar_w(&self) -> f64 {
         self.side_w
     }
 
-    /// Where the sidebar is headed.
     fn side_target(&self) -> f64 {
         if self.settings.compact && !self.peek { COMPACT_W } else { self.settings.sidebar_width as f64 }
     }
 
-    /// Step the sidebar's width toward its target. Returns whether it is still
-    /// moving, so the loop can keep waking for it and stop when it lands. Motion
-    /// off (or reduced) means it lands at once.
     fn step_side(&mut self, now: Instant) -> bool {
         const SIDE_MS: f64 = 0.16;
         let target = self.side_target();
@@ -2233,7 +1774,6 @@ impl App {
             return false;
         }
         if !self.chrome.look().motion.enabled {
-            // Motion off (or the system asking for less): it lands at once.
             self.side_w = target;
             self.side_anim = None;
             return false;
@@ -2253,8 +1793,6 @@ impl App {
         }
     }
 
-    /// The chrome's top rows: the tab strip, toolbar and bookmarks bar, for the
-    /// layouts that have them. Zero for the vertical sidebar.
     fn top_h(&self) -> f64 {
         chrome::Metrics::new(self.layout_kind(), self.settings.compact, self.settings.bm_bar).top() as f64
     }
@@ -2263,21 +1801,15 @@ impl App {
         chrome::Kind::of(&self.settings.layout)
     }
 
-    /// The UI needs the whole window only for the new tab page and settings.
-    /// The rest of the time it is a strip. A small surface is a fast surface.
     fn ui_full(&self) -> bool {
         self.panel != Panel::None || self.app_locked || self.active_tab().is_some_and(|t| t.status() == "new" || t.veiled())
     }
 
-    /// The page rectangle, in window coordinates.
     fn stage(&self) -> (f64, f64, f64, f64) {
         let (w, h) = logical_size(&self.ctx);
         if self.fullscreen_view() {
             return (0.0, 0.0, w, h);
         }
-        // With the sidebar hidden until the mouse reaches the edge, the page
-        // takes the whole width: the sidebar slides in over it, so the page is
-        // never resized.
         let hidden = self.settings.hide_sidebar && self.layout_kind().sidebar();
         let side = if hidden { 0.0 } else { self.sidebar_w() };
         let right = self.settings.sidebar_side == "right";
@@ -2298,22 +1830,15 @@ impl App {
         (x as f64, y as f64, sw as f64, sh as f64)
     }
 
-    /// The stage cut in two: the active tab's rectangle, the split tab's, and the
-    /// divider strip between them. With no split, both pages get the whole stage
-    /// and there is no strip.
     fn panes(&self) -> ((f64, f64, f64, f64), (f64, f64, f64, f64), Option<(f64, f64, f64, f64)>) {
         let stage = self.stage();
         if self.split.is_none() {
             return (stage, stage, None);
         }
         let (l, d, r) = split::panes(stage, self.split_at);
-        // The focused half is the one the person last worked in.
         if self.pane_right { (r, l, Some(d)) } else { (l, r, Some(d)) }
     }
 
-    /// A tab that is on screen right now: the active one, or the other half of a split.
-    /// Hidden-tab policies (freeze, discard, RAM) leave these alone.
-    /// An agent asked this tab to navigate: it waits for that, from now.
     fn expect_nav(&mut self, i: usize) {
         self.tabs[i].nav_pending = Some(Instant::now());
         self.tabs[i].nav_started = false;
@@ -2323,26 +1848,18 @@ impl App {
         id == self.active || self.split == Some(id)
     }
 
-    /// Which page windows are on screen: the two panes, and nothing else. A panel
-    /// covers the stage, so nothing is.
     fn sync_panes(&mut self) {
         let on = self.panel == Panel::None && !self.ui_full();
-        // Control and the dashboard measure the pages under them. A low target the moment
-        // one opens would make the tab just left read a fraction of what it costs in use.
         let measuring = self.panel.live();
         let split = self.split;
         let active = self.active;
         for i in 0..self.tabs.len() {
             let t = &mut self.tabs[i];
-            // An agent tab that is not being watched lives on the off-screen stage,
-            // visible to Chromium. The idle clock in `tick` hides it, not this.
             if t.agent && t.id != active && split != Some(t.id) {
                 continue;
             }
             let stage = t.id == active || split == Some(t.id);
-            // A locked tab's page stays hidden until Windows Hello says yes, split half too.
             let want = on && stage && t.has_page() && !t.veiled();
-            // A hidden stage page is looked at again: its target follows the panel over it.
             if want == t.visible && (want || !stage) {
                 continue;
             }
@@ -2358,10 +1875,6 @@ impl App {
             }
             if let Some(v) = &t.view {
                 let _ = v.set_visible(want);
-                // Off screen: a low memory target at once, not 30 s later at the trim.
-                // On screen: full memory now — the watch rule trims it 15 s after
-                // the person stops touching mouse and keyboard. A call keeps its
-                // full target either way: it is still being listened to.
                 let level = if t.call || want || (stage && measuring) { MemoryUsageLevel::Normal } else { MemoryUsageLevel::Low };
                 let _ = v.set_memory_usage_level(level);
                 t.visible = want;
@@ -2371,7 +1884,6 @@ impl App {
         }
     }
 
-    /// The strip between the panes takes the gap color and a grip a step off it.
     fn divider_theme(&mut self) {
         let dark = self.ctx.dark.get();
         let (r, g, b) = self.bg;
@@ -2385,15 +1897,11 @@ impl App {
     }
 
     fn layout(&mut self) {
-        // The sidebar's width glides; a step here is what moves it.
         let moving = self.step_side(Instant::now());
         let (w, h) = logical_size(&self.ctx);
         let fs = self.fullscreen_view();
         self.chrome.set_visible(!fs);
         if !fs {
-            // The chrome's own rectangle for this layout. The horizontal layout
-            // is a strip across the top; the hybrid one is an underlay the page
-            // is drawn over; the vertical one is the sidebar itself.
             let (x, y, cw, ch) = chrome::Chrome::bounds_for(self.layout_kind(), w, h);
             self.chrome.set_bounds(x, y, cw, ch);
         }
@@ -2402,7 +1910,6 @@ impl App {
         let scale = self.ctx.window.scale_factor();
         let r = if self.settings.look == "glass" { self.settings.radius.max(14) } else { self.settings.radius };
         let radius = if fs { 0 } else { (r as f64 * scale).round() as i32 };
-        // The divider only shows when the pages do.
         match div.filter(|_| !self.ui_full()) {
             Some((x, y, dw, dh)) => {
                 self.divider_theme();
@@ -2430,7 +1937,6 @@ impl App {
             let _ = v.set_bounds(logical_rect(x, y, pw, ph));
             clips.push((id, (pw * scale) as u32, (ph * scale) as u32));
         }
-        // The corner clip is a region rebuild and a repaint. Only when size changed.
         for (id, cw, ch) in clips {
             let key = (cw, ch + radius as u32);
             if self.rounded.get(&id) == Some(&key) {
@@ -2442,27 +1948,21 @@ impl App {
                 engine::round_corners(v, radius);
             }
         }
-        // The glance card floats at 80% of the stage, centred, over a dimmed page.
-        // With a split it covers both halves: the dim is one stage-sized window.
         if let Some((_, _, v)) = &self.glance {
             let (x, y, sw, sh) = self.stage();
             let gw = sw * 0.8;
             let gh = sh * 0.8;
             let _ = v.set_bounds(logical_rect(x + (sw - gw) / 2.0, y + (sh - gh) / 2.0, gw, gh));
             engine::round_corners(v, radius);
-            // Dim over the page, card over the dim: both are sibling windows.
             self.chrome.set_glance_dim(x, y, sw, sh);
             engine::raise(v);
         }
-        // A moving sidebar is a moving layout: keep the chrome drawing with it.
         if moving {
             self.push();
         }
         self.sync_watch();
     }
 
-    /// The watch over the page: on when the active tab is an agent's and the page shows
-    /// (no panel over it, not full-screen UI), off otherwise. Its pill says the last step.
     fn sync_watch(&mut self) {
         let t = self.active_tab().filter(|t| t.agent && t.view.is_some() && !t.owner.is_empty());
         let lent = self.lent_shown();
@@ -2489,16 +1989,12 @@ impl App {
         w.show(act, &name, rgb, &step, taken, is_lent);
     }
 
-    /// The agent at work in the person's tab on screen, if one clicked or typed there in the
-    /// last LENT_SHOW and the tab is still lent: (session, name).
     fn lent_shown(&self) -> Option<(String, String)> {
         let l = self.lent.as_ref().filter(|l| l.tab == self.active && l.at.elapsed() < LENT_SHOW)?;
         let t = self.active_tab().filter(|t| !t.agent && t.view.is_some() && self.agent_granted(t))?;
         (t.id == l.tab).then(|| (l.session.clone(), l.name.clone()))
     }
 
-    /// An agent clicked, moved or typed in tab `tab`. If it is one of the person's, lent to
-    /// agents, the person sees who and where, as on an agent's own tab.
     fn lent_touch(&mut self, tab: u64, who: &agent::Who) {
         let Some(i) = self.idx(tab) else { return };
         if self.tabs[i].agent || !self.agent_granted(&self.tabs[i]) {
@@ -2508,7 +2004,6 @@ impl App {
         self.sync_watch();
     }
 
-    /// For each agent session, what became of the person's last message to it, in words.
     fn note_states(&self) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
         for n in self.agent.notes() {
@@ -2523,14 +2018,12 @@ impl App {
         out
     }
 
-    /// The watched tab, if this is it: (zoom percent).
     fn watched_zoom(&self, tab: u64) -> Option<u32> {
         let t = self.active_tab().filter(|t| t.id == tab && (t.agent || self.lent.as_ref().is_some_and(|l| l.tab == tab)))?;
         self.watch.as_ref().filter(|w| w.shown()).map(|_| t.zoom)
     }
 
     fn focus_page(&self) {
-        // Headless never takes keyboard focus from whatever the person is doing.
         if headless() {
             return;
         }
@@ -2538,14 +2031,11 @@ impl App {
             self.chrome.focus();
             return;
         }
-        // A Servo page takes the keyboard in its own child window.
         #[cfg(feature = "servo")]
         if let Some(p) = self.active_tab().and_then(|t| t.servo.as_ref()) {
             p.focus();
             return;
         }
-        // A watched agent tab is behind its shield: the keys stay with the window,
-        // unless the person took the tab over.
         if self.active_tab().is_some_and(|t| t.agent && !self.taken.contains(&t.owner)) {
             self.chrome.focus();
             return;
@@ -2558,7 +2048,6 @@ impl App {
         }
     }
 
-    /// Mark the UI stale. The real send happens once, after the event burst.
     fn push(&mut self) {
         self.ui_dirty = true;
     }
@@ -2570,13 +2059,9 @@ impl App {
         if self.ui_dirty {
             self.ui_dirty = false;
             let (sx, sy, sw, sh) = self.stage();
-            // Chrome coordinates: full mode starts at the window origin; a sidebar
-            // on the right is the one place the stage sits left of the chrome.
             let (cx, _, _, _) = chrome::Chrome::bounds_for(self.layout_kind(), logical_size(&self.ctx).0, logical_size(&self.ctx).1);
             let off = cx;
             let bar_bookmarks = self.settings.bm_bar && self.layout_kind().top_toolbar();
-            // The essentials: the sites kept open in every workspace, and the tab
-            // that is each one here: it may have wandered from its address.
             let essentials: Vec<chrome::UiEssential> = self
                 .essentials
                 .iter()
@@ -2618,8 +2103,6 @@ impl App {
                         translated: t.translated.is_some(),
                         translating: t.translating,
                         servo: is_servo(t),
-                        // The sidebar groups agent tabs per session: the id is what a
-                        // Stop button ends, the name is what the group header shows.
                         owner: t.owner.clone(),
                         owner_name: t.owner_name.clone(),
                     })
@@ -2696,7 +2179,6 @@ impl App {
                     },
                     _ => "",
                 },
-                // Labels only; passwords never reach the chrome.
                 kdbx: match (self.vault.as_ref(), self.active_tab()) {
                     (Some(v), Some(t)) if t.url.starts_with("http") => v.matches(&t.url).into_iter().take(8).map(|n| v.label(n)).collect(),
                     _ => Vec::new(),
@@ -2719,7 +2201,6 @@ impl App {
                 } else {
                     Vec::new()
                 },
-                // Filled only while the report page is open.
                 privacy_today: (self.panel == Panel::Dashboard).then(privacy_stats::today),
                 report: if self.panel == Panel::Report {
                     Some(privacy_stats::snapshot(&self.report_range, self.report_site.as_deref()))
@@ -2786,21 +2267,16 @@ impl App {
         }
     }
 
-    // ---------------------------------------------------------------- tabs
-
     fn restore(&mut self, session: Session) {
         let (workspaces, active_ws) = workspaces::build_from_session(&session);
         self.workspaces = workspaces;
         self.active_workspace = active_ws.min(self.workspaces.len().saturating_sub(1));
-        // A workspace with no colour yet gets the next one in the palette.
         for (i, w) in self.workspaces.iter_mut().enumerate() {
             if w.colour.is_empty() {
                 w.colour = (i % 8).to_string();
             }
         }
-        // The essentials are the same in every workspace.
         self.essentials = session.essentials.iter().filter(|e| !e.url.is_empty()).cloned().collect();
-        // Load the active workspace's saved tabs into memory.
         let ws = self.workspaces[self.active_workspace].clone();
         let saved = ws.saved;
         let ws_active = ws.active;
@@ -2812,8 +2288,6 @@ impl App {
             t.pinned = saved.pinned;
             t.pin_url = pins::restored_pin_url(saved.pinned || saved.essential, &saved.pin_url, &t.url);
             t.essential = saved.essential;
-            // The idle time carries over; the stretch while Lumen was closed does
-            // not count, so the clock starts again from now.
             t.idle_ms = saved.idle_ms;
             t.idle_at = Some(Instant::now());
             t.locked = saved.locked;
@@ -2823,28 +2297,22 @@ impl App {
             }
             self.tabs.push(t);
         }
-        // Pinned tabs live at the front. The UI groups them; the order must agree.
         self.tabs.sort_by_key(|t| !t.pinned);
         if self.tabs.is_empty() {
             let mut t = Tab::new(self.ctx.alloc_id(), String::new());
             t.workspace = self.active_workspace;
             self.tabs.push(t);
         }
-        // Sync the active workspace's tab_ids with the live IDs.
         let ids: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
         if let Some(ws) = self.workspaces.get_mut(self.active_workspace) {
             ws.tab_ids = ids;
             ws.saved.clear();
             ws.active = self.tabs.iter().position(|t| Some(t.id) == active).unwrap_or(0);
         }
-        // Only the active tab gets a page. The rest stay "off" until clicked.
         let id = active.filter(|id| self.idx(*id).is_some()).unwrap_or(self.tabs[0].id);
         self.activate(id);
     }
 
-    /// The WebView2 world this tab belongs to: the person's own, or its agent session's.
-    /// A session with strict isolation gets an environment of its own; until that one is
-    /// ready (WebView2 makes it in its own time) the tab still has no page.
     fn tab_profile(&self, t: &Tab) -> engine::Profile {
         if t.agent && !self.settings.agent_shared_profile {
             if t.own_env { engine::Profile::Own(t.profile.clone()) } else { engine::Profile::Shared(t.profile.clone()) }
@@ -2856,15 +2324,12 @@ impl App {
     fn ensure_view(&mut self, i: usize) {
         #[cfg(feature = "servo")]
         {
-            // A host from the "Servo sites" list opens in Servo, unless the tab
-            // already has a WebView2 page (a reopened one) or the person put it back.
             let url = self.tabs[i].url.clone();
             if self.tabs[i].servo.is_none() && self.tabs[i].view.is_none() && self.wants_servo(&url) {
                 self.open_servo(i, &url);
                 if self.tabs[i].servo.is_some() {
                     return;
                 }
-                // Servo would not have it: carry on with WebView2.
             }
         }
         if self.tabs[i].view.is_some() || self.tabs[i].url.is_empty() {
@@ -2875,13 +2340,9 @@ impl App {
                 if engine::own_env(&self.ctx, &key).is_some() {
                     engine::Profile::Own(key)
                 } else if engine::own_env_failed(&self.ctx, &key) {
-                    // No browser of its own on this machine. The agent still gets a
-                    // profile of its own in the shared one: isolated, just not separate.
                     self.tabs[i].own_env = false;
                     engine::Profile::Shared(key)
                 } else {
-                    // Its browser is being made right now. Come back for this tab when
-                    // it is ready (`poll_own_envs`), never open it in the shared one.
                     engine::start_own_env(&self.ctx, &key);
                     if !self.pending_own.contains(&self.tabs[i].id) {
                         self.pending_own.push(self.tabs[i].id);
@@ -2893,7 +2354,6 @@ impl App {
         };
         let (x, y, w, h) = self.stage();
         let t = &mut self.tabs[i];
-        // An agent's page starts blank, so the recording is on before the first request.
         let first = if t.agent { None } else { Some(t.url.as_str()) };
         if let Ok(v) = engine::build_tab(&self.ctx, t.id, first, logical_rect(x, y, w, h), profile.clone(), t.private, t.agent) {
             if t.muted {
@@ -2902,11 +2362,8 @@ impl App {
             if t.agent {
                 agentkit::watch(&v, t.id, &self.agent_logs);
                 engine::remember_profile(&self.ctx, &t.profile, &v);
-                // WebView2's own downloads of this agent land in its own folder too.
                 engine::set_profile_download_dir(&v, &agent_policy::agent_downloads_dir_for(&t.downloads));
                 let _ = v.load_url(&t.url);
-                // Onto the off-screen stage, where Chromium counts it as visible. A tab the
-                // person is watching (a sleeping one they clicked) stays in the window.
                 let watched = t.id == self.active || self.split == Some(t.id);
                 if !watched {
                     let stage = self.stage.get_or_insert_with(stage::Stage::new);
@@ -2917,7 +2374,6 @@ impl App {
                     let _ = v.set_visible(true);
                 }
             } else if t.agent_ok.is_some() {
-                // A lent tab that slept: the record goes on in the new page.
                 agentkit::record(&v, t.id, &self.agent_logs, false);
             }
             t.view = Some(v);
@@ -2930,9 +2386,6 @@ impl App {
         self.arm_tab_mem();
     }
 
-    /// Strict-isolation browsers that came back since the last look: build the tabs
-    /// that were waiting for them, and fall back to a named profile for the sessions
-    /// WebView2 refused to give a process of their own.
     fn poll_own_envs(&mut self) {
         if self.pending_own.is_empty() {
             return;
@@ -2949,8 +2402,6 @@ impl App {
                 retry.push(id);
                 continue;
             }
-            // It came back decided. With no environment, the agent still gets a profile
-            // of its own in the shared browser: isolated, just not in its own process.
             if engine::own_env(&self.ctx, &self.tabs[i].profile).is_none() {
                 self.tabs[i].own_env = false;
                 journal::error("agent", "strict isolation unavailable; a named profile of the shared environment instead");
@@ -2963,14 +2414,12 @@ impl App {
         self.pending_own = retry;
     }
 
-    /// New page: give it the bandwidth cap and, if the Control page is open, a byte counter.
     fn limit_tab(&mut self, i: usize) {
         let t = &self.tabs[i];
         let Some(v) = &t.view else { return };
         if self.settings.net_limit {
             monitor::throttle(v, Some(self.settings.net_limit_kbps), t.recorded());
         }
-        // A frozen page fetches nothing, and a DevTools call could wake it.
         if self.panel.live()
             && !t.suspended
             && !self.watches.contains_key(&t.id)
@@ -2982,35 +2431,27 @@ impl App {
 
     fn activate(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
-        // The link pill belonged to the page being left.
         self.chrome.set_link(String::new());
-        // The card covered the page being left; a new page under it means it is done.
         self.drop_glance();
-        // A voice follows the tab it was reading; leaving that tab stops it.
         if self.aloud.as_ref().is_some_and(|a| a.tab != id) {
             self.listen_stop();
         }
-        // The other half of a split: the pages stay where they are, the focus (and
-        // the sidebar highlight) moves to this one.
         if self.split == Some(id) {
             self.split = Some(self.active);
             self.pane_right = !self.pane_right;
         }
         let prev = (id != self.active).then(|| self.idx(self.active)).flatten();
         self.active = id;
-        // The tab on screen is not idle: the clock for it starts again.
         self.tabs[i].idle_ms = 0;
         self.tabs[i].idle_at = None;
         if let Some(p) = prev
             && self.tabs[p].id != id
         {
             self.tabs[p].idle_at = Some(Instant::now());
-            // A locked tab is opened for one visit: leaving it locks it again.
             self.tabs[p].unlocked = false;
         }
         self.mru.touch(id);
         self.leave_panel();
-        // Watching: an agent tab moves from the stage into the main window, awake.
         if self.tabs[i].agent
             && let Some(v) = self.tabs[i].view.as_ref()
         {
@@ -3020,11 +2461,8 @@ impl App {
             self.tabs[i].visible = true;
         }
         self.ensure_view(i);
-        // Show the new page first, then hide the old. No flash of empty stage between.
         self.wake(i);
         self.layout();
-        // A dead page comes back on click: load it again. (A dead browser
-        // process left no view; ensure_view already built a fresh one.)
         if self.tabs[i].crashed {
             self.tabs[i].crashed = false;
             self.asked_nav(self.tabs[i].id);
@@ -3036,10 +2474,8 @@ impl App {
             let pid = self.tabs[pidx].id;
             let was_agent = self.tabs[pidx].agent;
             if was_agent {
-                // Send it back to the stage.
                 if let Some(v) = self.tabs[pidx].view.as_ref() {
                     let page = self.stage();
-                    // A tab that was born watched has never been on the stage, which may not exist yet.
                     let stage = self.stage.get_or_insert_with(stage::Stage::new);
                     let (sx, sy, sw, sh) = stage.slot(pid, (page.2, page.3));
                     let hwnd = stage.hwnd();
@@ -3049,7 +2485,6 @@ impl App {
                 }
             }
             let p = &mut self.tabs[pidx];
-            // It stops being the page being read unless it is the split's other half.
             if self.split != Some(p.id) {
                 p.hidden_at = Some(Instant::now());
             }
@@ -3060,22 +2495,16 @@ impl App {
         self.sync_watch();
     }
 
-    /// A page that is on screen must be neither frozen nor trimmed, however long
-    /// it has been since it was last the active tab.
     fn wake(&mut self, i: usize) {
         let t = &mut self.tabs[i];
         t.hidden_at = None;
         t.suspended = false;
-        // Shown again: full memory before the return's first paint, whatever the
-        // sleep policy did while it was away. The watch rule trims it again only
-        // 15 s after the person leaves mouse and keyboard.
         if let Some(v) = &t.view {
             let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
         }
         t.trimmed = false;
     }
 
-    /// Two pages in one stage, `left` focused. Replaces any split there was.
     fn set_split(&mut self, left: u64, right: u64) {
         if left == right || self.idx(left).is_none() || self.idx(right).is_none() {
             return;
@@ -3083,8 +2512,6 @@ impl App {
         self.split = Some(right);
         self.pane_right = false;
         self.activate(left);
-        // The page on the other side is on screen from now on: build it if it never
-        // had one, and take it out of sleep if it had.
         if let Some(i) = self.idx(right) {
             self.ensure_view(i);
             self.limit_tab(i);
@@ -3094,7 +2521,6 @@ impl App {
         self.push();
     }
 
-    /// Back to one page: the other half goes back to being a hidden tab.
     fn unsplit(&mut self) {
         let Some(id) = self.split.take() else { return };
         self.pane_right = false;
@@ -3105,8 +2531,6 @@ impl App {
         self.push();
     }
 
-    /// Ctrl+\: the active tab and the next one share the stage, or one page again.
-    /// A window with one tab has no next tab to share with.
     fn toggle_split(&mut self) {
         if self.split.is_some() {
             self.unsplit();
@@ -3122,8 +2546,6 @@ impl App {
         journal::feature("split", false);
     }
 
-    /// The tab menu's "Split with next tab", on any tab: it shares the stage with
-    /// the tab after it, or the split it is already half of goes away.
     fn split_next(&mut self, id: u64) {
         if self.split.is_some() && (self.split == Some(id) || id == self.active) {
             self.unsplit();
@@ -3143,16 +2565,10 @@ impl App {
         self.open_tab(url, after, false)
     }
 
-    /// Ctrl+Shift+N, or the tab menu. WebView2 InPrivate: no cookies outlive the
-    /// last private page, and Lumen writes nothing about it anywhere.
     fn new_private_tab(&mut self) -> u64 {
         self.open_tab(None, None, true)
     }
 
-    /// Every tab the person opens comes through here: Ctrl+T, the +, "New tab",
-    /// the palette, a link in a new tab, and Ctrl+Shift+N. One place, so "Open
-    /// new tabs as private" cannot miss one. `asked` is a request that named
-    /// privacy itself.
     fn open_tab(&mut self, url: Option<String>, after: Option<usize>, asked: bool) -> u64 {
         let id = self.ctx.alloc_id();
         let private = opens_private(self.settings.private_tabs, asked, false);
@@ -3160,7 +2576,6 @@ impl App {
         t.private = private;
         t.workspace = self.active_workspace;
         if private {
-            // The opening itself is not private: one line, no content.
             journal::feature("private_tab", false);
         }
         let floor = self.pinned_count();
@@ -3172,7 +2587,6 @@ impl App {
         id
     }
 
-    /// Which cookie jar a tab talks to: 0 the user's, 1 an agent's own, 2 a private one.
     fn jar(&self, t: &Tab) -> u8 {
         if t.private {
             2
@@ -3183,18 +2597,14 @@ impl App {
         }
     }
 
-    /// A tab that leaves no trace: no history, no page text, no session, no reopen.
     fn off_record(&self, t: &Tab) -> bool {
         t.agent || t.private
     }
 
-    /// A page of the user's own profile, to ask for cookies or clear data with.
     fn plain_view(&self) -> Option<&WebView> {
         self.tabs.iter().filter(|t| !self.off_record(t)).find_map(|t| t.view.as_ref())
     }
 
-    /// Closing a pinned tab unloads it instead: the page and its memory go, the pin stays
-    /// in the row and loads its pinned URL when clicked. False: not a pin to keep.
     fn unload_pin(&mut self, id: u64) -> bool {
         let Some(i) = self.idx(id) else { return false };
         let t = &self.tabs[i];
@@ -3221,7 +2631,6 @@ impl App {
         }
         let Some(i) = self.idx(id) else { return true };
         self.discard(i);
-        // A pin comes back where it was pinned, with a clean slate: no history to walk, no reader.
         let t = &mut self.tabs[i];
         t.url = pins::target(&t.pin_url, &t.url);
         t.pin_url = t.url.clone();
@@ -3245,11 +2654,8 @@ impl App {
             self.listen_stop();
         }
         self.spb.remove(&id);
-        // The page a redirect rule would have compared against is gone.
         self.ctx.docs.borrow_mut().remove(&id);
         self.ctx.api_nav.borrow_mut().remove(&id);
-        // Closing either half of a split leaves one page again. When the focused half
-        // goes, the other one takes the whole stage instead of being left behind.
         let keep = if id == self.active { self.split.take() } else { None };
         if self.split == Some(id) {
             self.split = None;
@@ -3270,7 +2676,6 @@ impl App {
                 let _ = r.send(Err("the tab was closed".into()));
             }
         }
-        // Requests from a closed tab go unanswered by the user; let WebView2 refuse them.
         for (pid, _, _, _) in self.prompts.iter().filter(|p| p.1 == id) {
             engine::answer_permission(&self.ctx, *pid, None);
         }
@@ -3290,11 +2695,6 @@ impl App {
             return;
         }
         if id == self.active {
-            // Back to the tab the person was on before this one, when it still
-            // exists. An agent tab is never where the person lands, nor a pin
-            // whose page is gone (landing there loads it). Failing that, the
-            // other half of a split, else the nearest plain tab in the row, else
-            // a fresh start page: pins restored at launch were never visited.
             let next = self
                 .mru
                 .back(id, |t| self.idx(t).is_some_and(|j| !self.tabs[j].agent && !(self.tabs[j].pinned && !self.tabs[j].has_page())))
@@ -3319,20 +2719,17 @@ impl App {
         }
     }
 
-    /// Drop the page, keep the tab. Frees the renderer process.
     fn discard(&mut self, i: usize) {
         let t = &mut self.tabs[i];
         if t.id == self.active || !t.has_page() {
             return;
         }
-        // The page is going; its loaded-at says nothing about the next one.
         self.ctx.docs.borrow_mut().remove(&t.id);
         self.ctx.api_nav.borrow_mut().remove(&t.id);
         if let Some(w) = self.watches.remove(&t.id) {
             monitor::unwatch(None, w, true);
         }
         t.view = None;
-        // A Servo page: closing the child window gives the tab's memory back.
         #[cfg(feature = "servo")]
         {
             t.servo = None;
@@ -3346,10 +2743,6 @@ impl App {
         t.visible = false;
     }
 
-    // ---------------------------------------------------------- workspaces
-
-    /// Serialize the live tabs into the active workspace's slot, so the
-    /// workspace can come back later without keeping its views alive.
     fn stash_workspace(&mut self) {
         let keep: Vec<&Tab> = keepable(&self.tabs, self.active);
         let saved: Vec<SavedTab> = keep
@@ -3365,10 +2758,7 @@ impl App {
         }
     }
 
-    /// Drop every live tab and its view. Hidden workspaces cost no memory.
     fn drop_all_tabs(&mut self) {
-        // Both halves of a split are going: the split goes with them, or the
-        // stale id would leave the stage looking split with nothing beside it.
         self.split = None;
         self.pane_right = false;
         while let Some(t) = self.tabs.pop() {
@@ -3379,7 +2769,6 @@ impl App {
                 monitor::unwatch(None, w, true);
             }
             self.prompts.retain(|p| p.1 != t.id);
-            // A person waiting on a handoff from a discarded tab gets their answer back.
             if self.handoff.as_ref().is_some_and(|h| h.0 == t.id)
                 && let Some((_, _, _, r)) = self.handoff.take()
             {
@@ -3387,11 +2776,9 @@ impl App {
             }
             drop(t);
         }
-        // activate() looks the old id up; a dead id must not resolve.
         self.active = 0;
     }
 
-    /// Rebuild live tabs for workspace `to` from its saved list and open one.
     fn load_workspace(&mut self, to: usize) {
         let ws = self
             .workspaces
@@ -3411,7 +2798,6 @@ impl App {
             }
             self.tabs.push(t);
         }
-        // Pinned tabs live at the front. The UI groups them; the order must agree.
         self.tabs.sort_by_key(|t| !t.pinned);
         if self.tabs.is_empty() {
             let mut t = Tab::new(self.ctx.alloc_id(), String::new());
@@ -3430,8 +2816,6 @@ impl App {
         self.activate(id);
     }
 
-    /// Switch to workspace `to`. The current workspace's tabs are discarded
-    /// (no memory) and the target's are restored.
     fn switch_workspace(&mut self, to: usize) {
         let to = to.min(self.workspaces.len().saturating_sub(1));
         if to == self.active_workspace {
@@ -3443,18 +2827,12 @@ impl App {
         journal::feature("workspace_switch", false);
     }
 
-    // ---------------------------------------------------------------- glance
-
-    /// Shift+click on a link: open it in a floating card over the current page.
     fn open_glance(&mut self, url: &str) {
-        // One glance at a time. Drop the old one.
         self.glance = None;
         let id = self.ctx.alloc_id();
         let (x, y, w, h) = self.stage();
-        // The card is 80% of the stage, centred; layout sizes the dim to match.
         let rect = logical_rect(x + w * 0.1, y + h * 0.1, w * 0.8, h * 0.8);
         let Ok(v) = engine::build_tab(&self.ctx, id, Some(url), rect, engine::Profile::Main, false, false) else { return };
-        // The card takes Escape and Enter itself while it has focus.
         glance::hook_keys(&v, self.ctx.proxy.clone());
         if !headless() {
             let _ = v.focus();
@@ -3466,7 +2844,6 @@ impl App {
         self.push();
     }
 
-    /// Escape: drop the floating card, back to the page below.
     fn close_glance(&mut self) {
         if self.drop_glance() {
             self.dirty = true;
@@ -3475,8 +2852,6 @@ impl App {
         }
     }
 
-    /// The card goes down without the trailing work: the caller lays out and
-    /// pushes anyway. True when a card was open.
     fn drop_glance(&mut self) -> bool {
         if self.glance.take().is_some() {
             self.chrome.set_glance(false);
@@ -3487,7 +2862,6 @@ impl App {
         }
     }
 
-    /// Enter or the "Open as tab" button: the glance becomes a normal tab.
     fn promote_glance(&mut self) {
         let Some((_, url, _v)) = self.glance.take() else { return };
         self.chrome.set_glance(false);
@@ -3497,7 +2871,6 @@ impl App {
         self.push();
     }
 
-    /// A tab for an address that came from outside: the command line, or a second start.
     fn open_launched(&mut self, o: &launch::Open) {
         let id = self.ctx.alloc_id();
         let mut t = Tab::new(id, o.url.clone());
@@ -3513,9 +2886,6 @@ impl App {
         self.activate(id);
     }
 
-    /// A page tried to open an app (mailto:, spotify:...). Open it, ask, or let it go: see
-    /// `extlink::decide`. Never for an agent's tab, never for a page nobody clicked on unless
-    /// the person said "always" for that site.
     fn on_external(&mut self, tab: u64, origin: String, uri: String, user: bool) {
         let Some(scheme) = extlink::scheme_of(&uri) else { return };
         let Some(i) = self.idx(tab) else { return };
@@ -3527,10 +2897,7 @@ impl App {
                 if !self.ext_gate.begin(&origin, &scheme, Instant::now()) {
                     return;
                 }
-                // A private tab, or a page with no real origin, can be let through once but
-                // never remembered: a rule is a trace on disk.
                 let remember = !private && origin.contains("://") && !origin.starts_with("file:");
-                // Test hook (debug builds): answer without a box, and say what was asked.
                 if cfg!(debug_assertions)
                     && let Ok(a) = std::env::var("LUMEN_TEST_EXT_ANSWER")
                 {
@@ -3543,13 +2910,10 @@ impl App {
                     self.on_external_answer(origin, uri, answer);
                     return;
                 }
-                // Nobody is there to answer a headless Lumen.
                 if headless() {
                     self.ext_gate.finish(&origin, &scheme, extlink::Answer::Cancel, Instant::now());
                     return;
                 }
-                // The drawn question, on the chrome. Its answer comes back as an
-                // ExternalAnswer event, the same door the box used to come through.
                 self.chrome.ask_external(&origin, &scheme, remember, &uri);
             }
         }
@@ -3570,7 +2934,6 @@ impl App {
         }
     }
 
-    /// Hand an address to Windows. (A debug run with the test answer set only says it would.)
     fn open_external(&mut self, uri: &str) {
         if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_EXT_ANSWER").is_some() {
             eprintln!("lumen: ext open {}", extlink::scheme_of(uri).unwrap_or_default());
@@ -3581,8 +2944,6 @@ impl App {
         }
     }
 
-    /// Someone started lumen.exe while this one runs. Headless becomes a normal window:
-    /// centred, in the taskbar, with sound. A normal one just comes to the front.
     fn show_me(&mut self) {
         let w = self.ctx.window.clone();
         if headless() {
@@ -3608,9 +2969,6 @@ impl App {
         self.focus_page();
     }
 
-    // ---------------------------------------------------------- downloads
-
-    /// A download id in band `band` (1 aria2, 2 video, 3 remembered). Ids never repeat.
     fn next_dl(&mut self, band: u64) -> u64 {
         self.dl_seq += 1;
         (band << 40) + self.dl_seq
@@ -3655,7 +3013,6 @@ impl App {
         store::save_downloads(&keep);
     }
 
-    /// Off the list, and out of whatever engine still remembers it. A running one is stopped.
     fn remove_download(&mut self, id: u64) {
         if let Some(gid) = self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
             self.aria_ids.remove(&gid);
@@ -3679,7 +3036,6 @@ impl App {
         self.push();
     }
 
-    /// Try a failed download again: same URL, same headers when Lumen still has them.
     fn retry_download(&mut self, id: u64) {
         let Some(d) = self.downloads.iter().find(|d| d.id == id) else { return };
         if self.videos.contains_key(&id) {
@@ -3721,8 +3077,6 @@ impl App {
         });
     }
 
-    /// A magnet the person asked for: it starts at once. One a page asked for
-    /// waits for the person, with a note saying which page asked.
     fn start_magnet(&mut self, tab: u64, url: &str, clicked: bool) {
         let private = self.idx(tab).is_some_and(|i| self.tabs[i].private);
         let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
@@ -3730,10 +3084,6 @@ impl App {
         self.add_magnet(url, private, hold);
     }
 
-    /// A magnet link goes straight to aria2. The display name comes from `dn=`
-    /// until the torrent metadata arrives with the real one. `hold` is Some for
-    /// a magnet a PAGE asked for: it goes in paused and waits for the person —
-    /// a torrent tells the swarm the user's IP, so a page never starts one.
     fn add_magnet(&mut self, url: &str, private: bool, hold: Option<String>) {
         let name = magnet_name(url);
         let person = hold.is_none();
@@ -3757,9 +3107,6 @@ impl App {
         self.aria_poll.store(true);
     }
 
-    // ---------------------------------------------------------- video
-
-    /// Save the video on this tab's page (yt-dlp), into Downloads.
     fn save_video(&mut self, i: usize) {
         let t = &self.tabs[i];
         let url = t.reader.clone().unwrap_or_else(|| t.url.clone());
@@ -3824,7 +3171,6 @@ impl App {
                 d.received = done as i64;
                 d.total = total as i64;
                 d.speed = speed;
-                // Video and audio come as separate parts ("x.f399.mp4"); say which.
                 d.note = match part_kind(&file) {
                     Some(k) => k.to_string(),
                     None => String::new(),
@@ -3857,7 +3203,6 @@ impl App {
         self.push();
     }
 
-    /// Pause stops yt-dlp (it keeps its .part files); resume runs it again and it carries on.
     fn video_control(&mut self, id: u64, a: &str) {
         let Some((_, _, slot)) = self.videos.get(&id) else { return };
         video::stop(slot);
@@ -3881,16 +3226,12 @@ impl App {
         self.push();
     }
 
-    // ---------------------------------------------------------- page kit
-
-    /// Reader view on, or back to the page.
     fn toggle_reader(&mut self, i: usize) {
         let id = self.tabs[i].id;
         if let Some(orig) = self.tabs[i].reader.take() {
             if let Some(v) = &self.tabs[i].view {
                 let _ = v.load_url(&orig);
             }
-            // Out of reader view: the reading goes with it.
             if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
                 self.listen_stop();
             }
@@ -3908,7 +3249,6 @@ impl App {
         });
     }
 
-    /// F7 or the chip: start, pause, or resume — whichever fits where it stands.
     fn listen_toggle(&mut self) {
         match self.aloud.as_mut() {
             Some(a) if a.playing => {
@@ -3924,8 +3264,6 @@ impl App {
         self.push();
     }
 
-    /// Reading starts from the article on screen: split it into sentences in
-    /// the page, then hand the list to the speaker thread.
     fn listen_start(&mut self) {
         let i = self.active_idx();
         let t = &self.tabs[i];
@@ -3940,8 +3278,6 @@ impl App {
         });
     }
 
-    /// Stop speaking and wipe the highlight. Called on tab switch, navigation,
-    /// reader exit, close — anywhere the page under the voice is going away.
     fn listen_stop(&mut self) {
         let Some(a) = self.aloud.take() else { return };
         aloud::stop();
@@ -3953,8 +3289,6 @@ impl App {
         self.push();
     }
 
-    /// Put the chosen KeePass login into the password box on screen. The
-    /// values exist only inside the script string, handed straight to the page.
     fn kdbx_fill(&mut self, n: usize) {
         let Some(i) = self.idx(self.active) else { return };
         let Some(v) = &self.vault else { return };
@@ -3971,7 +3305,6 @@ impl App {
     fn show_reader(&mut self, id: u64, url: &str, out: &str) {
         let Some(i) = self.idx(id) else { return };
         let Ok(article) = serde_json::from_str::<Value>(out) else { return };
-        // The page moved on while Readability worked, or there is no article.
         if article.is_null() || self.tabs[i].url != url {
             return;
         }
@@ -3988,7 +3321,6 @@ impl App {
         }
     }
 
-    /// The Dark Reader script for the current settings, pushed to every page.
     fn refresh_dark(&mut self) {
         let on = self.settings.dark_pages && self.ctx.dark.get();
         let js = on.then(|| {
@@ -4004,7 +3336,6 @@ impl App {
         }
     }
 
-    /// Shift+F9: this site keeps its own colors, or gets darkened again.
     fn toggle_dark_site(&mut self, i: usize) {
         let h = host_of(&self.tabs[i].url);
         if h.is_empty() {
@@ -4023,29 +3354,19 @@ impl App {
         self.apply_settings(s);
     }
 
-    /// The person asked for a navigation from Lumen itself: the address bar, a
-    /// bookmark, a history row, a pin coming home. WebView2 reports a page's own
-    /// navigation as user-initiated too (measured on 2026-10-25), so the
-    /// redirect rule is told which ones Lumen started.
     fn asked_nav(&self, id: u64) {
         self.ctx.api_nav.borrow_mut().insert(id, Instant::now());
     }
 
     fn navigate(&mut self, raw: &str) {
         let Some((url, bare)) = classify_input(raw, &self.settings.search) else { return };
-        // A magnet link is not a page: hand it to aria2 instead of loading it.
-        // The person typed it, so it runs at once.
         if url.starts_with("magnet:") {
             self.add_magnet(&url, self.active_tab().is_some_and(|t| t.private), None);
             return;
         }
         let i = self.active_idx();
         self.leave_panel();
-        // A bare host is remembered until the page answers: if the name turns out
-        // not to exist, the person gets a search for what they typed.
         self.tabs[i].typed = bare.then(|| Typed { raw: raw.trim().to_string(), url: url.clone(), started: false });
-        // The other engine: a host from the "Servo sites" list is a Servo page, and
-        // one that left the list goes back to WebView2.
         #[cfg(feature = "servo")]
         self.place_on_engine(i, &url);
         #[cfg(feature = "servo")]
@@ -4087,21 +3408,16 @@ impl App {
     fn set_panel(&mut self, p: Panel) {
         let was = self.panel;
         self.panel = p;
-        // The report is made when its page opens, so it says how things are now. Opened
-        // after a crash, it says so in its subject; either way the crash note has done its job.
         if p == Panel::Bug && was != Panel::Bug {
             self.bug_kind = if self.unclean_last { "crash" } else { "problem" };
             self.unclean_last = false;
             self.bug_sent = false;
             self.bug_report = Some(self.make_bug_report());
         }
-        // The check-up runs when its page opens, so it says how things are now, and never
-        // while nobody is looking at it.
         if p == Panel::Doctor && was != Panel::Doctor {
             self.doctor = None;
             self.run_doctor();
         }
-        // The page is open now: the dot on the footer button has done its job.
         if p == Panel::Downloads {
             self.dl_unseen = false;
         }
@@ -4116,8 +3432,6 @@ impl App {
         self.push();
     }
 
-    /// The check-up, run off the UI thread: it writes to disks, asks Windows Hello and knocks
-    /// on the agent door. The answer arrives as `Ev::Doctor`.
     fn run_doctor(&self) {
         let live = doctor::Live { in_app: true, locked: self.settings.lock_app || self.tabs.iter().any(|t| t.locked) };
         let proxy = self.ctx.proxy.clone();
@@ -4126,8 +3440,6 @@ impl App {
         });
     }
 
-    /// The problem report: facts about this Lumen and this PC, and the journal's crashes and
-    /// stalls. No addresses, no titles, nothing from pages (bugreport.rs keeps it that way).
     fn make_bug_report(&self) -> String {
         let webview = self.ctx.env.borrow().as_ref().map(engine::browser_version).unwrap_or_default();
         let facts = bugreport::Facts {
@@ -4150,7 +3462,6 @@ impl App {
         bugreport::build(&facts, &journal, &crash)
     }
 
-    /// Switching tabs or navigating closes any panel, quietly.
     fn leave_panel(&mut self) {
         if self.panel.live() {
             self.stop_monitor();
@@ -4162,7 +3473,6 @@ impl App {
         self.net.borrow_mut().clear();
         self.net_hist.clear();
         self.prev_cpu.clear();
-        // Bytes count from now: the first rate is over the time since now.
         self.prev_at = Instant::now();
         for i in 0..self.tabs.len() {
             self.limit_tab(i);
@@ -4175,7 +3485,6 @@ impl App {
         let keep = self.settings.net_limit;
         for (id, w) in std::mem::take(&mut self.watches) {
             let t = self.idx(id).map(|i| &self.tabs[i]);
-            // A recorded page keeps the Network domain: the agents' tools read it.
             let recorded = t.is_some_and(|t| t.recorded());
             monitor::unwatch(t.and_then(|t| t.view.as_ref()), w, keep || recorded);
         }
@@ -4187,8 +3496,6 @@ impl App {
         self.ask_usage();
     }
 
-    /// The slow sample: each tab's memory once a minute while Control is shut. Control's
-    /// own sample, once a second, leaves the same figures, so this one rests meanwhile.
     fn sample_tabs(&mut self) {
         self.next_tab_mem = None;
         if !self.panel.live() {
@@ -4196,8 +3503,6 @@ impl App {
         }
     }
 
-    /// Arm the slow sample when a tab of the person's has a page, disarm it when none has:
-    /// an idle Lumen with nothing open never wakes for it.
     fn arm_tab_mem(&mut self) {
         let any = self.tabs.iter().any(|t| !t.agent && t.view.is_some());
         if !any {
@@ -4208,16 +3513,12 @@ impl App {
         }
     }
 
-    /// Ask WebView2 for its processes; the answer comes back as `on_usage`.
     fn ask_usage(&self) {
-        // The person's browser and every strictly isolated agent's: each is a process tree
-        // of its own, and its pages are tabs here too.
         let mut envs: Vec<_> = self.ctx.env.borrow().iter().map(|e| (String::new(), e.clone())).collect();
         envs.extend(self.ctx.own_envs.borrow().iter().map(|(k, e)| (k.clone(), e.clone())));
         monitor::sample(envs, self.ctx.proxy.clone());
     }
 
-    /// (environment, main-frame id) -> tab. Frame ids are only unique inside one environment.
     fn tab_owners(&self) -> HashMap<(String, u32), u64> {
         let mut owner = HashMap::new();
         for t in &self.tabs {
@@ -4229,14 +3530,11 @@ impl App {
         owner
     }
 
-    /// Raw process numbers in; per-tab memory, CPU and network out, straight to the UI.
     fn on_usage(&mut self, procs: Vec<monitor::Proc>) {
-        // Every sample, Control's or the slow one, leaves each tab's memory behind.
         let owner = self.tab_owners();
         let mut mem: HashMap<u64, u64> = HashMap::new();
         for p in &procs {
             let mine: Vec<u64> = p.frames.iter().filter_map(|f| owner.get(&(p.env.clone(), *f)).copied()).collect();
-            // A process shared by several tabs: split it evenly, as Control does.
             for id in &mine {
                 *mem.entry(*id).or_default() += p.mem / mine.len() as u64;
             }
@@ -4250,7 +3548,6 @@ impl App {
         let now = Instant::now();
         let secs = (now - self.prev_at).as_secs_f64().max(0.001);
         self.prev_at = now;
-        // The first reading has nothing to take CPU time from: no CPU figure yet, not 0%.
         let first = self.prev_cpu.is_empty();
         let pct = |c: f64| if first { Value::Null } else { json!(c) };
         let mut tabs: HashMap<u64, (f64, f64)> = HashMap::new();
@@ -4260,14 +3557,12 @@ impl App {
         for p in &procs {
             let prev = self.prev_cpu.get(&p.pid).copied().unwrap_or(p.cpu);
             next_cpu.insert(p.pid, p.cpu);
-            // 100 ns ticks to percent of the whole machine.
             let cpu = if first { 0.0 } else { (p.cpu.saturating_sub(prev) as f64 / 1e7) / secs / self.cores * 100.0 };
             let mem = p.mem as f64;
             total.0 += mem;
             total.1 += cpu;
             let mine: Vec<u64> = p.frames.iter().filter_map(|f| owner.get(&(p.env.clone(), *f)).copied()).collect();
             if !mine.is_empty() {
-                // A process shared by several tabs: split it evenly. Honest enough.
                 let n = mine.len() as f64;
                 for id in mine {
                     let e = tabs.entry(id).or_default();
@@ -4275,10 +3570,8 @@ impl App {
                     e.1 += cpu / n;
                 }
             } else if p.kind == "host" {
-                // Lumen itself: the native chrome lives here.
                 ui = (ui.0 + mem, ui.1 + cpu);
             } else if p.kind == "helper" {
-                // Not a browser process: the download helper and its console.
                 helpers = (helpers.0 + mem, helpers.1 + cpu);
             } else {
                 core = (core.0 + mem, core.1 + cpu);
@@ -4315,7 +3608,6 @@ impl App {
         self.chrome.usage(report);
     }
 
-    /// CPU cap and bandwidth cap. The RAM limit is enforced in tick().
     fn apply_limits(&mut self, old: Option<&Settings>) {
         let s = &self.settings;
         let cpu_changed = old.is_none_or(|o| (o.cpu_limit, o.cpu_limit_pct) != (s.cpu_limit, s.cpu_limit_pct));
@@ -4341,10 +3633,6 @@ impl App {
         self.push();
     }
 
-    // ------------------------------------------------------------ settings
-
-    /// The window behind the page gaps takes the sidebar's color.
-    /// The native chrome is solid; an opaque window is the cheapest thing Windows draws.
     fn apply_backdrop(&mut self) {
         let (r, g, b) = self.bg;
         let w = self.ctx.window.clone();
@@ -4367,7 +3655,6 @@ impl App {
     fn apply_settings(&mut self, mut new: Settings) {
         new.clamp();
         let old = std::mem::replace(&mut self.settings, new);
-        // Switching compact either way (Ctrl+B, the toggle) is a fresh start for the peek.
         if old.compact != self.settings.compact {
             self.peek = false;
         }
@@ -4378,7 +3665,6 @@ impl App {
         }
         if old.tracking != self.settings.tracking {
             self.ctx.tracking.replace(self.settings.tracking.clone());
-            // Tracking prevention is per profile, and private and agent pages have their own.
             for v in self.tabs.iter().filter_map(|t| t.view.as_ref()) {
                 engine::set_tracking(v, &self.settings.tracking);
             }
@@ -4393,12 +3679,9 @@ impl App {
             self.ctx.gpc.set(self.settings.gpc);
         }
         if old.userscripts != self.settings.userscripts {
-            // Read when a tab is made: this reaches the next tab, and every page a
-            // reload of one of those tabs asks for.
             self.ctx.userscripts.set(self.settings.userscripts);
         }
         if old.trim_watched != self.settings.trim_watched && !self.settings.trim_watched {
-            // Off: every page this rule was holding down comes straight back.
             for t in self.tabs.iter().filter(|t| t.visible && !t.call) {
                 if let Some(v) = &t.view {
                     let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
@@ -4408,9 +3691,7 @@ impl App {
         if old.adblock_off_sites != self.settings.adblock_off_sites {
             self.blocker.set_off_sites(&self.settings.adblock_off_sites);
         }
-        // The pop-up rules the engine reads at every new-window request.
         self.ctx.popup_policy.replace(popup::Policy { block: self.settings.block_popups, trusted: self.settings.popup_sites.clone() });
-        // ... and the redirect rules it reads at every navigation.
         self.ctx.redirect_policy.replace(popup::RedirectPolicy {
             block: self.settings.block_redirects,
             allowed: self.settings.redirect_sites.clone(),
@@ -4418,7 +3699,6 @@ impl App {
         if old.perm_defaults != self.settings.perm_defaults {
         }
         if old.default_zoom != self.settings.default_zoom {
-            // Sites with no zoom of their own follow the default.
             for i in 0..self.tabs.len() {
                 let want = self.wanted_zoom(i);
                 self.put_zoom(i, want);
@@ -4449,7 +3729,6 @@ impl App {
         if old.agent != self.settings.agent || old.agent_port != self.settings.agent_port {
             self.agent.set(self.settings.agent, self.settings.agent_port, &self.ctx.proxy);
             if !self.settings.agent {
-                // Door shut: nothing the person allowed to agents outlasts it.
                 for i in 0..self.tabs.len() {
                     self.lend(i, None);
                 }
@@ -4466,8 +3745,6 @@ impl App {
         self.push();
     }
 
-    // -------------------------------------------------------------- events
-
     fn on_event(&mut self, ev: Ev) {
         if cfg!(debug_assertions) && !quiet_event(&ev) {
             debug_log(&ev);
@@ -4477,7 +3754,6 @@ impl App {
             Ev::Key(a) => self.on_key(a),
             Ev::Title(id, t) => {
                 if let Some(i) = self.idx(id) {
-                    // The page paces its own titles (engine.rs); one that is already shown is nothing.
                     if self.tabs[i].title != t {
                         self.show_title(i, t);
                     }
@@ -4485,38 +3761,28 @@ impl App {
             }
             Ev::Url(id, u) => {
                 if let Some(i) = self.idx(id) {
-                    // Lumen's error page is a page made from a string too.
                     if self.tabs[i].error_shown {
                         if !u.starts_with("http") {
                             return;
                         }
                         self.tabs[i].error_shown = false;
                     }
-                    // The warning for a site without https is a page made from a string: the tab
-                    // keeps the address it was asked for, until a real page replaces it.
                     if self.tabs[i].no_https.is_some() {
                         if !u.starts_with("http") {
                             return;
                         }
                         self.tabs[i].no_https = None;
                     }
-                    // Reader view is a page made from a string; the tab keeps the real URL.
                     if self.tabs[i].reader.is_some() {
                         if !u.starts_with("http") {
                             return;
                         }
                         self.tabs[i].reader = None;
-                        // The reader page is gone; so is the reading.
                         let id = self.tabs[i].id;
                         if self.aloud.as_ref().is_some_and(|a| a.tab == id) {
                             self.listen_stop();
                         }
                     }
-                    // SponsorBlock: on a YouTube watch page, fetch segments and
-                    // inject the skip script. One background fetch per video;
-                    // whatever was pending for this tab is about the old page.
-                    // Nothing is stored and the video ID never leaves the
-                    // machine in the clear, so agent and private tabs get it too.
                     self.spb.remove(&self.tabs[i].id);
                     if self.settings.sponsorblock && sponsorblock::is_youtube_watch(&u) {
                         if let Some(vid) = sponsorblock::video_id(&u) {
@@ -4527,8 +3793,6 @@ impl App {
                                 let proxy = self.ctx.proxy.clone();
                                 std::thread::spawn(move || {
                                     let segs = sponsorblock::fetch_segments(&vid);
-                                    // Counted where the segments are known: one
-                                    // page load, however many segments it skipped.
                                     privacy_stats::sponsor(&site, segs.len() as u64, who);
                                     let json = serde_json::json!(segs.iter().map(|s| [s.start, s.end]).collect::<Vec<_>>());
                                     let script = sponsorblock::init_script(&json.to_string());
@@ -4537,16 +3801,12 @@ impl App {
                             }
                         }
                     }
-                    // Agents browse off the record, and so do private tabs.
                     if !self.off_record(&self.tabs[i]) {
                         self.library.visit(&u, &self.tabs[i].title);
                     }
-                    // The person let agents use this tab on one site; another site ends it.
                     if self.tabs[i].agent_ok.as_deref().is_some_and(|site| site != engine::origin_of(&u)) {
                         self.lend(i, None);
                     }
-                    // Another page: the original text went with the old document, and
-                    // a translation still in the air is for a page that is gone.
                     if self.tabs[i].url != u {
                         self.tabs[i].translated = None;
                         self.tabs[i].translating = false;
@@ -4555,7 +3815,6 @@ impl App {
                         }
                     }
                     self.tabs[i].url = u;
-                    // A site the person zoomed keeps its zoom; any other gets the default.
                     let want = self.wanted_zoom(i);
                     self.put_zoom(i, want);
                     self.dirty = true;
@@ -4563,18 +3822,15 @@ impl App {
                 }
             }
             Ev::Loading(id, on) => {
-                // A new page starts its own count of questions; "stop asking" was for the last.
                 if on && let Some(i) = self.idx(id) {
                     self.tabs[i].asks_n = 0;
                     self.tabs[i].asks_off = false;
                 }
-                // The first page of the run done loading, for the startup lines.
                 static FIRST_PAGE: std::sync::Once = std::sync::Once::new();
                 if !on {
                     FIRST_PAGE.call_once(|| startup_line("first_page_at", since_born()));
                 }
                 if let Some(i) = self.idx(id) {
-                    // A page navigating again is a page that came back from "crashed".
                     if on && self.tabs[i].crashed {
                         self.tabs[i].crashed = false;
                         self.push();
@@ -4582,9 +3838,6 @@ impl App {
                     if self.tabs[i].loading != on {
                         self.tabs[i].loading = on;
                         self.push();
-                        // A page loading on screen keeps full memory: the swap
-                        // waits for the load, so the first paint is never a
-                        // fault-in from disk. The watch rule comes after it.
                         if on
                             && !self.minimized
                             && self.tabs[i].visible
@@ -4593,14 +3846,11 @@ impl App {
                         {
                             let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
                         }
-                        // The document is here: a skip script that was waiting
-                        // for it can go in now.
                         if !on && let Some(script) = self.spb.remove(&id) {
                             if let Some(v) = &self.tabs[i].view {
                                 let _ = v.evaluate_script(&script);
                             }
                         }
-                        // Done loading: read the page a little later, once scripts have filled it in.
                         let t = &self.tabs[i];
                         if !on && self.settings.remember_text && !self.off_record(t) && t.reader.is_none() && t.url.starts_with("http") {
                             let (proxy, url) = (self.ctx.proxy.clone(), t.url.clone());
@@ -4618,7 +3868,6 @@ impl App {
                     && self.tabs[i].reader.is_none()
                     && let Some(v) = &self.tabs[i].view
                 {
-                    // Pages that ask for a password are not kept.
                     let js = format!(
                         "(()=>{{if(document.querySelector('input[type=password]'))return null;const b=document.body;if(!b)return null;return {{t:document.title,x:b.innerText.slice(0,{})}}}})()",
                         recall::MAX_TEXT
@@ -4653,14 +3902,11 @@ impl App {
                     && self.tabs[i].reader.is_none()
                     && self.tabs[i].favicon != f
                 {
-                    // The site's icon for the speed dial, kept past this tab. Not for private tabs:
-                    // that would write down that the site was visited.
                     if !self.tabs[i].private && !self.tabs[i].agent {
                         if sitefavs::remember(&mut self.site_favs, &self.tabs[i].url, &f) {
                             self.site_favs_dirty = true;
                             self.chrome.set_site_fav(&speeddial::host_of(&self.tabs[i].url), &f);
                         }
-                        // Same visit fills the on-disk icon cache the redesign draws from.
                         use base64::Engine as _;
                         if let Some(b64) = f.strip_prefix("data:image/png;base64,")
                             && let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64)
@@ -4682,17 +3928,13 @@ impl App {
                     self.push();
                 }
             }
-            // The journal's timing of a page. A private tab is not in it.
             Ev::NavStart(id, url) => {
-                // A page that goes somewhere else has said what it wanted: the
-                // note about a pop-up it did not get is gone with it.
                 if self.block_notes.remove(&id).is_some() {
                     self.push();
                 }
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].nav_pending = Some(Instant::now());
                     self.tabs[i].nav_started = true;
-                    // The page the person typed is the one now loading, or it never will be.
                     match self.tabs[i].typed.as_mut() {
                         Some(t) if same_page(&t.url, &url) => t.started = true,
                         Some(_) => self.tabs[i].typed = None,
@@ -4705,16 +3947,11 @@ impl App {
             Ev::NavDone(id, ok, err, http) => {
                 journal::nav_done(id, ok, err, http, self.blocked_count());
                 let typed = self.typed_done(id, ok, err);
-                // No answer at all from the site (a server's own 404 is an answer): Lumen's
-                // error page, in the person's tabs. A typed name that does not resolve is a
-                // search instead, and a cancel is something else starting.
                 if !ok && !typed && http == 0 && err != 0 && err != ERR_CANCELED {
                     self.error_page(id, err);
                 }
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].last_nav = Some((ok, err, http));
-                    // Cancelled (14, OPERATION_CANCELED) is how a redirect, an https upgrade
-                    // or a warning page begins: something else may follow. Expect it a moment.
                     if !ok && err == 14 {
                         self.expect_nav(i);
                     } else {
@@ -4722,14 +3959,12 @@ impl App {
                     }
                 }
             }
-            // The server sent the typed page somewhere else: that is not a typo.
             Ev::NavRedirected(id) => {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].typed = None;
                 }
             }
             Ev::LowMemory => self.low_memory(),
-            // Straight to the chrome: a pointer crossing links must not rebuild the whole UI.
             Ev::LinkHover(id, text) => {
                 if id == self.active {
                     self.chrome.set_link(text);
@@ -4741,9 +3976,6 @@ impl App {
                     engine::answer_sign_in(&self.ctx, aid, None);
                     return;
                 };
-                // A page the person told to stop gets its answers without a card: an alert is
-                // seen, a confirm is no, a prompt is cancelled, a leave is allowed. A sign-in
-                // always asks.
                 if self.tabs[i].asks_off && !matches!(ask, engine::Ask::SignIn(_)) {
                     engine::answer_script(&self.ctx, aid, matches!(ask, engine::Ask::Alert(_) | engine::Ask::Leave), None);
                     return;
@@ -4770,7 +4002,6 @@ impl App {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].call = on;
                     if on {
-                        // A call in a tab that was frozen or trimmed: back to full life.
                         let t = &mut self.tabs[i];
                         if let Some(v) = &t.view {
                             if t.suspended {
@@ -4781,7 +4012,6 @@ impl App {
                         t.suspended = false;
                         t.trimmed = false;
                     } else if self.tabs[i].hidden_at.is_some() {
-                        // The call ended: the sleep timer starts now.
                         self.tabs[i].hidden_at = Some(Instant::now());
                     }
                     self.push();
@@ -4791,10 +4021,7 @@ impl App {
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].audio = on;
                     if on {
-                        // The media keys and the footer card follow the last tab
-                        // that made a sound.
                         self.media_tab = Some(id);
-                        // Sound from a page that was frozen a moment ago: let it go on.
                         if self.tabs[i].suspended
                             && let Some(v) = &self.tabs[i].view
                         {
@@ -4802,8 +4029,6 @@ impl App {
                             self.tabs[i].suspended = false;
                         }
                     } else if self.tabs[i].hidden_at.is_some() {
-                        // The music stopped: the sleep timer starts now, not from the
-                        // minute the tab was hidden.
                         self.tabs[i].hidden_at = Some(Instant::now());
                     }
                     self.push();
@@ -4811,34 +4036,26 @@ impl App {
             }
             Ev::Suspended(id, ok) => {
                 if let Some(i) = self.idx(id) {
-                    // Only count it if the tab is still hidden. User may have clicked back.
                     self.tabs[i].suspended = ok && id != self.active;
                     self.push();
                 }
             }
             Ev::Crashed(id, browser) => {
-                // The journal wants the death and, later, whether the reload took.
                 let host = self.idx(id).map_or_else(String::new, |i| host_of(&self.tabs[i].url));
                 let private = self.idx(id).is_some_and(|i| self.tabs[i].private);
                 journal::crash(id, if browser { "browser" } else { "renderer" }, &host, private);
                 if browser {
-                    // The browser process is gone and every WebView2 object with it.
-                    // Dropping them all lets the next tab activation build a fresh
-                    // environment, the same way the first tab does at startup.
                     self.ctx.env.replace(None);
                     self.ctx.popups.borrow_mut().clear();
                     for t in &mut self.tabs {
                         t.view = None;
                     }
                 } else if let Some(i) = self.idx(id) {
-                    // The renderer died; the tab stays. Clicking it reloads the page.
                     self.tabs[i].crashed = true;
                 }
                 self.push();
             }
             Ev::PaneFocus(id) => {
-                // A click landed in one half of the split. Anything else that takes
-                // focus (a page loading on its own) leaves the panes where they are.
                 if self.split == Some(id) {
                     self.activate(id);
                 }
@@ -4864,7 +4081,6 @@ impl App {
             Ev::TrPage(id, target, out) => self.on_tr_page(id, &target, &out),
             Ev::TrModel(id, ok, why) => self.on_tr_model(id, ok, why),
             Ev::TrMsg(msg) => self.on_tr_msg(&msg),
-            // Servo's reports: the same shape as WebView2's, from the other engine.
             #[cfg(feature = "servo")]
             Ev::ServoWake => {}
             #[cfg(feature = "servo")]
@@ -4896,7 +4112,6 @@ impl App {
                         self.tabs[i].loading = on;
                         self.push();
                     }
-                    // Test hook: the page finished loading, so say whether it painted.
                     #[cfg(debug_assertions)]
                     if !on
                         && let Some(p) = self.tabs[i].servo.as_ref()
@@ -4907,9 +4122,6 @@ impl App {
             }
             #[cfg(feature = "servo")]
             Ev::ServoGone(id) => {
-                // Servo gave up on the page, or it crashed: the tab stays, with its
-                // URL, and a click on it opens it again (in WebView2, if it is not a
-                // Servo host any more).
                 if let Some(i) = self.idx(id) {
                     self.tabs[i].servo = None;
                     self.tabs[i].crashed = true;
@@ -4931,8 +4143,6 @@ impl App {
                     if self.panel != Panel::Downloads {
                         self.dl_unseen = true;
                     }
-                    // The reason WebView2 gives is usually none, so the row's own
-                    // note, or the host, has to stand in for it.
                     let was = self.downloads.iter().find(|x| x.id == d.id).map(|x| x.state);
                     if d.state == "failed" && was.is_none_or(|w| w != "failed") {
                         let what = if d.name.is_empty() { host_of(&d.url) } else { d.name.clone() };
@@ -4963,7 +4173,6 @@ impl App {
             Ev::Zoom(id, f) => {
                 let Some(i) = self.idx(id) else { return };
                 let pct = sites::pct_of(f);
-                // The change Lumen made itself is not the person's choice.
                 let ours = self.tabs[i].zoom_set.take() == Some(pct);
                 self.tabs[i].zoom = pct;
                 if !ours {
@@ -5002,11 +4211,8 @@ impl App {
                 }
                 let (aria, proxy) = (self.aria.clone(), self.ctx.proxy.clone());
                 let u = url.clone();
-                // A download started by a private tab leaves no row on disk either.
                 let jar = self.idx(tab).map_or(0, |i| self.jar(&self.tabs[i]));
                 let private = jar == 2;
-                // What an agent asked for, or an agent's page offered, goes in that
-                // session's own folder: two agents never write over each other's files.
                 let agent_dir = self
                     .agent_dl
                     .get(&url)
@@ -5024,8 +4230,6 @@ impl App {
                     }
                     std::thread::spawn(move || {
                         let name = (!name.is_empty()).then_some(name);
-                        // A page's download: the .torrent file itself is fetched
-                        // like any file, but the torrent it spawns waits for Resume.
                         let _ = match aria.add_in(&u, &headers, name.as_deref(), false, agent_dir.as_deref()) {
                             Ok(gid) => proxy.send_event(Ev::AriaAdded(Box::new(engine::Added {
                                 gid,
@@ -5040,9 +4244,6 @@ impl App {
                         };
                     });
                 };
-                // Cookies live in the profile, so ask a settled page of the same jar:
-                // a popup that is turning into a download may never answer. A private
-                // tab's jar is its own; an agent's is its own; never mix them.
                 let asker = self
                     .tabs
                     .iter()
@@ -5059,23 +4260,17 @@ impl App {
                 if person {
                     self.aria_person.insert(gid.clone());
                 } else if hold.is_none() {
-                    // A page's download: any torrent it spawns waits for Resume.
                     self.aria_page.insert(gid.clone());
                 }
-                // When this torrent started looking for its peers.
                 self.aria_since.insert(gid.clone(), Instant::now());
                 if let Some(note) = hold {
                     self.aria_hold.insert(gid.clone(), note);
                 }
-                // The row may already exist if a poll adopted this gid first; keep its id.
                 if !self.aria_ids.contains_key(&gid) {
                     let id = self.next_dl(1);
                     self.aria_ids.insert(gid.clone(), id);
                     if private {
-                        // Show it now, marked private, so it never reaches downloads.json.
                         let held = self.aria_hold.get(&gid).cloned();
-                        // A magnet is a torrent from the start, and it carries the
-                        // name it was given until aria2 knows the real one.
                         let magnet = url.starts_with("magnet:");
                         self.downloads.insert(
                             0,
@@ -5112,8 +4307,6 @@ impl App {
             }
             Ev::AriaFailed(tab, url, private) => {
                 if tab == 0 && !url.is_empty() {
-                    // A manual add (Add link / magnet / torrent) that aria2 refused:
-                    // show a failed row. There is no page to fall back to.
                     journal::error("download", "aria2 refused it");
                     let id = self.next_dl(1);
                     let name = if url.starts_with("magnet:") {
@@ -5134,7 +4327,6 @@ impl App {
                             state: "failed",
                             speed: 0,
                             note: "aria2 refused it".into(),
-                            // A private tab's row stays private: it leaves no trace.
                             private,
                             name,
                             kind: if magnet { "torrent" } else { "file" },
@@ -5152,15 +4344,12 @@ impl App {
                     self.push();
                     return;
                 }
-                // aria2 said no (auth, odd server): let WebView2 download it after all.
                 self.ctx.bypass.borrow_mut().insert(url.clone());
                 if let Some(v) = self.idx(tab).and_then(|i| self.tabs[i].view.as_ref()) {
                     let _ = v.load_url(&url);
                 }
             }
             Ev::AriaJobs(jobs) => {
-                // Adopt-on-start: aria2 restored unfinished downloads from its session
-                // file, but Lumen forgot their gids. Put each one in the list once.
                 if !jobs.is_empty() && !self.aria_adopted {
                     self.aria_adopted = true;
                     for j in &jobs {
@@ -5197,7 +4386,6 @@ impl App {
                         );
                     }
                 }
-                // A finished .torrent file hands its row to the torrent it spawned.
                 let fmap = aria::follow_map(&jobs);
                 let mut busy_pending = false;
                 for (old, new) in &fmap {
@@ -5205,8 +4393,6 @@ impl App {
                         && !self.aria_ids.contains_key(new)
                     {
                         self.aria_ids.remove(old);
-                        // What we know about the magnet follows the torrent it
-                        // became: the same address, the same name, the same age.
                         if let Some(meta) = self.aria_meta.remove(old) {
                             self.aria_meta.insert(new.clone(), meta);
                         }
@@ -5215,9 +4401,6 @@ impl App {
                         }
                         self.aria_ids.insert(new.clone(), id);
                         if self.aria_person.remove(old) {
-                            // A person-started .torrent hands its consent to the
-                            // torrent it spawned; pause-metadata stops the child,
-                            // so start it now.
                             self.aria_person.insert(new.clone());
                             let gid = new.clone();
                             let aria = self.aria.clone();
@@ -5226,8 +4409,6 @@ impl App {
                             });
                             busy_pending = true;
                         } else if self.aria_page.remove(old) {
-                            // A page's .torrent: the torrent it spawned waits for
-                            // the person, with a note saying so.
                             self.aria_hold.insert(new.clone(), "press Resume to start this torrent".into());
                             let gid = new.clone();
                             let aria = self.aria.clone();
@@ -5241,9 +4422,6 @@ impl App {
                 let mut torrent_active = false;
                 for j in jobs {
                     let Some(&id) = self.aria_ids.get(&j.gid) else { continue };
-                    // A magnet is a torrent from the start, and it carries the name
-                    // it was given until aria2 knows the real one. A job aria2
-                    // brought back from its session file says so itself.
                     let meta_url = self.aria_meta.get(&j.gid).map(|(u, _, _)| u.clone()).unwrap_or_default();
                     let url = if meta_url.starts_with("magnet:") { meta_url } else { j.url.clone() };
                     let magnet = url.starts_with("magnet:");
@@ -5256,9 +4434,6 @@ impl App {
                     };
                     let ratio = if j.done > 0 { j.upload_length as f64 / j.done as f64 } else { 0.0 };
                     let kind = if !j.name.is_empty() || magnet { "torrent" } else { "file" };
-                    // A person-started torrent pause-metadata stopped once its
-                    // metadata arrived: start it. Keep the poll awake for one
-                    // more round to see it run.
                     if should_auto_resume(self.aria_person.contains(&j.gid), &j.status, !j.name.is_empty(), j.done < j.total) {
                         let gid = j.gid.clone();
                         let aria = self.aria.clone();
@@ -5280,8 +4455,6 @@ impl App {
                     busy |= matches!(state, "progress" | "seeding");
                     let note = match j.status {
                         "active" if j.seeder => format!("{} peers", j.connections),
-                        // The metadata phase: aria2 is still looking for the
-                        // torrent's peers. Say so, or the row reads as frozen.
                         "active" if kind == "torrent" && j.total == 0 => {
                             let looking = self.aria_since.get(&j.gid).map(|at| Instant::now().duration_since(*at)).unwrap_or_default();
                             metadata_note(true, j.connections, looking)
@@ -5300,14 +4473,11 @@ impl App {
                         if state != "seeding" {
                             self.dl_dirty = true;
                         }
-                        // Something ended while the page was closed: show the dot.
                         if self.panel != Panel::Downloads {
                             self.dl_unseen = true;
                         }
                     }
                     let private = self.downloads.iter().find(|x| x.id == id).is_some_and(|x| x.private);
-                    // The journal's view of it: one `download` line when it ends,
-                    // and the reason the person was shown when aria2 gives up.
                     journal::download(id, kind, state, j.done as i64, private);
                     if state == "failed" && was.is_some_and(|w| w != "failed") && !note.is_empty() {
                         journal::error("download", &note);
@@ -5350,15 +4520,10 @@ impl App {
             }
             Ev::Reader(id, url, out) => self.show_reader(id, &url, &out),
             Ev::SponsorBlock(id, script) => {
-                // Used only when there was something to skip: an empty list is
-                // a page SponsorBlock knows nothing about.
                 if !script.contains("const SEGMENTS = [];") {
                     let private = self.idx(id).is_some_and(|i| self.tabs[i].private);
                     journal::feature("sponsorblock_skip", private);
                 }
-                // A page still loading is about to become another document:
-                // hold the script until it is there, or it runs in the old one
-                // and the player never hears of it.
                 let loading = self.idx(id).is_some_and(|i| self.tabs[i].loading);
                 if loading {
                     self.spb.insert(id, script);
@@ -5404,7 +4569,6 @@ impl App {
                 }
                 let Some(i) = self.idx(tab) else { return };
                 if n == usize::MAX {
-                    // Spoken through: no state left, no highlight left.
                     self.aloud = None;
                     if let Some(v) = &self.tabs[i].view {
                         let _ = v.evaluate_script(&aloud::highlight_script(None));
@@ -5417,8 +4581,6 @@ impl App {
                 self.push();
             }
             Ev::VaultOpen(path, pw) => {
-                // Parsing is slow and must stay off the UI thread. The pair
-                // rides on a quiet event: never logged, never written.
                 let proxy = self.ctx.proxy.clone();
                 std::thread::spawn(move || {
                     let r = kdbx::Vault::open(std::path::Path::new(&path), &pw).map(Box::new);
@@ -5432,7 +4594,6 @@ impl App {
                     self.push();
                 }
                 Err(e) => {
-                    // Wrong password or not a .kdbx: say it where the button was.
                     let msg = format!("Couldn't open that file: {e}");
                     journal::error("kdbx", &msg);
                     self.chrome.flash(msg);
@@ -5440,8 +4601,6 @@ impl App {
             },
             Ev::Video(id, up) => self.on_video(id, up),
             Ev::ShowMe => {
-                // A second start: addresses it left open as tabs; with none, or when it wants
-                // the window, the window comes forward.
                 let q = launch::drain();
                 for o in &q.opens {
                     self.open_launched(o);
@@ -5458,7 +4617,6 @@ impl App {
                 } else if let Some((gid, _, v)) = &self.glance
                     && *gid == id
                 {
-                    // A shift+click inside the card moves the card, not the page.
                     let _ = v.load_url(&url);
                 }
             }
@@ -5467,8 +4625,6 @@ impl App {
                 _ => self.promote_glance(),
             },
             Ev::Orphan(id) => {
-                // Like Chrome: a tab a page opened just for a download goes away.
-                // A tab the user typed it into goes back to the new tab page.
                 if let Some(i) = self.idx(id) {
                     if self.tabs[i].popup {
                         self.close(id);
@@ -5490,24 +4646,15 @@ impl App {
                 if let Some(i) = self.idx(id)
                     && let Some(v) = &self.tabs[i].view
                 {
-                    // Lumen stopped the link to strip its tracking tags and is
-                    // starting the clean one itself: the page did not do this.
                     self.asked_nav(id);
                     let _ = v.load_url(&url);
                     self.tabs[i].url = url;
                 }
             }
             Ev::Magnet(tab, url, user) => {
-                // A magnet the person clicked starts at once: they asked for it,
-                // and a torrent of their own choosing is their business. One a
-                // page asked for waits for the person: a torrent shows the
-                // swarm the person's address, and no page may start one.
                 if user {
                     self.start_magnet(tab, &url, true);
                 } else {
-                    // The page's report of the click lands after the
-                    // navigation (measured on 2026-10-19), so wait a moment
-                    // and ask again before holding the torrent.
                     let (proxy, tab, url) = (self.ctx.proxy.clone(), tab, url);
                     std::thread::Builder::new()
                         .name("lumen-magnet".into())
@@ -5519,14 +4666,11 @@ impl App {
                 }
             }
             Ev::MagnetSettled(tab, url) => {
-                // The page has had its moment to say the person clicked it.
                 let clicked = self.ctx.clicks.borrow().get(&tab).is_some_and(|p| popup::clicked_magnet(p, &url));
                 self.start_magnet(tab, &url, clicked);
             }
             Ev::HelloReady(ok) => {
                 self.hello = Some(ok);
-                // No Windows Hello on this PC: a lock nobody can open would lock the person
-                // out of their own browser. Nothing stays shut, and the card says why.
                 if !ok {
                     self.app_locked = false;
                     self.tabs.iter_mut().filter(|t| t.locked).for_each(|t| t.unlocked = true);
@@ -5538,15 +4682,11 @@ impl App {
             Ev::Hello(what, id, verdict) => self.on_hello(what, id, verdict),
             Ev::Doctor(report) => {
                 self.doctor = Some(*report);
-                // The page may have closed while the checks ran. Nothing to push then.
                 if self.panel == Panel::Doctor {
                     self.push();
                 }
             }
             Ev::PopupBlocked(tab, target, site) => {
-                // A pop-up the person did not ask for. The chrome says so over the
-                // page, with the way back: allow this site, or let it go.
-                // An agent's tab gets no note: nobody is watching it.
                 if self.idx(tab).is_some_and(|i| !self.tabs[i].agent) {
                     self.block_notes.insert(
                         tab,
@@ -5556,9 +4696,6 @@ impl App {
                 }
             }
             Ev::RedirectBlocked(tab, url, site) => {
-                // A page tried to send the person to another site on its own. The
-                // same note, with "Go anyway" as well as "Allow on this site".
-                // An agent's tab gets no note: nobody is watching it.
                 if self.idx(tab).is_some_and(|i| !self.tabs[i].agent) {
                     let target = host_of(&url);
                     self.block_notes.insert(
@@ -5570,8 +4707,6 @@ impl App {
             }
             Ev::Popup(id, parent) => {
                 let agent = self.idx(parent).is_some_and(|i| self.tabs[i].agent);
-                // A link opened in a new tab is a new tab of the person's: private
-                // when the setting says so, and a private page's popup stays private.
                 let parent_private = self.idx(parent).is_some_and(|i| self.tabs[i].private);
                 let private = opens_private(self.settings.private_tabs, parent_private, agent);
                 let (owner, owner_name, profile, downloads, own_env) = self
@@ -5591,8 +4726,6 @@ impl App {
                     t.private = private;
                     t.owner = owner;
                     t.owner_name = owner_name;
-                    // The popup is the same agent's, in the same profile and folder: an
-                    // OAuth popup must see the cookies its opener is logged in with.
                     t.profile = profile;
                     t.downloads = downloads;
                     t.own_env = own_env;
@@ -5615,7 +4748,6 @@ impl App {
         let i = self.active_idx();
         match a {
             Action::NewTab => {
-                // Like Chrome: a new tab means "I want to type an address".
                 self.new_tab(None, None);
                 self.on_key(Action::Omnibox);
             }
@@ -5679,8 +4811,6 @@ impl App {
                 }
             }
             Action::Sidebar => {
-                // With the sidebar hidden until the mouse reaches the edge, the
-                // key brings it in over the page instead of folding it.
                 if self.settings.hide_sidebar && self.layout_kind().sidebar() {
                     self.chrome.show_sidebar();
                     return;
@@ -5736,7 +4866,6 @@ impl App {
             }
             Action::Split => self.toggle_split(),
             Action::TranslatePage => self.toggle_translate(i),
-            // The switcher lives in the chrome: it owns the list box and the typing.
             Action::TabSearch => self.chrome.open_tab_search(),
             Action::Palette => self.chrome.open_palette(),
         }
@@ -5745,7 +4874,6 @@ impl App {
     fn on_ui(&mut self, raw: &str) {
         let Ok(m) = serde_json::from_str::<Value>(raw) else { return };
         let id = m["id"].as_u64().unwrap_or(0);
-        // Locked: nothing behind the lock screen can be reached, by click or by key.
         if self.app_locked && !matches!(m["t"].as_str(), Some("helloUnlock" | "ready" | "win")) {
             return;
         }
@@ -5760,7 +4888,6 @@ impl App {
                 self.ask_hello(what, id);
             }
             "fileList" => {
-                // A folder's read, from the file card's own thread.
                 self.chrome.file_list(&m);
             }
             "ready" => {
@@ -5781,7 +4908,6 @@ impl App {
             }
             "nav" => self.navigate(m["url"].as_str().unwrap_or("")),
             "openTab" => {
-                // A link of Lumen's own (the credit): a tab of its own, after this one.
                 let url = m["url"].as_str().unwrap_or("").to_string();
                 if url.starts_with("https://") {
                     let after = self.idx(self.active);
@@ -5789,8 +4915,6 @@ impl App {
                 }
             }
             "bugSend" => {
-                // Exactly what the page shows, with the person's words in it, posted off the
-                // window's thread; the answer comes back as a "bugSent" message.
                 if let Some(report) = self.bug_report.clone().filter(|_| !self.bug_sent) {
                     let text = bugreport::with_story(&report, m["what"].as_str().unwrap_or(""));
                     let (kind, proxy) = (self.bug_kind, self.ctx.proxy.clone());
@@ -5808,7 +4932,6 @@ impl App {
                 if m["ok"].as_bool().unwrap_or(false) {
                     self.chrome.flash("Sent to zemo. Thank you.".into());
                 } else {
-                    // Not sent: it may be sent again, or copied and sent another way.
                     self.bug_sent = false;
                     let why = m["why"].as_str().unwrap_or("it did not go");
                     self.chrome.flash(format!("Not sent: {why}. Copy it instead, or try again."));
@@ -5826,9 +4949,6 @@ impl App {
                 self.push();
             }
             "popupAllow" => {
-                // The person said this site may open pop-ups (or redirect). It is
-                // remembered, and the note has done its work. A redirect note's
-                // "Allow on <site>" also loads the page it was holding back.
                 let id = m["id"].as_u64().unwrap_or(0);
                 let site = m["site"].as_str().unwrap_or("").trim().to_string();
                 let redirect = m["kind"].as_str() == Some("redirect");
@@ -5848,7 +4968,6 @@ impl App {
                 self.push();
             }
             "redirectGo" => {
-                // "Go anyway": this one page, this once, in this tab.
                 let id = m["id"].as_u64().unwrap_or(0);
                 self.redirect_go(id);
                 self.block_notes.remove(&id);
@@ -5860,7 +4979,6 @@ impl App {
                 self.push();
             }
             "bugSave" => {
-                // The report as a file in Downloads, named by the minute it was made.
                 if let Some(text) = self.bug_report.clone() {
                     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
                     let name = format!("lumen-report-{:04}{:02}{:02}-{:02}{:02}.txt", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute);
@@ -5880,7 +4998,6 @@ impl App {
                 self.new_private_tab();
             }
             "pageAnswer" => {
-                // A page's alert, confirm, prompt or "leave site?", answered on its card.
                 let aid = m["aid"].as_u64().unwrap_or(0);
                 if let Some(at) = self.page_asks.iter().position(|a| a.0 == aid) {
                     let (_, tab, _, _) = self.page_asks.remove(at);
@@ -5898,7 +5015,6 @@ impl App {
                 engine::answer_menu(&self.ctx, aid, m["cmd"].as_i64().map(|c| c as i32));
             }
             "openPrivateUrl" => {
-                // The page menu's "Open link in a private tab".
                 let url = m["url"].as_str().unwrap_or("").to_string();
                 if url.starts_with("http") {
                     self.new_private_tab();
@@ -5906,7 +5022,6 @@ impl App {
                 }
             }
             "searchNewTab" => {
-                // The page menu's "Search for": the words in a tab of their own, after this one.
                 let q = m["q"].as_str().unwrap_or("").trim().to_string();
                 if !q.is_empty() {
                     let after = self.idx(self.active);
@@ -5917,17 +5032,13 @@ impl App {
             "activate" => self.activate(id),
             "close" => self.close(id),
             "agentGrant" => {
-                // Right-click > Let agents use this tab. Again: stop letting them. Only a tab
-                // of the person's, only with a real page, and only for the site it is on now.
                 self.toggle_agent_grant(id);
             }
             "pin" => {
                 if let Some(i) = self.idx(id) {
                     let mut t = self.tabs.remove(i);
                     t.pinned = !t.pinned;
-                    // The pin remembers the page it was made on; unpinning forgets it.
                     t.pin_url = if t.pinned { t.url.clone() } else { String::new() };
-                    // Pinned: end of the pinned block. Unpinned: first after it.
                     let at = self.pinned_count();
                     self.tabs.insert(at, t);
                     self.dirty = true;
@@ -5935,7 +5046,6 @@ impl App {
                 }
             }
             "pinBack" => {
-                // A pin that wandered goes back to the page it was pinned on.
                 if let Some(i) = self.idx(id) {
                     let url = self.tabs[i].pin_url.clone();
                     let pin = self.tabs[i].pinned || self.tabs[i].essential;
@@ -5951,7 +5061,6 @@ impl App {
                 }
             }
             "pinHome" => {
-                // The page the tab is on now becomes the page it was pinned on.
                 if let Some(i) = self.idx(id) {
                     let url = self.tabs[i].url.clone();
                     if self.tabs[i].pinned && !url.is_empty() {
@@ -5962,7 +5071,6 @@ impl App {
                 }
             }
             "essentialBack" => {
-                // An essential that wandered goes back to the address it was kept at.
                 let home = m["url"].as_str().unwrap_or("").to_string();
                 if let Some(i) = self.tabs.iter().position(|t| t.essential && t.pin_url == home) {
                     let url = self.tabs[i].pin_url.clone();
@@ -5976,7 +5084,6 @@ impl App {
                 }
             }
             "essentialHome" => {
-                // The page an essential is on now becomes the address it is kept at.
                 let home = m["url"].as_str().unwrap_or("").to_string();
                 if let Some(i) = self.tabs.iter().position(|t| t.essential && t.pin_url == home) {
                     let url = self.tabs[i].url.clone();
@@ -5996,7 +5103,6 @@ impl App {
                 self.remove_essential(&url);
             }
             "essential" => {
-                // An essential's site: show its tab, in whichever workspace is open.
                 let url = m["url"].as_str().unwrap_or("").to_string();
                 if !url.is_empty() {
                     self.show_essential(&url);
@@ -6019,8 +5125,6 @@ impl App {
             }
             "split" => self.split_next(id),
             "webview2" => {
-                // "Reopen in WebView2": the host leaves the Servo list, so it opens
-                // here from now on, and this tab is handed over right away.
                 #[cfg(feature = "servo")]
                 if let Some(i) = self.idx(id) {
                     let host = host_of(&self.tabs[i].url);
@@ -6079,7 +5183,6 @@ impl App {
             "move" => {
                 if let Some(i) = self.idx(id) {
                     let t = self.tabs.remove(i);
-                    // Stay inside your own group: pinned with pinned, the rest with the rest.
                     let pins = self.pinned_count();
                     let (lo, hi) = if t.pinned { (0, pins) } else { (pins, self.tabs.len()) };
                     let to = (m["to"].as_u64().unwrap_or(0) as usize).clamp(lo, hi);
@@ -6121,13 +5224,10 @@ impl App {
                 }
             }
             "palOpen" => {
-                // The palette's rows list history and bookmarks while it is open.
                 self.pal_open = m["open"].as_bool().unwrap_or(false);
                 self.push();
             }
             "pip" => {
-                // The PiP button on a tab's row: the biggest playing video, asked
-                // for its own picture-in-picture window.
                 if let Some(i) = self.idx(id)
                     && let Some(v) = &self.tabs[i].view
                 {
@@ -6135,8 +5235,6 @@ impl App {
                 }
             }
             "media" => {
-                // The footer card and the media keys: play/pause, next, previous,
-                // on the tab that last made a sound.
                 if let Some(mid) = self.media_tab
                     && let Some(i) = self.idx(mid)
                     && let Some(v) = &self.tabs[i].view
@@ -6145,14 +5243,11 @@ impl App {
                 }
             }
             "dashboard" => {
-                // The dashboard is Lumen's own home: the clock, the search box and
-                // the speed dial. Opening it means an empty page on this tab.
                 let i = self.active_idx();
                 self.leave_panel();
                 self.tabs[i].url.clear();
                 self.tabs[i].title.clear();
                 self.tabs[i].typed = None;
-                // The page goes; the tab stays.
                 self.tabs[i].view = None;
                 self.tabs[i].visible = false;
                 self.tabs[i].suspended = false;
@@ -6182,7 +5277,6 @@ impl App {
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);
-                // The same scrubbed report, sent to help make Lumen better rather than about a fault.
                 if m["which"].as_str() == Some("numbers") {
                     self.bug_kind = "numbers";
                     self.bug_report = self.bug_report.take().map(|r| bugreport::as_numbers(&r));
@@ -6190,7 +5284,6 @@ impl App {
                 }
             }
             "report" => {
-                // The report page picked a range tile or a site row.
                 if let Some(r) = m["range"].as_str()
                     && matches!(r, "today" | "7" | "30" | "all")
                 {
@@ -6202,8 +5295,6 @@ impl App {
                 self.push();
             }
             "freeMemory" => {
-                // The dashboard's button: every hidden page to its lowest memory level now,
-                // the same trim the sleep policy gives a page hidden for 30 seconds.
                 for t in self.tabs.iter().filter(|t| !self.on_stage(t.id)) {
                     if let Some(v) = &t.view {
                         let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
@@ -6222,19 +5313,16 @@ impl App {
                 }
             }
             "workspaceAdd" => {
-                // A new, empty workspace; switch into it. Ctrl+Alt+1..4 reaches it.
                 let n = self.workspaces.len();
                 if n < workspaces::MAX_WORKSPACES {
                     journal::feature("workspace_add", false);
                     let mut ws = workspaces::WorkspaceData::new(&format!("Workspace {}", n + 1));
-                    // The colours are handed out in turn.
                     ws.colour = (n % 8).to_string();
                     self.workspaces.push(ws);
                     self.switch_workspace(n);
                 }
             }
             "workspaceColour" => {
-                // The colour a workspace wears: a number in the palette.
                 let i = m["i"].as_u64().unwrap_or(0) as usize;
                 let c = m["c"].as_str().unwrap_or("").to_string();
                 if let Some(ws) = self.workspaces.get_mut(i) {
@@ -6256,7 +5344,6 @@ impl App {
             }
             "workspaceDuplicate" => {
                 let i = m["i"].as_u64().unwrap_or(0) as usize;
-                // The active workspace's tabs are live; everyone else's are stored.
                 let dup = self.workspaces.get(i).map(|ws| {
                     let saved = if i == self.active_workspace {
                         keepable(&self.tabs, self.active)
@@ -6284,7 +5371,6 @@ impl App {
                     let was_active = i == self.active_workspace;
                     self.workspaces.remove(i);
                     if was_active {
-                        // The closed workspace's live tabs go with it; open the neighbour.
                         self.active_workspace = self.active_workspace.min(self.workspaces.len() - 1);
                         self.drop_all_tabs();
                         self.load_workspace(self.active_workspace);
@@ -6292,7 +5378,6 @@ impl App {
                         if i < self.active_workspace {
                             self.active_workspace -= 1;
                         }
-                        // Live tabs all belong to the active workspace; their index moved.
                         for t in &mut self.tabs {
                             t.workspace = self.active_workspace;
                         }
@@ -6308,8 +5393,6 @@ impl App {
                     && to != self.active_workspace
                     && let Some(i) = self.idx(id)
                 {
-                    // Not closed: it lives on in the other workspace, so no reopen entry.
-                    // It does leave the stage, so a split half ends the split here too.
                     let keep = if id == self.active { self.split.take() } else { None };
                     if self.split == Some(id) {
                         self.split = None;
@@ -6332,7 +5415,6 @@ impl App {
                         if self.tabs.is_empty() {
                             self.new_tab(None, None);
                         } else {
-                            // The other pane, when there was one, takes the stage.
                             let next = keep.filter(|k| self.idx(*k).is_some()).unwrap_or_else(|| self.tabs[i.min(self.tabs.len() - 1)].id);
                             self.active = 0;
                             self.activate(next);
@@ -6362,9 +5444,6 @@ impl App {
                     "pause" | "resume" | "cancel" if self.videos.contains_key(&id) => self.video_control(id, a),
                     "pause" | "resume" | "cancel" => match self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
                         Some(gid) => {
-                            // Resume on a held row is consent: it runs now, and
-                            // any torrent it spawns inherits that consent.
-                            // Pause takes a person-started one out of auto-start.
                             if a == "resume" {
                                 self.aria_hold.remove(&gid);
                                 self.aria_person.insert(gid.clone());
@@ -6386,7 +5465,6 @@ impl App {
                     },
                     "open" | "folder" => {
                         if let Some(d) = self.downloads.iter().find(|d| d.id == id) {
-                            // A multi-file torrent has no single thing to open: show it in its folder.
                             let folder = a == "folder" || (a == "open" && d.kind == "torrent" && d.files > 1);
                             open_path(&d.path, folder);
                         }
@@ -6398,7 +5476,6 @@ impl App {
                         }
                     }
                     "addUrl" => {
-                        // The chrome read the clipboard and classified it; take it from there.
                         let url = m["url"].as_str().unwrap_or("").to_string();
                         if url.starts_with("magnet:") {
                             let private = self.active_tab().is_some_and(|t| t.private);
@@ -6426,7 +5503,6 @@ impl App {
                         }
                     }
                     "addTorrent" => {
-                        // The chrome opened the file dialog and read the file.
                         let b64 = m["b64"].as_str().unwrap_or("");
                         if b64.is_empty() {
                             return;
@@ -6459,7 +5535,6 @@ impl App {
                         self.apply_settings(s);
                     }
                     "stopSeed" => {
-                        // Keep the files, drop the torrent out of aria2.
                         if let Some(gid) = self.aria_ids.iter().find(|(_, v)| **v == id).map(|(g, _)| g.clone()) {
                             self.aria_ids.remove(&gid);
                             self.aria_meta.remove(&gid);
@@ -6480,7 +5555,6 @@ impl App {
                         self.push();
                     }
                     "note" => {
-                        // The firewall note is dismissed for good.
                         let mut s = self.settings.clone();
                         s.torrent_note = false;
                         self.apply_settings(s);
@@ -6490,7 +5564,6 @@ impl App {
             }
             "suggest" => {
                 let q = m["q"].as_str().unwrap_or("").to_string();
-                // The journal sees that history was searched, never what for.
                 journal::history_search(&q);
                 let hits = self
                     .library
@@ -6499,7 +5572,6 @@ impl App {
                     .map(|h| (h.url, h.title, h.kind == library::Kind::Bookmark, String::new()))
                     .collect();
                 self.chrome.set_suggest(&q, hits, self.library.complete(&q));
-                // Then what pages said, from the worker thread, when it has looked.
                 if self.settings.remember_text && q.trim().len() >= 3 && !q.contains("://") && !(q.contains('.') && !q.contains(' ')) {
                     let proxy = self.ctx.proxy.clone();
                     self.recall.search(&q, 4, move |q, hits| {
@@ -6527,8 +5599,6 @@ impl App {
                     return;
                 }
                 if m["bg"].as_bool().unwrap_or(false) {
-                    // A tab behind this one. It loads when it is first clicked, like any
-                    // tab restored from a session: ten middle clicks must not start ten pages.
                     let mut t = Tab::new(self.ctx.alloc_id(), url.clone());
                     t.title = self.library.mark_for_url(&url).map(|b| b.title).unwrap_or_default();
                     t.workspace = self.active_workspace;
@@ -6582,7 +5652,6 @@ impl App {
                 self.push();
             }
             "bmImport" => {
-                // Read-only: the other browsers' files are opened for reading and never touched.
                 let want = m["browser"].as_str().unwrap_or("");
                 let found: Vec<bookmarks::Found> = bookmarks::scan().into_iter().filter(|f| want == "all" || f.browser == want).collect();
                 let (mut added, mut skipped) = (0, 0);
@@ -6602,7 +5671,6 @@ impl App {
             }
             "unbookmark" => {
                 self.library.unbookmark(m["url"].as_str().unwrap_or(""));
-                // Written now, not on a later tick: a bookmark is worth a write.
                 self.library.flush();
                 self.push();
             }
@@ -6613,13 +5681,11 @@ impl App {
                 self.push();
             }
             "clearHistory" => {
-                // Seconds since the epoch; missing or null means everything.
                 let since = m["since"].as_u64();
                 self.library.clear_history(since);
                 self.forget_site_favs(since);
                 self.recall.clear(since);
                 self.library.flush();
-                // WebView2 keeps a history of its own in the profile; it goes too.
                 if let Some(v) = self.plain_view() {
                     engine::clear_data(v, since, false);
                 }
@@ -6642,7 +5708,6 @@ impl App {
                 let allow = m["allow"].as_bool().unwrap_or(false);
                 if let Some(k) = self.prompts.iter().position(|p| p.0 == pid) {
                     let (_, tab, origin, kind) = self.prompts.remove(k);
-                    // A private tab's answer is for this once: it must not be written down.
                     let private = self.idx(tab).is_some_and(|i| self.off_record(&self.tabs[i]));
                     if !private {
                         let v = if allow { sites::Verdict::Allow } else { sites::Verdict::Block };
@@ -6659,7 +5724,6 @@ impl App {
                 store::save_rules(&self.rules);
                 self.push();
             }
-            // The Site settings page and the lock's popover: Allow, Block or Ask for one kind.
             "permSet" => {
                 let (origin, kind) = (m["origin"].as_str().unwrap_or(""), m["kind"].as_str().unwrap_or(""));
                 let v = match m["v"].as_str() {
@@ -6667,11 +5731,7 @@ impl App {
                     Some("block") => sites::Verdict::Block,
                     _ => sites::Verdict::Ask,
                 };
-                // An answer given on a private or agent page, from the lock, is for this visit:
-                // writing it down would record a site the person kept off the record.
                 let keep = !(m["lock"].as_bool().unwrap_or(false) && self.active_tab().is_some_and(|t| self.off_record(t)));
-                // Only kinds Lumen knows, on origins that are sites. The app launcher's own
-                // per-scheme rules ("open mailto") are the Site settings page's to edit too.
                 let known = sites::KINDS.iter().any(|k| k.key == kind) || kind.starts_with("open ");
                 if keep && known && origin.starts_with("http") {
                     sites::set_rule(&mut self.rules, origin, kind, v);
@@ -6679,13 +5739,11 @@ impl App {
                     self.push();
                 }
             }
-            // Every answer a site has: back to asking.
             "permResetSite" => {
                 self.rules.remove(m["origin"].as_str().unwrap_or(""));
                 store::save_rules(&self.rules);
                 self.push();
             }
-            // The chip in the address bar: back to 100%. The site keeps that choice.
             "zoomSet" => {
                 let pct = sites::clamp_pct(m["pct"].as_u64().unwrap_or(100) as u32);
                 let i = self.active_idx();
@@ -6693,7 +5751,6 @@ impl App {
                 self.remember_zoom(i, pct);
                 self.push();
             }
-            // The Site settings page: this site goes back to the default zoom.
             "zoomForget" => {
                 let host = m["host"].as_str().unwrap_or("").to_string();
                 if self.zooms.remove(&host).is_some() {
@@ -6702,20 +5759,15 @@ impl App {
                 self.follow_zoom(&host);
                 self.push();
             }
-            // The lock was pressed: ask what the site holds.
             "siteOpen" => self.ask_site_cookies(),
             "siteClear" => {
                 let origin = m["origin"].as_str().unwrap_or("").to_string();
-                // From the lock over a private or agent page, clearing would reach into the
-                // person's own store for a site they never opened there. Those stores go away
-                // with their last page anyway.
                 if m["lock"].as_bool().unwrap_or(false) && self.active_tab().is_some_and(|t| self.off_record(t)) {
                     self.chrome.flash("Private tabs forget everything when they close".into());
                 } else {
                     self.clear_site(&origin);
                 }
             }
-            // The tab search picked a row: a tab here, or one in a workspace that is put away.
             "switchTab" => {
                 if m["other"].as_bool().unwrap_or(false) {
                     let ws = m["ws"].as_u64().unwrap_or(0) as usize;
@@ -6723,7 +5775,6 @@ impl App {
                     if ws < self.workspaces.len() && ws != self.active_workspace {
                         self.switch_workspace(ws);
                     }
-                    // Pinned tabs sort to the front on load, so the index holds.
                     if let Some(t) = self.tabs.get(idx) {
                         let id = t.id;
                         self.activate(id);
@@ -6735,7 +5786,6 @@ impl App {
                     }
                 }
             }
-            // Privacy: this host may stay on plain http no more.
             "httpForget" => {
                 let host = m["host"].as_str().unwrap_or("").to_string();
                 if self.settings.http_ok.iter().any(|h| *h == host) {
@@ -6745,7 +5795,6 @@ impl App {
                 }
                 self.push();
             }
-            // Per-kind default: ask, or block without asking.
             "permDefault" => {
                 let kind = m["kind"].as_str().unwrap_or("");
                 if sites::KINDS.iter().any(|k| k.key == kind) {
@@ -6764,8 +5813,6 @@ impl App {
                 if let Some((_, _, _, r)) = self.handoff.take() {
                     let _ = r.send(Ok(Value::Null));
                 }
-                // A paused Drive run gets its tab back when the person presses Done:
-                // that is what "pause and take over" is waiting for.
                 if let Some(sid) = self.drive.as_ref().filter(|d| d.paused).and_then(|d| d.session.clone()) {
                     self.agent.set_paused(&sid, false);
                     if let Some(d) = self.drive.as_mut() {
@@ -6799,7 +5846,6 @@ impl App {
                 if let Some((_, _, _, r)) = self.handoff.take() {
                     let _ = r.send(Err("the person stopped the agents".into()));
                 }
-                // The kill switch: door shut, agent tabs gone, their profile data wiped.
                 let mut s = self.settings.clone();
                 s.agent = false;
                 self.apply_settings(s);
@@ -6812,7 +5858,6 @@ impl App {
                 self.chrome.open_message(session, name);
             }
             "watchStop" => {
-                // The pill over a lent tab: the tab is taken back from every agent.
                 if let Some(l) = self.lent.take()
                     && let Some(i) = self.idx(l.tab)
                 {
@@ -6823,7 +5868,6 @@ impl App {
                 self.push();
             }
             "watchMessage" => {
-                // The pill's Message: the card over the sidebar, for the watched agent.
                 let lent = self.lent_shown();
                 if let Some((owner, name)) = self.active_tab().filter(|t| t.agent).map(|t| (t.owner.clone(), t.owner_name.clone())).or(lent) {
                     let name = if name.trim().is_empty() { "agent".to_string() } else { name };
@@ -6833,8 +5877,6 @@ impl App {
             "watchTakeOver" | "watchGiveBack" => {
                 let Some(owner) = self.active_tab().filter(|t| t.agent).map(|t| t.owner.clone()) else { return };
                 let take = m["t"] == "watchTakeOver";
-                // Taken over: the agent may only ask for the tab back (browser_handoff) until the
-                // person gives it back. The shield goes, the page takes the keyboard.
                 self.agent.set_paused(&owner, take);
                 if take {
                     self.taken.insert(owner);
@@ -6853,12 +5895,9 @@ impl App {
                     return;
                 }
                 match m["say"].as_str().unwrap_or("") {
-                    // A new task is a new Drive run: Lumen cannot open a task inside a terminal
-                    // session someone else started.
                     "new" => self.drive_start_task(text),
                     say => {
                         let say = if say == "later" { agent::Say::Later } else { agent::Say::Now };
-                        // A Drive run that already ended takes a queued message as its next run.
                         let drive_over = self.drive.as_ref().is_some_and(|d| d.exit.is_some() && d.session.as_deref() == Some(session.as_str()));
                         if drive_over {
                             self.drive_start_task(text);
@@ -6875,8 +5914,6 @@ impl App {
                 self.push();
             }
             "agentStopSession" => {
-                // The per-agent Stop in the sidebar: this session ends now. Its id stops
-                // working, its tabs close, and what it left behind is wiped.
                 let session = m["session"].as_str().unwrap_or("");
                 if let Some((_, _, _, r)) = self.handoff.take() {
                     let _ = r.send(Err("the person stopped this agent".into()));
@@ -6892,12 +5929,7 @@ impl App {
         }
     }
 
-    // ---------------------------------------------------------- translation
-
-    /// F8, or "Translate page" in the tab menu: the page's text in the target
-    /// language, or the page as it was.
     fn toggle_translate(&mut self, i: usize) {
-        // Already translated: the original text is still in the page.
         if self.tabs[i].translated.take().is_some() {
             if let Some(v) = &self.tabs[i].view {
                 let _ = v.evaluate_script(translate::RESTORE);
@@ -6919,7 +5951,6 @@ impl App {
         journal::feature("translate", self.tabs[i].private);
         self.tr_busy = Some(id);
         self.push();
-        // Ask the page what language it is in and what its text is.
         let proxy = self.ctx.proxy.clone();
         if let Some(v) = &self.tabs[i].view {
             let _ = v.evaluate_script_with_callback(translate::COLLECT, move |out| {
@@ -6928,8 +5959,6 @@ impl App {
         }
     }
 
-    /// The page came back with its language and its text. Find the pair that
-    /// translates it into what the person reads, and get its model.
     fn on_tr_page(&mut self, id: u64, target: &str, out: &str) {
         if self.tr_busy != Some(id) {
             return;
@@ -6951,7 +5980,6 @@ impl App {
         };
         self.tr_pair = Some(p);
         self.tr_texts = Some(texts.to_string());
-        // 15-25 MB the first time a pair is asked for. The rest of the app keeps going.
         let proxy = self.ctx.proxy.clone();
         let note = format!("{} -> {}", p.src, p.dst);
         std::thread::Builder::new()
@@ -6966,7 +5994,6 @@ impl App {
             .ok();
     }
 
-    /// The model is on disk (or is not). Open the translator page and let it load.
     fn on_tr_model(&mut self, id: u64, ok: bool, why: String) {
         if self.tr_busy != Some(id) {
             return;
@@ -6990,14 +6017,12 @@ impl App {
         }
     }
 
-    /// Word from the translator page: it is up, it is working, or it is done.
     fn on_tr_msg(&mut self, msg: &str) {
         let Ok(m) = serde_json::from_str::<Value>(msg) else { return };
         if m["lumen"] != "tr" {
             return;
         }
         if m["ready"] == 1 {
-            // The page is up: hand it the text it is to work on.
             let texts = self.tr_texts.take();
             if let (Some(texts), Some(page)) = (texts, self.translator.as_ref()) {
                 page.run(&texts);
@@ -7017,11 +6042,8 @@ impl App {
         }
     }
 
-    /// The translations came back. Put them in the page; the page keeps the
-    /// originals, so F8 goes back. The translator page goes away with them.
     fn show_translation(&mut self, texts_json: &str) {
         let Some(id) = self.tr_busy.take() else { return };
-        // The wasm, the worker, the model in memory and a renderer: all of it goes.
         self.translator = None;
         self.tr_pair = None;
         self.tr_texts = None;
@@ -7030,7 +6052,6 @@ impl App {
         self.tabs[i].translated = Some(self.settings.translate_to.clone());
         if let Some(v) = &self.tabs[i].view {
             let _ = v.evaluate_script(&translate::apply(texts_json));
-            // Test hook: say what the page reads now, and that going back works.
             if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_TRANSLATE").is_some() {
                 let _ = v.evaluate_script_with_callback("document.body.innerText.slice(0,200)", |out| {
                     eprintln!("lumen: translated page text: {out}");
@@ -7043,7 +6064,6 @@ impl App {
         self.push();
     }
 
-    /// Give up on a translation that cannot be finished.
     fn stop_translating(&mut self, id: u64) {
         self.tr_busy = None;
         self.tr_pair = None;
@@ -7055,10 +6075,6 @@ impl App {
         self.push();
     }
 
-    // ----------------------------------------------------------------- servo
-
-    /// A host from the "Servo sites" list: this tab is meant to run in Servo. The
-    /// list is exact hosts, with or without the "www.".
     #[cfg(feature = "servo")]
     fn wants_servo(&self, url: &str) -> bool {
         let host = host_of(url);
@@ -7071,8 +6087,6 @@ impl App {
         })
     }
 
-    /// Open a Servo page for this tab. Servo itself is made the first time one is
-    /// asked for, so a Lumen that never opens one never pays for it.
     #[cfg(feature = "servo")]
     fn open_servo(&mut self, i: usize, url: &str) {
         let id = self.tabs[i].id;
@@ -7092,8 +6106,6 @@ impl App {
         }
     }
 
-    /// Put this tab on the engine its host asks for, dropping the other one's page.
-    /// Nothing happens when it is already on the right one.
     #[cfg(feature = "servo")]
     fn place_on_engine(&mut self, i: usize, url: &str) {
         let wants = self.wants_servo(url);
@@ -7101,7 +6113,6 @@ impl App {
             return;
         }
         if wants {
-            // Servo's turn: the WebView2 page goes.
             self.tabs[i].view = None;
             self.tabs[i].visible = false;
             self.tabs[i].trimmed = false;
@@ -7111,72 +6122,45 @@ impl App {
         }
     }
 
-    // ---------------------------------------------------------------- tick
-
-    /// The tick runs when something waits for it, at most once per TICK. The
-    /// rate limit matters: a step whose time has come but whose turn has not
-    /// must not wake the loop again on the same instant.
     fn tick_due(&self, now: Instant) -> bool {
         self.next_tick <= now && self.tick_waiting(now)
     }
 
-    /// What wants a tick: pending saves, the agent chip, the RAM cap, a sleep
-    /// step gone due, and aria2's boot (the tick is what notices it answered
-    /// and turns accelerate_downloads on).
     fn tick_waiting(&self, now: Instant) -> bool {
         if self.dirty || self.dl_dirty || self.agent_seen.is_some() || self.settings.ram_limit {
             return true;
         }
-        // The archive looks for the tabs nobody has looked at.
         if now >= self.next_archive {
             return true;
         }
-        // A strictly isolated agent's browser is being made: the tick is what
-        // notices it is ready and gives the waiting tabs their page.
         if !self.pending_own.is_empty() {
             return true;
         }
-        // A stage view still painting: the tick is what puts it to sleep once its
-        // agent goes quiet. After that nothing here wants a tick.
         if self.tabs.iter().any(|t| t.agent && t.view.is_some() && !t.stage_idle && !self.on_stage(t.id)) {
             return true;
         }
-        // A Drive run is going: its output and its session want a look.
         if self.drive.is_some() && now >= self.next_drive {
             return true;
         }
-        // The window not shown yet (the 3 s fallback), and a headless Lumen, which
-        // must notice when agents have gone quiet and leave.
         if !self.shown || headless() {
             return true;
         }
         self.next_tab_wake().is_some_and(|t| t <= now)
     }
 
-    /// When the loop owes the next wake: a deadline it owns, the tick's next
-    /// turn when something waits for it, IDLE_TICK when nothing does.
     fn next_wake(&self, now: Instant) -> Instant {
         let mut at = now + IDLE_TICK;
-        // A gliding sidebar wants the next frame, and only while it glides.
         if self.side_anim.is_some() {
             at = at.min(now + Duration::from_millis(16));
         }
-        // The memory read, which the journal's minute rides on. Idle means idle:
-        // neither clock is armed when nothing is on screen and nothing is loading,
-        // so the journal never wakes an idle Lumen.
         let watch = self.settings.show_memory || (journal::on() && self.journal_busy());
         let mem = watch.then_some(self.next_mem);
-        // The cursor over a lent tab goes when the agent has been still a while.
         let lent = self.lent.as_ref().map(|l| l.at + LENT_SHOW);
         for t in [self.next_sample, self.next_tab_mem, mem, lent].into_iter().flatten() {
             if t < at {
                 at = t;
             }
         }
-        // The watch on mouse and keyboard: armed only while an on-screen page is
-        // load-done and trimmable. Unarmed means due now, so the wake that just
-        // made a page trimmable (load finished, tab shown, setting flipped on)
-        // gets the check on its way out of the event.
         if self.trim_watchable() {
             at = at.min(self.next_trim.unwrap_or(now));
         }
@@ -7187,17 +6171,11 @@ impl App {
         } else if let Some(t) = self.next_tab_wake()
             && t < at
         {
-            // Not due yet: arrive for it exactly.
             at = t;
         }
         at
     }
 
-    /// The next sleep-policy step of any hidden tab, in the past if one is due:
-    /// trim at TRIM_AFTER, freeze at sleep_after_min, discard at discard_after_min or,
-    /// for a heavy page, at HEAVY_AFTER. A crashed page is already dead; a page playing
-    /// audio is only ever trimmed. Read fresh each wake, so a tab a new memory sample
-    /// made heavy is due at its own five minutes.
     fn next_tab_wake(&self) -> Option<Instant> {
         let (sleep, discard) = self.sleep_times();
         self.tabs
@@ -7205,17 +6183,12 @@ impl App {
             .filter(|t| t.has_page() && !t.crashed && !self.on_stage(t.id))
             .filter_map(|t| {
                 let mem = self.tab_mem.get(&t.id).copied();
-                // A step at "never" is no wake at all.
                 let step = next_sleep_step_after(&t.sleep_state(mem), sleep, discard).filter(|d| *d < NEVER)?;
                 Some(t.hidden_at? + step)
             })
             .min()
     }
 
-    /// The page a typed host led to has answered. A name that does not exist
-    /// becomes a search for the words; anything else lets the typing go.
-    /// A typed bare name's navigation ended. True when it is taken care of here (waiting for
-    /// more, or a search instead), so nothing else should answer the failure.
     fn typed_done(&mut self, id: u64, ok: bool, err: i32) -> bool {
         let Some(i) = self.idx(id) else { return false };
         let Some(t) = &self.tabs[i].typed else { return false };
@@ -7241,8 +6214,6 @@ impl App {
         }
     }
 
-    /// A page that did not load: Lumen's own page saying why, with Try again. The tab keeps
-    /// the address it failed on. Agents keep WebView2's page: their tools read the failure.
     fn error_page(&mut self, id: u64, err: i32) {
         let Some(i) = self.idx(id) else { return };
         let t = &self.tabs[i];
@@ -7256,7 +6227,6 @@ impl App {
         self.tabs[i].error_shown = true;
     }
 
-    /// A click on the error page: the same address again, or back.
     fn error_choice(&mut self, id: u64, choice: sites::ErrorChoice) {
         let Some(i) = self.idx(id) else { return };
         let Some(v) = self.tabs[i].view.as_ref() else { return };
@@ -7270,7 +6240,6 @@ impl App {
         }
     }
 
-    /// A title reaches the chrome, the history and the session.
     fn show_title(&mut self, i: usize, t: String) {
         if !self.off_record(&self.tabs[i]) {
             self.library.set_title(&self.tabs[i].url, &t);
@@ -7280,9 +6249,6 @@ impl App {
         self.push();
     }
 
-    /// Trim, freeze and discard hidden tabs, enforce the RAM cap, save what changed.
-    /// The tabs nobody has looked at for a long time close themselves into the
-    /// archive. The clock counts only the time Lumen was open.
     fn archive_idle(&mut self, now: Instant) {
         let Some(after) = archive::after(&self.settings.archive_after) else { return };
         let mut gone = Vec::new();
@@ -7303,8 +6269,6 @@ impl App {
         }
     }
 
-    /// Close one tab into the archive: its title, its address, its icon and the
-    /// time it went.
     fn archive_tab(&mut self, i: usize) {
         let Some(t) = self.tabs.get(i) else { return };
         if t.url.is_empty() || t.private || t.agent {
@@ -7324,39 +6288,27 @@ impl App {
         self.push();
     }
 
-    /// The periodic work: once a minute the archive looks for tabs nobody has
-    /// looked at.
     fn tick(&mut self) {
         let now = Instant::now();
-        // The tabs nobody has looked at for a long time close themselves away.
         if now >= self.next_archive {
             self.next_archive = now + ARCHIVE_TICK;
             self.archive_idle(now);
         }
-        // Strictly isolated agents whose browser came back since the last look.
         self.poll_own_envs();
-        // Filter lists past their own expiry are fetched again, in the background, hourly.
         self.blocker.refresh_if_due(now);
-        // A Drive run's output, session and end.
         if self.drive.is_some() && now >= self.next_drive {
             self.drive_poll();
         }
-        // Started headless for agents, never shown to a person, no agent tab left, quiet for
-        // ten minutes: nobody needs this Lumen. lumen-agent starts a new one when asked.
         if headless() && self.handoff.is_none() && !self.tabs.iter().any(|t| t.agent) && now - self.agent_last > agent_idle() {
             self.library.flush();
             self.clear_on_exit();
             self.save_session();
             self.upnp.release();
-            // aria2 goes out the clean way, so it writes its DHT table.
             self.aria.shutdown();
-            // Leaving on purpose, so the journal ends with a clean goodbye.
             journal::stop(true, self.born.elapsed());
             privacy_stats::flush();
             std::process::exit(0);
         }
-        // A stage view whose agent has been quiet for STAGE_IDLE stops painting. Its next
-        // call wakes it (`on_agent`). A watched tab is on screen and keeps painting.
         let stage_idle = if cfg!(debug_assertions) {
             std::env::var("LUMEN_STAGE_IDLE_MS").ok().and_then(|v| v.parse::<u64>().ok()).map(Duration::from_millis).unwrap_or(STAGE_IDLE)
         } else {
@@ -7372,14 +6324,12 @@ impl App {
                 && let Some(v) = t.view.as_ref()
             {
                 let _ = v.set_visible(false);
-                // The agent is idle: the page gives up its memory target too, not only its paint.
                 let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
                 self.tabs[i].stage_idle = true;
             }
         }
         self.next_tick = now + TICK;
 
-        // Battery saver follows the plug: read the power state now and then.
         if now >= self.power_at {
             self.power_at = now + POWER_EVERY;
             let on = on_battery();
@@ -7420,11 +6370,8 @@ impl App {
             }
         }
 
-        // The sidebar memory readout has its own clock in the event loop.
         self.enforce_ram(now);
         self.settle_clear();
-        // Downloads go to aria2 while the setting is on; the first one starts it. One that
-        // could not start leaves them to WebView2 for the rest of the run.
         self.ctx.aria_on.set(self.settings.accelerate_downloads && !self.aria.failed());
         self.library.flush();
         if self.agent_seen.is_some_and(|t| now - t > Duration::from_secs(6)) {
@@ -7432,14 +6379,11 @@ impl App {
             self.push();
         }
 
-        // KeePass: ten minutes untouched and the database leaves memory.
         if self.vault.is_some() && now - self.vault_seen > Duration::from_secs(600) {
             self.vault = None;
             self.push();
         }
 
-        // A note about a stopped pop-up or redirect does not stay for long: the
-        // person has seen it, or has not.
         let old: Vec<u64> = self
             .block_notes
             .iter()
@@ -7453,7 +6397,6 @@ impl App {
             self.push();
         }
 
-        // The UI never said ready. Show the window anyway so the user is not stuck.
         if !self.shown && now - self.born > Duration::from_secs(3) {
             self.shown = true;
             show_window(&self.ctx.window);
@@ -7465,9 +6408,7 @@ impl App {
         if self.dl_dirty {
             self.save_downloads();
         }
-        // Debug test hook: add one magnet once aria2 is up, cancel it on schedule.
         if cfg!(debug_assertions) {
-            // Translate the first page that has settled, once.
             if self.test_translate && self.tr_busy.is_none() {
                 let settled = self
                     .tabs
@@ -7492,34 +6433,20 @@ impl App {
         }
     }
 
-    /// Something is on screen, or on its way: the journal works only then. Idle
-    /// (hidden or minimized, nothing loading) means it does nothing at all:
-    /// no sample, no write to disk, no wake of its own.
     fn journal_busy(&self) -> bool {
         self.tabs.iter().any(|t| t.loading) || (self.shown && !self.minimized)
     }
 
-    /// Whether the memory clock is worth arming: the sidebar shows it, or the
-    /// journal needs the numbers behind it.
     fn watches_memory(&self) -> bool {
         self.settings.show_memory || (journal::on() && self.journal_busy())
     }
 
-    /// Is there an on-screen page the mouse-and-keyboard watch could trim right
-    /// now: the setting on, the window up, a page finished loading and not in a
-    /// call. The loop's wake includes the check only while this holds, so a
-    /// window nobody is looking at, or a page still loading, adds no timer.
     fn trim_watchable(&self) -> bool {
         self.settings.trim_watched
             && !self.minimized
             && self.tabs.iter().any(|t| t.visible && t.has_page() && !t.loading && !t.call)
     }
 
-    /// One `GetLastInputInfo` read: full memory while the person is at mouse or
-    /// keyboard, the low target 15 s after the last click or key, and back again
-    /// within a second of the next one. Armed by `next_wake` while something is
-    /// trimmable; disarms itself the moment nothing is, so the timer dies with
-    /// the reason it existed.
     fn trim_poll(&mut self, now: Instant) {
         if !self.trim_watchable() {
             self.next_trim = None;
@@ -7536,43 +6463,32 @@ impl App {
                 let _ = v.set_memory_usage_level(level);
             }
         }
-        // Trimmed: a read a second, so the next input brings the page back at once. At the
-        // keys: nothing can change before the 15 s are up, so the next read waits for them.
         let next = if away { WATCH_POLL } else { (WATCH_TRIM_AWAY - idle).max(WATCH_POLL) };
         self.next_trim = Some(now + next);
     }
 
-    /// The blocker's running total, for a page's share of it. None when blocking
-    /// is off: there is no count to speak of then.
     fn blocked_count(&self) -> Option<u64> {
         self.settings.adblock.then(|| self.blocker.blocked())
     }
 
-    /// What the journal needs to know about the tabs right now.
     fn journal_sample(&self) -> journal::Sample {
         let count = |want: [&'static str; 1]| self.tabs.iter().filter(|t| want.contains(&t.status())).count();
         journal::Sample {
             tabs: self.tabs.len(),
             live: count(["live"]),
             asleep: count(["asleep"]),
-            // A tab with no page left (unloaded, or waiting to load) is discarded.
             discarded: count(["off"]),
             workspaces: self.workspaces.len(),
             panel: self.panel.name(),
         }
     }
 
-    /// The sidebar memory readout, on its own slow clock. Reading it walks every
-    /// WebView2 process, so it does not run on the tick. The journal's minute
-    /// rides on the same walk: one enumeration, two readers, and nothing at all
-    /// while the window is hidden or minimized and no page is loading.
     fn read_memory(&mut self, now: Instant) {
         self.next_mem = now + MEM_TICK;
         let journal_work = journal::on() && self.journal_busy();
         let env = self.ctx.env.borrow();
         let (own, total, procs, cpu) = engine::memory_with_cpu(env.as_ref(), journal_work);
         if journal_work {
-            // The 60 s line, on the minute, and the write to disk behind it.
             journal::mem_read(own, total, cpu);
             if now >= self.journal_at {
                 self.journal_at = now + journal::period();
@@ -7580,20 +6496,16 @@ impl App {
             }
             journal::flush_due();
         }
-        // Only redraw when it moved by more than 1 MB.
         if self.settings.show_memory && self.mem.is_none_or(|(b, _)| b.abs_diff(total) > 1 << 20) {
             self.mem = Some((total, procs));
             self.ui_dirty = true;
         }
     }
 
-    /// The person said agents may use this tab, and it is still on the site they said it for.
     fn agent_granted(&self, t: &Tab) -> bool {
         !t.agent && t.agent_ok.as_deref().is_some_and(|site| site == engine::origin_of(&t.url))
     }
 
-    /// "Hide in secret": a finished download leaves the Downloads folder for the secret one,
-    /// and its row goes from the list.
     fn hide_download(&mut self, id: u64) {
         let Some(d) = self.downloads.iter().find(|d| d.id == id && d.state == "done") else { return };
         match secret::move_in(std::path::Path::new(&d.path)) {
@@ -7606,13 +6518,10 @@ impl App {
         self.push();
     }
 
-    /// The secret downloads: open them with Windows Hello, shut them, open or move back one.
     fn on_secret(&mut self, m: &Value) {
         let name = m["name"].as_str().unwrap_or("");
         match m["a"].as_str().unwrap_or("") {
             "open" => {
-                // No Windows Hello on this PC: a lock nobody can open would only hide the
-                // person's own files from them.
                 if self.hello == Some(false) {
                     self.secret_open = true;
                 } else {
@@ -7634,7 +6543,6 @@ impl App {
         self.push();
     }
 
-    /// What the lock card shows: Lumen locked, or the tab on screen locked. None otherwise.
     fn lock_state(&self) -> Option<chrome::UiLock> {
         let hello = self.hello;
         let note = self.hello_note.clone();
@@ -7645,9 +6553,6 @@ impl App {
         Some(chrome::UiLock { app: false, hello, note })
     }
 
-    /// Lock a tab, or take its lock off. Locking is at once: the page goes behind the lock
-    /// card, and a lent tab is taken back from agents. Taking the lock off needs the tab open,
-    /// which needs Windows Hello first.
     fn toggle_lock(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
         if self.tabs[i].agent {
@@ -7669,8 +6574,6 @@ impl App {
         self.push();
     }
 
-    /// Ask Windows Hello about the app, a tab or the secret downloads. The answer comes back
-    /// as `Ev::Hello`; the UI thread never waits for it.
     fn ask_hello(&mut self, what: &'static str, id: u64) {
         let why = match what {
             "app" => "Unlock Lumen",
@@ -7697,7 +6600,6 @@ impl App {
                 "app" => self.app_locked = false,
                 "secret" => self.secret_open = true,
                 _ => {
-                    // Only the tab still on screen opens: one left meanwhile stays shut.
                     if id == self.active
                         && let Some(i) = self.idx(id)
                     {
@@ -7710,8 +6612,6 @@ impl App {
         self.push();
     }
 
-    /// "Let agents use this tab", or take it back. Only a tab of the person's with a real page,
-    /// never a private one, and only for the site it is on now.
     fn toggle_agent_grant(&mut self, id: u64) {
         let Some(i) = self.idx(id) else { return };
         let t = &self.tabs[i];
@@ -7720,9 +6620,6 @@ impl App {
         self.push();
     }
 
-    /// Lend a tab of the person's to agents for one site, or take it back. While lent, the
-    /// page's network and browser log are recorded for the agents' tools; taken back, the
-    /// record is dropped and the DevTools domains go back to how the monitor wants them.
     fn lend(&mut self, i: usize, site: Option<String>) {
         let keep_net = self.settings.net_limit || self.watches.contains_key(&self.tabs[i].id);
         let t = &mut self.tabs[i];
@@ -7738,17 +6635,10 @@ impl App {
         }
     }
 
-    /// One primitive for an agent. An agent may use the tabs its session opened, and a tab of
-    /// the person's only while they have granted that tab. Never another agent's. The tool-level
-    /// rules (what may run where) are `agent_policy::authorize`, applied before this is reached.
     fn on_agent(&mut self, call: agent::Call) {
         use agent::Op;
         self.agent_last = Instant::now();
-        // A strictly isolated browser made since the last call: its waiting tabs get
-        // their page now, so the call below finds the tab it asked for.
         self.poll_own_envs();
-        // A stage view the idle clock put to sleep paints again before the call runs.
-        // Only then: a view that is awake costs nothing here.
         let wake_tab = match &call.op {
             Op::Navigate { tab, .. } | Op::Back { tab } | Op::Forward { tab } | Op::Reload { tab } | Op::NavInfo { tab }
             | Op::Eval { tab, .. } | Op::Cdp { tab, .. } | Op::Log { tab, .. } | Op::NetIdle { tab }
@@ -7763,17 +6653,10 @@ impl App {
             self.tabs[i].stage_idle = false;
             if let Some(v) = self.tabs[i].view.as_ref() {
                 let _ = v.set_visible(true);
-                // Awake for a call: the full memory target before the call runs.
                 let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
-                // A moment for Chromium to mark the page visible again, or the first
-                // mouse event after a long quiet is dropped.
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
-        // The sidebar is drawn again only when a call can change what it shows: the chip
-        // coming on, a tab opening, closing or moving. The calls in between (scripts,
-        // DevTools, logs, the policy look-up) are nearly every call, and a whole redraw of
-        // the window for each one was most of what a call cost.
         let reads = matches!(
             call.op,
             Op::Eval { .. } | Op::Cdp { .. } | Op::Log { .. } | Op::NetIdle { .. } | Op::Contexts { .. } | Op::CdpForSession { .. }
@@ -7783,12 +6666,10 @@ impl App {
             self.push();
         }
         self.agent_seen = Some(Instant::now());
-        // The pill says what the watched agent did last; its step list grows per tool call.
         if self.watch.as_ref().is_some_and(|w| w.shown()) && self.active_tab().is_some_and(|t| t.agent && t.owner == call.who.session) {
             self.sync_watch();
         }
         let (reply, who) = (call.reply, call.who);
-        // One line per session, not per call. No tab, no page, no content.
         journal::agent_session(&who.session, &who.name);
         let access = |app: &App, t: &Tab| agent_policy::access(&who.session, t.agent, &t.owner, app.agent_granted(t));
         let mine = |app: &App, tab: u64| app.idx(tab).filter(|&i| access(app, &app.tabs[i]).is_some());
@@ -7810,8 +6691,6 @@ impl App {
             Op::Policy => {
                 let tabs = self.tabs.iter().map(|t| agent_policy::TabInfo { id: t.id, agent: t.agent, owner: t.owner.clone(), granted: self.agent_granted(t) }).collect();
                 let s = &self.settings;
-                // The pause flag is read fresh here, so a Drive run paused from the panel
-                // sees it on its very next call.
                 let paused = self.agent.session(&who.session).is_some_and(|w| w.paused);
                 let _ = reply.send(Ok(agent_policy::ctx_value(tabs, s.agent_shared_profile, s.agent_upload, &s.agent_upload_dir, paused)));
             }
@@ -7834,8 +6713,6 @@ impl App {
                 let _ = reply.send(r);
             }
             Op::TestProfile { tab } => {
-                // Debug builds only: which WebView2 profile this tab lives in. The
-                // integration test uses it to watch a profile folder appear and go.
                 let r = match (self.idx(tab), cfg!(debug_assertions)) {
                     (Some(i), true) => match self.tabs[i].view.as_ref().and_then(engine::webview_profile) {
                         Some(p) => Ok(json!({"profile": engine::profile_name(&p), "path": engine::profile_path(&p).map(|d| d.display().to_string())})),
@@ -7846,8 +6723,6 @@ impl App {
                 let _ = reply.send(r);
             }
             Op::TestPause { paused } => {
-                // Debug builds only: the same pause "Pause and take over" sets, so the
-                // integration test can watch the door answer drive_paused.
                 let r = if cfg!(debug_assertions) {
                     self.agent.set_paused(&who.session, paused);
                     Ok(json!({"paused": paused}))
@@ -7898,7 +6773,6 @@ impl App {
                 }
             }
             Op::TestDone => {
-                // Debug builds only: stands in for the person pressing Done.
                 match self.handoff.take() {
                     Some((_, _, _, r)) if cfg!(debug_assertions) => {
                         let _ = r.send(Ok(Value::Null));
@@ -7923,8 +6797,6 @@ impl App {
                 t.owner_name = who.name.clone();
                 t.profile = who.profile.clone();
                 t.downloads = who.downloads.clone();
-                // Strict isolation, when the person turned it on, applies to the tabs a
-                // session opens. A kept profile keeps: its own folder holds its cookies.
                 t.own_env = self.settings.agent_strict_isolation;
                 self.tabs.push(t);
                 let i = self.tabs.len() - 1;
@@ -7949,14 +6821,11 @@ impl App {
                 if let Some(i) = mine(self, tab) {
                     let v = self.tabs[i].last_nav;
                     let (ok, err, http) = v.unwrap_or((true, 0, 0));
-                    // unknown when no nav yet: return nulls
                     let mut resp = if v.is_none() {
                         json!({"ok": Value::Null, "err": Value::Null, "http": Value::Null})
                     } else {
                         json!({"ok": ok, "err": err, "http": http})
                     };
-                    // Asked for and never started (history.back() with no history): after
-                    // a moment it is not coming.
                     let t = &self.tabs[i];
                     resp["pending"] = json!(t.nav_pending.is_some_and(|at| t.nav_started || at.elapsed() < Duration::from_millis(1500)));
                     let _ = reply.send(Ok(resp));
@@ -7996,7 +6865,6 @@ impl App {
                     return;
                 };
                 self.expect_nav(i);
-                // A dead renderer cannot run a script. Load the page again: that makes a new one.
                 if self.tabs[i].crashed {
                     let url = self.tabs[i].url.clone();
                     let sent = match (&self.tabs[i].view, js) {
@@ -8050,7 +6918,6 @@ impl App {
                     let _ = reply.send(no_tab(tab));
                     return;
                 };
-                // The person's tab may be steered, not scripted: no code, no file picker.
                 if !self.tabs[i].agent && !agent_policy::cdp_allowed_on_person_tab(&method) {
                     let _ = reply.send(Err(format!("{method} is not allowed in the person's tab")));
                     return;
@@ -8062,7 +6929,6 @@ impl App {
                 if self.tabs[i].view.is_none() {
                     self.ensure_view(i);
                 }
-                // Watched: the agent's cursor goes where its mouse goes.
                 if method.starts_with("Input.") {
                     self.lent_touch(tab, &who);
                 }
@@ -8088,7 +6954,6 @@ impl App {
                     return;
                 }
                 let mut logs = self.agent_logs.borrow_mut();
-                // Silence here is not "nothing happened": say the tab is not recorded.
                 let Some(log) = logs.get_mut(&tab) else {
                     let _ = reply.send(Err("this tab is not recorded: a tab the person lends is recorded from the moment they lend it".into()));
                     return;
@@ -8117,8 +6982,6 @@ impl App {
                     let _ = reply.send(no_tab(tab));
                     return;
                 }
-                // Quiet for 250 ms: long enough for the fetch a script starts when the page
-                // loads, short enough that a page with nothing more to fetch is not waited on.
                 let idle = self.agent_logs.borrow().get(&tab).is_none_or(|log| log.net_idle(Duration::from_millis(250)));
                 let _ = reply.send(Ok(json!(idle)));
             }
@@ -8175,8 +7038,6 @@ impl App {
                 log.prompt_text = text;
                 let _ = reply.send(Ok(Value::Null));
             }
-            // Never in the way: no agent call brings a tab to the front. A handoff does,
-            // because there the agent needs the person. This only checks the tab is theirs.
             Op::Show { tab } => {
                 let _ = reply.send(if mine(self, tab).is_none() { no_tab(tab) } else { Ok(Value::Null) });
             }
@@ -8185,7 +7046,6 @@ impl App {
                     let _ = reply.send(no_tab(tab));
                     return;
                 }
-                // One at a time. A second agent asking waits its turn with an error it can retry.
                 if self.handoff.is_some() {
                     let _ = reply.send(Err("the person is already helping another agent; try again in a minute".into()));
                     return;
@@ -8213,7 +7073,6 @@ impl App {
                 self.push();
             }
             Op::Close { tab } => {
-                // Only a tab the agent opened. A granted tab of the person's stays the person's to close.
                 if mine(self, tab).is_none_or(|i| !self.tabs[i].agent) {
                     let _ = reply.send(no_tab(tab));
                     return;
@@ -8232,8 +7091,6 @@ impl App {
                 }
                 let tab = tab.filter(|t| mine(self, *t).is_some()).unwrap_or(0);
                 let page = self.idx(tab).map(|i| self.tabs[i].url.clone()).unwrap_or_default();
-                // It goes to this agent's own folder under "Agent downloads", and is
-                // the agent's to see.
                 if self.agent_dl.len() > 500 {
                     self.agent_dl.clear();
                 }
@@ -8242,8 +7099,6 @@ impl App {
                 let _ = reply.send(Ok(Value::Null));
             }
             Op::Downloads => {
-                // This agent's own files: its folder, or a download it asked for. The
-                // person's downloads and other agents' files are not its business.
                 let dir = agent_policy::agent_downloads_dir_for(&who.downloads);
                 let list: Vec<Value> = self
                     .downloads
@@ -8256,9 +7111,6 @@ impl App {
         }
     }
 
-    /// The end of one agent session: its tabs close and its profile data is wiped. An
-    /// ephemeral session leaves nothing behind: not a cookie, not a stored page. A kept
-    /// profile (`--session NAME`) keeps its cookies and its folder: that is the point.
     fn end_agent_session(&mut self, who: &agent::Who) {
         let ids: Vec<u64> = self.tabs.iter().filter(|t| t.agent && t.owner == who.session).map(|t| t.id).collect();
         for id in ids {
@@ -8270,10 +7122,7 @@ impl App {
         engine::purge_profile(&self.ctx, &who.profile, self.settings.agent_strict_isolation);
     }
 
-    /// Closing everything an agent opened, and wiping what each session left: the person
-    /// shut the door, and the agents have no business keeping data after that.
     fn end_all_agent_sessions(&mut self) {
-        // What each session left behind, before its tabs go: (profile, strict, kept).
         let sessions: Vec<(String, bool, bool)> = self
             .tabs
             .iter()
@@ -8289,25 +7138,17 @@ impl App {
         }
         let strict = self.settings.agent_strict_isolation;
         for (profile, own, keeps) in sessions {
-            // A kept profile is a place the person asked for; the door shutting does not
-            // delete it. Everything else is wiped.
             if !keeps {
                 engine::purge_profile(&self.ctx, &profile, strict && own);
             }
         }
     }
 
-    // ---------------------------------------------------------------- drive
-
-    /// Start a Drive run: the person's task goes to an agent CLI Lumen starts itself,
-    /// with Lumen as its MCP server. The run gets its own session, its own profile and
-    /// its own download folder; nothing of it touches the person's tabs or logins.
     fn drive_start(&mut self) {
         let task = self.chrome.drive_task();
         self.drive_start_task(task);
     }
 
-    /// A Drive run for this task: from the Drive panel, or a "New task" message.
     fn drive_start_task(&mut self, task: String) {
         if self.drive.as_ref().is_some_and(|d| d.exit.is_none()) {
             self.chrome.flash("a Drive run is going; stop it first".into());
@@ -8333,8 +7174,6 @@ impl App {
         let name = format!("drive-{}", self.drive_n);
         let out: Arc<Mutex<std::collections::VecDeque<String>>> = Arc::new(Mutex::new(Default::default()));
         let finished = Arc::new(AtomicBool::new(false));
-        // The run's own session: the CLI labels itself cli-<name>, asks for a profile of
-        // that name, and finds this Lumen through LUMEN_DATA. Nothing is shared.
         let env = |cmd: &mut std::process::Command| {
             cmd.env("LUMEN_SESSION", &name)
                 .env("LUMEN_DATA", store::data_dir())
@@ -8343,14 +7182,12 @@ impl App {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flashes up
+            cmd.creation_flags(0x0800_0000);
         };
         let mut cmd = std::process::Command::new(&program);
         cmd.args(&args);
         env(&mut cmd);
         let child = cmd.spawn().or_else(|_| {
-            // A CLI that is a .cmd shim (npm) is not a program Windows can start itself:
-            // hand the whole line to cmd.
             let line = self.settings.drive_cmd.replace("{task}", &store::drive_prompt(&task));
             let mut c = std::process::Command::new("cmd");
             c.arg("/C").arg(&line);
@@ -8375,7 +7212,6 @@ impl App {
             let _ = std::thread::Builder::new().name("lumen-drive-err".into()).spawn(move || drive_pipe(pipe, o, Arc::new(AtomicBool::new(false))));
         }
         journal::feature("drive", false);
-        // A task the person typed does not belong in the journal: only that it ran.
         journal::error("agent", "drive run started");
         self.drive = Some(Drive {
             name,
@@ -8394,7 +7230,6 @@ impl App {
         self.push();
     }
 
-    /// Stop the run: the CLI is killed, its session ends, and its profile data goes.
     fn drive_stop(&mut self, why: &str) {
         let Some(d) = self.drive.as_mut() else { return };
         if d.exit.is_some() {
@@ -8405,7 +7240,6 @@ impl App {
         let _ = d.child.kill();
         d.exit = Some(-1);
         let (name, session) = (d.name.clone(), d.session.clone());
-        // Handoff is waiting on that tab: the run is over, so it ends too.
         if self.handoff.as_ref().is_some_and(|h| self.idx(h.0).is_some_and(|i| self.tabs[i].owner == session.clone().unwrap_or_default())) {
             if let Some((_, _, _, r)) = self.handoff.take() {
                 let _ = r.send(Err("the Drive run was stopped".into()));
@@ -8420,8 +7254,6 @@ impl App {
         self.push();
     }
 
-    /// A Drive run is over: its tabs close and its profile data is deleted. A run is not
-    /// a worker to come back to; what it downloaded under its own name stays.
     fn drive_end_session(&mut self, who: &agent::Who) {
         let own = self.tabs.iter().find(|t| t.agent && t.owner == who.session).is_some_and(|t| t.own_env);
         self.end_agent_session(who);
@@ -8430,8 +7262,6 @@ impl App {
         }
     }
 
-    /// "Pause and take over": the run's tab comes to the front, the agent may only ask
-    /// for it back (browser_handoff), and Done hands it over again.
     fn drive_pause(&mut self) {
         let Some(d) = self.drive.as_mut() else { return };
         let Some(sid) = d.session.clone() else {
@@ -8445,7 +7275,6 @@ impl App {
         let name = d.name.clone();
         if let Some(id) = tab {
             self.activate(id);
-            // The person holds the tab until they press Done; a pause is a handoff.
             let (tx, _rx) = std::sync::mpsc::channel();
             self.handoff = Some((id, name.clone(), "Paused: the tab is yours. Press Done when the run may have it back.".into(), tx));
         }
@@ -8453,12 +7282,10 @@ impl App {
         self.push();
     }
 
-    /// A look at the run, while it is going: its output, its session, its end.
     fn drive_poll(&mut self) {
         self.next_drive = Instant::now() + Duration::from_millis(500);
         let Some(d) = self.drive.as_mut() else { return };
         if d.session.is_none() {
-            // The CLI opens its session on its first call; its label is cli-<name>.
             d.session = self.agent.session_by_label(&format!("cli-{}", d.name)).map(|w| w.session);
         }
         if d.exit.is_some() || !d.finished.load(Ordering::Relaxed) {
@@ -8467,16 +7294,12 @@ impl App {
         let code = d.child.try_wait().ok().flatten().and_then(|s| s.code());
         d.exit = Some(code.unwrap_or(-1));
         let (name, session) = (d.name.clone(), d.session.clone());
-        // What the person queued for after this run is the next run's task.
         let next = session.as_deref().map(|s| self.agent.take_later(s)).unwrap_or_default();
-        // The run is over: its tabs close and its profile data goes.
         if let Some(sid) = session
             && let Some(who) = self.agent.end_session(&sid)
         {
             self.drive_end_session(&who);
         }
-        // Nothing of the run is left to remember but its own step list, which the panel
-        // still shows; the session's state goes when a new run starts.
         self.chrome.flash(format!("Drive run {name} finished"));
         if !next.is_empty() {
             self.drive_start_task(next.join("\n"));
@@ -8484,8 +7307,6 @@ impl App {
         self.push();
     }
 
-    /// What the Drive panel shows: this run's steps and the tail of the CLI's words.
-    /// Filled only while the panel is open.
     fn drive_view(&self) -> Option<chrome::DriveView> {
         if self.panel != Panel::Drive {
             return None;
@@ -8505,16 +7326,10 @@ impl App {
         })
     }
 
-    /// Clearing everything also clears the site icons: they are a list of the sites that were
-    /// visited. A partial clear leaves them (they carry no times to cut by).
-    // ----------------------------------------------------------------- sites
-
-    /// The zoom a tab's page should be at, in percent. Pages that are not websites stay at 100.
     fn wanted_zoom(&self, i: usize) -> u32 {
         sites::zoom_host(&self.tabs[i].url).map_or(100, |h| sites::zoom_for(&self.zooms, self.settings.default_zoom, &h))
     }
 
-    /// Put a tab's page at `pct`. The change event this causes is Lumen's own, not the person's.
     fn put_zoom(&mut self, i: usize, pct: u32) {
         let t = &mut self.tabs[i];
         t.zoom = pct;
@@ -8525,7 +7340,6 @@ impl App {
         }
     }
 
-    /// Every tab of the host `host` goes to the zoom the site has now (or the default).
     fn follow_zoom(&mut self, host: &str) {
         for i in 0..self.tabs.len() {
             if sites::zoom_host(&self.tabs[i].url).as_deref() == Some(host) {
@@ -8535,7 +7349,6 @@ impl App {
         }
     }
 
-    /// The person zoomed tab `i` to `pct`: the site keeps it. Private and agent tabs keep nothing.
     fn remember_zoom(&mut self, i: usize, pct: u32) {
         let t = &self.tabs[i];
         if self.off_record(t) {
@@ -8548,8 +7361,6 @@ impl App {
         self.follow_zoom(&host);
     }
 
-    /// A plain http address was stopped. If the site answers on the https port, go there; if
-    /// it does not, say so and let the person choose. Asked once per site and run.
     fn upgrade(&mut self, id: u64, secure: String, plain: String) {
         let Some(i) = self.idx(id) else { return };
         let host = sites::exception_host(&plain).unwrap_or_default();
@@ -8560,7 +7371,6 @@ impl App {
                 let _ = v.load_url(&secure);
             }
         } else {
-            // The spinner runs while the port is tried; the answer comes back as an event.
             self.tabs[i].loading = true;
             let proxy = self.ctx.proxy.clone();
             let target = format!("{}:443", host.trim_start_matches('['));
@@ -8578,7 +7388,6 @@ impl App {
 
     fn probed(&mut self, id: u64, secure: String, plain: String, answer: sites::Probe) {
         let Some(i) = self.idx(id) else { return };
-        // The person typed something else while the port was tried: that wins.
         if self.tabs[i].url != secure || self.tabs[i].no_https.is_some() {
             return;
         }
@@ -8587,8 +7396,6 @@ impl App {
         t.loading = false;
         match answer {
             sites::Probe::Shut => {
-                // No page was loaded: the warning is the first thing this tab shows, so Back
-                // goes to the page before it.
                 t.no_https = Some(plain.clone());
                 t.url = plain.clone();
                 t.title = format!("{} does not use https", host);
@@ -8610,7 +7417,6 @@ impl App {
         self.push();
     }
 
-    /// A click on the warning page. It only counts while this tab shows that page for that address.
     fn http_choice(&mut self, id: u64, choice: sites::HttpChoice) {
         use sites::HttpChoice::*;
         let Some(i) = self.idx(id) else { return };
@@ -8634,7 +7440,6 @@ impl App {
             return;
         }
         let Some(host) = sites::exception_host(&url) else { return };
-        // Agents and private tabs change nothing that outlives them.
         if always && !self.tabs[i].agent && !self.tabs[i].private {
             let mut st = self.settings.clone();
             st.http_ok.push(host);
@@ -8651,8 +7456,6 @@ impl App {
         self.push();
     }
 
-    /// A navigation hit a host on the malware or phishing lists. Stop, show the
-    /// warning, count it once per shown warning.
     fn danger(&mut self, id: u64, url: String) {
         let Some(i) = self.idx(id) else { return };
         let host = sites::host_of(&url);
@@ -8668,7 +7471,6 @@ impl App {
         self.push();
     }
 
-    /// A click on the danger page. It only counts while this tab shows that page.
     fn danger_choice(&mut self, id: u64, choice: sites::DangerChoice) {
         let Some(i) = self.idx(id) else { return };
         let Some(shown) = self.tabs[i].no_danger.clone() else { return };
@@ -8687,7 +7489,6 @@ impl App {
                 if url != shown {
                     return;
                 }
-                // Agents and private tabs change nothing that outlives them.
                 if !self.tabs[i].agent && !self.tabs[i].private {
                     blocker::danger_pass(&url);
                 }
@@ -8702,8 +7503,6 @@ impl App {
         self.push();
     }
 
-    /// The note's way through: load the address a redirect was holding back,
-    /// once, in this tab. "Go anyway" and "Allow on <site>" both come here.
     fn redirect_go(&mut self, id: u64) {
         let Some(note) = self.block_notes.get(&id) else { return };
         if note.kind != chrome::NoteKind::Redirect || note.url.is_empty() {
@@ -8711,7 +7510,6 @@ impl App {
         }
         let url = note.url.clone();
         let Some(i) = self.idx(id) else { return };
-        // The rule would stop this one too: the person is the one asking now.
         self.ctx.redirect_pass.replace(Some((id, url.clone())));
         self.tabs[i].url = url.clone();
         if let Some(v) = &self.tabs[i].view {
@@ -8723,7 +7521,6 @@ impl App {
         self.push();
     }
 
-    /// Open the address bar's lock: ask how many cookies the site has.
     fn ask_site_cookies(&mut self) {
         let Some(t) = self.active_tab() else { return };
         let (id, url) = (t.id, t.url.clone());
@@ -8734,8 +7531,6 @@ impl App {
         });
     }
 
-    /// Forget one site's cookies and stored data. Never the InPrivate store: it ends with
-    /// the last private tab anyway. Needs a page of the person's own profile to ask.
     fn clear_site(&mut self, origin: &str) {
         if !origin.starts_with("http") {
             return;
@@ -8757,8 +7552,6 @@ impl App {
         }
     }
 
-    /// Sites to offer on the new tab page while it has no tiles: the ones seen most. Only worked
-    /// out when the page is showing and has nothing else to show.
     fn speed_dial_suggestions(&self) -> Vec<store::Shortcut> {
         let showing = self.panel == Panel::None && self.active_tab().is_some_and(|t| t.status() == "new");
         if !showing || !self.settings.speed_dial || !self.settings.shortcuts.is_empty() {
@@ -8783,8 +7576,6 @@ impl App {
         self.push();
     }
 
-    /// Soft RAM limit. Over it: unload the hidden tab looked at longest ago.
-    /// One per tick, so a spike never empties the window.
     fn enforce_ram(&mut self, now: Instant) {
         if !self.settings.ram_limit {
             return;
@@ -8803,7 +7594,6 @@ impl App {
         }
     }
 
-    /// Every tab as the unload rules see it, in tab order.
     fn unloadable(&self) -> Vec<Unloadable> {
         self.tabs
             .iter()
@@ -8819,8 +7609,6 @@ impl App {
             .collect()
     }
 
-    /// Windows is short of memory: one hidden tab goes, the one looked at longest ago.
-    /// The signal comes again every few seconds while it stays short.
     fn low_memory(&mut self) {
         let n = match unload_victim(&self.unloadable(), Instant::now()) {
             Some(i) => {
@@ -8833,22 +7621,14 @@ impl App {
         journal::low_memory(n);
     }
 
-    /// Battery saver is in force: the setting is on and the PC is on battery.
     fn power_saving(&self) -> bool {
         self.settings.battery_saver && self.on_battery
     }
 
-    /// When a hidden tab freezes and when it unloads: the person's own times, 0 for never.
-    /// Battery saver used to cut them to 1 and 10 minutes, and tabs froze while the person
-    /// was still coming back to them. It keeps to the motion now.
     fn sleep_times(&self) -> (Duration, Duration) {
         sleep_durations(self.settings.sleep_after_min, self.settings.discard_after_min)
     }
 
-    /// Clean close with "clear history on exit" on. Lumen's history and the page
-    /// text go right now; WebView2's own history goes now too when a page is there
-    /// to ask, and at the next start when there is not (the call is WebView2's to
-    /// finish, and this app is on its way out).
     fn clear_on_exit(&mut self) {
         if !self.settings.clear_on_exit {
             return;
@@ -8857,20 +7637,16 @@ impl App {
         self.library.clear_history(None);
         self.forget_site_favs(None);
         self.library.flush();
-        // WebView2 finishes the wipe on its own time and Lumen is closing, so ask now
-        // and again at the next start: clearing twice costs nothing, missing it would.
         if let Some(v) = self.plain_view() {
             engine::clear_data(v, None, false);
         }
         store::set_clear_history_pending(true);
     }
 
-    /// A clear-on-exit the last run could not finish, done at the first chance.
     fn settle_clear(&mut self) {
         if !self.clear_pending {
             return;
         }
-        // Take the flag first: the view borrow and the field write must not overlap.
         self.clear_pending = false;
         let Some(v) = self.plain_view() else {
             self.clear_pending = true;
@@ -8885,8 +7661,6 @@ impl App {
         if std::mem::take(&mut self.site_favs_dirty) {
             sitefavs::save(&self.site_favs);
         }
-        // Fold the idle stretch into the saved time, so the time Lumen was closed
-        // is not counted twice and not counted at all.
         let now = Instant::now();
         for t in self.tabs.iter_mut() {
             if let Some(at) = t.idle_at {
@@ -8902,7 +7676,6 @@ impl App {
             .map(|t| t.saved())
             .collect();
         let active_tab_idx = keep.iter().position(|t| t.id == self.active).unwrap_or(0);
-        // to_session stamps the live tabs into the active workspace's slot.
         let mut s = workspaces::to_session(
             &self.workspaces,
             self.active_workspace,
@@ -8912,11 +7685,8 @@ impl App {
             if maximized || self.fullscreen() { 0.0 } else { height },
             maximized,
         );
-        // The essentials are the same in every workspace, so they sit beside them.
         s.essentials = self.essentials.clone();
-        // And the tabs that were closed away.
         s.archived = self.archived.clone();
-        // Remember it for the panic hook: a panic must not lose these tabs.
         if let Ok(mut g) = LAST_SESSION.lock() {
             *g = Some(s.clone());
         }
@@ -8929,7 +7699,6 @@ mod tests {
     use super::{HEAVY_AFTER, HEAVY_MEM, METADATA_PATIENCE, NEVER, sleep_durations, SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, magnet_label, metadata_note, next_sleep_step_after, keepable, magnet_hold, magnet_name, opens_private, resolve_input, same_page, should_auto_resume, typed_verdict};
     use std::time::Duration;
 
-    /// A normal tab, a private one and an agent one; only the normal one may be saved.
     #[test]
     fn session_holds_normal_tabs_only() {
         let mut tabs = vec![Tab::new(1, "https://plain.example/".into())];
@@ -8942,15 +7711,12 @@ mod tests {
         tabs.push(agent);
 
         let keep = keepable(&tabs, 1);
-        // The private tab, the agent tab and the empty new tab page are all out.
         assert_eq!(keep.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1]);
 
-        // An empty tab is kept while it is the one being looked at.
         let keep = keepable(&tabs, 2);
         assert_eq!(keep.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 2]);
     }
 
-    /// A pinned private tab still leaves no trace.
     #[test]
     fn a_pinned_private_tab_is_not_saved_either() {
         let mut private = Tab::new(7, "https://secret.example/".into());
@@ -8959,105 +7725,77 @@ mod tests {
         assert!(keepable(&[private], 7).is_empty());
     }
 
-    /// The dn= display name comes out of a magnet link, percent-decoded.
     #[test]
     fn magnet_name_reads_dn() {
         let m = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Ftracker.example%3A1337";
         assert_eq!(magnet_name(m), "Big Buck Bunny");
-        // No dn= at all: empty, not a crash.
         assert_eq!(magnet_name("magnet:?xt=urn:btih:abc"), "");
         assert_eq!(magnet_name("https://example.com/"), "");
     }
 
-    /// A page-started magnet's hold note names the page that asked for it.
     #[test]
     fn magnet_hold_names_the_page() {
         assert_eq!(magnet_hold("https://example.com/files?x=1"), "from example.com: press Resume to start");
-        // No host to name: still says a page asked.
         assert_eq!(magnet_hold("about:blank"), "from a page: press Resume to start");
     }
 
-    /// The row of a magnet carries the name it was given, until aria2 knows
-    /// the real one.
     #[test]
     fn magnet_label_falls_back_to_a_short_hash() {
         let m = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny";
         assert_eq!(magnet_label(m, "abc123"), "Big Buck Bunny");
-        // No dn=: the torrent's own hash, so the row is not a row of zeroes.
         let m = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&tr=udp%3A%2F%2Ftracker.example%3A1337";
         assert_eq!(magnet_label(m, "abc123"), "Torrent dd8255e");
-        // No hash either: the gid stands in.
         assert_eq!(magnet_label("magnet:?tr=udp%3A%2F%2Ftracker.example", "abc123def"), "Torrent abc123d");
     }
 
-    /// The metadata phase says what it is doing, and after a long while it
-    /// says plainly that nobody is answering.
     #[test]
     fn the_metadata_phase_says_what_it_is_doing() {
         let soon = Duration::from_secs(30);
         let long = Duration::from_secs(METADATA_PATIENCE.as_secs() + 30);
         assert_eq!(metadata_note(true, 12, soon), "Finding peers for torrent info · 12 peers");
         assert_eq!(metadata_note(true, 0, long), "Still looking for the torrent's info · 3 min, no peers yet");
-        // Not a torrent: it is not looking for anything.
         assert_eq!(metadata_note(false, 0, long), "");
     }
 
-    /// Only a person-started, unfinished, known-name torrent gets auto-started.
     #[test]
     fn only_person_torrents_auto_resume() {
-        // The rule fires for a person's torrent that pause-metadata stopped.
         assert!(should_auto_resume(true, "paused", true, true));
-        // A page-started one waits for Resume.
         assert!(!should_auto_resume(false, "paused", true, true));
-        // Still fetching metadata: nothing to resume into yet.
         assert!(!should_auto_resume(true, "paused", false, true));
-        // A finished torrent paused by aria2's seed limit is left alone.
         assert!(!should_auto_resume(true, "paused", true, false));
-        // Running torrents need nothing.
         assert!(!should_auto_resume(true, "active", true, true));
     }
 
-    /// A magnet typed in the address bar reaches the main loop, not the renderer.
     #[test]
     fn resolve_input_passes_magnets_through() {
         let m = "magnet:?xt=urn:btih:abc&dn=x";
         assert_eq!(resolve_input(m, "https://duckduckgo.com/?q=%s").as_deref(), Some(m));
-        // And an ordinary https URL is still just itself.
         assert_eq!(resolve_input("https://a.test/", "x").as_deref(), Some("https://a.test/"));
     }
 
     const DDG: &str = "https://duckduckgo.com/?q=%s";
 
-    /// What the address bar does with a word: go there, or search for it.
     #[test]
     fn address_bar_classifies_typing() {
         let url = |s: &str| classify_input(s, DDG).unwrap();
-        // Not a real TLD: a search, not a dead page.
         assert_eq!(url("youtube.music"), ("https://duckduckgo.com/?q=youtube.music".into(), false));
         assert_eq!(url("index.html").0, "https://duckduckgo.com/?q=index.html");
         assert_eq!(url("rust lang"), ("https://duckduckgo.com/?q=rust+lang".into(), false));
-        // Places.
         assert_eq!(url("music.youtube.com"), ("https://music.youtube.com".into(), true));
         assert_eq!(url("localhost:3000"), ("http://localhost:3000".into(), true));
         assert_eq!(url("192.168.1.1"), ("http://192.168.1.1".into(), true));
         assert_eq!(url("example.co.uk"), ("https://example.co.uk".into(), true));
         assert_eq!(url("github.com/rust-lang/rust").0, "https://github.com/rust-lang/rust");
-        // A scheme says it all, even for a name that is not a TLD.
         assert_eq!(url("https://youtube.music"), ("https://youtube.music".into(), false));
         assert_eq!(classify_input("  ", DDG), None);
     }
 
-    /// A typed host that does not exist becomes a search, once, and only if it
-    /// was the page that was loading.
     #[test]
     fn typed_host_falls_back_to_search_only_for_missing_names() {
         use crate::TypedVerdict::*;
         assert_eq!(typed_verdict(true, false, 13), Search);
-        // Not started: an older page's ending is not the answer.
         assert_eq!(typed_verdict(false, false, 13), Wait);
-        // Cut short by another load: keep waiting for the real one.
         assert_eq!(typed_verdict(true, false, 14), Wait);
-        // Loaded, or failed in a way a search would not mend.
         assert_eq!(typed_verdict(true, true, 0), Forget);
         assert_eq!(typed_verdict(true, false, 9), Forget);
         assert_eq!(typed_verdict(true, false, 6), Forget);
@@ -9065,17 +7803,11 @@ mod tests {
         assert!(!same_page("https://a.com", "https://b.com/"));
     }
 
-    /// "Open new tabs as private" covers every new tab the person opens, and
-    /// never an agent's; a request that named privacy gets one either way.
     #[test]
     fn new_tabs_are_private_when_the_setting_or_the_person_asks() {
-        // Off, nothing asked: an ordinary tab.
         assert!(!opens_private(false, false, false));
-        // The setting on: every new tab the person opens.
         assert!(opens_private(true, false, false));
-        // Ctrl+Shift+N with the setting off.
         assert!(opens_private(false, true, false));
-        // An agent's tab is never made private by the setting.
         assert!(!opens_private(true, false, true));
     }
 
@@ -9083,8 +7815,6 @@ mod tests {
         SleepState { audio, call: false, trimmed, suspended, pinned, heavy: false }
     }
 
-    /// Windows short of memory, or the RAM cap: the hidden tab looked at longest ago goes,
-    /// never one on screen, with sound, in a call, pinned, or a working agent's.
     #[test]
     fn unload_takes_the_oldest_hidden_tab_it_may() {
         use std::time::{Duration, Instant};
@@ -9106,8 +7836,6 @@ mod tests {
         assert_eq!(unload_victim(&tabs[..6], now), None, "nothing it may take");
     }
 
-    /// A tab in a call is never trimmed, frozen or dropped, however long it is hidden and
-    /// whether or not anyone is talking. Discord froze five minutes into a quiet call.
     #[test]
     fn sleep_policy_leaves_a_call_alone() {
         use std::time::Duration;
@@ -9118,30 +7846,22 @@ mod tests {
             assert_eq!(due_sleep_step(&call(true, false), idle, sleep, discard), None, "talking call at {idle:?}");
         }
         assert_eq!(next_sleep_step_after(&call(false, false), sleep, discard), None);
-        // The call over, it is a silent tab again.
         assert_eq!(due_sleep_step(&st(false, true, false, false), sleep, sleep, discard), Some(SleepStep::Suspend));
     }
 
-    /// A tab playing audio is trimmed, never frozen and never dropped, however
-    /// long it has been hidden.
     #[test]
     fn sleep_policy_never_freezes_or_drops_a_playing_tab() {
         use std::time::Duration;
         let (sleep, discard) = (Duration::from_secs(300), Duration::from_secs(1800));
         let hours = Duration::from_secs(5 * 3600);
-        // Playing and not yet trimmed: trim once, after the usual wait, and not before.
         assert_eq!(due_sleep_step(&st(true, false, false, false), Duration::from_secs(1), sleep, discard), None);
         assert_eq!(due_sleep_step(&st(true, false, false, false), TRIM_AFTER, sleep, discard), Some(SleepStep::Trim));
-        // An hour in, trimmed, still playing: nothing, ever.
         assert_eq!(due_sleep_step(&st(true, true, false, false), hours, sleep, discard), None);
-        // Even straight from untrimmed after a very long hide: trim, not discard.
         assert_eq!(due_sleep_step(&st(true, false, false, false), hours, sleep, discard), Some(SleepStep::Trim));
         assert_eq!(next_sleep_step_after(&st(true, true, false, false), sleep, discard), None);
         assert_eq!(next_sleep_step_after(&st(true, false, false, false), sleep, discard), Some(TRIM_AFTER));
     }
 
-    /// Silent tabs keep the policy they always had; a tab whose audio just
-    /// stopped is silent, so its steps come back.
     #[test]
     fn sleep_policy_for_silent_tabs_is_unchanged() {
         use std::time::Duration;
@@ -9152,17 +7872,12 @@ mod tests {
         assert_eq!(due_sleep_step(&st(false, true, false, false), s(301), sleep, discard), Some(SleepStep::Suspend));
         assert_eq!(due_sleep_step(&st(false, true, true, false), s(301), sleep, discard), None);
         assert_eq!(due_sleep_step(&st(false, true, true, false), s(1801), sleep, discard), Some(SleepStep::Discard));
-        // Pinned tabs freeze but are never dropped.
         assert_eq!(due_sleep_step(&st(false, true, true, true), s(99999), sleep, discard), None);
         assert_eq!(next_sleep_step_after(&st(false, true, true, true), sleep, discard), None);
         assert_eq!(next_sleep_step_after(&st(false, true, false, false), sleep, discard), Some(sleep));
         assert_eq!(next_sleep_step_after(&st(false, true, true, false), sleep, discard), Some(discard));
     }
 
-    /// A heavy hidden tab leaves after five minutes, not after the normal half hour. Light
-    /// tabs keep their time, and a heavy tab keeps its sound, its call and its pin.
-    /// A locked tab hides its page until Windows Hello opens it, and keeps its lock in the
-    /// session: a restart does not open it.
     #[test]
     fn a_locked_tab_stays_shut_until_hello_and_across_a_restart() {
         let mut t = Tab::new(1, "https://mail.example.com/".into());
@@ -9171,7 +7886,6 @@ mod tests {
         assert!(t.veiled());
         t.unlocked = true;
         assert!(!t.veiled());
-        // The saved tab keeps the lock and not the visit's opening.
         let saved = t.saved();
         assert!(saved.locked);
         let mut back = Tab::new(2, saved.url);
@@ -9179,7 +7893,6 @@ mod tests {
         assert!(back.veiled());
     }
 
-    /// "Never" is never: no freeze, no unload, no wake, and a heavy tab is not dropped early.
     #[test]
     fn never_means_never() {
         use std::time::Duration;
@@ -9189,9 +7902,7 @@ mod tests {
         assert_eq!(due_sleep_step(&st(false, true, false, false), year, sleep, discard), None);
         let heavy = SleepState { heavy: true, ..st(false, true, true, false) };
         assert_eq!(due_sleep_step(&heavy, year, sleep, discard), None);
-        // What the wake asks for is "never", which next_tab_wake drops.
         assert!(next_sleep_step_after(&heavy, sleep, discard).is_some_and(|d| d >= NEVER));
-        // Freeze on time, unload never: the tab freezes and stays.
         let (sleep, discard) = sleep_durations(5, 0);
         assert_eq!(due_sleep_step(&st(false, true, false, false), Duration::from_secs(300), sleep, discard), Some(SleepStep::Suspend));
         assert_eq!(due_sleep_step(&st(false, true, true, false), year, sleep, discard), None);
@@ -9204,40 +7915,31 @@ mod tests {
         let (sleep, discard) = (Duration::from_secs(600), Duration::from_secs(1800));
         let s = |x| Duration::from_secs(x);
         let heavy = |audio, trimmed, suspended, pinned| SleepState { heavy: true, ..st(audio, trimmed, suspended, pinned) };
-        // Five minutes hidden, and not a moment before.
         assert_eq!(due_sleep_step(&heavy(false, true, true, false), s(299), sleep, discard), None);
         assert_eq!(due_sleep_step(&heavy(false, true, true, false), s(300), sleep, discard), Some(SleepStep::Discard));
-        // Light: the normal time.
         assert_eq!(due_sleep_step(&st(false, true, true, false), s(300), sleep, discard), None);
         assert_eq!(due_sleep_step(&st(false, true, true, false), s(1801), sleep, discard), Some(SleepStep::Discard));
-        // The loop wakes for the five minutes, not for the half hour.
         assert_eq!(next_sleep_step_after(&heavy(false, true, true, false), sleep, discard), Some(HEAVY_AFTER));
-        // A heavy tab that has not frozen yet is due at the earlier of the two.
         assert_eq!(next_sleep_step_after(&heavy(false, true, false, false), sleep, discard), Some(HEAVY_AFTER));
         assert_eq!(next_sleep_step_after(&heavy(false, true, false, false), s(60), discard), Some(s(60)));
-        // Sound, a call, a pin: unchanged, however heavy.
         assert_eq!(due_sleep_step(&heavy(true, true, false, false), s(3600), sleep, discard), None);
         assert_eq!(due_sleep_step(&SleepState { call: true, ..heavy(false, true, true, false) }, s(3600), sleep, discard), None);
         assert_eq!(due_sleep_step(&heavy(false, true, true, true), s(3600), sleep, discard), None);
-        // A normal unload already sooner than five minutes keeps its own time.
         let (sleep, discard) = (s(60), s(120));
         assert_eq!(due_sleep_step(&heavy(false, true, true, false), s(119), sleep, discard), None);
         assert_eq!(due_sleep_step(&heavy(false, true, true, false), s(121), sleep, discard), Some(SleepStep::Discard));
         assert_eq!(next_sleep_step_after(&heavy(false, true, true, false), sleep, discard), Some(discard));
     }
 
-    /// The memory sample is what makes a tab heavy, and a busy agent's tab never is.
     #[test]
     fn a_heavy_tab_is_one_the_memory_sample_says_is_heavy() {
         let t = Tab::new(1, "https://feed.example/".into());
         assert!(!t.sleep_state(None).heavy, "no figure yet is not heavy");
         assert!(!t.sleep_state(Some(HEAVY_MEM)).heavy, "at the line is not over it");
         assert!(t.sleep_state(Some(HEAVY_MEM + 1)).heavy);
-        // An agent working in its tab: the page is in use, and not the policy's to drop.
         let mut busy = Tab::new(2, "https://agent.example/".into());
         busy.agent = true;
         assert!(!busy.sleep_state(Some(HEAVY_MEM * 2)).heavy);
-        // The agent gone quiet, the tab sleeps like any other.
         busy.stage_idle = true;
         assert!(busy.sleep_state(Some(HEAVY_MEM * 2)).heavy);
     }

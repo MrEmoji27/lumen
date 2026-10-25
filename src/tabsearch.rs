@@ -1,13 +1,10 @@
-//! Finding an open tab by a few typed letters: the quick switcher (Ctrl+Shift+A) and the
-//! "Switch to tab" lines of the address bar. Pure ranking, no window.
+//! Finding an open tab by a few typed letters.
 
-/// What the search looks at in one tab.
 pub struct Entry<'a> {
     pub title: &'a str,
     pub url: &'a str,
 }
 
-/// The host of a URL for matching: no scheme, no www., no path, lower case.
 fn host(url: &str) -> String {
     let rest = url.split("://").nth(1).unwrap_or(url);
     let h = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -15,8 +12,6 @@ fn host(url: &str) -> String {
     h.strip_prefix("www.").map(str::to_string).unwrap_or(h)
 }
 
-/// How well one word fits a tab: 0 for not at all. The title beginning with it is best, then
-/// a word of the title, the host beginning with it, then anywhere in the title, the host, the URL.
 fn word_score(w: &str, title: &str, host: &str, url: &str) -> u32 {
     if title.starts_with(w) {
         100
@@ -35,8 +30,6 @@ fn word_score(w: &str, title: &str, host: &str, url: &str) -> u32 {
     }
 }
 
-/// The score of a tab for a query, or None when some word of the query is nowhere in it.
-/// Words are separated by spaces and all of them have to fit.
 pub fn score(query: &str, e: &Entry) -> Option<u32> {
     let title = e.title.to_lowercase();
     let url = e.url.to_lowercase();
@@ -51,12 +44,9 @@ pub fn score(query: &str, e: &Entry) -> Option<u32> {
         }
         total += s;
     }
-    // Nothing typed: every tab fits, equally.
     Some(if any { total } else { 1 })
 }
 
-/// Indexes of the entries that fit, the best first; equals keep the order they were given in
-/// (the sidebar's order), so an empty query lists the tabs as they stand.
 pub fn rank(query: &str, entries: &[Entry]) -> Vec<usize> {
     let mut hits: Vec<(usize, u32)> = entries.iter().enumerate().filter_map(|(n, e)| score(query, e).map(|s| (n, s))).collect();
     hits.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -98,14 +88,12 @@ mod tests {
             e("Mail - Inbox", "https://mail.test/"),
             e("Fastmail settings", "https://fastmail.test/"),
         ];
-        // Starts the title, then starts a word of it, then is somewhere inside.
         assert_eq!(rank("mail", &tabs), vec![1, 0, 2]);
     }
 
     #[test]
     fn the_host_counts_when_the_title_says_nothing() {
         let tabs = [e("Untitled", "https://www.example.org/x"), e("Something", "https://other.test/example")];
-        // The host starts with it; the path only contains it.
         assert_eq!(rank("example", &tabs), vec![0, 1]);
     }
 

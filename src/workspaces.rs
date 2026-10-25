@@ -1,18 +1,11 @@
-//! Named sets of tabs. Each workspace is a list of saved tabs and a name.
-//! Only the active workspace's tabs live in memory as Tab objects; hidden
-//! workspaces hold their tabs as serialized state and cost nothing.
+//! Named sets of tabs.
 
 use crate::store::{SavedTab, Session, Workspace};
 
-/// The workspace a fresh install starts on.
 pub const DEFAULT_NAME: &str = "Main";
 
-/// Ctrl+Alt+1..4 covers these. Four is plenty.
 pub const MAX_WORKSPACES: usize = 4;
 
-/// Migrate a session file from the pre-workspaces era (a flat tab list and an
-/// active index) into the workspace list. Old files have an empty `workspaces`
-/// vec; this turns them into a single "Main" workspace and returns it.
 pub fn from_session(session: &Session) -> Vec<Workspace> {
     if !session.workspaces.is_empty() {
         return session.workspaces.clone();
@@ -26,8 +19,6 @@ pub fn from_session(session: &Session) -> Vec<Workspace> {
     }]
 }
 
-/// Build the initial workspace list from a session. If the session predates
-/// workspaces, the tabs become one "Main" workspace.
 pub fn build_from_session(session: &Session) -> (Vec<WorkspaceData>, usize) {
     let list: Vec<WorkspaceData> = from_session(session)
         .iter()
@@ -44,11 +35,6 @@ pub fn build_from_session(session: &Session) -> (Vec<WorkspaceData>, usize) {
     (list, active)
 }
 
-/// Build a session for saving, stamping the current workspace's tabs and
-/// active index back into it. `active_tabs` is the serialized form of the
-/// currently-loaded Tab objects; `active_tab_idx` points at the active one.
-/// The `tabs`/`active` fields mirror the active workspace so a pre-workspaces
-/// build can still read the file.
 pub fn to_session(
     workspaces: &[WorkspaceData],
     active_ws_idx: usize,
@@ -90,18 +76,12 @@ pub fn to_session(
     }
 }
 
-/// Runtime state of one workspace. `tab_ids` is only valid for the active
-/// workspace; inactive workspaces store their tabs as `saved`.
 #[derive(Clone, Debug)]
 pub struct WorkspaceData {
     pub name: String,
-    /// Tab IDs currently in memory. Only the active workspace populates this.
     pub tab_ids: Vec<u64>,
-    /// Serialized tabs, kept for inactive workspaces (cheap, no WebView memory).
     pub saved: Vec<SavedTab>,
-    /// Index of the active tab within `tab_ids` (active) or `saved` (inactive).
     pub active: usize,
-    /// The colour this workspace wears: a number in the palette, empty for none.
     pub colour: String,
 }
 
@@ -116,7 +96,6 @@ impl WorkspaceData {
         }
     }
 
-    /// The persisted Workspace view of this inactive workspace.
     pub fn to_workspace(&self) -> Workspace {
         Workspace {
             name: self.name.clone(),
@@ -126,19 +105,16 @@ impl WorkspaceData {
         }
     }
 
-    /// True when this workspace currently has its tabs in memory.
     #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         !self.tab_ids.is_empty()
     }
 
-    /// Tab IDs that should be discarded when leaving this workspace (all of them).
     #[allow(dead_code)]
     pub fn all_ids(&self) -> Vec<u64> {
         self.tab_ids.clone()
     }
 
-    /// The active tab ID, if this workspace is the active one.
     #[allow(dead_code)]
     pub fn active_id(&self) -> Option<u64> {
         self.tab_ids.get(self.active).copied()
@@ -157,8 +133,6 @@ impl From<&Workspace> for WorkspaceData {
     }
 }
 
-/// Switch from one workspace to another. Returns the tab IDs to discard (the
-/// old workspace's) and the tab ID to activate (the new workspace's active tab).
 #[allow(dead_code)]
 pub fn switch(
     workspaces: &[WorkspaceData],
@@ -170,7 +144,6 @@ pub fn switch(
     (discard, activate)
 }
 
-/// Rename a workspace in place.
 #[allow(dead_code)]
 pub fn rename(workspaces: &mut [WorkspaceData], idx: usize, name: &str) {
     if let Some(ws) = workspaces.get_mut(idx) {
@@ -196,9 +169,6 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------ format
-
-    /// An old session.json with no `workspaces` field loads as one "Main".
     #[test]
     fn old_session_becomes_main() {
         let session = Session {
@@ -219,7 +189,6 @@ mod tests {
         assert_eq!(active, 0);
     }
 
-    /// An old session with a single tab still works.
     #[test]
     fn old_session_single_tab() {
         let session = Session {
@@ -234,7 +203,6 @@ mod tests {
         assert_eq!(active, 0);
     }
 
-    /// A new session with workspaces loads them all.
     #[test]
     fn new_session_with_workspaces() {
         let mut session = Session::default();
@@ -252,7 +220,6 @@ mod tests {
         assert_eq!(active, 1);
     }
 
-    /// An empty session (no tabs, no workspaces) still creates Main.
     #[test]
     fn empty_session_creates_main() {
         let session = Session::default();
@@ -262,7 +229,6 @@ mod tests {
         assert_eq!(active, 0);
     }
 
-    /// Round-trip: save workspaces then reload, nothing is lost.
     #[test]
     fn round_trip_preserves_workspaces() {
         let session = Session {
@@ -283,13 +249,10 @@ mod tests {
         assert_eq!(s.width, 800.0);
         assert_eq!(s.height, 600.0);
         assert!(s.maximized);
-        // The active workspace's tabs also appear in the compat fields.
         assert_eq!(s.tabs.len(), 2);
         assert_eq!(s.active, 1);
     }
 
-    /// Pins belong to the workspace they were made in, and keep the page they were pinned on
-    /// whether that workspace is the live one or a stored one.
     #[test]
     fn pins_stay_in_their_workspace() {
         let mut work_pin = tab("https://mail.work/inbox", "Mail", true);
@@ -309,14 +272,10 @@ mod tests {
         assert_eq!(s.workspaces[0].tabs[0].pin_url, "https://music.example/");
         assert!(s.workspaces[1].tabs[0].pinned);
         assert_eq!(s.workspaces[1].tabs[0].pin_url, "https://mail.work/");
-        // And it all survives the file.
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).expect("to json")).expect("from json");
         assert_eq!(back.workspaces[1].tabs[0].pin_url, "https://mail.work/");
     }
 
-    // ---------------------------------------------------------------- switching
-
-    /// Switching discards the old workspace's tabs and activates the new one.
     #[test]
     fn switch_discards_and_activates() {
         let ws = vec![
@@ -328,7 +287,6 @@ mod tests {
         assert_eq!(activate, Some(4));
     }
 
-    /// Switching to a workspace with no tabs activates nothing.
     #[test]
     fn switch_to_empty_workspace() {
         let ws = vec![
@@ -340,7 +298,6 @@ mod tests {
         assert_eq!(activate, None);
     }
 
-    /// Out-of-range indices are handled gracefully.
     #[test]
     fn switch_out_of_range_is_safe() {
         let ws = vec![WorkspaceData::new("Main")];
@@ -349,7 +306,6 @@ mod tests {
         assert_eq!(activate, None);
     }
 
-    /// `from_session` trusts existing workspaces when present.
     #[test]
     fn from_session_preserves_existing() {
         let session = Session {
@@ -366,7 +322,6 @@ mod tests {
         assert_eq!(ws[1].name, "Two");
     }
 
-    /// `active_id` returns the active tab for an active workspace.
     #[test]
     fn active_id_points_at_active_tab() {
         let ws = WorkspaceData {
@@ -379,7 +334,6 @@ mod tests {
         assert_eq!(ws.active_id(), Some(30));
     }
 
-    /// An inactive workspace has no tab IDs and no active ID.
     #[test]
     fn inactive_workspace_has_no_active_id() {
         let ws = WorkspaceData {
@@ -393,7 +347,6 @@ mod tests {
         assert_eq!(ws.active_id(), None);
     }
 
-    /// Renaming a workspace works.
     #[test]
     fn rename_changes_name() {
         let mut ws = vec![WorkspaceData::new("Old")];
@@ -403,7 +356,6 @@ mod tests {
         assert_eq!(ws[0].name, "New");
     }
 
-    /// `to_workspace` serializes the saved-tab list, not the live tab IDs.
     #[test]
     fn to_workspace_emits_saved() {
         let ws = WorkspaceData {

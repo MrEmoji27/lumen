@@ -1,11 +1,4 @@
 //! Who uses what, and the knobs that cap it.
-//!
-//! - Job: the whole browser tree lives in one Windows Job Object. It gives a hard CPU
-//!   cap and kills every WebView2 process when Lumen dies. No orphans.
-//! - tree(): Lumen and every process under it, the same tree Task Manager folds under
-//!   Lumen and tools/vs_brave.py adds up.
-//! - sample(): which processes belong to which tab, and their memory and CPU time.
-//! - Network: bytes per tab and a bandwidth cap, through the DevTools protocol.
 
 use std::{
     cell::RefCell,
@@ -41,13 +34,9 @@ use wry::{WebView, WebViewExtWindows};
 
 use crate::engine::Ev;
 
-// --------------------------------------------------------------------- job
-
 pub struct Job(HANDLE);
 
 impl Job {
-    /// Put Lumen in a job before WebView2 starts. Its processes inherit the job.
-    /// None if Windows refuses (some launchers hold us in a job that forbids it).
     pub fn adopt_self() -> Option<Job> {
         unsafe {
             let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
@@ -67,12 +56,10 @@ impl Job {
         }
     }
 
-    /// Hard cap on CPU for the whole tree, percent of all cores. None lifts it.
     pub fn cap_cpu(&self, pct: Option<u32>) {
         let mut info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
         if let Some(p) = pct {
             info.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
-            // Units of 1/100 percent.
             info.Anonymous.CpuRate = p.clamp(1, 100) * 100;
         }
         unsafe {
@@ -86,9 +73,6 @@ impl Job {
     }
 }
 
-// ------------------------------------------------------------- per process
-
-/// Private working set: the number Task Manager calls "Memory".
 pub fn private_ws(h: HANDLE) -> u64 {
     let mut c = PROCESS_MEMORY_COUNTERS_EX2::default();
     let ok = unsafe {
@@ -101,8 +85,6 @@ pub fn private_ws(h: HANDLE) -> u64 {
     if ok.is_ok() { c.PrivateWorkingSetSize as u64 } else { 0 }
 }
 
-/// Total CPU time, kernel plus user, in 100 ns units. Also read by the journal's
-/// shared memory walk, so the tree's CPU costs no second enumeration.
 pub fn cpu_time(h: HANDLE) -> u64 {
     let (mut a, mut b, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     if unsafe { GetProcessTimes(h, &mut a, &mut b, &mut k, &mut u) }.is_err() {
@@ -125,7 +107,6 @@ fn read(pid: u32) -> (u64, u64) {
     }
 }
 
-/// When a process started, in 100 ns units. None if it is gone or closed to us.
 fn born(pid: u32) -> Option<u64> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
@@ -136,10 +117,6 @@ fn born(pid: u32) -> Option<u64> {
     }
 }
 
-/// Lumen and every process under it, children of children too: (pid, exe name), Lumen
-/// first. WebView2's own lists leave out the crash reporter, the browsers of strictly
-/// isolated agents and the download helper. Task Manager and tools/vs_brave.py count them,
-/// so this does too.
 pub fn tree() -> Vec<(u32, String)> {
     let mut all = Vec::new();
     unsafe {
@@ -157,9 +134,6 @@ pub fn tree() -> Vec<(u32, String)> {
     descendants(std::process::id(), &all, born)
 }
 
-/// Walk down from `root` through (pid, parent pid, name). Windows reuses pids: a stranger
-/// whose real parent died long ago can name a pid that is now one of ours. A child is only
-/// taken if it started after the parent it names.
 fn descendants(root: u32, all: &[(u32, u32, String)], born: impl Fn(u32) -> Option<u64>) -> Vec<(u32, String)> {
     let name = |pid| all.iter().find(|p| p.0 == pid).map(|p| p.2.clone()).unwrap_or_default();
     let mut out = vec![(root, name(root), born(root))];
@@ -182,17 +156,11 @@ fn descendants(root: u32, all: &[(u32, u32, String)], born: impl Fn(u32) -> Opti
     out.into_iter().map(|(pid, name, _)| (pid, name)).collect()
 }
 
-/// One process, raw. main.rs turns a pair of these into percentages.
 #[derive(Debug, Clone)]
 pub struct Proc {
     pub pid: u32,
-    /// "host" (Lumen), "browser" | "renderer" | "gpu" | "utility" | "other" (WebView2),
-    /// "helper" (anything else Lumen started: the download helper and its console).
     pub kind: &'static str,
-    /// The WebView2 environment the frames below belong to: "" for the person's, an
-    /// agent's key for a strictly isolated one. Frame ids are only unique inside one.
     pub env: String,
-    /// Main-frame ids of every page this process works for.
     pub frames: Vec<u32>,
     pub mem: u64,
     pub cpu: u64,
@@ -208,7 +176,6 @@ fn kind_name(k: COREWEBVIEW2_PROCESS_KIND) -> &'static str {
     }
 }
 
-/// The page a frame belongs to: walk up to the top frame and take its id.
 unsafe fn top_frame(f: ICoreWebView2FrameInfo) -> Option<u32> {
     let mut cur = f.cast::<ICoreWebView2FrameInfo2>().ok()?;
     for _ in 0..32 {
@@ -225,7 +192,6 @@ unsafe fn top_frame(f: ICoreWebView2FrameInfo) -> Option<u32> {
     Some(id)
 }
 
-/// The processes WebView2 did not name: Lumen itself, and whatever else is in its tree.
 fn rest_of_tree(out: &mut Vec<Proc>) {
     let me = std::process::id();
     for (pid, name) in tree() {
@@ -244,12 +210,8 @@ fn rest_of_tree(out: &mut Vec<Proc>) {
     }
 }
 
-/// Ask every WebView2 environment which process serves which page, then add the rest of
-/// Lumen's tree. One Ev::Usage when the last environment has answered. With no
-/// environment yet (the start page is Lumen's own drawing), the tree alone, at once.
 pub fn sample(envs: Vec<(String, ICoreWebView2Environment)>, proxy: EventLoopProxy<Ev>) {
     let envs: Vec<_> = envs.into_iter().filter_map(|(k, e)| e.cast::<ICoreWebView2Environment13>().ok().map(|e| (k, e))).collect();
-    // Environments still to answer, and what came back so far.
     let acc = Rc::new(RefCell::new((envs.len(), Vec::<Proc>::new())));
     let done = {
         let acc = acc.clone();
@@ -282,7 +244,6 @@ pub fn sample(envs: Vec<(String, ICoreWebView2Environment)>, proxy: EventLoopPro
     }
 }
 
-/// One environment's answer: each process, its kind, and the pages it works for.
 unsafe fn procs_of(list: &ICoreWebView2ProcessExtendedInfoCollection, key: &str) -> Vec<Proc> {
     let mut out = Vec::new();
     unsafe {
@@ -319,15 +280,12 @@ unsafe fn procs_of(list: &ICoreWebView2ProcessExtendedInfoCollection, key: &str)
     out
 }
 
-/// Main-frame id of a page. Ties processes back to tabs.
 pub fn frame_id(wv: &WebView) -> Option<u32> {
     let c20 = wv.webview().cast::<ICoreWebView2_20>().ok()?;
     let mut id = 0u32;
     unsafe { c20.FrameId(&mut id) }.ok()?;
     Some(id)
 }
-
-// ----------------------------------------------------------------- network
 
 fn cdp(wv: &WebView, method: &str, params: &str) {
     unsafe {
@@ -339,17 +297,12 @@ fn cdp(wv: &WebView, method: &str, params: &str) {
     }
 }
 
-/// Network.enable for a person's page. The domain is only on for the byte count and the
-/// bandwidth cap, so no response bodies are kept for it. An agent's page is left as the
-/// agent kit set it (bodies kept for browser_network_body): enabling it again would
-/// replace those sizes.
 fn enable_net(wv: &WebView, agent: bool) {
     if !agent {
         cdp(wv, "Network.enable", r#"{"maxTotalBufferSize":0,"maxResourceBufferSize":0}"#);
     }
 }
 
-/// Cap a page's bandwidth, KB/s. None lifts the cap.
 pub fn throttle(wv: &WebView, kbps: Option<u32>, agent: bool) {
     match kbps {
         Some(k) => {
@@ -369,22 +322,17 @@ pub fn throttle(wv: &WebView, kbps: Option<u32>, agent: bool) {
     }
 }
 
-/// Bytes received per tab since the last read. Fed by DevTools events.
 pub type NetBytes = Rc<RefCell<HashMap<u64, u64>>>;
 
 pub struct NetWatch {
     subs: Vec<(ICoreWebView2DevToolsProtocolEventReceiver, i64)>,
 }
 
-/// The events the byte count listens to.
 const NET_EVENTS: [&str; 4] =
     ["Network.dataReceived", "Network.loadingFinished", "Network.loadingFailed", "Network.webSocketFrameReceived"];
 
-/// Count bytes for one tab. Only while the Control page or the dashboard is open: the
-/// events cost.
 pub fn watch(wv: &WebView, tab: u64, sink: NetBytes, agent: bool) -> Option<NetWatch> {
     enable_net(wv, agent);
-    // Requests still arriving: what their chunks have counted so far.
     let open: Rc<RefCell<HashMap<String, u64>>> = Rc::default();
     let mut subs = Vec::new();
     for ev in NET_EVENTS {
@@ -432,10 +380,6 @@ pub fn unwatch(wv: Option<&WebView>, w: NetWatch, keep_enabled: bool) {
     }
 }
 
-/// The bytes one Network event adds. Chromium sends most chunks with an encodedDataLength
-/// of 0 and puts the true size on loadingFinished, so a sum of chunks alone came out at
-/// about half (Wikipedia: 417 KB of 876). The chunks count as they come, for a live
-/// figure while a big file streams in; the finish adds whatever they missed.
 fn bytes_of(event: &str, v: &serde_json::Value, open: &mut HashMap<String, u64>) -> u64 {
     let id = v["requestId"].as_str().unwrap_or_default();
     match event {
@@ -455,7 +399,6 @@ fn bytes_of(event: &str, v: &serde_json::Value, open: &mut HashMap<String, u64>)
         "Network.webSocketFrameReceived" => {
             let r = &v["response"];
             let len = r["payloadData"].as_str().map_or(0, str::len) as u64;
-            // Opcode 2 is binary, sent as base64: four characters for three bytes.
             if r["opcode"].as_u64() == Some(2) { len * 3 / 4 } else { len }
         }
         _ => 0,
@@ -491,8 +434,6 @@ mod tests {
 
     #[test]
     fn tree_takes_children_of_children_but_not_strangers_on_a_reused_pid() {
-        // 10 is Lumen, born at 100. 11 and 12 are its children, 13 a grandchild. 99 names 12
-        // as its parent but started before 12 did: its real parent died and 12 reused the pid.
         let all = vec![
             (10, 1, "lumen.exe".to_string()),
             (11, 10, "msedgewebview2.exe".to_string()),

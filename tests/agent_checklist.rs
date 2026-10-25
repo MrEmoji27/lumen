@@ -1,6 +1,4 @@
 //! Agent checklist: one step per point, printed pass lines.
-//!
-//!     cargo test -j 2 --test agent_checklist -- --ignored --nocapture
 
 use std::{
     io::{Read, Write},
@@ -14,8 +12,6 @@ use serde_json::{Value, json};
 
 const LUMEN: &str = env!("CARGO_BIN_EXE_lumen");
 
-/// The Lumen under test, stopped when the test ends, also when an assert fails: a failed
-/// run used to leave it running, holding the test's output pipe open.
 struct Lumen(std::process::Child);
 
 impl Drop for Lumen {
@@ -32,7 +28,6 @@ fn tmp(name: &str) -> PathBuf {
     dir
 }
 
-// Operate the door over raw HTTP, keeping the session id header.
 fn raw_post(port: u16, token: &str, sid: Option<&str>, body: &Value) -> (u16, String, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(60))).ok();
@@ -60,7 +55,6 @@ fn tool(port: u16, token: &str, sid: &str, name: &str, args: Value) -> Result<St
 #[test]
 #[ignore = "starts a real headless Lumen"]
 fn agent_checklist() {
-    // page server
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let page_port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
@@ -87,7 +81,6 @@ fn agent_checklist() {
     cmd.arg("--headless").env("LUMEN_HEADLESS","1").env("LUMEN_DATA",&dir).env("LUMEN_DOWNLOADS",&downloads)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let mut child = Lumen(cmd.spawn().unwrap());
-    // wait for token
     let mut token = String::new();
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(60) {
@@ -97,8 +90,6 @@ fn agent_checklist() {
         thread::sleep(Duration::from_millis(300));
     }
     let port: u16 = 47999;
-    // need port in settings; rewrite with port
-    // Actually settings already written without port; agent_port default? Lumen reads settings agent_port. We didn't set. Let's set default port 47640 by rewriting settings before start? Too late. Instead use LUMEN_AGENT_PORT? Lumen uses settings.agent_port. Default maybe 0? Let's check: we must set agent_port. We'll kill and restart with port.
     drop(child);
     thread::sleep(Duration::from_millis(500));
     let _ = std::fs::remove_dir_all(&dir);
@@ -118,12 +109,10 @@ fn agent_checklist() {
         thread::sleep(Duration::from_millis(300));    }
     eprintln!("TOKEN2={} PORT={}", token, port);
     assert!(!token.is_empty(), "no token after restart");
-    // init session
     let (code, sid, _) = raw_post(port, &token, None, &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"1"}}}));
     assert_eq!(code, 200);
     assert!(!sid.is_empty());
 
-    // 1. discover tools and schemas
     let (code, _, body) = raw_post(port, &token, Some(&sid), &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
     assert_eq!(code, 200);
     let v: Value = serde_json::from_str(&body).unwrap();
@@ -133,34 +122,28 @@ fn agent_checklist() {
     assert!(h.contains("browser_click"));
     println!("PASS 1 discover tools and schemas (help ok)");
 
-    // 2. read current page
     let t = tool(port, &token, &sid, "browser_open", json!({"url": format!("http://127.0.0.1:{}/plain", page_port), "background": true})).unwrap();
     let tab: u64 = t.lines().next().unwrap().strip_prefix("tab ").unwrap().trim().parse().unwrap();
     let r = tool(port, &token, &sid, "browser_read", json!({"tab": tab, "max_chars": 100})).unwrap();
     assert!(r.contains("Plain page") || r.contains("Hello"));
     println!("PASS 2 read current page (max_chars applied)");
 
-    // 3/4. interact + result
     let snap = tool(port, &token, &sid, "browser_snapshot", json!({"tab": tab})).unwrap();
     assert!(snap.contains("[ref="));
     println!("PASS 3/4 interact and see result");
 
-    // 5. recover from changes (stale_ref)
     let _ = tool(port, &token, &sid, "browser_navigate", json!({"tab": tab, "url": format!("http://127.0.0.1:{}/plain?x=1", page_port)}));
     let _ = tool(port, &token, &sid, "browser_snapshot", json!({"tab": tab}));
     let res = tool(port, &token, &sid, "browser_click", json!({"tab": tab, "ref": "e999"}));
     println!("stale click result: {:?}", res);
     println!("stale click result: {:?}", res);
     println!("PASS 5 recover from changes (stale_ref path exercised)");
-    // 6. manage tasks
     let st = tool(port, &token, &sid, "browser_status", json!({})).unwrap();
     assert!(st.contains("tabs"));
-    // timeout_ms on wait: wait for text that never appears with short timeout
     let w = tool(port, &token, &sid, "browser_wait", json!({"tab": tab, "text": "ZZZNOPE", "timeout_ms": 200}));
     assert!(w.is_err());
     println!("PASS 6 manage tasks (status + timeout)");
 
-    // 7. human help: handoff decline
     let tab2 = {
         let t = tool(port, &token, &sid, "browser_open", json!({"url": format!("http://127.0.0.1:{}/plain", page_port), "background": true})).unwrap();
         t.lines().next().unwrap().strip_prefix("tab ").unwrap().trim().parse::<u64>().unwrap()
@@ -170,13 +153,11 @@ fn agent_checklist() {
         tool(portc, &tokenc, &sidc, "browser_handoff", json!({"tab": tab2, "message": "approve?", "reason": "consent", "timeout_ms": 10000}))
     });
     thread::sleep(Duration::from_millis(1000));
-    // decline via debug hook
     let _ = tool(port, &token, &sid, "browser_test_decline", json!({}));
     let got = waiter.join().unwrap();
     assert!(got.is_err() && got.as_ref().unwrap_err().contains("declined"), "{:?}", got);
     println!("PASS 7 ask for human help (decline -> declined)");
 
-    // 8. consent
     let ctab = {
         let t = tool(port, &token, &sid, "browser_open", json!({"url": format!("http://127.0.0.1:{}/plain", page_port), "background": true})).unwrap();
         t.lines().next().unwrap().strip_prefix("tab ").unwrap().trim().parse::<u64>().unwrap()
@@ -191,12 +172,10 @@ fn agent_checklist() {
     assert!(got.is_err() && got.as_ref().unwrap_err().contains("declined"), "{:?}", got);
     println!("PASS 8 respect permissions (consent decline -> declined)");
 
-    // 9. protect session state
     let w = tool(port, &token, &sid, "browser_whoami", json!({})).unwrap();
     assert!(w.contains("short_id") && w.contains("profile"));
     println!("PASS 9 protect session state (whoami)");
 
-    // cleanup
     let _ = child.0.kill();
     let _ = child.0.wait();
     let _ = std::fs::remove_dir_all(&dir);

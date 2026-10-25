@@ -1,8 +1,4 @@
-//! The dashboard: Lumen at a glance. Memory, CPU, network, tabs, downloads, privacy today and
-//! the agents, one tile each. A tile opens the full page it sums up.
-//!
-//! The live numbers are Control's: the process sampling runs only while this page or Control
-//! is open, so a closed dashboard costs nothing.
+//! The dashboard: Lumen at a glance.
 
 use serde_json::{Value, json};
 
@@ -15,11 +11,8 @@ use super::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Click {
-    /// Open a full page: "control" | "downloads" | "report" | "settings".
     Open(&'static str),
-    /// Trim every hidden page now.
     FreeMemory,
-    /// Stop every agent and close its tabs.
     StopAgents,
 }
 
@@ -31,7 +24,6 @@ fn mb(b: f64) -> String {
     }
 }
 
-/// Counts of the tabs by state: open, live, asleep (frozen), unloaded.
 pub fn tab_counts(s: &UiState) -> (usize, usize, usize, usize) {
     let mut c = (0, 0, 0, 0);
     for t in &s.tabs {
@@ -46,7 +38,6 @@ pub fn tab_counts(s: &UiState) -> (usize, usize, usize, usize) {
     c
 }
 
-/// One tile: a caption, a big value, a note, and the page it opens.
 struct Tile {
     caption: &'static str,
     value: String,
@@ -126,7 +117,6 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     }
     y += 2.0 * 104.0 + gap + i.look.s5;
 
-    // Actions under the tiles, and the pages that left the footer for here.
     let mut x = col.x;
     for (label, c) in [
         ("Free memory", Click::FreeMemory),
@@ -148,14 +138,12 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
     }
     y += 30.0 + i.look.s5;
 
-    // Agents: who is working right now.
     i.label("Agents", R::new(col.x + 4.0, y, col.w, 20.0), th.faint);
     y += 28.0;
     if agents == 0 {
         i.gfx.text("No agent is working. Agents connect through lumen-agent (Settings > AI agent).", R::new(col.x + 4.0, y, col.w, 20.0), i.look.small, th.dim);
         y += 30.0;
     } else {
-        // Each agent once, in the order its tabs are.
         let mut seen: Vec<(String, String, usize)> = Vec::new();
         for t in s.tabs.iter().filter(|t| t.agent) {
             match seen.iter_mut().find(|(o, _, _)| *o == t.owner) {
@@ -201,7 +189,6 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
             y += ROW;
         }
         y += i.look.s3;
-        // Every agent at once: the kill switch.
         let label = "Stop all agents";
         let f = i.look.small_strong.align(Align::Center);
         let w = i.gfx.measure(label, f) + 2.0 * i.look.s4;

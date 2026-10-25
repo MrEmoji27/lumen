@@ -1,14 +1,4 @@
 //! The agent bench: fixed tasks on local pages, through the agent door, timed.
-//!
-//!     cargo test -j 2 --test agent_bench -- --ignored --nocapture
-//!
-//! There is no model in here. The number of tool calls a task takes stands in for the model's
-//! round trips, and the reply bytes for what it has to read before each decision: those two are
-//! where an agent's time goes, not the browser. Wall time is measured too.
-//!
-//! One headless Lumen, its own LUMEN_DATA under %TEMP%, pages from a listener in this file,
-//! never the internet. Each task runs RUNS times in the same Lumen (warm). At most two tabs
-//! are open at once. Only the Lumen this test started is ever killed.
 
 use std::{
     io::{Read, Write},
@@ -25,8 +15,6 @@ const LUMEN: &str = env!("CARGO_BIN_EXE_lumen");
 const LUMEN_AGENT: &str = env!("CARGO_BIN_EXE_lumen-agent");
 const RUNS: usize = 3;
 const PORT: u16 = 47691;
-
-// ---------------------------------------------------------------- the pages
 
 fn pages(path: &str) -> String {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
@@ -56,7 +44,6 @@ document.getElementById('t').innerHTML=h+'</tbody></table>'},300)</script>"#
             .into(),
         "/search" => r#"<title>Search</title><h1>Search the shop</h1><form action="/results"><input name="q" aria-label="Search"><button>Search</button></form>"#.into(),
         "/steps" => {
-            // Forty links and a button that changes its own name: one interaction, one line.
             let mut b = String::from(
                 "<title>Steps</title><h1>Steps</h1>\
                  <button data-n=\"0\" onclick=\"this.dataset.n=+this.dataset.n+1;this.textContent='Step '+this.dataset.n\">Step 0</button><ul>",
@@ -74,7 +61,6 @@ document.getElementById('t').innerHTML=h+'</tbody></table>'},300)</script>"#
             b + "</ol>"
         }
         "/products" => {
-            // Fifty products in a table: what extract, browser_table and browser_read each cost.
             let mut b = String::from(
                 "<title>Products</title><h1>Products</h1><table><thead><tr><th>Name</th><th>Price</th><th>Link</th></tr></thead><tbody>",
             );
@@ -115,15 +101,12 @@ fn page(mut s: TcpStream) {
     let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
 }
 
-// ---------------------------------------------------------------- the door
-
 struct Door {
     port: u16,
     token: String,
     sid: String,
     calls: usize,
     bytes: usize,
-    /// Per tool: calls and milliseconds, over the whole bench.
     per: std::collections::BTreeMap<String, (usize, f64)>,
 }
 
@@ -159,7 +142,6 @@ impl Door {
         self.sid = sid;
     }
 
-    /// One tool call: its text, counted.
     fn tool(&mut self, name: &str, args: Value) -> String {
         let t0 = Instant::now();
         let (_, body) = self.post(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": args}}), &self.sid.clone());
@@ -180,25 +162,20 @@ impl Door {
     }
 
     fn close(&mut self, tab: u64) {
-        // Cleanup, not part of a task: not counted.
         let (c, b) = (self.calls, self.bytes);
         self.tool("browser_close", json!({"tab": tab}));
         (self.calls, self.bytes) = (c, b);
     }
 }
 
-/// The ref of the first line of a snapshot that has all these words.
 fn find_ref(snap: &str, words: &[&str]) -> String {
     let line = snap.lines().find(|l| words.iter().all(|w| l.contains(w)) && l.contains("[ref=")).unwrap_or_else(|| panic!("no {words:?} in:\n{snap}"));
     let at = line.find("[ref=").unwrap() + 5;
     line[at..].split(']').next().unwrap().to_string()
 }
 
-// ---------------------------------------------------------------- the tasks
-
 type Task = fn(&mut Door, &str);
 
-/// Read the title and URL of a page.
 fn t_title(d: &mut Door, base: &str) {
     let tab = d.open(&format!("{base}/title"));
     let s = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true}));
@@ -206,7 +183,6 @@ fn t_title(d: &mut Door, base: &str) {
     d.close(tab);
 }
 
-/// The hundred links of a page, text and URL.
 fn t_links(d: &mut Door, base: &str) {
     let tab = d.open(&format!("{base}/links"));
     let s = d.tool("browser_eval", json!({"tab": tab, "script": "return [...document.links].map(a=>[a.textContent,a.href])"}));
@@ -214,7 +190,6 @@ fn t_links(d: &mut Door, base: &str) {
     d.close(tab);
 }
 
-/// Fill a form of five fields, a select and a checkbox, and send it.
 fn t_form(d: &mut Door, base: &str) {
     let tab = d.open(&format!("{base}/form"));
     let s = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true}));
@@ -228,7 +203,6 @@ fn t_form(d: &mut Door, base: &str) {
     d.close(tab);
 }
 
-/// A table the page builds with a script after 300 ms, as rows.
 fn t_table(d: &mut Door, base: &str) {
     let tab = d.open(&format!("{base}/table"));
     d.tool("browser_wait", json!({"tab": tab, "selector": "table tr:nth-child(50)"}));
@@ -237,7 +211,6 @@ fn t_table(d: &mut Door, base: &str) {
     d.close(tab);
 }
 
-/// Ten steps: search, open a result, read it, add it to the cart, go back, open another.
 fn t_workflow(d: &mut Door, base: &str) {
     let tab = d.open(&format!("{base}/search"));
     let s = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true}));
@@ -255,7 +228,6 @@ fn t_workflow(d: &mut Door, base: &str) {
     d.close(tab);
 }
 
-/// Two pages read side by side.
 fn t_two_tabs(d: &mut Door, base: &str) {
     let a = d.open(&format!("{base}/item/1"));
     let b = d.open(&format!("{base}/item/2"));
@@ -266,12 +238,10 @@ fn t_two_tabs(d: &mut Door, base: &str) {
     d.close(b);
 }
 
-/// Five interactions on one page, each followed by a whole snapshot.
 fn t_five_full(d: &mut Door, base: &str) {
     five_steps(d, base, false);
 }
 
-/// The same five, with `diff: true`: only the line a click changed comes back.
 fn t_five_diff(d: &mut Door, base: &str) {
     five_steps(d, base, true);
 }
@@ -280,7 +250,6 @@ fn five_steps(d: &mut Door, base: &str, diff: bool) {
     let tab = d.open(&format!("{base}/steps"));
     let snap = d.tool("browser_snapshot", json!({"tab": tab, "interactive": true, "diff": diff}));
     if diff {
-        // The first look at a tab is the whole page, and says so.
         assert!(snap.contains("first snapshot"), "{snap}");
     }
     let button = find_ref(&snap, &["button \"Step 0\""]);
@@ -295,8 +264,6 @@ fn five_steps(d: &mut Door, base: &str, diff: bool) {
     }
     d.close(tab);
 }
-
-// ------------------------------------------------- the same tasks, with the newer tools
 
 fn t_form_fill(d: &mut Door, base: &str) {
     let tab = d.open(&format!("{base}/form"));
@@ -324,7 +291,6 @@ fn t_table_tool(d: &mut Door, base: &str) {
     d.close(tab);
 }
 
-/// Fifty products as JSON: the fields, the price, the link.
 fn t_extract_products(d: &mut Door, base: &str) {
     let tab = d.open(&format!("{base}/products"));
     let s = d.tool(
@@ -336,7 +302,6 @@ fn t_extract_products(d: &mut Door, base: &str) {
     d.close(tab);
 }
 
-/// The same fifty products through browser_table, and the whole page through browser_read.
 fn t_table_products(d: &mut Door, base: &str) {
     let tab = d.open(&format!("{base}/products"));
     let s = d.tool("browser_table", json!({"tab": tab}));
@@ -376,9 +341,6 @@ fn t_two_tabs_batch(d: &mut Door, base: &str) {
     assert!(out.contains("model 1") && out.contains("model 2") && !out.contains("ERR"), "{out}");
 }
 
-/// The first open of a fresh session: initialize, then one open of the bench's local
-/// page, timed from initialize's reply. Five sessions, one open each; their p50 is
-/// printed beside the row, which is the whole five-run batch.
 fn t_first_open(d: &mut Door, base: &str) {
     let mut ms = Vec::new();
     for _ in 0..5 {
@@ -396,8 +358,6 @@ fn t_first_open(d: &mut Door, base: &str) {
     );
 }
 
-// ---------------------------------------------------------------- the run
-
 struct KillLumen(Child);
 
 impl Drop for KillLumen {
@@ -412,7 +372,6 @@ fn start() -> (KillLumen, PathBuf, String) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("dl")).unwrap();
     std::fs::write(dir.join("settings.json"), json!({"agent": true, "agent_port": PORT}).to_string()).unwrap();
-    // The example scripts, as the person would put them in.
     std::fs::create_dir_all(dir.join("scripts")).unwrap();
     for e in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/scripts")).unwrap().flatten() {
         std::fs::copy(e.path(), dir.join("scripts").join(e.file_name())).unwrap();
@@ -474,8 +433,6 @@ fn bench() {
         ("two tabs, browser_batch", t_two_tabs_batch),
         ("first open, fresh session", t_first_open),
     ];
-    // Floor: what one call costs before any page work. ping is HTTP alone; browser_help
-    // adds the policy round trip to the UI thread; browser_tabs adds a second one.
     for (what, name) in [("ping", ""), ("browser_help", "browser_help"), ("browser_tabs", "browser_tabs")] {
         let t0 = Instant::now();
         for _ in 0..20 {
