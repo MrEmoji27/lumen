@@ -55,6 +55,14 @@ one machine, measured with `tools/vs_brave.py` on 0.6.7.2. brave does a lot more
 - **not signed**, so smartscreen will complain the first time.
 - **built with a lot of ai help.** i wrote it with claude doing much of the typing. it's tested, but bugs will be there, and settings may not survive every update.
 
+## your data
+
+lumen keeps a usage journal on your pc: how fast pages loaded, memory, cpu, crashes and errors. sites are kept by name only, never a full address, a page title or anything you typed. private tabs leave nothing in it. it lives in `%APPDATA%\Lumen\journal` and **never leaves your pc on its own**: lumen has no telemetry and phones nothing home.
+
+- **turn it off:** settings > privacy > keep a usage journal.
+- **help make lumen better:** settings > about > share your numbers. it builds a report from the journal with every address and site name scrubbed out, shows you all of it, and sends only when you press send (through a small form service to my inbox). you can copy or save it instead and send it however you like.
+- **found a bug:** settings > about > report a problem works the same way, or open an issue with the output of `lumen.exe --doctor`.
+
 ## agents
 
 lumen speaks MCP. `lumen-agent.exe` is the bridge; each agent gets its own tabs and its own profile.
