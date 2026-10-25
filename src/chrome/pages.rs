@@ -403,6 +403,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Button("Site settings", "What each site may do, the zoom it is read at, the data it left behind, and the http addresses you let through.", "Open…", PageHit::Panels("sites")),
             Button("Clear browsing data", "Lumen history, page text and WebView2's own browsing history and downloads. Passwords and bookmarks are never touched.", "Clear…", PageHit::ClearData),
             Toggle("clear_on_exit", "Clear history when Lumen closes", "Lumen history, the words of pages and WebView2's own browsing history go when the browser closes. Private tabs leave nothing anyway."),
+            Toggle("private_tabs", "Open new tabs as private", "Every new tab you open leaves nothing behind: no history, no cookies that outlive it, no saved session. Agent tabs and tabs restored from your last session are not affected."),
         ]),
         ("Keys", vec![Keys]),
         ("About", vec![

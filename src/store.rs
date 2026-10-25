@@ -156,6 +156,11 @@ pub struct Settings {
     /// pop-up ones. Empty means no site may.
     #[serde(default)]
     pub redirect_sites: Vec<String>,
+    /// Open every new tab of the person's as a private one: Ctrl+T, the +,
+    /// "New tab", the palette, a link in a new tab. Restored and agent tabs
+    /// keep what they were.
+    #[serde(default)]
+    pub private_tabs: bool,
     /// The running "N blocked" note at the bottom of the sidebar.
     pub page_chip: bool,
     pub show_memory: bool,
@@ -351,6 +356,7 @@ impl Default for Settings {
             popup_sites: Vec::new(),
             block_redirects: true,
             redirect_sites: Vec::new(),
+            private_tabs: false,
             page_chip: true,
             dark_pages: false,
             remember_text: true,
