@@ -1,27 +1,22 @@
 # lumen
 
-a browser for windows that tries to stay out of your RAM.
+a small shell around webview2 for windows. it exists to use as little RAM as it can and to keep browsing simple.
 
-rust around webview2. every bit of interface (sidebar, tabs, menus, settings, file pickers) is drawn by hand with direct2d, no html.
+rust, with every bit of interface (sidebar, tabs, menus, settings, file pickers) drawn by hand with direct2d. the pages themselves are rendered by microsoft's webview2, the same engine edge uses.
 
 <p align="center">
   <img src="docs/img/readme-signal-dark.png" width="860" alt="lumen, signal dark">
 </p>
 
 > [!WARNING]
-> the ui is unfinished. some screens are rough, some settings are missing, and things will move around between versions. it's my daily driver, but expect sharp edges.
+> **lumen is not a full browser, and it isn't trying to compete with brave, edge, chrome or firefox.** those are built by large teams, with security reviews, extensions, sync and years of work behind them. lumen is one person's project. if you need any of that, use them.
 
-## why
+> [!CAUTION]
+> the ui is unfinished. some screens are rough, some settings are missing, and things will move around or break between versions. it's my daily driver, but expect sharp edges.
 
-idle, nothing open, whole process tree, same machine:
+## what it's for
 
-| | lumen | brave |
-|---|---|---|
-| idle | 36 MB | 151 MB |
-| one wikipedia tab | 49 MB | 192 MB |
-| 20 tabs, 6 min later | 124 MB | 1111 MB |
-
-hidden tabs freeze and then unload, the chrome is one process, and nothing runs that you didn't ask for. numbers from `tools/vs_brave.py`, measured on 0.6.7.2.
+low memory, and a quiet place to read the web. with nothing open the whole thing sits around 36 MB on my laptop; hidden tabs freeze and then unload, the interface is one process, and nothing runs that you didn't ask for. numbers are from one machine, measured with `tools/vs_brave.py`, so treat them as a rough guide.
 
 ## what's in it
 
@@ -38,9 +33,19 @@ hidden tabs freeze and then unload, the chrome is one process, and nothing runs 
   <img src="docs/img/readme-precise.png" width="420" alt="precise">
 </p>
 
+## what it isn't
+
+- **not a security product.** pages run inside webview2, which windows keeps updated, but lumen's own code has never been audited. for banking and anything you can't afford to lose, use a mainstream browser.
+- **no extensions, no sync, no accounts.** there's a reader for a keepass file, but no password manager.
+- **the locks are a convenience.** a locked tab or the secret downloads keep things out of sight of someone using lumen. the secret folder is hidden, not encrypted; anyone signed in to windows as you can still find it.
+- **the ai agent side is experimental.** letting a model drive a browser has real risks: a page can try to talk the model into things. lumen hands logins, payments and messages back to you, but don't point agents at anything sensitive.
+- **windows 10 and 11, 64-bit only.** no mac, no linux.
+- **not signed**, so smartscreen will complain the first time.
+- **built with a lot of ai help.** i wrote it with claude doing much of the typing. it's tested, but bugs will be there, and settings may not survive every update.
+
 ## agents
 
-lumen speaks MCP. `lumen-agent.exe` is the bridge; each agent gets its own tabs and its own profile, and anything like paying, sending or logging in gets handed back to you.
+lumen speaks MCP. `lumen-agent.exe` is the bridge; each agent gets its own tabs and its own profile.
 
 ```
 claude mcp add -s user lumen -- %LOCALAPPDATA%\Programs\Lumen\lumen-agent.exe mcp
@@ -50,9 +55,7 @@ more in [docs/agents.md](docs/agents.md).
 
 ## install
 
-grab the installer from [releases](../../releases). windows 10 or 11, 64-bit. webview2 is already on every windows 11 machine.
-
-it isn't signed yet, so smartscreen may complain the first time.
+grab the installer from [releases](../../releases). webview2 is already on every windows 11 machine; the installer fetches it on windows 10 if it's missing.
 
 if something's off, `lumen.exe --doctor` checks the install and tells you what to fix.
 
@@ -67,5 +70,3 @@ rust 1.98+, windows only. `cargo test` runs the unit tests; the live suites in `
 ## license
 
 GPL-3.0. third-party pieces (ublock scriptlets, dark reader, readability, dompurify, bergamot, lucide) keep their own licenses, next to them in `assets/`.
-
-built with a lot of help from claude and a few other ai agents.
