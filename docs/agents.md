@@ -12,7 +12,7 @@ path. Never a secret.
 
 | Agent | How |
 |---|---|
-| Claude Code | `claude mcp add -s user lumen -- C:\Users\mremo\projects\browser\target\release\lumen-agent.exe mcp` |
+| Claude Code | `claude mcp add -s user lumen -- %LOCALAPPDATA%\Programs\Lumen\lumen-agent.exe mcp` |
 | opencode | in `~/.config/opencode/opencode.json`: `"mcp": {"lumen": {"type": "local", "command": ["...\\lumen-agent.exe", "mcp"]}}` |
 | Codex | in `~/.codex/config.toml`: `[mcp_servers.lumen]` `command = '...\lumen-agent.exe'` `args = ["mcp"]` |
 | Cursor, Windsurf, anything MCP | a stdio server: command `lumen-agent.exe`, argument `mcp` |

@@ -1,0 +1,18 @@
+name: bug
+description: something broke
+body:
+  - type: textarea
+    attributes:
+      label: what happened
+      description: what you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: lumen --doctor
+      description: run `lumen.exe --doctor` and paste what it says. it has no urls or page names in it.
+      render: text
+  - type: input
+    attributes:
+      label: version
+      description: settings > about, or `lumen-agent --version`.

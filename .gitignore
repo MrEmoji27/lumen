@@ -4,3 +4,7 @@
 # Brainstorm mockups (visual companion)
 .superpowers/
 /dist/
+
+# local
+/.commandcode/
+__pycache__/

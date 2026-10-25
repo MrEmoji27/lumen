@@ -1,0 +1,9 @@
+name: idea
+description: something lumen should do
+body:
+  - type: textarea
+    attributes:
+      label: the idea
+      description: what you'd want, and what it would save you.
+    validations:
+      required: true

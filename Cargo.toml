@@ -2,6 +2,9 @@
 name = "lumen"
 version = "0.6.7"
 edition = "2024"
+license = "GPL-3.0-or-later"
+description = "A browser for Windows that tries to stay out of your RAM."
+repository = "https://github.com/MrEmoji27/lumen"
 default-run = "lumen"
 
 # Lumen stays on the 0.6.7 line: the person's rule. The version people see is

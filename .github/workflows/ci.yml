@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --locked
+      - name: test
+        shell: pwsh
+        run: |
+          $env:LUMEN_DATA = Join-Path $env:RUNNER_TEMP "lumen-test"
+          cargo test --locked

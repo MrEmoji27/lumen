@@ -1,77 +1,71 @@
-# Lumen
+# lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low.
+a browser for windows that tries to stay out of your RAM.
 
-What Lumen is so far and where it goes next: [docs/lumen.md](docs/lumen.md).
+rust around webview2. every bit of interface (sidebar, tabs, menus, settings, file pickers) is drawn by hand with direct2d, no html.
 
-## Run it
+<p align="center">
+  <img src="docs/img/readme-signal-dark.png" width="860" alt="lumen, signal dark">
+</p>
+
+> [!WARNING]
+> the ui is unfinished. some screens are rough, some settings are missing, and things will move around between versions. it's my daily driver, but expect sharp edges.
+
+## why
+
+idle, nothing open, whole process tree, same machine:
+
+| | lumen | brave |
+|---|---|---|
+| idle | 36 MB | 151 MB |
+| one wikipedia tab | 49 MB | 192 MB |
+| 20 tabs, 6 min later | 124 MB | 1111 MB |
+
+hidden tabs freeze and then unload, the chrome is one process, and nothing runs that you didn't ask for. numbers from `tools/vs_brave.py`, measured on 0.6.7.2.
+
+## what's in it
+
+- ads and trackers blocked (adblock-rust, easylist, easyprivacy, ublock lists), cookie banners hidden, pop-ups and sneaky redirects stopped
+- a privacy report that only shows things it actually counted
+- tabs that sleep, show what they cost on hover, and leave sooner when they get heavy
+- downloads through aria2: many connections, resume, torrents
+- lock a tab, or all of lumen, with windows hello. a secret downloads folder too
+- offline translation, reader view, read aloud, split view, workspaces, pinned tabs
+- three looks: signal, glass, precise
+
+<p align="center">
+  <img src="docs/img/readme-glass.png" width="420" alt="glass">
+  <img src="docs/img/readme-precise.png" width="420" alt="precise">
+</p>
+
+## agents
+
+lumen speaks MCP. `lumen-agent.exe` is the bridge; each agent gets its own tabs and its own profile, and anything like paying, sending or logging in gets handed back to you.
+
+```
+claude mcp add -s user lumen -- %LOCALAPPDATA%\Programs\Lumen\lumen-agent.exe mcp
+```
+
+more in [docs/agents.md](docs/agents.md).
+
+## install
+
+grab the installer from [releases](../../releases). windows 10 or 11, 64-bit. webview2 is already on every windows 11 machine.
+
+it isn't signed yet, so smartscreen may complain the first time.
+
+if something's off, `lumen.exe --doctor` checks the install and tells you what to fix.
+
+## build
 
 ```
 cargo build --release
-target\release\lumen.exe
 ```
 
-Debug builds read `ui/` from disk at start, so UI edits need no recompile:
+rust 1.98+, windows only. `cargo test` runs the unit tests; the live suites in `tests/` drive a headless lumen.
 
-```
-cargo run
-```
+## license
 
-Data lives in `%APPDATA%\Lumen`: `settings.json`, `session.json`, `filters\`, and the WebView2 profile.
-Debug builds also write `debug.log` there.
+GPL-3.0. third-party pieces (ublock scriptlets, dark reader, readability, dompurify, bergamot, lucide) keep their own licenses, next to them in `assets/`.
 
-## Keys
-
-| Keys | Does |
-|---|---|
-| Ctrl+T | New tab, cursor in address bar |
-| Ctrl+Shift+T | Reopen closed tab |
-| Ctrl+W | Close tab |
-| Ctrl+L, Ctrl+K, F6 | Address bar |
-| Ctrl+Tab, Ctrl+Shift+Tab | Next, previous tab |
-| Ctrl+1..8, Ctrl+9 | Jump to tab, last tab |
-| Alt+Left, Alt+Right | Back, forward |
-| Ctrl+R, F5 | Reload |
-| Ctrl+B | Compact sidebar |
-| F11 | Fullscreen |
-| Ctrl+, | Settings |
-| Shift+Esc | Control: memory, CPU, network per tab, and limits |
-| F12, Ctrl+Shift+I | DevTools |
-| Ctrl+F | Find in page |
-
-## How it works
-
-One window. The chrome (sidebar, new tab page, settings, Control) is native: Direct2D and
-DirectWrite in one child window, real Windows edit boxes and menus. No webview runs until a
-page needs one. Idle with a new tab: 18 MB, one process.
-
-- `src/main.rs` owns tabs, layout, the session, and who sleeps.
-- `src/engine.rs` is the only file that talks to WebView2. Swap it to change engines.
-- `src/blocker.rs` kills ads and trackers at the network layer. EasyList, EasyPrivacy,
-  Peter Lowe, uBlock filters. About 2 microseconds a request. Matcher cached to disk.
-- `src/monitor.rs` measures each tab and holds the limiters.
-- `src/store.rs` is settings and session, JSON, written atomically.
-- `src/chrome/` is the native UI: `mod.rs` (window, input, sidebar, address bar, new tab),
-  `pages.rs` (settings and Control), `gfx.rs` (drawing), `theme.rs` (palettes).
-
-Memory rules:
-
-1. All pages share one browser process, one GPU process, one network process.
-2. On start, only the active tab loads. The rest wait until clicked.
-3. Hidden tab: no paint, low priority, caches trimmed.
-4. Hidden for 5 minutes: frozen. Wakes instantly.
-5. Hidden for 30 minutes: discarded. Its process dies. Click reloads it.
-6. Tabs playing sound never sleep. Pinned tabs freeze but are never discarded.
-7. Ads never load at all.
-8. Graphics run inside the browser process. Measured: a third less memory at idle.
-
-All the timers are in Settings > Performance. Control (Shift+Esc, or click the memory
-readout) shows each tab's memory, CPU and network, and holds three limits: a soft RAM
-limit (unloads the oldest hidden tab), a hard CPU cap (Windows Job Object over the whole
-browser), and a per-tab bandwidth cap. The footer shows live memory for the
-whole app, every process counted, the same way Task Manager counts it.
-
-## Engine
-
-WebView2, the Chromium engine that ships with Windows 11. Every site works and
-Microsoft patches it. Servo is the plan for later; `engine.rs` is the seam.
+built with a lot of help from claude and a few other ai agents.
