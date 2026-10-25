@@ -167,6 +167,14 @@ before each one. So:
 
 Replay and batch are one engine (`run_steps` in `src/agent.rs`). Scripts call the same one.
 
+### Check-up
+
+`browser_doctor` runs Lumen's check-up and answers in plain text, one line a check: WebView2, the
+data folder, filter lists, the pinned helpers, Windows Hello, the agent door, the bridge's build,
+the MCP clients that start it, the agents' disk, recent crashes. Anything not ok has a line of
+what to do. No addresses or paths. From a shell, `lumen-agent doctor` gives the same report
+without needing Lumen to be running.
+
 ### Scripts (Luau)
 
 A script is a batch with loops and ifs. The person writes them: `.luau` files in `scripts\` in the

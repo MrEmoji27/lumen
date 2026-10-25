@@ -9,7 +9,6 @@ use std::{
 pub enum Level {
     Ok,
     Warn,
-    Fail,
 }
 
 /// One finding: how it came out, what was found, what to do.

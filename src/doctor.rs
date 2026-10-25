@@ -123,9 +123,7 @@ pub fn run(live: &Live) -> Report {
         ("yt-dlp", video::ytdlp_state(&tools)),
         ("FFmpeg", video::ffmpeg_state(&tools)),
     ];
-    Report {
-        head: format!("Lumen {}", crate::VERSION),
-        rows: vec![
+    let mut rows = vec![
             webview_row(engine::runtime_version().as_deref()),
             folder_row(dir.is_dir(), probe_write(&dir), free_bytes(&dir)),
             files_row(parsed::<store::Settings>(&dir.join("settings.json")), parsed::<store::Session>(&dir.join("session.json"))),
@@ -133,10 +131,32 @@ pub fn run(live: &Live) -> Report {
             tools_row(&helpers),
             hello_row(hello::available(), live.locked),
             default_row(defaultapp::status()),
-            door_row(settings.agent, settings.agent_port, probe_door(settings.agent_port), live.in_app),
+            door_row(settings.agent, settings.agent_port, if live.in_app && settings.agent { Port::ThisLumen } else { probe_door(settings.agent_port) }, live.in_app),
             crashes_row(crash_last(&dir).as_deref(), unclean_exits(&dir.join("journal"), now_ms(), 7), 7),
-        ],
-    }
+    ];
+    rows.extend(agent_rows(&dir, settings.agent));
+    Report { head: format!("Lumen {}", crate::VERSION), rows }
+}
+
+/// The agents' side: the bridge, the MCP clients, the agents' disk. Quiet for someone who
+/// does not use agents at all.
+fn agent_rows(dir: &std::path::Path, door: bool) -> Vec<Row> {
+    use crate::agent_doctor as ad;
+    let from = |name: &'static str, f: ad::Finding| {
+        let mark = match f.0 {
+            ad::Level::Ok => Mark::Ok,
+            ad::Level::Warn => Mark::Warn,
+        };
+        row(name, mark, f.1, f.2)
+    };
+    let regs = dirs::home_dir().map(|h| ad::registrations(&h)).unwrap_or_default();
+    let bridge = if door || !regs.is_empty() {
+        let agent = ad::bridge_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| ad::exe_version(&b));
+        ad::bridge(env!("LUMEN_VERSION"), agent.as_deref())
+    } else {
+        (ad::Level::Ok, "agents not in use".to_string(), "")
+    };
+    vec![from("Agent bridge", bridge), from("MCP clients", ad::mcp(&regs)), from("Agent disk", ad::space(ad::agent_bytes(dir)))]
 }
 
 // ------------------------------------------------------------------- the checks

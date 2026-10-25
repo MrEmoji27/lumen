@@ -181,6 +181,8 @@ pub enum Op {
     Downloads,
     /// The facts `agent_policy::authorize` needs: tabs, owners, grants, settings.
     Policy,
+    /// Whether a lock is in use, for the doctor's Windows Hello row.
+    Locks,
     /// Test hook, debug builds only: press Done on the waiting handoff.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     TestDone,
@@ -300,6 +302,7 @@ impl std::fmt::Debug for Call {
             Op::Download { url, .. } => format!("download {url}"),
             Op::Downloads => "downloads".to_string(),
             Op::Policy => "policy".to_string(),
+            Op::Locks => "locks".to_string(),
             Op::TestDone => "test done".to_string(),
             Op::TestState => "test state".to_string(),
             Op::TestGrant { tab } => format!("test grant {tab}"),
@@ -1032,6 +1035,7 @@ pub fn tools() -> Value {
           json!({"tab": tab, "match": {"type": "string"}, "same_site": {"type": "boolean"}, "max": {"type": "integer", "description": "Default 100, at most 1000"}}), &["tab"]),
         t("browser_help", "Short usage and examples. topic optional.", json!({"topic": {"type": "string", "description": "Tool name, e.g. browser_click"}}), &[]),
         t("browser_status", "Session tabs, load state, running calls, pending handoff, downloads.", json!({}), &[]),
+        t("browser_doctor", "Lumen's check-up, as plain text: WebView2, the data folder, filter lists, pinned helpers, Windows Hello, the agent door, the bridge and MCP clients, recent crashes. One line each, with what to do. No addresses or paths.", json!({}), &[]),
         t("browser_whoami", "Who this session is: label, short id, profile, granted tabs, limiting settings.", json!({}), &[]),
         t("browser_consent", "Ask the person to approve a side effect. Blocks until approved/declined/timeout.", json!({"tab": tab, "kind": {"type": "string", "enum": ["download","submit","upload","other"]}, "message": {"type": "string"}, "timeout_ms": {"type": "integer"}}), &["tab"])
     ])}
@@ -2813,6 +2817,11 @@ fn run_tool(sh: &Arc<Shared>, who: &Who, name: &str, args: &Value, approval: &Ap
         "browser_status" => {
             let v = call(p, who, Op::Status)?;
             Ok(text(serde_json::to_string_pretty(&v).unwrap_or_default()))
+        }
+        "browser_doctor" => {
+            // The checks read files and ask Windows: they run here, never on Lumen's window thread.
+            let locked = call(p, who, Op::Locks)?.as_bool().unwrap_or(false);
+            Ok(text(crate::doctor::run(&crate::doctor::Live { in_app: true, locked }).text()))
         }
         "browser_whoami" => {
             let ctxv = call(p, who, Op::Policy)?;

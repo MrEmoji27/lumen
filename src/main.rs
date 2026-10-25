@@ -8,7 +8,6 @@ mod address;
 mod archive;
 mod aria;
 mod agent;
-#[allow(dead_code)]
 mod agent_doctor;
 mod agent_policy;
 mod agentkit;
@@ -7804,6 +7803,9 @@ impl App {
                     .map(|t| json!({"tab": t.id, "title": t.title, "url": t.url, "front": t.id == self.active, "yours": t.agent, "crashed": t.crashed}))
                     .collect();
                 let _ = reply.send(Ok(Value::Array(list)));
+            }
+            Op::Locks => {
+                let _ = reply.send(Ok(json!(self.app_locked || self.tabs.iter().any(|t| t.locked))));
             }
             Op::Policy => {
                 let tabs = self.tabs.iter().map(|t| agent_policy::TabInfo { id: t.id, agent: t.agent, owner: t.owner.clone(), granted: self.agent_granted(t) }).collect();

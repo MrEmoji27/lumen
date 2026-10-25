@@ -175,6 +175,7 @@ pub const RULES: &[Rule] = &[
     rule("browser_close", Scope::OwnTab, Gate::Nothing),
     rule("browser_help", Scope::Free, Gate::Nothing),
     rule("browser_status", Scope::Free, Gate::Nothing),
+    rule("browser_doctor", Scope::Free, Gate::Nothing),
     rule("browser_whoami", Scope::Free, Gate::Nothing),
     rule("browser_consent", Scope::Tab, Gate::Nothing),
     // Runs of other tools: each step is authorized on its own, so the run itself needs nothing.
