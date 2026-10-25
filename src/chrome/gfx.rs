@@ -417,6 +417,31 @@ impl Gfx {
         unsafe { self.t().PopAxisAlignedClip() };
     }
 
+    /// What follows is drawn faded to `opacity` and moved down `dy`, until `end_fade`. A card's
+    /// entrance. Only while it moves: a settled card draws without the layer.
+    pub fn begin_fade(&self, opacity: f32, dy: f32) {
+        unsafe {
+            let p = D2D1_LAYER_PARAMETERS {
+                contentBounds: D2D_RECT_F { left: -1.0e6, top: -1.0e6, right: 1.0e6, bottom: 1.0e6 },
+                geometricMask: std::mem::ManuallyDrop::new(None),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: windows_numerics::Matrix3x2::identity(),
+                opacity: opacity.clamp(0.0, 1.0),
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+            };
+            self.t().PushLayer(&p, None);
+            self.t().SetTransform(&windows_numerics::Matrix3x2::translation(0.0, dy));
+        }
+    }
+
+    pub fn end_fade(&self) {
+        unsafe {
+            self.t().SetTransform(&windows_numerics::Matrix3x2::identity());
+            self.t().PopLayer();
+        }
+    }
+
     // ------------------------------------------------------------- text
 
     /// Choose the interface, display and monospace families by setting. A key

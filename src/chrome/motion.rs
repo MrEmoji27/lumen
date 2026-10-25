@@ -43,6 +43,8 @@ pub enum Id {
     Mark(usize),
     /// The glance card's dim wash over the page.
     Glance,
+    /// A download's row, by its id: the progress bar gliding to each new reading.
+    Dl(u64),
     /// Something with no component of its own: the new tab page's entrance, the
     /// suggestion list, the slid highlight.
     Named(&'static str),

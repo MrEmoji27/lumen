@@ -12,6 +12,7 @@ use serde_json::json;
 
 use super::{
     Hit, Inner, UiState,
+    motion::{Ease, Id, Prop},
     gfx::{Align, R},
     group_digits,
     pages::{close_button, column, empty_state, group_label, site_icon, title_block},
@@ -157,7 +158,9 @@ fn blocked_panel(i: &mut Inner, col: R, y: f32, c: &Counts, prev: &Counts, range
         Style::Precise => (8.0, 0.0, 1.0),
     };
     let bar = R::new(inner.x, inner.y + 66.0, inner.w, bh);
-    let usable = bar.w - gap * (kinds.len() as f32 - 1.0);
+    // The bar fills from the left the first time the page is drawn.
+    let grow = i.motion.enter(Id::Named("report-blocked"), Prop::Progress, 0.0, 1.0, 520, Ease::OutQuint);
+    let usable = (bar.w - gap * (kinds.len() as f32 - 1.0)) * grow;
     let mut x = bar.x;
     for (k, (name, n)) in kinds.iter().enumerate() {
         let w = (usable * of(*n)).max(4.0).min(bar.right() - x);
@@ -359,6 +362,8 @@ fn draw_bars(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     panel(i, frame);
     let inner = R::new(frame.x + 20.0, frame.y + 18.0, frame.w - 40.0, 112.0);
     let top = bars.iter().map(|b| b.blocked).max().unwrap_or(0).max(1) as f32;
+    // The days rise from the baseline the first time the page is drawn.
+    let rise = i.motion.enter(Id::Named("report-days"), Prop::Progress, 0.0, 1.0, 620, Ease::OutQuint);
     if style == Style::Precise {
         // The grid: a baseline and two quiet lines at a third and two thirds.
         for k in 0..3 {
@@ -373,7 +378,7 @@ fn draw_bars(i: &mut Inner, col: R, y: f32, snap: &Snapshot) -> f32 {
     let last = bars.len() - 1;
     for (n, b) in bars.iter().enumerate() {
         let today = n == last;
-        let bh = (b.blocked as f32 / top * inner.h).max(if b.blocked > 0 { 3.0 } else { 0.0 });
+        let bh = (b.blocked as f32 / top * inner.h).max(if b.blocked > 0 { 3.0 } else { 0.0 }) * rise;
         let cx = inner.x + n as f32 * step + step / 2.0;
         match style {
             Style::Signal => {
