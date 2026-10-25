@@ -8,6 +8,20 @@ The rule: Lumen stays on the 0.6.7 line. A release build that goes to the person
 number: a batch of new features bumps the fourth part (0.6.7.5 -> 0.6.7.6), a small fix adds or
 bumps the last one (0.6.7.6 -> 0.6.7.6.1).
 
+## 0.6.7.8 — 2026-10-25
+
+- **A check-up.** `lumen.exe --doctor` checks the install: WebView2, the data folder, the
+  filter lists, aria2, yt-dlp and FFmpeg, the disk, the agent door and the bridge. Each line
+  says ok, a warning, or what to fix. The same check is in Settings > About, and an agent can
+  ask for it with `browser_doctor`.
+- **Things move a little.** Cards fade in and out, the report's bars grow, download bars
+  glide. Short, and nothing moves when nothing changed.
+- **The usage journal has a switch.** Settings > Privacy, "Keep a usage journal".
+- **Share your numbers.** Settings > About builds a report from the journal with every address
+  and site scrubbed out, shows all of it, and sends only when you press Send.
+- **The credit can be hidden.** Settings > About.
+- **The report has an icon for every row.**
+
 ## 0.6.7.7 — 2026-10-25
 
 - **The privacy report, redrawn.** The total blocked, one bar of what it
