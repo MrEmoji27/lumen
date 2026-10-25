@@ -42,6 +42,8 @@ pub enum FormAct {
     SignIn { aid: u64 },
     /// A site that may open pop-ups of its own.
     PopupSite,
+    /// A site that may send the page to another site on its own.
+    RedirectSite,
 }
 
 impl FormAct {
@@ -314,6 +316,20 @@ fn submit(i: &mut Inner, act: &FormAct, a: &[String]) {
             }
             list.push(host);
             super::pages::set(i, "popup_sites", json!(list));
+        }
+        FormAct::RedirectSite => {
+            // A host the person trusts to send them elsewhere.
+            let Some(host) = a.first().map(|v| crate::popup::host_of(v)) else { return };
+            if host.is_empty() {
+                i.page.flash = Some(("That is not a site name".into(), Instant::now()));
+                return;
+            }
+            let mut list = s.settings.redirect_sites.clone();
+            if list.contains(&host) {
+                return;
+            }
+            list.push(host);
+            super::pages::set(i, "redirect_sites", json!(list));
         }
     }
 }

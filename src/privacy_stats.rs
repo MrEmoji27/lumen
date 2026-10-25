@@ -110,6 +110,8 @@ pub struct Counts {
     #[serde(skip_serializing_if = "is_zero")]
     pub popups: u64,
     #[serde(skip_serializing_if = "is_zero")]
+    pub redirects: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub webrtc: u64,
     #[serde(skip_serializing_if = "is_zero")]
     pub signals: u64,
@@ -147,6 +149,7 @@ impl Counts {
         self.scriptlets += o.scriptlets;
         self.sponsor += o.sponsor;
         self.popups += o.popups;
+        self.redirects += o.redirects;
         self.webrtc += o.webrtc;
         self.signals += o.signals;
         self.wrong_password += o.wrong_password;
@@ -693,6 +696,13 @@ pub fn popup(site: &str, who: Who) {
     with(|s| s.put(&day, site, who, true, |c| c.popups += 1));
 }
 
+/// A redirect Lumen stopped: a page sending the person to another site on its
+/// own, a moment after it loaded.
+pub fn redirect(site: &str, who: Who) {
+    let day = local_date(now_secs());
+    with(|s| s.put(&day, site, who, true, |c| c.redirects += 1));
+}
+
 /// An RTCPeerConnection the page made. Lumen forced the public interface only,
 /// so the local IP never left; this counts the attempt.
 pub fn rtc(site: &str, who: Who) {
@@ -1037,6 +1047,7 @@ mod tests {
         let secret = Who::new(2, true, false);
         let agent = Who::new(3, false, true);
         s.put(&d, "news.example", me, true, |c| c.popups += 1);
+        s.put(&d, "news.example", me, true, |c| c.redirects += 1);
         s.put(&d, "news.example", me, false, |c| c.webrtc += 2);
         s.put(&d, "news.example", me, false, |c| c.signals += 3);
         s.put(&d, "news.example", me, false, |c| c.wrong_password += 1);
@@ -1048,6 +1059,7 @@ mod tests {
 
         let day_file = &s.file.days[&d];
         assert_eq!(day_file.counts.popups, 1);
+        assert_eq!(day_file.counts.redirects, 1);
         assert_eq!(day_file.counts.webrtc, 2);
         assert_eq!(day_file.counts.signals, 3);
         assert_eq!(day_file.counts.wrong_password, 1);
@@ -1060,15 +1072,16 @@ mod tests {
         assert_eq!(day_file.counts.malicious, 2, "only the two non-agent ones landed on the day");
         // Sites: private and agent leave no site.
         assert_eq!(day_file.sites["news.example"].popups, 1);
+        assert_eq!(day_file.sites["news.example"].redirects, 1);
         assert_eq!(day_file.sites["news.example"].malicious, 1);
         assert!(!day_file.sites.contains_key("evil.example"));
         assert!(!day_file.sites.contains_key("agent.example"));
         // Domains follow the same rule as sites: only the person's non-private tab.
         assert_eq!(s.file.domains.get("bad.example"), Some(&1), "only the person's hit is recorded");
         assert!(!s.file.domains.contains_key("evil.example"));
-        // The chip: popup and malicious count, the rest do not. It is memory,
+        // The chip: popup, redirect and malicious count, the rest do not. It is memory,
         // so the private tab's own page counts in it too.
-        assert_eq!(s.tab[&1], 2, "the popup and the malicious block on this page");
+        assert_eq!(s.tab[&1], 3, "the popup, the redirect and the malicious block on this page");
         assert_eq!(s.tab[&2], 1, "the private tab's malicious block counts in its own chip");
     }
 
@@ -1118,6 +1131,7 @@ mod tests {
         assert_eq!(d.counts.ads, 5);
         assert_eq!(d.counts.trackers, 3);
         assert_eq!(d.counts.popups, 0, "new fields default to zero");
+        assert_eq!(d.counts.redirects, 0);
         assert_eq!(d.counts.webrtc, 0);
         assert_eq!(d.counts.danger, 0);
         assert_eq!(d.counts.malicious, 0);

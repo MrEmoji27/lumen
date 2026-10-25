@@ -647,6 +647,19 @@ struct Aloud {
     playing: bool,
 }
 
+/// A note over the page about something Lumen stopped: a pop-up, or a page
+/// sending the person to another site. One per tab; the newest replaces the old.
+struct BlockNote {
+    kind: chrome::NoteKind,
+    /// The host the page wanted to go to, as the note shows it.
+    target: String,
+    /// The host of the page that asked. "Allow on <site>" adds this one.
+    site: String,
+    /// The whole address a redirect wanted to load: "Go anyway" loads it once.
+    url: String,
+    at: Instant,
+}
+
 struct App {
     ctx: Rc<Ctx>,
     chrome: chrome::Chrome,
@@ -836,9 +849,9 @@ struct App {
     /// A torrent that has been looking for a long time with nobody answering
     /// is the swarm's doing, and the row says so.
     aria_since: HashMap<String, Instant>,
-    /// A pop-up Lumen stopped, by tab: the host it wanted, the host that asked,
-    /// and when. One notice per tab: the newest replaces the old.
-    popup_notes: HashMap<u64, (String, String, Instant)>,
+    /// A pop-up or a redirect Lumen stopped, by tab: what it wanted, the site
+    /// that asked, and when. One notice per tab: the newest replaces the old.
+    block_notes: HashMap<u64, BlockNote>,
     /// The translator page is open. Only alive while a translation is in the air.
     translator: Option<translate::Page>,
     /// Servo, when the feature is compiled in and a Servo tab has been opened.
@@ -1105,6 +1118,13 @@ fn main() {
         next_id: Cell::new(1),
         popups: RefCell::new(Vec::new()),
         popup_policy: RefCell::new(popup::Policy { block: settings.block_popups, trusted: settings.popup_sites.clone() }),
+        redirect_policy: Rc::new(RefCell::new(popup::RedirectPolicy {
+            block: settings.block_redirects,
+            allowed: settings.redirect_sites.clone(),
+        })),
+        docs: Rc::new(RefCell::new(HashMap::new())),
+        redirect_pass: Rc::new(RefCell::new(None)),
+        api_nav: Rc::new(RefCell::new(HashMap::new())),
         dark: Cell::new(dark),
         on_built: RefCell::new(None),
         web_context: RefCell::new(wry::WebContext::new(Some(store::data_dir().join("WebView2")))),
@@ -1275,7 +1295,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         aria_page: HashSet::new(),
         aria_hold: HashMap::new(),
         aria_since: HashMap::new(),
-        popup_notes: HashMap::new(),
+        block_notes: HashMap::new(),
         translator: None,
         #[cfg(feature = "servo")]
         servo: None,
@@ -1763,6 +1783,16 @@ fn classify_input(raw: &str, search: &str) -> Option<(String, bool)> {
 /// The same page, give or take case and a trailing slash.
 fn same_page(a: &str, b: &str) -> bool {
     a.trim_end_matches('/').eq_ignore_ascii_case(b.trim_end_matches('/'))
+}
+
+/// Whether a tab about to be opened is private.
+///
+/// `setting` is "Open new tabs as private", and `asked` is a request that named
+/// privacy itself: Ctrl+Shift+N, or the page menu's private tab. An agent's tab
+/// is never made private by the setting. Tabs restored from the session do not
+/// come through here at all: they keep what they were saved as.
+fn opens_private(setting: bool, asked: bool, agent: bool) -> bool {
+    !agent && (asked || setting)
 }
 
 /// What a typed host's answer means.
@@ -2567,10 +2597,11 @@ impl App {
                         ask: ask.clone(),
                         many: self.idx(*tab).is_some_and(|i| self.tabs[i].asks_n >= 2),
                     }),
-                popup_note: self.popup_notes.get(&self.active).map(|(target, site, _)| chrome::UiPopup {
+                popup_note: self.block_notes.get(&self.active).map(|n| chrome::UiPopup {
                     tab: self.active,
-                    target: target.clone(),
-                    site: site.clone(),
+                    kind: n.kind,
+                    target: n.target.clone(),
+                    site: n.site.clone(),
                 }),
                 battery: self.power_saving(),
                 secret_open: self.secret_open,
@@ -2944,6 +2975,7 @@ impl App {
         // process left no view; ensure_view already built a fresh one.)
         if self.tabs[i].crashed {
             self.tabs[i].crashed = false;
+            self.asked_nav(self.tabs[i].id);
             if let Some(v) = &self.tabs[i].view {
                 let _ = v.load_url(&self.tabs[i].url);
             }
@@ -3056,29 +3088,35 @@ impl App {
     }
 
     fn new_tab(&mut self, url: Option<String>, after: Option<usize>) -> u64 {
+        self.open_tab(url, after, false)
+    }
+
+    /// Ctrl+Shift+N, or the tab menu. WebView2 InPrivate: no cookies outlive the
+    /// last private page, and Lumen writes nothing about it anywhere.
+    fn new_private_tab(&mut self) -> u64 {
+        self.open_tab(None, None, true)
+    }
+
+    /// Every tab the person opens comes through here: Ctrl+T, the +, "New tab",
+    /// the palette, a link in a new tab, and Ctrl+Shift+N. One place, so "Open
+    /// new tabs as private" cannot miss one. `asked` is a request that named
+    /// privacy itself.
+    fn open_tab(&mut self, url: Option<String>, after: Option<usize>, asked: bool) -> u64 {
         let id = self.ctx.alloc_id();
+        let private = opens_private(self.settings.private_tabs, asked, false);
         let mut t = Tab::new(id, url.unwrap_or_default());
+        t.private = private;
         t.workspace = self.active_workspace;
+        if private {
+            // The opening itself is not private: one line, no content.
+            journal::feature("private_tab", false);
+        }
         let floor = self.pinned_count();
         match after {
             Some(i) if i < self.tabs.len() => self.tabs.insert((i + 1).max(floor), t),
             _ => self.tabs.push(t),
         }
         self.activate(id);
-        id
-    }
-
-    /// Ctrl+Shift+N, or the tab menu. WebView2 InPrivate: no cookies outlive the
-    /// last private page, and Lumen writes nothing about it anywhere.
-    fn new_private_tab(&mut self) -> u64 {
-        let id = self.ctx.alloc_id();
-        let mut t = Tab::new(id, String::new());
-        t.private = true;
-        t.workspace = self.active_workspace;
-        self.tabs.push(t);
-        self.activate(id);
-        // The opening itself is not private: one line, no content.
-        journal::feature("private_tab", false);
         id
     }
 
@@ -3155,6 +3193,9 @@ impl App {
             self.listen_stop();
         }
         self.spb.remove(&id);
+        // The page a redirect rule would have compared against is gone.
+        self.ctx.docs.borrow_mut().remove(&id);
+        self.ctx.api_nav.borrow_mut().remove(&id);
         // Closing either half of a split leaves one page again. When the focused half
         // goes, the other one takes the whole stage instead of being left behind.
         let keep = if id == self.active { self.split.take() } else { None };
@@ -3232,6 +3273,9 @@ impl App {
         if t.id == self.active || !t.has_page() {
             return;
         }
+        // The page is going; its loaded-at says nothing about the next one.
+        self.ctx.docs.borrow_mut().remove(&t.id);
+        self.ctx.api_nav.borrow_mut().remove(&t.id);
         if let Some(w) = self.watches.remove(&t.id) {
             monitor::unwatch(None, w, true);
         }
@@ -3277,6 +3321,8 @@ impl App {
         self.pane_right = false;
         while let Some(t) = self.tabs.pop() {
             self.agent_logs.borrow_mut().remove(&t.id);
+            self.ctx.docs.borrow_mut().remove(&t.id);
+            self.ctx.api_nav.borrow_mut().remove(&t.id);
             if let Some(w) = self.watches.remove(&t.id) {
                 monitor::unwatch(None, w, true);
             }
@@ -3925,6 +3971,14 @@ impl App {
         self.apply_settings(s);
     }
 
+    /// The person asked for a navigation from Lumen itself: the address bar, a
+    /// bookmark, a history row, a pin coming home. WebView2 reports a page's own
+    /// navigation as user-initiated too (measured on 2026-10-25), so the
+    /// redirect rule is told which ones Lumen started.
+    fn asked_nav(&self, id: u64) {
+        self.ctx.api_nav.borrow_mut().insert(id, Instant::now());
+    }
+
     fn navigate(&mut self, raw: &str) {
         let Some((url, bare)) = classify_input(raw, &self.settings.search) else { return };
         // A magnet link is not a page: hand it to aria2 instead of loading it.
@@ -3955,6 +4009,7 @@ impl App {
             return;
         }
         if let Some(v) = &self.tabs[i].view {
+            self.asked_nav(self.tabs[i].id);
             let _ = v.load_url(&url);
             self.tabs[i].url = url;
         } else {
@@ -4287,6 +4342,11 @@ impl App {
         }
         // The pop-up rules the engine reads at every new-window request.
         self.ctx.popup_policy.replace(popup::Policy { block: self.settings.block_popups, trusted: self.settings.popup_sites.clone() });
+        // ... and the redirect rules it reads at every navigation.
+        self.ctx.redirect_policy.replace(popup::RedirectPolicy {
+            block: self.settings.block_redirects,
+            allowed: self.settings.redirect_sites.clone(),
+        });
         if old.perm_defaults != self.settings.perm_defaults {
         }
         if old.default_zoom != self.settings.default_zoom {
@@ -4558,7 +4618,7 @@ impl App {
             Ev::NavStart(id, url) => {
                 // A page that goes somewhere else has said what it wanted: the
                 // note about a pop-up it did not get is gone with it.
-                if self.popup_notes.remove(&id).is_some() {
+                if self.block_notes.remove(&id).is_some() {
                     self.push();
                 }
                 if let Some(i) = self.idx(id) {
@@ -5362,6 +5422,9 @@ impl App {
                 if let Some(i) = self.idx(id)
                     && let Some(v) = &self.tabs[i].view
                 {
+                    // Lumen stopped the link to strip its tracking tags and is
+                    // starting the clean one itself: the page did not do this.
+                    self.asked_nav(id);
                     let _ = v.load_url(&url);
                     self.tabs[i].url = url;
                 }
@@ -5410,13 +5473,32 @@ impl App {
                 // page, with the way back: allow this site, or let it go.
                 // An agent's tab gets no note: nobody is watching it.
                 if self.idx(tab).is_some_and(|i| !self.tabs[i].agent) {
-                    self.popup_notes.insert(tab, (target, site, Instant::now()));
+                    self.block_notes.insert(
+                        tab,
+                        BlockNote { kind: chrome::NoteKind::Popup, target, site, url: String::new(), at: Instant::now() },
+                    );
+                    self.push();
+                }
+            }
+            Ev::RedirectBlocked(tab, url, site) => {
+                // A page tried to send the person to another site on its own. The
+                // same note, with "Go anyway" as well as "Allow on this site".
+                // An agent's tab gets no note: nobody is watching it.
+                if self.idx(tab).is_some_and(|i| !self.tabs[i].agent) {
+                    let target = host_of(&url);
+                    self.block_notes.insert(
+                        tab,
+                        BlockNote { kind: chrome::NoteKind::Redirect, target, site, url, at: Instant::now() },
+                    );
                     self.push();
                 }
             }
             Ev::Popup(id, parent) => {
-                let private = self.idx(parent).is_some_and(|i| self.tabs[i].private);
                 let agent = self.idx(parent).is_some_and(|i| self.tabs[i].agent);
+                // A link opened in a new tab is a new tab of the person's: private
+                // when the setting says so, and a private page's popup stays private.
+                let parent_private = self.idx(parent).is_some_and(|i| self.tabs[i].private);
+                let private = opens_private(self.settings.private_tabs, parent_private, agent);
                 let (owner, owner_name, profile, downloads, own_env) = self
                     .idx(parent)
                     .map(|i| {
@@ -5664,22 +5746,37 @@ impl App {
                 self.push();
             }
             "popupAllow" => {
-                // The person said this site may open pop-ups. It is remembered,
-                // and the note has done its work.
+                // The person said this site may open pop-ups (or redirect). It is
+                // remembered, and the note has done its work. A redirect note's
+                // "Allow on <site>" also loads the page it was holding back.
                 let id = m["id"].as_u64().unwrap_or(0);
                 let site = m["site"].as_str().unwrap_or("").trim().to_string();
+                let redirect = m["kind"].as_str() == Some("redirect");
                 let host = blocker::site_key(&site);
-                if !host.is_empty() && !self.settings.popup_sites.contains(&host) {
+                if !host.is_empty() {
                     let mut s = self.settings.clone();
-                    s.popup_sites.push(host);
-                    self.apply_settings(s);
+                    let list = if redirect { &mut s.redirect_sites } else { &mut s.popup_sites };
+                    if !list.contains(&host) {
+                        list.push(host);
+                        self.apply_settings(s);
+                    }
                 }
-                self.popup_notes.remove(&id);
+                if redirect {
+                    self.redirect_go(id);
+                }
+                self.block_notes.remove(&id);
+                self.push();
+            }
+            "redirectGo" => {
+                // "Go anyway": this one page, this once, in this tab.
+                let id = m["id"].as_u64().unwrap_or(0);
+                self.redirect_go(id);
+                self.block_notes.remove(&id);
                 self.push();
             }
             "popupDismiss" => {
                 let id = m["id"].as_u64().unwrap_or(0);
-                self.popup_notes.remove(&id);
+                self.block_notes.remove(&id);
                 self.push();
             }
             "bugSave" => {
@@ -5760,11 +5857,12 @@ impl App {
             "pinBack" => {
                 // A pin that wandered goes back to the page it was pinned on.
                 if let Some(i) = self.idx(id) {
-                    let t = &mut self.tabs[i];
-                    let url = t.pin_url.clone();
-                    if (t.pinned || t.essential) && !url.is_empty() {
-                        t.url = url.clone();
-                        if let Some(v) = &t.view {
+                    let url = self.tabs[i].pin_url.clone();
+                    let pin = self.tabs[i].pinned || self.tabs[i].essential;
+                    if pin && !url.is_empty() {
+                        self.tabs[i].url = url.clone();
+                        self.asked_nav(self.tabs[i].id);
+                        if let Some(v) = &self.tabs[i].view {
                             let _ = v.load_url(&url);
                         }
                         self.dirty = true;
@@ -5789,6 +5887,7 @@ impl App {
                 if let Some(i) = self.tabs.iter().position(|t| t.essential && t.pin_url == home) {
                     let url = self.tabs[i].pin_url.clone();
                     self.tabs[i].url = url.clone();
+                    self.asked_nav(self.tabs[i].id);
                     if let Some(v) = &self.tabs[i].view {
                         let _ = v.load_url(&url);
                     }
@@ -7043,6 +7142,7 @@ impl App {
                 let Some(t) = self.tabs[i].typed.take() else { return true };
                 let url = self.settings.search.replace("%s", &url_encode(&t.raw));
                 journal::feature("typed_name_search", self.tabs[i].private);
+                self.asked_nav(self.tabs[i].id);
                 if let Some(v) = &self.tabs[i].view {
                     let _ = v.load_url(&url);
                 }
@@ -7251,17 +7351,17 @@ impl App {
             self.push();
         }
 
-        // A note about a stopped pop-up does not stay for long: the person has
-        // seen it, or has not.
+        // A note about a stopped pop-up or redirect does not stay for long: the
+        // person has seen it, or has not.
         let old: Vec<u64> = self
-            .popup_notes
+            .block_notes
             .iter()
-            .filter(|(_, (_, _, at))| now.duration_since(*at) > Duration::from_secs(6))
+            .filter(|(_, n)| now.duration_since(n.at) > Duration::from_secs(6))
             .map(|(id, _)| *id)
             .collect();
         if !old.is_empty() {
             for id in old {
-                self.popup_notes.remove(&id);
+                self.block_notes.remove(&id);
             }
             self.push();
         }
@@ -8512,6 +8612,27 @@ impl App {
         self.push();
     }
 
+    /// The note's way through: load the address a redirect was holding back,
+    /// once, in this tab. "Go anyway" and "Allow on <site>" both come here.
+    fn redirect_go(&mut self, id: u64) {
+        let Some(note) = self.block_notes.get(&id) else { return };
+        if note.kind != chrome::NoteKind::Redirect || note.url.is_empty() {
+            return;
+        }
+        let url = note.url.clone();
+        let Some(i) = self.idx(id) else { return };
+        // The rule would stop this one too: the person is the one asking now.
+        self.ctx.redirect_pass.replace(Some((id, url.clone())));
+        self.tabs[i].url = url.clone();
+        if let Some(v) = &self.tabs[i].view {
+            let _ = v.load_url(&url);
+        } else {
+            self.ensure_view(i);
+        }
+        self.dirty = true;
+        self.push();
+    }
+
     /// Open the address bar's lock: ask how many cookies the site has.
     fn ask_site_cookies(&mut self) {
         let Some(t) = self.active_tab() else { return };
@@ -8715,7 +8836,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{HEAVY_AFTER, HEAVY_MEM, METADATA_PATIENCE, NEVER, sleep_durations, SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, magnet_label, metadata_note, next_sleep_step_after, keepable, magnet_hold, magnet_name, resolve_input, same_page, should_auto_resume, typed_verdict};
+    use super::{HEAVY_AFTER, HEAVY_MEM, METADATA_PATIENCE, NEVER, sleep_durations, SleepState, SleepStep, TRIM_AFTER, Tab, Unloadable, unload_victim, classify_input, due_sleep_step, magnet_label, metadata_note, next_sleep_step_after, keepable, magnet_hold, magnet_name, opens_private, resolve_input, same_page, should_auto_resume, typed_verdict};
     use std::time::Duration;
 
     /// A normal tab, a private one and an agent one; only the normal one may be saved.
@@ -8852,6 +8973,20 @@ mod tests {
         assert_eq!(typed_verdict(true, false, 6), Forget);
         assert!(same_page("https://a.com", "https://A.com/"));
         assert!(!same_page("https://a.com", "https://b.com/"));
+    }
+
+    /// "Open new tabs as private" covers every new tab the person opens, and
+    /// never an agent's; a request that named privacy gets one either way.
+    #[test]
+    fn new_tabs_are_private_when_the_setting_or_the_person_asks() {
+        // Off, nothing asked: an ordinary tab.
+        assert!(!opens_private(false, false, false));
+        // The setting on: every new tab the person opens.
+        assert!(opens_private(true, false, false));
+        // Ctrl+Shift+N with the setting off.
+        assert!(opens_private(false, true, false));
+        // An agent's tab is never made private by the setting.
+        assert!(!opens_private(true, false, true));
     }
 
     fn st(audio: bool, trimmed: bool, suspended: bool, pinned: bool) -> SleepState {

@@ -101,6 +101,9 @@ pub enum Ev {
     Hello(&'static str, u64, crate::hello::Verdict),
     /// Whether this PC has Windows Hello set up at all.
     HelloReady(bool),
+    /// A redirect Lumen stopped: the tab, the address the page wanted to go to,
+    /// and the host of the page that asked.
+    RedirectBlocked(u64, String, String),
     Download(Dl),
     /// A site asks for a permission. Answer with `answer_permission(pid, ..)`.
     Permission { pid: u64, tab: u64, origin: String, kind: &'static str },
@@ -340,6 +343,18 @@ pub struct Ctx {
     pub popup_info: Rc<RefCell<VecDeque<(bool, String, u64)>>>,
     /// Pop-up protection: the setting, and the sites whose pop-ups are allowed.
     pub popup_policy: RefCell<crate::popup::Policy>,
+    /// Redirect protection: the setting, and the sites that may redirect.
+    pub redirect_policy: Rc<RefCell<crate::popup::RedirectPolicy>>,
+    /// What each tab's page is now, for the redirect rule: its address and when
+    /// it finished loading. A new document starts unloaded.
+    pub docs: Rc<RefCell<HashMap<u64, Doc>>>,
+    /// One navigation the person let through by hand: (tab, address). The next
+    /// navigation that matches it is not stopped again.
+    pub redirect_pass: Rc<RefCell<Option<(u64, String)>>>,
+    /// Navigations Lumen itself started (the address bar, a bookmark, a history
+    /// row, a pin coming home), by tab, and when. WebView2 cannot tell them from
+    /// a page's own, so the main loop says.
+    pub api_nav: Rc<RefCell<HashMap<u64, Instant>>>,
     /// What each page did last: the click it saw, and the window a script opened.
     /// A new document starts with nothing; the last click of the old one says
     /// nothing about this one.
@@ -355,6 +370,15 @@ pub struct Ctx {
 pub struct PendingEnv {
     pub key: String,
     rx: std::sync::mpsc::Receiver<Result<ICoreWebView2Environment, String>>,
+}
+
+/// What a tab's page is, as far as the redirect rule needs to know: the address
+/// showing, and when it finished loading. `None` while a document loads, so a
+/// site's own routing during load is never mistaken for a redirect.
+#[derive(Clone, Debug, Default)]
+pub struct Doc {
+    pub url: String,
+    pub loaded: Option<Instant>,
 }
 
 impl Ctx {
@@ -663,7 +687,21 @@ fn build_tab_in(
     // Tracking prevention is a setting of the profile, and InPrivate pages and the agent's
     // pages each have a profile of their own. Every page says it again; it costs nothing.
     set_tracking(&wv, &ctx.tracking.borrow());
-    hook_page(&wv, id, ctx.proxy.clone(), ctx.rewrite.borrow().clone(), ctx.https.clone(), ctx.clicks.clone(), who);
+    hook_page(
+        &wv,
+        id,
+        ctx.proxy.clone(),
+        ctx.rewrite.borrow().clone(),
+        NavRules {
+            https: ctx.https.clone(),
+            redirect: ctx.redirect_policy.clone(),
+            docs: ctx.docs.clone(),
+            pass: ctx.redirect_pass.clone(),
+            api_nav: ctx.api_nav.clone(),
+        },
+        ctx.clicks.clone(),
+        who,
+    );
     hook_zoom(&wv, id, ctx.proxy.clone());
     crate::glance::hook(&wv, id, ctx.proxy.clone());
     hook_downloads(ctx, &wv, id, private);
@@ -1021,21 +1059,53 @@ fn title_pacer(id: u64, proxy: EventLoopProxy<Ev>) -> impl Fn(String) + 'static 
     }
 }
 
+/// Whether a navigation is a back, a forward or a reload. No click reported
+/// those, though the person asked for them; without this, the redirect rule
+/// would stop a Back to another site.
+fn history_nav(args: &ICoreWebView2NavigationStartingEventArgs) -> bool {
+    let Ok(third) = args.cast::<ICoreWebView2NavigationStartingEventArgs3>() else {
+        // An older runtime cannot say which kind it is. Let it through rather
+        // than stop a Back the person asked for.
+        return true;
+    };
+    let mut kind = COREWEBVIEW2_NAVIGATION_KIND_NEW_DOCUMENT;
+    if unsafe { third.NavigationKind(&mut kind) }.is_err() {
+        return true;
+    }
+    kind == COREWEBVIEW2_NAVIGATION_KIND_BACK_OR_FORWARD || kind == COREWEBVIEW2_NAVIGATION_KIND_RELOAD
+}
+
+/// The per-tab rules the navigation hook reads: plain http to https, redirects,
+/// and what each tab's page is.
+struct NavRules {
+    https: Rc<RefCell<crate::sites::HttpsPolicy>>,
+    redirect: Rc<RefCell<crate::popup::RedirectPolicy>>,
+    docs: Rc<RefCell<HashMap<u64, Doc>>>,
+    pass: Rc<RefCell<Option<(u64, String)>>>,
+    api_nav: Rc<RefCell<HashMap<u64, Instant>>>,
+}
+
+/// How long after Lumen asked for a navigation its mark still counts. The
+/// navigation starts within a turn of the call; two seconds is already generous.
+const API_NAV: Duration = Duration::from_secs(2);
+
 fn hook_page(
     wv: &WebView,
     id: u64,
     proxy: EventLoopProxy<Ev>,
     rewrite: Option<Rc<dyn Fn(&str, crate::privacy_stats::Who) -> Option<String>>>,
-    https: Rc<RefCell<crate::sites::HttpsPolicy>>,
+    rules: NavRules,
     clicks: Rc<RefCell<HashMap<u64, crate::popup::Page>>>,
     who: crate::privacy_stats::Who,
 ) {
+    let NavRules { https, redirect, docs, pass, api_nav } = rules;
     let core = wv.webview();
     let mut token = 0i64;
     unsafe {
         // Links carry tracking tags (utm_*, fbclid, gclid...). Stop, strip, go.
         // Server redirects are left alone, or a site that adds them back would loop.
         let p = proxy.clone();
+        let (d_start, pass_start) = (docs.clone(), pass.clone());
         let _ = core.add_NavigationStarting(
             &NavigationStartingEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
@@ -1095,6 +1165,45 @@ fn hook_page(
                     let _ = p.send_event(Ev::Danger(id, u));
                     return Ok(());
                 }
+                // Redirect protection: a page may not send the person to another site
+                // on its own, a moment after it loaded. A click, a key, a back, a
+                // forward and the site's own server redirects all go through.
+                let mut served = windows::core::BOOL::default();
+                let _ = args.IsRedirected(&mut served);
+                let doc = d_start.borrow().get(&id).cloned().unwrap_or_default();
+                let from = crate::privacy_stats::host(&doc.url);
+                // The person's own input, as the page reported it. WebView2's
+                // IsUserInitiated is true for a page's own navigation as well
+                // (measured on 2026-10-25), so it is not asked.
+                let person = clicks.borrow().get(&id).cloned().unwrap_or_default();
+                // A navigation Lumen started: the person typed it, clicked a
+                // bookmark or a history row, or a pin went home. Not the page.
+                let ours = api_nav.borrow_mut().remove(&id).is_some_and(|t| t.elapsed() <= API_NAV);
+                let step = crate::popup::Step {
+                    gesture: ours || history_nav(&args) || crate::popup::asked_nav(&person, &u),
+                    redirected: served.as_bool(),
+                    from: doc.url,
+                    to: u.clone(),
+                    loaded: doc.loaded.map(|t| t.elapsed()).unwrap_or_default(),
+                    agent: who.agent,
+                };
+                // "Go anyway" on a note: this one navigation, this once.
+                let mut once = pass_start.borrow_mut();
+                let asked = matches!(once.as_ref(), Some((t, url)) if *t == id && *url == u);
+                if asked {
+                    *once = None;
+                }
+                drop(once);
+                let (block, allowed) = {
+                    let r = redirect.borrow();
+                    (r.block, r.allowed.clone())
+                };
+                if !asked && crate::popup::blocks_redirect(&step, block, &allowed) {
+                    args.SetCancel(true)?;
+                    crate::privacy_stats::redirect(&from, who);
+                    let _ = p.send_event(Ev::RedirectBlocked(id, u.clone(), from));
+                    return Ok(());
+                }
                 // Plain http: stop, and see whether the site speaks https. The main loop goes on.
                 if let Some(secure) = crate::sites::https_upgrade(&u, &https.borrow()) {
                     args.SetCancel(true)?;
@@ -1120,12 +1229,20 @@ fn hook_page(
         );
 
         let p = proxy.clone();
+        let d_src = docs.clone();
         let _ = core.add_SourceChanged(
             &SourceChangedEventHandler::create(Box::new(move |w, _| {
                 if let Some(w) = w {
                     let mut s = PWSTR::null();
                     w.Source(&mut s)?;
-                    let _ = p.send_event(Ev::Url(id, take(s)));
+                    let url = take(s);
+                    // A new document is loading: until it says it is done, the
+                    // redirect rule treats this page as too young to judge.
+                    let mut d = d_src.borrow_mut();
+                    let doc = d.entry(id).or_default();
+                    doc.url = url.clone();
+                    doc.loaded = None;
+                    let _ = p.send_event(Ev::Url(id, url));
                 }
                 Ok(())
             })),
@@ -1135,6 +1252,7 @@ fn hook_page(
         // The other end of the journal's timing: whether the page came, and with
         // what. The second interface carries the HTTP status when there was one.
         let p = proxy.clone();
+        let d_done = docs.clone();
         let _ = core.add_NavigationCompleted(
             &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
@@ -1145,6 +1263,14 @@ fn hook_page(
                 let mut http = 0i32;
                 if let Ok(second) = args.cast::<ICoreWebView2NavigationCompletedEventArgs2>() {
                     let _ = second.HttpStatusCode(&mut http);
+                }
+                // The page has finished loading: from now on, a navigation of
+                // its own to another site is the page's doing. A navigation
+                // Lumen stopped did not load, and says nothing about the page.
+                if ok.as_bool()
+                    && let Some(doc) = d_done.borrow_mut().get_mut(&id)
+                {
+                    doc.loaded = Some(Instant::now());
                 }
                 let _ = p.send_event(Ev::NavDone(id, ok.as_bool(), err.0, http));
                 Ok(())
@@ -2067,7 +2193,10 @@ fn hook_popup_page(wv: &WebView, id: u64, ctx: &Rc<Ctx>) {
                     "click" => {
                         p.link = msg["link"].as_u64().unwrap_or(0) == 1;
                         p.url = msg["url"].as_str().unwrap_or("").to_string();
-                        p.at = Instant::now();
+                        p.at = Some(Instant::now());
+                    }
+                    "key" => {
+                        p.keyed = Some(Instant::now());
                     }
                     "open" => {
                         p.opened = Some((msg["url"].as_str().unwrap_or("").to_string(), Instant::now()));
