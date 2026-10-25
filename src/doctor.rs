@@ -181,7 +181,7 @@ pub fn files_row(settings: Parsed, session: Parsed) -> Row {
 /// The filter lists are on disk and inside their own `Expires:`.
 pub fn lists_row(present: usize, total: usize, stale: usize) -> Row {
     if present == 0 {
-        return row("Filter lists", Mark::Fail, "none on disk", "open a page with the blocker on; Lumen fetches them");
+        return row("Filter lists", Mark::Warn, "none on disk yet", "open a page with the blocker on; Lumen fetches them then");
     }
     if stale > 0 {
         let theirs = if stale == 1 { "its expiry" } else { "their expiry" };
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn the_lists_fail_when_none_are_there_and_warn_when_stale() {
-        assert_eq!(lists_row(0, 9, 9).mark, Mark::Fail);
+        assert_eq!(lists_row(0, 9, 9).mark, Mark::Warn);
         assert_eq!(lists_row(9, 9, 0).mark, Mark::Ok);
         assert_eq!(lists_row(9, 9, 0).found, "9 of 9 present, all current");
         let stale = lists_row(8, 9, 1);
