@@ -137,6 +137,8 @@ pub struct Settings {
     pub battery_saver: bool,
     /// Lumen opens behind a lock until Windows Hello says it is the person.
     pub lock_app: bool,
+    /// The credit at the foot of the Settings menu.
+    pub show_credit: bool,
     /// Hide ad leftovers and cookie banners (cosmetic rules).
     pub cosmetic: bool,
     /// Count what the blocker stops, per day and per site, for the report.
@@ -341,6 +343,7 @@ impl Default for Settings {
             userscripts: true,
             battery_saver: true,
             lock_app: false,
+            show_credit: true,
             show_memory: true,
             gpu_in_process: false,
             share_processes: true,
