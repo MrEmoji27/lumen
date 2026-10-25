@@ -228,14 +228,14 @@ fn rows_panel(i: &mut Inner, col: R, y: f32, title: &str, rows: &[(&str, &str, S
 /// Everything else Lumen did quietly, the ones that happened.
 fn other_rows(c: &Counts) -> Vec<(&'static str, &'static str, String, &'static str)> {
     [
-        ("external", "Redirects blocked", c.redirects, "Pages that tried to send you to another site on their own."),
-        ("globe", "Real IP hidden", c.webrtc + c.signals, "WebRTC and tracking headers cannot see your address. Lumen has no VPN."),
-        ("lock", "Moved to HTTPS", c.https_up, "Plain http pages opened over https instead."),
-        ("wind", "Cookie banners hidden", c.cookies, "Consent pop-ups that never showed."),
-        ("shapes", "Page clutter hidden", c.cosmetic, "Empty ad boxes and leftovers, by the filter lists."),
-        ("zap", "Tracking parameters removed", c.removeparam, "utm_ and friends, cut from links."),
-        ("play", "Sponsor segments skipped", c.sponsor, "On YouTube, by SponsorBlock."),
-        ("shield", "Dangerous sites", c.danger + c.malicious, "Warnings shown, and parts of pages from the malware lists."),
+        ("redirect", "Redirects blocked", c.redirects, "Pages that tried to send you to another site on their own."),
+        ("mask", "Real IP hidden", c.webrtc + c.signals, "WebRTC and tracking headers cannot see your address. Lumen has no VPN."),
+        ("https", "Moved to HTTPS", c.https_up, "Plain http pages opened over https instead."),
+        ("cookie", "Cookie banners hidden", c.cookies, "Consent pop-ups that never showed."),
+        ("eraser", "Page clutter hidden", c.cosmetic, "Empty ad boxes and leftovers, by the filter lists."),
+        ("unlink", "Tracking parameters removed", c.removeparam, "utm_ and friends, cut from links."),
+        ("next", "Sponsor segments skipped", c.sponsor, "On YouTube, by SponsorBlock."),
+        ("danger", "Dangerous sites", c.danger + c.malicious, "Warnings shown, and parts of pages from the malware lists."),
         ("key", "Wrong vault password", c.wrong_password, "Failed KeePass unlocks."),
     ]
     .into_iter()

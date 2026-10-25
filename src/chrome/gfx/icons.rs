@@ -101,6 +101,14 @@ pub static TABLE: &[Entry] = &[
     lucide!("send", "send"),
     // The way back to the page a pin was made on.
     lucide!("home", "house"),
+    // The privacy report's rows, one each.
+    lucide!("mask", "venetian-mask"),
+    lucide!("cookie", "cookie"),
+    lucide!("eraser", "eraser"),
+    lucide!("unlink", "link-2-off"),
+    lucide!("redirect", "route-off"),
+    lucide!("danger", "shield-alert"),
+    lucide!("https", "shield-check"),
 ];
 
 /// Every name `Gfx::geometry_icon` can draw by hand. Lucide has all of them; the hand-made
