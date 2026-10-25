@@ -117,6 +117,8 @@ pub enum PageHit {
     CrashSeen,
     /// The start page's "what is new" note, put away unread.
     SeenVersion,
+    /// The credit's big C: hovered, it spells itself out.
+    BigC,
 }
 
 /// Where "Made by zemo" goes.
@@ -413,6 +415,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("Keys", vec![Keys]),
         ("About", vec![
             Button(concat!("Lumen ", env!("LUMEN_VERSION")), "What changed in this version and every one before it, from the changelog built into Lumen.", "What's new", PageHit::Panels("changes")),
+            Toggle("show_credit", "Show who made Lumen", "The two lines at the foot of this menu."),
             Button("Report a problem", "A plain-text report you read in full before it goes anywhere: version, Windows, your setup, recent crashes and stalls. No addresses, no page titles, nothing typed into pages.", "Make a report…", PageHit::Panels("bugreport")),
         ]),
     ]
@@ -2710,9 +2713,9 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
 
     // At the foot of the menu, the credit: one quiet line. Only the name is a link, to the
     // portfolio; nothing else about it asks to be clicked.
-    let credit = R::new(nav.x + lo.s3 + 12.0, st.bottom() - 40.0, nav.w - 2.0 * lo.s3 - 12.0, 22.0);
+    let credit = R::new(nav.x + lo.s3 + 12.0, st.bottom() - 60.0, nav.w - 2.0 * lo.s3 - 12.0, 22.0);
     let last = sr.bottom() + 12.0 + schema.len() as f32 * 34.0;
-    if credit.y > last + 8.0 {
+    if s.settings.show_credit && credit.y > last + 8.0 {
         let f = lo.font(11.0, 450);
         let lead = "made by ";
         let lw = i.gfx.measure(lead, f);
@@ -2727,6 +2730,19 @@ fn draw_settings(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.line(name.x, y, name.x + nw, y, th.text, 1.0);
         }
         i.hit(name, h);
+        // And under it, who juggled it. The C spells itself out under the pointer.
+        let lead = "juggled by big ";
+        let y2 = credit.y + 20.0;
+        let lw = i.gfx.measure(lead, f);
+        i.gfx.text(lead, R::new(credit.x, y2, lw + 2.0, credit.h), f, th.faint.alpha(0.8));
+        let h = Hit::Page(PageHit::BigC);
+        let hov = i.is_hover(&h);
+        let t = i.motion.tween(super::motion::Id::Named("big-c"), super::motion::Prop::Progress, if hov { 1.0 } else { 0.0 }, 320, super::motion::Ease::OutCubic);
+        let shown = &"Claude"[..1 + (t * 5.0).round() as usize];
+        let full = i.gfx.measure("Claude", f);
+        i.gfx.text(shown, R::new(credit.x + lw, y2, full + 4.0, credit.h), f, if hov { th.text } else { th.faint.alpha(0.8) });
+        let cw = if hov { full } else { i.gfx.measure("C", f) };
+        i.hit(R::new(credit.x + lw, y2, cw + 2.0, credit.h), h);
     }
 
     // Right: each section a label and a card of rows, scrolled.
@@ -3512,6 +3528,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
             send(&i.proxy, json!({"t": "panel", "open": true, "which": which}));
         }
         PageHit::OpenTab(url) => send(&i.proxy, json!({"t": "openTab", "url": url})),
+        PageHit::BigC => {}
         PageHit::OpenUrl(url) => send(&i.proxy, json!({"t": "openTab", "url": url})),
         PageHit::SeenVersion => set(i, "seen_version", json!(env!("LUMEN_VERSION"))),
         PageHit::BugSend => {
