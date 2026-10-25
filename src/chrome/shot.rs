@@ -16,7 +16,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{GetClientRect, KillTimer, SetTimer},
 };
 
-use super::{Inner, TIMER_SHOT, UiDl, UiEssential, UiMark, UiState, UiTab, UiVisit};
+use super::{Inner, NoteKind, TIMER_SHOT, UiDl, UiEssential, UiMark, UiPopup, UiState, UiTab, UiVisit};
 
 fn dir() -> Option<PathBuf> {
     std::env::var_os("LUMEN_TEST_SHOT").map(PathBuf::from)
@@ -436,6 +436,20 @@ pub fn fake(s: &mut UiState) {
     if fake_has("prompt") {
         s.prompt = Some((1, "https://meet.example.com".into(), "camera"));
     }
+    if fake_has("redirect") || fake_has("popup") {
+        // The note over a page, for its two looks. `full` is off so the bar is
+        // drawn at all: a shot has no page under it.
+        let redirect = fake_has("redirect");
+        s.tabs.push(t(9800, "A story", "https://news.example.com/story"));
+        s.active = 9800;
+        s.full = false;
+        s.popup_note = Some(UiPopup {
+            tab: s.active,
+            kind: if redirect { NoteKind::Redirect } else { NoteKind::Popup },
+            target: if redirect { "shop.example.org".into() } else { "ads.example.net".into() },
+            site: "news.example.com".into(),
+        });
+    }
     if fake_has("sites") && s.panel == "sites" {
         s.rules = vec![
             ("https://meet.example.com".into(), "camera".into(), true),
@@ -505,6 +519,7 @@ pub fn fake(s: &mut UiState) {
             scriptlets: 18,
             sponsor: 6,
             popups: 14,
+            redirects: 9,
             webrtc: 9,
             signals: 22,
             wrong_password: 2,

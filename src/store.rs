@@ -147,6 +147,15 @@ pub struct Settings {
     /// count as one. Empty means no site is trusted.
     #[serde(default)]
     pub popup_sites: Vec<String>,
+    /// Stop a page that sends the person to another site on its own, a moment
+    /// after it loaded. A click, a link and a site's own login redirects stay
+    /// untouched. A file from before this setting reads as on.
+    #[serde(default = "yes")]
+    pub block_redirects: bool,
+    /// Hosts a page may send the person away from: keyed hosts, like the
+    /// pop-up ones. Empty means no site may.
+    #[serde(default)]
+    pub redirect_sites: Vec<String>,
     /// The running "N blocked" note at the bottom of the sidebar.
     pub page_chip: bool,
     pub show_memory: bool,
@@ -340,6 +349,8 @@ impl Default for Settings {
             privacy_stats: true,
             block_popups: true,
             popup_sites: Vec::new(),
+            block_redirects: true,
+            redirect_sites: Vec::new(),
             page_chip: true,
             dark_pages: false,
             remember_text: true,
@@ -594,6 +605,12 @@ impl Settings {
         self.popup_sites.sort();
         self.popup_sites.dedup();
         self.popup_sites.truncate(500);
+        // The sites a page may redirect from, the same way.
+        self.redirect_sites.iter_mut().for_each(|h| *h = crate::blocker::site_key(h));
+        self.redirect_sites.retain(|h| !h.is_empty() && !h.contains(['/', ' ', '*']));
+        self.redirect_sites.sort();
+        self.redirect_sites.dedup();
+        self.redirect_sites.truncate(500);
         // 0 means "never chosen"; a real port stays inside the range.
         if self.bt_port != 0 {
             self.bt_port = self.bt_port.clamp(BT_PORT_MIN, BT_PORT_MAX);

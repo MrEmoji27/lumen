@@ -208,11 +208,24 @@ pub struct UiDl {
     pub ratio: f64,
 }
 
-/// A pop-up Lumen stopped: the host it wanted, and the site that asked.
+/// What a note over the page is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteKind {
+    /// A pop-up the person did not ask for.
+    Popup,
+    /// A page sending the person to another site on its own.
+    Redirect,
+}
+
+/// A note over the page about something Lumen stopped: a pop-up, or a page
+/// sending the person to another site. The host it wanted, and the site that
+/// asked.
 #[derive(Clone, Debug)]
 pub struct UiPopup {
     /// The tab it was stopped in.
     pub tab: u64,
+    /// Which note this is.
+    pub kind: NoteKind,
     /// The host the pop-up wanted to open.
     pub target: String,
     /// The host of the page that asked. "Allow on <site>" adds this one.
@@ -541,6 +554,8 @@ pub enum Hit {
     PopupAllow(u64),
     /// The same bar, put away.
     PopupDismiss(u64),
+    /// The bar over a page whose redirect was stopped: load it anyway, once.
+    RedirectGo(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -5228,8 +5243,9 @@ impl Inner {
     }
 
     /// A pop-up Lumen stopped: a bar over the page saying so, with the two
-    /// things the person can do about it. Not a dialog: the page keeps its
-    /// place, and the bar goes away by itself.
+    /// things the person can do about it. A redirect stopped uses the same bar,
+    /// with one more way through. Not a dialog: the page keeps its place, and
+    /// the bar goes away by itself.
     fn draw_popup_note(&mut self, s: &UiState) {
         let Some(note) = s.popup_note.clone() else { return };
         if s.full || s.panel != "none" {
@@ -5238,14 +5254,18 @@ impl Inner {
         let (sx, sy, sw, _sh) = s.stage;
         let lo = self.look.clone();
         let th = lo.theme;
-        let head = "Pop-up blocked";
+        let redirect = note.kind == NoteKind::Redirect;
+        let head = if redirect { "Redirect blocked" } else { "Pop-up blocked" };
         let target = if note.target.is_empty() { String::new() } else { format!(" · {}", note.target) };
         let allow = if note.site.is_empty() { "Allow on this site".to_string() } else { format!("Allow on {}", note.site) };
+        let go = "Go anyway";
         let fw = lo.font(12.5, 500);
-        let bw = self.gfx.measure(&allow, lo.font(12.5, 600)) + 26.0;
+        let aw = self.gfx.measure(&allow, lo.font(12.5, 600)) + 26.0;
+        let gw = if redirect { self.gfx.measure(go, lo.font(12.5, 500)) + 26.0 } else { 0.0 };
         let tw = self.gfx.measure(head, fw);
         let tt = self.gfx.measure(&target, lo.font(12.5, 450));
-        let w = (tw + tt + 46.0 + bw + 30.0).min(sw - 24.0).max(240.0);
+        let gap = if redirect { 8.0 } else { 0.0 };
+        let w = (tw + tt + 46.0 + aw + gw + gap + 30.0).min(sw - 24.0).max(240.0);
         let h = 38.0;
         let r = R::new(sx + (sw - w) / 2.0, sy + 12.0, w, h);
         self.floats.push((r, lo.r_card));
@@ -5255,9 +5275,14 @@ impl Inner {
         self.gfx.circle(r.x + 20.0, r.y + h / 2.0, 3.5, th.accent);
         self.gfx.text(head, R::new(r.x + 32.0, r.y, tw + 2.0, h), fw, th.text);
         self.gfx.text(&target, R::new(r.x + 34.0 + tw, r.y, tt + 2.0, h), lo.font(12.5, 450), th.dim);
-        // The way back: let this site open pop-ups, or let the note go.
-        let b = R::new(r.right() - 30.0 - bw, r.y + (h - 26.0) / 2.0, bw, 26.0);
+        // The way back: let this site do it again, and for a redirect, this one
+        // page once. A redirect's "Go anyway" is the quieter of the two.
+        let b = R::new(r.right() - 30.0 - aw, r.y + (h - 26.0) / 2.0, aw, 26.0);
         self.pill_button(b, &allow, Hit::PopupAllow(note.tab), true, 1.0);
+        if redirect {
+            let g = R::new(b.x - gap - gw, r.y + (h - 26.0) / 2.0, gw, 26.0);
+            self.pill_button(g, go, Hit::RedirectGo(note.tab), false, 1.0);
+        }
         let x = R::new(r.right() - 28.0, r.y + (h - 24.0) / 2.0, 24.0, 24.0);
         let gone = Hit::PopupDismiss(note.tab);
         if self.is_hover(&gone) {
@@ -5754,11 +5779,18 @@ impl Inner {
             Hit::WsChip => self.ws_menu(x, y),
             Hit::GlanceOpen => send(p, json!({"t": "glanceOpen"})),
             Hit::PopupAllow(tab) => {
-                // Let this site open pop-ups from now on.
-                let site = self.state.as_ref().and_then(|s| s.popup_note.as_ref()).map(|n| n.site.clone()).unwrap_or_default();
-                send(p, json!({"t": "popupAllow", "id": tab, "site": site}));
+                // Let this site open pop-ups (or redirect) from now on.
+                let (site, kind) = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.popup_note.as_ref())
+                    .map(|n| (n.site.clone(), n.kind))
+                    .unwrap_or((String::new(), NoteKind::Popup));
+                let kind = if kind == NoteKind::Redirect { "redirect" } else { "popup" };
+                send(p, json!({"t": "popupAllow", "id": tab, "site": site, "kind": kind}));
             }
             Hit::PopupDismiss(tab) => send(p, json!({"t": "popupDismiss", "id": tab})),
+            Hit::RedirectGo(tab) => send(p, json!({"t": "redirectGo", "id": tab})),
             Hit::Sugg(i) => self.pick(i),
             Hit::DlFooter => {
                 let open = self.state.as_ref().is_some_and(|s| s.panel != "downloads");

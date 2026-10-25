@@ -24,7 +24,8 @@ pub fn token() -> String {
 }
 
 /// The script Lumen puts in every page: it says what the last click was on,
-/// and when a script opened a window.
+/// when a key that activates something was pressed, and when a script opened a
+/// window.
 ///
 /// The click is caught in the capture phase, on the window, so it is seen
 /// before the page's own handlers run: a page that opens a window on the first
@@ -33,6 +34,10 @@ pub fn token() -> String {
 /// 2026-10-19: the message arrives first, because the page sends it before the
 /// browser asks for the window and the host reads the queue in the order it
 /// was filled.
+///
+/// Only a real click or key counts (`isTrusted`): a page can dispatch a click
+/// of its own, and that must not look like the person's. Measured on 2026-10-25:
+/// a click the person made is reported before the navigation it starts.
 ///
 /// The secret is kept out of the page's reach: the message is built in one go,
 /// with no prototype the page can see, and the sender is Lumen's own, bound
@@ -43,7 +48,7 @@ const T='__TOKEN__';
 const P=W.postMessage.bind(W);
 const say=(k,link,url)=>{try{P({__proto__:null,t:T,lumen:k,link:link,url:url})}catch(_){}};
 const opens=t=>!!t&&t!=='_self'&&t!=='_top'&&t!=='_parent';
-const onClick=e=>{let el=e.target,link=0,url='';
+const onClick=e=>{if(!e.isTrusted)return;let el=e.target,link=0,url='';
  while(el&&el.nodeType===1){const tag=el.tagName;
   if(tag==='A'||tag==='AREA'){if(!url)url=el.href?String(el.href):'';if(opens(el.getAttribute('target')))link=1;break}
   if(tag==='FORM'){if(opens(el.getAttribute('target')))link=1;break}
@@ -53,6 +58,8 @@ const onClick=e=>{let el=e.target,link=0,url='';
  say('click',link,url)};
 window.addEventListener('click',onClick,true);
 window.addEventListener('auxclick',onClick,true);
+const onKey=e=>{if(!e.isTrusted)return;if(e.key==='Enter'||e.key===' '||e.key==='Spacebar')say('key',0,'')};
+window.addEventListener('keydown',onKey,true);
 const O=window.open;
 if(typeof O==='function')window.open=function(u){say('open',0,String(u||''));return O.apply(this,arguments)};
 })()}catch(e){}"#;
@@ -148,22 +155,18 @@ fn under(host: &str, site: &str) -> bool {
 const CLICK_WINDOW: Duration = Duration::from_secs(10);
 
 /// What a page did last, as far as Lumen could see it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Page {
     /// The last click was on a link that opens a window by itself.
     pub link: bool,
     /// The address of the link that was clicked, when the click was on one.
     pub url: String,
-    /// When the click was.
-    pub at: Instant,
+    /// When the click was. `None` until the person clicks.
+    pub at: Option<Instant>,
+    /// When a key that activates something (Enter, Space) was pressed.
+    pub keyed: Option<Instant>,
     /// A script opened a window, and when: the page did it, not the person.
     pub opened: Option<(String, Instant)>,
-}
-
-impl Default for Page {
-    fn default() -> Self {
-        Page { link: false, url: String::new(), at: Instant::now(), opened: None }
-    }
 }
 
 /// Whether the magnet is the one the person clicked: the page's last click
@@ -173,7 +176,7 @@ impl Default for Page {
 /// a click asked for it or the page did it on its own (measured on 2026-10-19),
 /// so the page's report of the click is what tells the two apart.
 pub fn clicked_magnet(page: &Page, url: &str) -> bool {
-    !page.url.is_empty() && page.url == url && page.at.elapsed() <= CLICK_WINDOW
+    !page.url.is_empty() && page.url == url && page.at.is_some_and(|t| t.elapsed() <= CLICK_WINDOW)
 }
 
 /// Whether the click that asked for this window was on a link that opens one.
@@ -186,12 +189,13 @@ pub fn link_click(page: &Page, target: &str) -> bool {
     if !page.link {
         return false;
     }
-    if page.at.elapsed() > CLICK_WINDOW {
+    let Some(at) = page.at else { return false };
+    if at.elapsed() > CLICK_WINDOW {
         return false;
     }
     // A script that opened this very window after the click did: the page did it.
-    if let Some((url, at)) = &page.opened
-        && *at >= page.at
+    if let Some((url, opened)) = &page.opened
+        && *opened >= at
         && crate::privacy_stats::host(url) == target
     {
         return false;
@@ -199,6 +203,89 @@ pub fn link_click(page: &Page, target: &str) -> bool {
     // The link must go where the window went.
     let host = crate::privacy_stats::host(&page.url);
     host.is_empty() || host == target
+}
+
+/// How long a page has to have been loaded before a navigation of its own is
+/// treated as the page sending the person away rather than its own routing.
+const REDIRECT_GRACE: Duration = Duration::from_secs(1);
+
+/// What the redirect rule is right now: the setting, and the sites a page may
+/// send the person away from.
+#[derive(Clone, Debug, Default)]
+pub struct RedirectPolicy {
+    /// The person's "Block redirects" setting.
+    pub block: bool,
+    /// Hosts that may redirect: an entry covers its subdomains.
+    pub allowed: Vec<String>,
+}
+
+/// The facts about one top-level navigation, for the redirect rule.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Step {
+    /// A click, a key, a back or a forward asked for this navigation.
+    pub gesture: bool,
+    /// The site answered with a redirect of its own: a login, a trailing slash.
+    pub redirected: bool,
+    /// The page the person is on, and the address it is going to.
+    pub from: String,
+    pub to: String,
+    /// How long the page being left has been loaded.
+    pub loaded: Duration,
+    /// The tab belongs to an agent.
+    pub agent: bool,
+}
+
+/// Whether Lumen stops this navigation: a page sending the person to another
+/// site on its own, more than a moment after it loaded.
+///
+/// `block` is the person's "Block redirects" setting, `allowed` the sites that
+/// may redirect. A click, a key, a back, a forward, a server redirect and a
+/// site's own routing while the page loads all go through.
+pub fn blocks_redirect(step: &Step, block: bool, allowed: &[String]) -> bool {
+    if !block || step.agent || step.gesture || step.redirected {
+        return false;
+    }
+    // Real pages only, in and out: never file:, lumen: or about:.
+    if !web_page(&step.from) || !web_page(&step.to) {
+        return false;
+    }
+    let (from, to) = (crate::privacy_stats::host(&step.from), crate::privacy_stats::host(&step.to));
+    if same_site(&from, &to) || trusted_site(allowed, &from) {
+        return false;
+    }
+    step.loaded > REDIRECT_GRACE
+}
+
+/// Whether an address is a real web page: http or https, and nothing else.
+pub fn web_page(url: &str) -> bool {
+    let b = url.as_bytes();
+    b.len() >= 7 && (b[..7].eq_ignore_ascii_case(b"http://") || (b.len() >= 8 && b[..8].eq_ignore_ascii_case(b"https://")))
+}
+
+/// How long after a click or a key the person still counts as the one who asked
+/// for a navigation. Chromium gives a script five seconds of the person's
+/// activation; this is the same five.
+const NAV_ASK: Duration = Duration::from_secs(5);
+
+/// Whether the person's own input asked for this navigation: a click or a key
+/// in the last few seconds, as the page reported it.
+///
+/// WebView2's own `IsUserInitiated` says true for a page's own navigation as
+/// well (measured on 2026-10-25), so it cannot tell a click from a script. A
+/// click on a link must go where the link went; a click on a button, or a key,
+/// may go anywhere: that is the person pressing something the page reacts to.
+pub fn asked_nav(page: &Page, to: &str) -> bool {
+    if page.keyed.is_some_and(|t| t.elapsed() <= NAV_ASK) {
+        return true;
+    }
+    if !page.at.is_some_and(|t| t.elapsed() <= NAV_ASK) {
+        return false;
+    }
+    // A click on a button, not a link: the page decides where it goes.
+    if page.url.is_empty() {
+        return true;
+    }
+    same_site(&crate::privacy_stats::host(&page.url), &crate::privacy_stats::host(to))
 }
 
 /// The host a person typed: an address, or a plain site name. Empty when it is
@@ -310,7 +397,7 @@ mod tests {
 
     #[test]
     fn the_link_must_go_where_the_window_went() {
-        let page = Page { link: true, url: "https://other.example.org/x".into(), at: Instant::now(), opened: None };
+        let page = Page { link: true, url: "https://other.example.org/x".into(), at: Some(Instant::now()), keyed: None, opened: None };
         assert!(link_click(&page, "other.example.org"));
         assert!(!link_click(&page, "ads.example.net"));
     }
@@ -321,7 +408,8 @@ mod tests {
         let page = Page {
             link: true,
             url: "https://other.example.org/x".into(),
-            at: now,
+            at: Some(now),
+            keyed: None,
             // The page opened this very window itself, after the click.
             opened: Some(("https://other.example.org/ad".into(), now + Duration::from_millis(1))),
         };
@@ -333,13 +421,13 @@ mod tests {
         // The usual OAuth shape: the link opens a window, and the script opens
         // another one it will fill in later.
         let now = Instant::now();
-        let page = Page { link: true, url: "https://other.example.org/x".into(), at: now, opened: Some((String::new(), now + Duration::from_millis(1))) };
+        let page = Page { link: true, url: "https://other.example.org/x".into(), at: Some(now), keyed: None, opened: Some((String::new(), now + Duration::from_millis(1))) };
         assert!(link_click(&page, "other.example.org"));
     }
 
     #[test]
     fn an_old_click_is_not_the_one_that_asked() {
-        let page = Page { link: true, url: "https://other.example.org/x".into(), at: Instant::now() - Duration::from_secs(60), opened: None };
+        let page = Page { link: true, url: "https://other.example.org/x".into(), at: Some(Instant::now() - Duration::from_secs(60)), keyed: None, opened: None };
         assert!(!link_click(&page, "other.example.org"));
     }
 
@@ -352,17 +440,124 @@ mod tests {
         assert_eq!(host_of("example.com/evil"), "");
     }
 
+    /// A navigation a page starts on its own, well after it loaded.
+    fn step(from: &str, to: &str) -> Step {
+        Step { gesture: false, redirected: false, from: from.into(), to: to.into(), loaded: Duration::from_secs(5), agent: false }
+    }
+
+    #[test]
+    fn a_page_sending_the_person_away_on_its_own_is_stopped() {
+        let s = step("https://news.example/a", "https://ads.example.net/x");
+        assert!(blocks_redirect(&s, true, &[]));
+    }
+
+    #[test]
+    fn a_click_may_go_anywhere() {
+        let mut s = step("https://news.example/a", "https://shop.example.org/x");
+        s.gesture = true;
+        assert!(!blocks_redirect(&s, true, &[]));
+    }
+
+    #[test]
+    fn a_server_redirect_is_the_sites_own_routing() {
+        // A login: the site answers with another site's page. Not a trick.
+        let mut s = step("https://login.example/a", "https://accounts.example.org/in");
+        s.redirected = true;
+        assert!(!blocks_redirect(&s, true, &[]));
+    }
+
+    #[test]
+    fn the_same_site_is_not_another_site() {
+        // A sub domain, a www, another path: the same site.
+        assert!(!blocks_redirect(&step("https://news.example.com/a", "https://shop.example.com/b"), true, &[]));
+        assert!(!blocks_redirect(&step("https://example.com/a", "https://www.example.com/b"), true, &[]));
+    }
+
+    #[test]
+    fn routing_while_the_page_loads_is_left_alone() {
+        // A site's own hop in the first second is how its routing works.
+        let mut s = step("https://news.example/a", "https://cdn.example.net/b");
+        s.loaded = Duration::from_millis(400);
+        assert!(!blocks_redirect(&s, true, &[]));
+        // The moment is over: after a second it is the page's doing.
+        s.loaded = Duration::from_millis(1001);
+        assert!(blocks_redirect(&s, true, &[]));
+    }
+
+    #[test]
+    fn an_agents_tab_is_never_redirect_blocked() {
+        let mut s = step("https://news.example/a", "https://ads.example.net/x");
+        s.agent = true;
+        assert!(!blocks_redirect(&s, true, &[]));
+    }
+
+    #[test]
+    fn only_real_pages_are_judged() {
+        // A new tab going from nothing to a page, and Lumen's own pages.
+        assert!(!blocks_redirect(&step("", "https://news.example/a"), true, &[]));
+        assert!(!blocks_redirect(&step("lumen:start", "https://news.example/a"), true, &[]));
+        assert!(!blocks_redirect(&step("https://news.example/a", "about:blank"), true, &[]));
+        assert!(!blocks_redirect(&step("file:///C:/x.html", "https://news.example/a"), true, &[]));
+    }
+
+    #[test]
+    fn a_site_the_person_trusts_may_redirect() {
+        let allowed = vec!["example.com".into()];
+        assert!(!blocks_redirect(&step("https://example.com/a", "https://ads.example.net/x"), true, &allowed));
+        assert!(blocks_redirect(&step("https://other.example/a", "https://ads.example.net/x"), true, &allowed));
+    }
+
+    #[test]
+    fn with_redirects_off_nothing_is_stopped() {
+        assert!(!blocks_redirect(&step("https://news.example/a", "https://ads.example.net/x"), false, &[]));
+    }
+
     #[test]
     fn a_magnet_is_the_persons_only_when_they_clicked_it() {
         let m = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c";
-        let page = Page { link: false, url: m.into(), at: Instant::now(), opened: None };
+        let page = Page { link: false, url: m.into(), at: Some(Instant::now()), keyed: None, opened: None };
         assert!(clicked_magnet(&page, m));
         // Another magnet: the page asked for that one.
         assert!(!clicked_magnet(&page, "magnet:?xt=urn:btih:0000"));
         // A click long ago is not the one that asked.
-        let old = Page { link: false, url: m.into(), at: Instant::now() - Duration::from_secs(60), opened: None };
+        let old = Page { link: false, url: m.into(), at: Some(Instant::now() - Duration::from_secs(60)), keyed: None, opened: None };
         assert!(!clicked_magnet(&old, m));
         // No click at all.
         assert!(!clicked_magnet(&Page::default(), m));
+    }
+
+    /// What the page last reported the person doing, `ago` before now.
+    fn person(url: &str, ago: Duration) -> Page {
+        Page { link: false, url: url.into(), at: Some(Instant::now() - ago), keyed: None, opened: None }
+    }
+
+    #[test]
+    fn a_click_on_a_link_asks_for_where_the_link_goes() {
+        let p = person("https://other.example.org/x", Duration::from_millis(200));
+        assert!(asked_nav(&p, "https://other.example.org/y"));
+        // Another site: the page moved the person somewhere they did not click.
+        assert!(!asked_nav(&p, "https://ads.example.net/x"));
+    }
+
+    #[test]
+    fn a_click_on_a_button_lets_the_page_choose() {
+        // Sign in with Google, a form submit: the button has no address of its own.
+        let p = person("", Duration::from_millis(200));
+        assert!(asked_nav(&p, "https://accounts.example.org/in"));
+    }
+
+    #[test]
+    fn a_key_that_activates_something_is_the_persons() {
+        let p = Page { keyed: Some(Instant::now()), ..Page::default() };
+        assert!(asked_nav(&p, "https://accounts.example.org/in"));
+        let old = Page { keyed: Some(Instant::now() - Duration::from_secs(60)), ..Page::default() };
+        assert!(!asked_nav(&old, "https://accounts.example.org/in"));
+    }
+
+    #[test]
+    fn with_no_input_the_page_asked_for_itself() {
+        assert!(!asked_nav(&Page::default(), "https://ads.example.net/x"));
+        // A click from a minute ago is not this navigation's.
+        assert!(!asked_nav(&person("https://other.example.org/x", Duration::from_secs(60)), "https://other.example.org/y"));
     }
 }

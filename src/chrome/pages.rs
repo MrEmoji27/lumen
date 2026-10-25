@@ -97,6 +97,10 @@ pub enum PageHit {
     PopupSiteAdd,
     /// Settings: take this site off the list.
     PopupSiteDel(String),
+    /// Settings: let this site redirect the page on its own.
+    RedirectSiteAdd,
+    /// Settings: take this site off the redirect list.
+    RedirectSiteDel(String),
     /// A link that opens in a tab of its own.
     OpenTab(&'static str),
     /// A page to open in a new tab: the address is not known at build time.
@@ -224,6 +228,8 @@ pub(super) enum Item {
     DefaultBrowser,
     /// The sites whose pop-ups are allowed: a list, with a way in and a way out.
     PopupSites,
+    /// The sites allowed to redirect the page on their own.
+    RedirectSites,
 }
 
 const RAM: &[u32] = &[512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
@@ -392,6 +398,8 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Toggle("gpc", "Tell sites not to sell or share my data", "Sends the Global Privacy Control signal (Sec-GPC: 1) and Do Not Track with every request, and tells the page itself through navigator.globalPrivacyControl. Sites that honour it must treat you as opted out."),
             Toggle("block_popups", "Block pop-ups", "A window a page opens on its own is stopped. A link you clicked still opens one, and a site you trust may open as many as it likes."),
             PopupSites,
+            Toggle("block_redirects", "Block redirects", "A page that sends you to another site on its own is stopped, with a way through for this once or for that site. A link you clicked, a login's own redirects and a site's first moments of loading are left alone."),
+            RedirectSites,
             Button("Site settings", "What each site may do, the zoom it is read at, the data it left behind, and the http addresses you let through.", "Open…", PageHit::Panels("sites")),
             Button("Clear browsing data", "Lumen history, page text and WebView2's own browsing history and downloads. Passwords and bookmarks are never touched.", "Clear…", PageHit::ClearData),
             Toggle("clear_on_exit", "Clear history when Lumen closes", "Lumen history, the words of pages and WebView2's own browsing history go when the browser closes. Private tabs leave nothing anyway."),
@@ -1505,6 +1513,37 @@ fn draw_item(i: &mut Inner, it: &Item, r: R, s: &UiState) -> f32 {
             y += 30.0;
             y - r.y
         }
+        Item::RedirectSites => {
+            // The sites allowed to send the page elsewhere on their own.
+            let mut y = r.y;
+            i.gfx.text("Sites allowed to redirect", R::new(r.x, y, r.w, 20.0), i.look.font(13.0, 500), th.text);
+            y += 22.0;
+            i.gfx.text(
+                "These sites may take you to another site without a click. Every other site asks first.",
+                R::new(r.x, y, r.w, 18.0),
+                i.look.small,
+                th.faint,
+            );
+            y += 24.0;
+            if s.settings.redirect_sites.is_empty() {
+                i.gfx.text("No site yet.", R::new(r.x, y, r.w * 0.5, 26.0), i.look.font(12.5, 400), th.faint);
+            }
+            for host in &s.settings.redirect_sites {
+                site_icon(i, R::new(r.x, y + 4.0, 18.0, 18.0), host);
+                i.gfx.text(host, R::new(r.x + 28.0, y, r.w - 60.0, 26.0), i.look.font(12.5, 500), th.text);
+                let x = R::new(right - 26.0, y + 1.0, 24.0, 24.0);
+                let h = Hit::Page(PageHit::RedirectSiteDel(host.clone()));
+                if i.is_hover(&h) {
+                    i.gfx.round(x, 12.0, th.press);
+                }
+                i.gfx.icon("close", x.x + 6.0, x.y + 6.0, 12.0, th.dim);
+                i.hit(x, h);
+                y += 30.0;
+            }
+            draw_button(i, right, y + 13.0, "Add a site…", PageHit::RedirectSiteAdd);
+            y += 30.0;
+            y - r.y
+        }
         Item::Keys => {
             let mut y = r.y;
             for (what, keys) in KEYS {
@@ -2546,6 +2585,7 @@ fn item_words(it: &Item) -> String {
         SitePerms => "site permissions camera microphone location notifications".into(),
         DefaultBrowser => "default browser windows".into(),
         PopupSites => "pop-ups popups popup sites allowed trusted window".into(),
+        RedirectSites => "redirects redirect sites allowed trusted away".into(),
     }
 }
 
@@ -2573,6 +2613,7 @@ pub(super) fn pal_label(it: &Item) -> String {
         SitePerms => "Site permissions".into(),
         DefaultBrowser => "Default browser".into(),
         PopupSites => "Sites allowed to open pop-ups".into(),
+        RedirectSites => "Sites allowed to redirect".into(),
     }
 }
 
@@ -3396,6 +3437,14 @@ pub fn click(i: &mut Inner, p: PageHit) {
             let mut list = s.settings.popup_sites.clone();
             list.retain(|h| *h != host);
             set(i, "popup_sites", json!(list));
+        }
+        PageHit::RedirectSiteAdd => {
+            super::form::open(i, "Allow redirects on a site", &[("Site", "")], super::form::FormAct::RedirectSite);
+        }
+        PageHit::RedirectSiteDel(host) => {
+            let mut list = s.settings.redirect_sites.clone();
+            list.retain(|h| *h != host);
+            set(i, "redirect_sites", json!(list));
         }
         PageHit::Panels(which) => {
             // Opening the changelog is reading it: the start page's note goes.
