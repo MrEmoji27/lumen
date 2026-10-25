@@ -29,7 +29,19 @@ pub const STORY_PLACEHOLDER: &str = "(say what you did, what you expected, and w
 /// the placeholder, so the reader sees nothing was said.
 pub fn with_story(report: &str, story: &str) -> String {
     let story = story.trim();
-    if story.is_empty() { report.to_string() } else { report.replacen(STORY_PLACEHOLDER, story, 1) }
+    if story.is_empty() { report.to_string() } else { report.replacen(STORY_PLACEHOLDER, story, 1).replacen(NOTE_PLACEHOLDER, story, 1) }
+}
+
+/// Where a shared set of numbers keeps the person's note until they write one.
+pub const NOTE_PLACEHOLDER: &str = "(nothing added)";
+
+/// The same report, shared to help rather than about a fault: its head says so, and the
+/// person's words are an optional note.
+pub fn as_numbers(report: &str) -> String {
+    report
+        .replacen("Lumen problem report", "Lumen numbers, shared to help", 1)
+        .replacen("What happened:", "A note:", 1)
+        .replacen(STORY_PLACEHOLDER, NOTE_PLACEHOLDER, 1)
 }
 
 /// Post a report to `SEND_TO`. Blocking: call it off the window's thread. `kind` is
@@ -428,6 +440,13 @@ mod tests {
         let r = format!("What happened:\n{STORY_PLACEHOLDER}\n\nSetup: x");
         assert_eq!(with_story(&r, "  the tab went blank  "), "What happened:\nthe tab went blank\n\nSetup: x");
         assert_eq!(with_story(&r, "   "), r, "nothing said leaves the placeholder");
+    }
+
+    #[test]
+    fn shared_numbers_say_so_and_take_a_note() {
+        let n = as_numbers(&format!("Lumen problem report\nVersion 1\n\nWhat happened:\n{STORY_PLACEHOLDER}\n"));
+        assert_eq!(n, format!("Lumen numbers, shared to help\nVersion 1\n\nA note:\n{NOTE_PLACEHOLDER}\n"));
+        assert!(with_story(&n, "fast enough").contains("A note:\nfast enough"));
     }
 
     #[test]

@@ -410,11 +410,13 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
             Button("Site settings", "What each site may do, the zoom it is read at, the data it left behind, and the http addresses you let through.", "Open…", PageHit::Panels("sites")),
             Button("Clear browsing data", "Lumen history, page text and WebView2's own browsing history and downloads. Passwords and bookmarks are never touched.", "Clear…", PageHit::ClearData),
             Toggle("clear_on_exit", "Clear history when Lumen closes", "Lumen history, the words of pages and WebView2's own browsing history go when the browser closes. Private tabs leave nothing anyway."),
+            Toggle("journal", "Keep a usage journal", "Speed, memory, crashes and errors, kept on this PC only, with sites by name and never a full address. Nothing is sent anywhere unless you send a report yourself."),
             Toggle("private_tabs", "Open new tabs as private", "Every new tab you open leaves nothing behind: no history, no cookies that outlive it, no saved session. Agent tabs and tabs restored from your last session are not affected."),
         ]),
         ("Keys", vec![Keys]),
         ("About", vec![
             Button(concat!("Lumen ", env!("LUMEN_VERSION")), "What changed in this version and every one before it, from the changelog built into Lumen.", "What's new", PageHit::Panels("changes")),
+            Button("Share your numbers", "Lumen's speed, memory and crash counts from your journal, scrubbed of every address and site. You read all of it before it goes.", "Share…", PageHit::Panels("numbers")),
             Toggle("show_credit", "Show who made Lumen", "The two lines at the foot of this menu."),
             Button("Report a problem", "A plain-text report you read in full before it goes anywhere: version, Windows, your setup, recent crashes and stalls. No addresses, no page titles, nothing typed into pages.", "Make a report…", PageHit::Panels("bugreport")),
         ]),
@@ -2525,22 +2527,29 @@ fn draw_bugreport(i: &mut Inner, st: R, s: &UiState) {
     let story = super::wide_text(i.bug_edit);
     let flash = i.page.flash.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < 8.0).map(|(m, _)| m.clone());
     let sub = flash.unwrap_or_else(|| "Read it all, then send it".to_string());
-    let mut y = title_block(i, col, st.y + lo.s5 + 2.0, "Report a problem", &sub);
+    let numbers = s.bug_kind == "numbers";
+    let mut y = title_block(i, col, st.y + lo.s5 + 2.0, if numbers { "Share your numbers" } else { "Report a problem" }, &sub);
+    let why = if numbers {
+        "Lumen's own speed, memory, crash and feature counts, to help make it better. Nothing leaves this PC until you press Send, and then only the text below. No addresses, no site names, no page titles."
+    } else {
+        "Nothing leaves this PC until you press Send, and then only the text below, to zemo's inbox. It holds no addresses, no page titles and nothing typed into pages."
+    };
     i.gfx.text_wrap(
-        "Nothing leaves this PC until you press Send, and then only the text below, to zemo's inbox. It holds no addresses, no page titles and nothing typed into pages.",
+        why,
         R::new(col.x + 4.0, y - 4.0, col.w - 8.0, 36.0),
         lo.small,
         th.faint,
     );
     y += 40.0;
-    i.label("What happened", R::new(col.x + 4.0, y, col.w, 16.0), th.faint);
+    i.label(if numbers { "A note, if you like" } else { "What happened" }, R::new(col.x + 4.0, y, col.w, 16.0), th.faint);
     // The box itself is a real edit window over this card.
     let field = bug_story_rect(st, lo.s5);
     let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == i.bug_edit;
     i.gfx.round(field, lo.r_card, th.raise);
     i.gfx.round_stroke(field, lo.r_card, if focused { th.text.alpha(0.45) } else { th.line }, if focused { 1.5 } else { 1.0 });
     if story.is_empty() && !focused {
-        i.gfx.text("What you did, what you expected, what Lumen did instead", R::new(field.x + 16.0, field.y, field.w - 32.0, field.h), lo.body, th.faint);
+        let hint = if numbers { "How you use Lumen, what feels slow, or nothing at all" } else { "What you did, what you expected, what Lumen did instead" };
+        i.gfx.text(hint, R::new(field.x + 16.0, field.y, field.w - 32.0, field.h), lo.body, th.faint);
     }
     y = field.bottom() + lo.s3;
     let mut x = col.x;

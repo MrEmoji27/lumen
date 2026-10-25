@@ -337,6 +337,8 @@ pub struct UiState {
     pub bug_report: Option<String>,
     /// That report has been sent.
     pub bug_sent: bool,
+    /// "problem", "crash", or "numbers" when the person is sharing them to help.
+    pub bug_kind: &'static str,
     /// The run before this one never said goodbye: the start page offers a report.
     pub unclean_last: bool,
     /// Whether the torrent port is mapped via UPnP (only meaningful while torrents run).

@@ -2696,6 +2696,7 @@ impl App {
                 archived: self.archived.iter().rev().map(|a| chrome::UiArchived { url: a.url.clone(), title: a.title.clone(), when: ago(a.when) }).collect(),
                 bug_report: (self.panel == Panel::Bug).then(|| self.bug_report.clone()).flatten(),
                 bug_sent: self.bug_sent,
+                bug_kind: self.bug_kind,
                 unclean_last: self.unclean_last && !headless(),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
                 zoom: self.active_tab().map_or(100, |t| t.zoom),
@@ -6097,10 +6098,16 @@ impl App {
                     (true, Some("dashboard")) => Panel::Dashboard,
                     (true, Some("sites")) => Panel::Sites,
                     (true, Some("changes")) => Panel::Changes,
-                    (true, Some("bugreport")) => Panel::Bug,
+                    (true, Some("bugreport" | "numbers")) => Panel::Bug,
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);
+                // The same scrubbed report, sent to help make Lumen better rather than about a fault.
+                if m["which"].as_str() == Some("numbers") {
+                    self.bug_kind = "numbers";
+                    self.bug_report = self.bug_report.take().map(|r| bugreport::as_numbers(&r));
+                    self.push();
+                }
             }
             "report" => {
                 // The report page picked a range tile or a site row.
