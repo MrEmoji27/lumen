@@ -21,6 +21,8 @@ bumps the last one (0.6.7.6 -> 0.6.7.6.1).
   and site scrubbed out, shows all of it, and sends only when you press Send.
 - **The credit can be hidden.** Settings > About.
 - **The report has an icon for every row.**
+- **A back button.** The pages Settings opens (site settings, what's new, the check-up, the
+  problem report) have one at the top left, and Esc goes back to Settings too.
 
 ## 0.6.7.7 — 2026-10-25
 
