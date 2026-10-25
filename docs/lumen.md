@@ -1,16 +1,17 @@
 # Lumen
 
-A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.8,
-20 October 2026. Early, in daily use by one person, Windows only.
+A native Windows shell around WebView2, written in Rust, built to keep memory low. Version 0.6.7.7,
+25 October 2026. Early, in daily use by one person, Windows only.
 
 ## Get it
 
-`lumen-0.6.8-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
-Or take `lumen-0.6.8-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
+`lumen-0.6.7.7-setup.exe` installs Lumen for your user, no admin needed, with a Start menu entry.
+Or take `lumen-0.6.7.7-win64.zip`, unpack it anywhere and run `lumen.exe`; nothing to install.
 Windows 10 or 11, 64-bit. Lumen is not signed yet, so the first time Windows may say it protected
 your PC: click **More info**, then **Run anyway**. Lumen needs Microsoft WebView2, which Windows
 nearly always has; the installer fetches it if not, and Lumen says so if it is missing. Your
-things live in `%APPDATA%\Lumen`. Something wrong: Settings > About > Report a problem.
+things live in `%APPDATA%\Lumen`. Something wrong: `lumen.exe --doctor` checks the install and says what to fix, or Settings >
+About > Report a problem.
 
 ## What it is
 
@@ -240,9 +241,15 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
   Site permissions lists every such site with a Reset on its row.
 - Userscripts: `*.user.js` files in Lumen's data folder, with Chrome-style `@match`
   patterns, run in your own tabs only.
-- Pop-ups blocked unless you clicked for them. A note says so, with **Allow** for that site;
-  Settings > Privacy lists the sites you allow. Malware and phishing sites get a warning page.
-- A privacy report: what was blocked and what was counted, with trends.
+- Pop-ups blocked unless you clicked for them, and a page may not send you to another site on its
+  own. A note says so, with **Allow** for that site; Settings > Privacy lists the sites you allow.
+  Malware and phishing sites get a warning page.
+- A privacy report of what was blocked and what was done, with trends. Only counts, no estimates.
+- Lock a tab with Windows Hello (right-click it), or all of Lumen (Settings > Privacy). A locked
+  tab shows nothing of itself until your face, finger or PIN opens it.
+- Secret downloads: a finished download can move to a hidden folder that opens with Windows Hello.
+  Hidden, not encrypted.
+- New tabs can open private by default (Settings > Privacy).
 - Reader view, dark pages, translation on the PC, read aloud.
 - Downloads through aria2, torrents, saving the video on a page. A magnet you click starts at
   once; one a page starts on its own waits for you to press Resume.
@@ -250,8 +257,10 @@ the loop never waits for less than 50 ms, and it ignores events it never reads.
   next, and the keyboard's media keys acting on the tab that is playing.
 - Hidden tabs sleep: trimmed, then frozen, then unloaded, never one with sound or in a call
   (a microphone, camera or call link that is live, talking or not). When Windows runs short of
-  memory, the hidden tab looked at longest ago goes first. On battery, battery saver makes them
-  sleep sooner and the chrome move less; a leaf in the footer says so.
+  memory, the hidden tab looked at longest ago goes first. A hidden tab over 500 MB unloads
+  after 5 minutes. Freeze and unload times are yours to set, up to Never. On battery, battery
+  saver makes the chrome move less; a leaf in the footer says so.
+- Hover a tab and it says what it costs; one over 500 MB shows it all the time.
 - The address bar fills in the site you go to most as you type: `yout`, Enter, YouTube.
 - Control (Shift+Esc) says what each tab costs right now: memory, CPU and network, and below
   them Lumen's own drawing, the shared browser processes and the download helper. The total is
