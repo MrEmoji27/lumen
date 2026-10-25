@@ -6,5 +6,4 @@
 /dist/
 
 # local
-/.commandcode/
 __pycache__/

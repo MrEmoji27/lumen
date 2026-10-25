@@ -1,5 +1,5 @@
 param([string]$Label, [bool]$InProc, [int]$Port, [string]$Url = "https://www.youtube.com/watch?v=aqz-KE-bpKQ", [int]$Secs = 60)
-$W = "C:\Users\mremo\projects\browser\.claude\worktrees\agent-ab0a21b822b169568"
+$W = Split-Path -Parent $PSScriptRoot
 $D = Join-Path $env:TEMP "lumen_$Label"
 Remove-Item $D -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $D | Out-Null

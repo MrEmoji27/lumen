@@ -154,7 +154,7 @@ script this used lived in `%TEMP%` and was not checked in.
 
 ## Journal
 
-The usage journal (`docs/briefs/journal.md`) has to cost nothing: no thread,
+The usage journal has to cost nothing: no thread,
 no timer, no deadline of its own, no second process walk. It rides on the
 memory read the sidebar already makes, buffers lines in one 64 KB string, and
 touches the disk at most once a minute. When Lumen is idle (window hidden or
