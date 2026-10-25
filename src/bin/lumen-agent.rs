@@ -159,6 +159,7 @@ fn main() -> ExitCode {
         }
         Some("mcp") => stdio(&session),
         Some("journal") => journal_report(&args[1..]),
+        Some("doctor") => doctor(),
         Some(tool) => {
             let tool = tool.to_string();
             once(&tool, &args[1..], &session)
@@ -171,6 +172,8 @@ const HELP: &str = "lumen-agent: drive the Lumen browser from any AI agent.
   lumen-agent mcp                      MCP over stdio. Add to an agent, e.g.
                                          claude mcp add lumen -- <path>\\lumen-agent.exe mcp
   lumen-agent tools                    list the tools
+  lumen-agent doctor                   check this install, agents included, and say what
+                                         to fix (no Lumen needed)
   lumen-agent journal [--days N]        read Lumen's local usage journal and print
                                          a plain-text report (no Lumen needed)
   lumen-agent <tool> key=value ...     one call, e.g.
@@ -182,6 +185,26 @@ const HELP: &str = "lumen-agent: drive the Lumen browser from any AI agent.
   --session NAME    CLI calls with the same name share tabs (default: one shared CLI session)
 
 Lumen not running? It is started headless: off-screen, silent, out of your way.";
+
+/// `lumen-agent doctor`: Lumen's own check-up, run by the lumen.exe beside this bridge, which
+/// knows the install. Its words and its exit code are passed through.
+fn doctor() -> ExitCode {
+    let Ok(exe) = std::env::current_exe().map(|e| e.with_file_name("lumen.exe")) else { return ExitCode::FAILURE };
+    if !exe.is_file() {
+        eprintln!("lumen-agent: there is no lumen.exe next to this bridge to check");
+        return ExitCode::FAILURE;
+    }
+    match Command::new(&exe).arg("--doctor").output() {
+        Ok(out) => {
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            if out.status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+        }
+        Err(e) => {
+            eprintln!("lumen-agent: could not run lumen.exe --doctor: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
 /// Lumen is up right now (no starting it).
 fn running() -> Option<Door> {

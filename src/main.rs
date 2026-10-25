@@ -8,6 +8,8 @@ mod address;
 mod archive;
 mod aria;
 mod agent;
+#[allow(dead_code)]
+mod agent_doctor;
 mod agent_policy;
 mod agentkit;
 mod agent_result;
