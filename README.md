@@ -14,9 +14,21 @@ rust, with every bit of interface (sidebar, tabs, menus, settings, file pickers)
 > [!CAUTION]
 > the ui is unfinished. some screens are rough, some settings are missing, and things will move around or break between versions. it's my daily driver, but expect sharp edges.
 
-## what it's for
+## why it exists
 
-low memory, and a quiet place to read the web. with nothing open the whole thing sits around 36 MB on my laptop; hidden tabs freeze and then unload, the interface is one process, and nothing runs that you didn't ask for. numbers are from one machine, measured with `tools/vs_brave.py`, so treat them as a rough guide.
+i used a youtube music desktop client built the same way, rust around webview2, and it glitched constantly. fixing that itch turned into this.
+
+so it's for two things: low memory, and a quiet place to read the web. hidden tabs freeze and then unload, the interface is one process, and nothing runs that you didn't ask for.
+
+brave was my daily driver before this, so that's what i measured against. same laptop, fresh profiles, whole process tree:
+
+| | lumen | brave |
+|---|---|---|
+| nothing open | 36 MB | 151 MB |
+| one wikipedia tab | 49 MB | 192 MB |
+| 20 tabs, 6 min later | 124 MB | 1111 MB |
+
+one machine, measured with `tools/vs_brave.py` on 0.6.7.2. brave does a lot more than lumen does, so this is what each costs on my laptop, not which is better.
 
 ## what's in it
 
