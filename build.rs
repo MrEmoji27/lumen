@@ -70,7 +70,7 @@ fn angle_dlls() {
     if done < 2 {
         println!(
             "cargo:warning=the ANGLE DLLs are not built yet, so they are not next to the exe and a Servo \
-             tab will not open. Build once more (or copy them by hand; docs/servo-notes.md says how)."
+             tab will not open. Build once more."
         );
     }
 }
