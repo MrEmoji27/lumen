@@ -8,6 +8,23 @@ The rule: Lumen stays on the 0.6.7 line. A release build that goes to the person
 number: a batch of new features bumps the fourth part (0.6.7.5 -> 0.6.7.6), a small fix adds or
 bumps the last one (0.6.7.6 -> 0.6.7.6.1).
 
+## 0.6.7.7 — 2026-10-25
+
+- **The privacy report, redrawn.** Laid out like another browser's: the total blocked, one bar of what it
+  was with each number under its name, then everything else Lumen did, one row each. Signal,
+  Glass and Precise each draw it their own way. Every number is counted, none estimated: "data
+  saved" and "time saved" are gone, here and on the dashboard.
+- **Lock a tab with Windows Hello.** Right-click a tab, "Lock this tab": its page hides behind a
+  lock until your face, finger or PIN opens it, and locks again when you leave. Its row says
+  only "Locked tab". It stays locked after a restart.
+- **Lock Lumen itself.** Settings > Privacy: Lumen opens behind a lock until Windows Hello says
+  it is you.
+- **Secret downloads.** "Hide in secret" on a finished download moves it out of your Downloads
+  folder into a hidden one that opens with Windows Hello. Hidden, not encrypted.
+- **A page cannot send you to another site on its own.** "Redirect blocked" with Go anyway and
+  Allow on this site, like the pop-up blocker. The report counts them.
+- **New tabs can open private.** Settings > Privacy, "Open new tabs as private".
+
 ## 0.6.7.6.1 — 2026-10-25
 
 - **Tabs stop freezing too soon.** Battery saver used to cut the freeze to 1 minute and the

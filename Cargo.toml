@@ -9,7 +9,7 @@ default-run = "lumen"
 # (6 -> 7), a small fix adds or bumps the last (6 -> 6.1 -> 6.2). It is a string, since
 # TOML has no number with two dots. build.rs makes LUMEN_VERSION from both.
 [package.metadata.lumen]
-release = "6.1"
+release = "7"
 
 [dependencies]
 # Windows Hello answers asynchronously; join() waits for it off the UI thread.

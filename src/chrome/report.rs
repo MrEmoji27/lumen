@@ -228,6 +228,7 @@ fn rows_panel(i: &mut Inner, col: R, y: f32, title: &str, rows: &[(&str, &str, S
 /// Everything else Lumen did quietly, the ones that happened.
 fn other_rows(c: &Counts) -> Vec<(&'static str, &'static str, String, &'static str)> {
     [
+        ("external", "Redirects blocked", c.redirects, "Pages that tried to send you to another site on their own."),
         ("globe", "Real IP hidden", c.webrtc + c.signals, "WebRTC and tracking headers cannot see your address. Lumen has no VPN."),
         ("lock", "Moved to HTTPS", c.https_up, "Plain http pages opened over https instead."),
         ("wind", "Cookie banners hidden", c.cookies, "Consent pop-ups that never showed."),
@@ -274,6 +275,7 @@ pub fn draw(i: &mut Inner, st: R, s: &UiState) {
         && snap.all.cosmetic == 0
         && snap.all.cookies == 0
         && snap.all.popups == 0
+        && snap.all.redirects == 0
         && snap.all.webrtc == 0
         && snap.all.signals == 0
         && snap.all.wrong_password == 0
