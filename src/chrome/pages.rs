@@ -2067,7 +2067,9 @@ fn draw_downloads(i: &mut Inner, st: R, s: &UiState) {
             i.gfx.text(&d.name, R::new(tx, y + 13.0, tw, 22.0), i.look.body_strong, if failed { th.dim } else { th.text });
             i.gfx.text(&status_line(d), R::new(tx, y + 35.0, tw, 18.0), i.look.small, th.faint);
             if d.state == "progress" || d.state == "paused" {
-                let pct = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
+                let raw = if d.total > 0 { d.received as f32 / d.total as f32 } else { 0.0 };
+                // Readings come about once a second: the bar glides between them.
+                let pct = i.motion.tween(super::motion::Id::Dl(d.id), super::motion::Prop::Progress, raw, 600, super::motion::Ease::OutCubic);
                 let bar = R::new(tx, y + 59.0, col.right() - 10.0 - tx, 4.0);
                 i.gfx.round(bar, 2.0, th.line);
                 if pct > 0.0 {

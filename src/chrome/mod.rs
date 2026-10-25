@@ -3188,12 +3188,33 @@ impl Inner {
         self.draw_link(s);
         // A pop-up Lumen stopped: a bar over the page, with the way back.
         self.draw_popup_note(s);
-        // The cards over everything else. Their order is their z-order.
-        color::draw(self, s);
-        form::draw(self, s);
-        files::draw(self, s);
-        confirm::draw(self, s);
-        menu::draw(self, s);
+        // The cards over everything else. Their order is their z-order. Each one fades and lifts
+        // in the first frames it is open.
+        if self.color.is_some() {
+            let f = self.card_in("color");
+            color::draw(self, s);
+            self.card_out(f);
+        }
+        if self.form.is_some() {
+            let f = self.card_in("form");
+            form::draw(self, s);
+            self.card_out(f);
+        }
+        if self.files.is_some() {
+            let f = self.card_in("files");
+            files::draw(self, s);
+            self.card_out(f);
+        }
+        if self.confirm.is_some() {
+            let f = self.card_in("confirm");
+            confirm::draw(self, s);
+            self.card_out(f);
+        }
+        if self.menu.is_some() {
+            let f = self.card_in("menu");
+            menu::draw(self, s);
+            self.card_out(f);
+        }
         self.motion.end();
     }
 
@@ -4154,13 +4175,38 @@ impl Inner {
     /// The quick switcher sits over everything else in the sidebar; so does the lock's card.
     fn draw_footer_overlays(&mut self, s: &UiState) {
         if self.say.is_some() {
+            let f = self.card_in("say");
             self.draw_say();
+            self.card_out(f);
         } else if self.search_open {
+            let f = self.card_in("search");
             self.draw_search(s);
+            self.card_out(f);
         } else if self.site_open {
+            let f = self.card_in("site");
             self.draw_site_menu(s);
+            self.card_out(f);
         } else if self.pal_open {
+            let f = self.card_in("palette");
             self.draw_palette(s);
+            self.card_out(f);
+        }
+    }
+
+    /// A card's entrance: a quick fade and a short lift the first frames it is drawn. True when
+    /// the fade layer is up and `card_out` must take it down. Nothing at all once it settles.
+    fn card_in(&mut self, name: &'static str) -> bool {
+        let a = self.motion.enter(Id::Named(name), Prop::Opacity, 0.0, 1.0, 160, Ease::OutCubic);
+        let moving = a < 0.999;
+        if moving {
+            self.gfx.begin_fade(a, (1.0 - a) * 8.0);
+        }
+        moving
+    }
+
+    fn card_out(&self, faded: bool) {
+        if faded {
+            self.gfx.end_fade();
         }
     }
 
@@ -5381,6 +5427,12 @@ impl Inner {
     /// The lock card: a lock, what is locked, and the one way in. With no Windows Hello on
     /// this PC there is nothing to ask, and the card says so instead of offering a button.
     fn draw_lock(&mut self, area: R, l: &UiLock) {
+        let f = self.card_in(if l.app { "lock-app" } else { "lock-tab" });
+        self.draw_lock_card(area, l);
+        self.card_out(f);
+    }
+
+    fn draw_lock_card(&mut self, area: R, l: &UiLock) {
         let lo = self.look.clone();
         let th = lo.theme;
         let w = 420.0_f32.min(area.w - 40.0);
