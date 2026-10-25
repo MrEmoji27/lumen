@@ -571,4 +571,24 @@ pub fn fake(s: &mut UiState) {
             ..Default::default()
         });
     }
+    if fake_has("doctor") && s.panel == "doctor" {
+        use crate::doctor::{Mark, Report, Row};
+        let r = |name: &'static str, mark: Mark, found: &str, fix: &'static str| Row { name, mark, found: found.into(), fix };
+        s.doctor = Some(super::DoctorView {
+            report: Some(Report {
+                head: format!("Lumen {}", crate::VERSION),
+                rows: vec![
+                    r("WebView2", Mark::Ok, "141.0.3537.71", ""),
+                    r("Data folder", Mark::Ok, "writable, 231 GB free", ""),
+                    r("Settings and session", Mark::Ok, "both parse", ""),
+                    r("Filter lists", Mark::Warn, "8 of 9 present, 1 past its expiry", "they refresh themselves when a page needs them; check the network if they stay stale"),
+                    r("Helpers", Mark::Ok, "3 of 3 present, all match the pinned SHA-256", ""),
+                    r("Windows Hello", Mark::Ok, "set up", ""),
+                    r("Default browser", Mark::Ok, "registered; not picked in Windows yet", ""),
+                    r("Agent door", Mark::Fail, "on, but port 47615 is held by something else", "pick another port in Settings > AI agent"),
+                    r("Crashes", Mark::Warn, "last crash: panic at …; 2 unclean exits in the last 7 days", "send a problem report from Settings > About"),
+                ],
+            }),
+        });
+    }
 }

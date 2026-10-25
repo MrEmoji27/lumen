@@ -28,14 +28,20 @@ pub enum Verdict {
     Unavailable,
 }
 
+/// Is Windows Hello set up on this PC? Blocking: call it off the window's thread.
+pub fn available() -> bool {
+    // A WinRT call needs this thread in an apartment; an already-initialized one keeps its own.
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+    }
+    UserConsentVerifier::CheckAvailabilityAsync()
+        .and_then(|op| op.join())
+        .is_ok_and(|a| a == UserConsentVerifierAvailability::Available)
+}
+
 /// Is Windows Hello set up on this PC? Answers on a thread of its own.
 pub fn check(done: impl FnOnce(bool) + Send + 'static) {
-    let _ = thread::Builder::new().name("lumen-hello".into()).spawn(move || {
-        let ok = UserConsentVerifier::CheckAvailabilityAsync()
-            .and_then(|op| op.join())
-            .is_ok_and(|a| a == UserConsentVerifierAvailability::Available);
-        done(ok);
-    });
+    let _ = thread::Builder::new().name("lumen-hello".into()).spawn(move || done(available()));
 }
 
 /// Ask Windows Hello, over Lumen's window, with `why` as the line the prompt shows.

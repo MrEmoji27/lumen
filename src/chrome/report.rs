@@ -84,7 +84,7 @@ fn shades(th: &Theme, style: Style) -> [Color; 4] {
 }
 
 /// The look's own surface for a block of the report.
-fn panel(i: &mut Inner, r: R) {
+pub(super) fn panel(i: &mut Inner, r: R) {
     let th = i.theme;
     match i.look.style {
         Style::Signal => i.gfx.round(r, i.look.r_lg, th.raise),

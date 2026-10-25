@@ -119,6 +119,8 @@ pub enum PageHit {
     SeenVersion,
     /// The credit's big C: hovered, it spells itself out.
     BigC,
+    /// The check-up: run every check again.
+    DoctorRun,
 }
 
 /// Where "Made by zemo" goes.
@@ -416,9 +418,10 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("Keys", vec![Keys]),
         ("About", vec![
             Button(concat!("Lumen ", env!("LUMEN_VERSION")), "What changed in this version and every one before it, from the changelog built into Lumen.", "What's new", PageHit::Panels("changes")),
+            Button("Run a check-up", "What is wrong with this Lumen, and what to do about it: WebView2, the data folder, the filter lists, the helpers, Windows Hello, the default browser, the agent door, and the crashes. Nothing goes over the network.", "Open…", PageHit::Panels("doctor")),
+            Button("Report a problem", "A plain-text report you read in full before it goes anywhere: version, Windows, your setup, recent crashes and stalls. No addresses, no page titles, nothing typed into pages.", "Make a report…", PageHit::Panels("bugreport")),
             Button("Share your numbers", "Lumen's speed, memory and crash counts from your journal, scrubbed of every address and site. You read all of it before it goes.", "Share…", PageHit::Panels("numbers")),
             Toggle("show_credit", "Show who made Lumen", "The two lines at the foot of this menu."),
-            Button("Report a problem", "A plain-text report you read in full before it goes anywhere: version, Windows, your setup, recent crashes and stalls. No addresses, no page titles, nothing typed into pages.", "Make a report…", PageHit::Panels("bugreport")),
         ]),
     ]
 }
@@ -618,6 +621,7 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
         "dashboard" => super::dashboard::draw(i, st, s),
         "changes" => draw_changes(i, st),
         "bugreport" => draw_bugreport(i, st, s),
+        "doctor" => super::doctor::draw(i, st, s),
         _ => draw_control(i, st, s),
     }
 }
@@ -3555,6 +3559,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
             }
         }
         PageHit::BugSave => send(&i.proxy, json!({"t": "bugSave"})),
+        PageHit::DoctorRun => send(&i.proxy, json!({"t": "doctorRun"})),
     }
 }
 
