@@ -33,6 +33,7 @@ pub enum PageHit {
     Engine(usize),
     Nav(usize),
     Done,
+    Back,
     Unload(u64),
     Row(u64),
     ClearPasswords,
@@ -126,6 +127,7 @@ pub struct Page {
     pub(super) themes: Option<Vec<style::ThemeFile>>,
     changes: Option<(f32, Vec<ChangeBlock>)>,
     bug_lines: Option<(f32, usize, Vec<String>)>,
+    back: &'static str,
 }
 
 struct BmDrag {
@@ -496,6 +498,7 @@ fn value_at(scale: Scale, r: f32) -> f32 {
 }
 
 pub fn draw(i: &mut Inner, st: R, s: &UiState) {
+    i.page.back = s.back;
     if i.page.which != s.panel {
         i.page.which = s.panel;
         i.page.scroll = 0.0;
@@ -1638,6 +1641,31 @@ pub(super) fn close_button(i: &mut Inner, st: R) {
     i.gfx.round(r, i.look.round(32.0), if hov { th.hover } else { th.raise });
     i.gfx.round_stroke(r, i.look.round(32.0), th.line, 1.0);
     i.gfx.icon("close", r.x + 8.0, r.y + 8.0, 16.0, if hov { th.text } else { th.dim });
+    i.hit(r, h);
+    back_button(i, st);
+}
+
+fn back_button(i: &mut Inner, st: R) {
+    let label = match i.page.back {
+        "" => return,
+        "settings" => "Settings",
+        other => other,
+    };
+    let th = i.theme;
+    let f = i.look.small_strong;
+    let wide = 32.0 + i.gfx.measure(label, f) + i.look.s3;
+    let x = st.x + i.look.s4;
+    let w = if column(st, 860.0).x >= x + wide + 12.0 { wide } else { 32.0 };
+    let r = R::new(x, st.y + i.look.s4, w, 32.0);
+    let h = Hit::Page(PageHit::Back);
+    let hov = i.is_hover(&h);
+    let ink = if hov { th.text } else { th.dim };
+    i.gfx.round(r, i.look.round(32.0), if hov { th.hover } else { th.raise });
+    i.gfx.round_stroke(r, i.look.round(32.0), th.line, 1.0);
+    i.gfx.icon("back", r.x + 8.0, r.y + 8.0, 16.0, ink);
+    if w > 32.0 {
+        i.gfx.text(label, R::new(r.x + 30.0, r.y, w - 30.0, 32.0), f.align(Align::Left), ink);
+    }
     i.hit(r, h);
 }
 
@@ -3077,6 +3105,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
             }
         }
         PageHit::Done => send(&i.proxy, json!({"t": "panel", "open": false})),
+        PageHit::Back => send(&i.proxy, json!({"t": "panel", "open": false, "back": true})),
         PageHit::Unload(id) => send(&i.proxy, json!({"t": "sleep", "id": id})),
         PageHit::Row(_) => {}
         PageHit::Slider(_) => {}

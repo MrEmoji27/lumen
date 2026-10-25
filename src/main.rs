@@ -536,6 +536,7 @@ struct App {
     test_idle: Option<Duration>,
     settings: Settings,
     panel: Panel,
+    panel_back: Option<Panel>,
     report_range: String,
     report_site: Option<String>,
     peek: bool,
@@ -940,6 +941,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         test_idle: None,
         settings,
         panel: Panel::None,
+        panel_back: None,
         report_range: "today".into(),
         report_site: None,
         peek: false,
@@ -2112,6 +2114,7 @@ impl App {
                 dark: self.ctx.dark.get(),
                 maximized: self.ctx.window.is_maximized(),
                 panel: self.panel.name(),
+                back: self.panel_back.map_or("", Panel::name),
                 peek: self.peek,
                 full: self.ui_full(),
                 stage: ((sx - off) as f32, sy as f32, sw as f32, sh as f32),
@@ -3408,6 +3411,11 @@ impl App {
     fn set_panel(&mut self, p: Panel) {
         let was = self.panel;
         self.panel = p;
+        if was == Panel::Settings && !matches!(p, Panel::None | Panel::Settings) {
+            self.panel_back = Some(Panel::Settings);
+        } else if p != was {
+            self.panel_back = None;
+        }
         if p == Panel::Bug && was != Panel::Bug {
             self.bug_kind = if self.unclean_last { "crash" } else { "problem" };
             self.unclean_last = false;
@@ -5261,7 +5269,9 @@ impl App {
                 self.push();
             }
             "panel" => {
+                let back = m["back"].as_bool().unwrap_or(false);
                 let p = match (m["open"].as_bool().unwrap_or(false), m["which"].as_str()) {
+                    (false, _) if back => self.panel_back.unwrap_or(Panel::None),
                     (false, _) => Panel::None,
                     (true, Some("control")) => Panel::Control,
                     (true, Some("downloads")) => Panel::Downloads,

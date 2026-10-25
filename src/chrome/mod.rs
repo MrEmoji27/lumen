@@ -202,6 +202,7 @@ pub struct UiState {
     pub dark: bool,
     pub maximized: bool,
     pub panel: &'static str,
+    pub back: &'static str,
     pub peek: bool,
     pub full: bool,
     pub stage: (f32, f32, f32, f32),
@@ -5722,7 +5723,7 @@ impl Inner {
         }
         if vk == VK_ESCAPE.0 as u32 && !down(VK_SHIFT.0) {
             if self.state.as_ref().is_some_and(|s| s.panel != "none") {
-                send(&self.proxy, json!({"t": "panel", "open": false}));
+                send(&self.proxy, json!({"t": "panel", "open": false, "back": true}));
                 return true;
             }
         }
