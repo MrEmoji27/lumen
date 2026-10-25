@@ -192,6 +192,7 @@ mod tests {
             pin_url: if pinned { url.to_string() } else { String::new() },
             essential: false,
             idle_ms: 0,
+            locked: false,
         }
     }
 

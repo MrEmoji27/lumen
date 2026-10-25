@@ -135,6 +135,8 @@ pub struct Settings {
     /// and unload after 10, and the chrome's motion is reduced.
     #[serde(default = "yes")]
     pub battery_saver: bool,
+    /// Lumen opens behind a lock until Windows Hello says it is the person.
+    pub lock_app: bool,
     /// Hide ad leftovers and cookie banners (cosmetic rules).
     pub cosmetic: bool,
     /// Count what the blocker stops, per day and per site, for the report.
@@ -324,6 +326,7 @@ impl Default for Settings {
             sponsorblock: true,
             userscripts: true,
             battery_saver: true,
+            lock_app: false,
             show_memory: true,
             gpu_in_process: false,
             share_processes: true,
@@ -643,6 +646,8 @@ pub struct SavedTab {
     /// How long the tab has been unseen, in milliseconds. The time Lumen was
     /// closed does not count, so the clock only runs while it is open.
     pub idle_ms: u64,
+    /// The person locked it: its page shows only after Windows Hello.
+    pub locked: bool,
 }
 
 /// A tab that was closed into the archive: what it was, and when it went.

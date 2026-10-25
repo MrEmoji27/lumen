@@ -315,6 +315,8 @@ pub fn fake(s: &mut UiState) {
         status: "live",
         agent: false,
         agent_ok: false,
+        locked: false,
+        veiled: false,
         reader: false,
         private: false,
         split: false,
@@ -371,6 +373,28 @@ pub fn fake(s: &mut UiState) {
     }
     if fake_has("battery") {
         s.battery = true;
+    }
+    // A locked tab: its row says nothing, and its card is where the page would be.
+    if fake_has("lock") {
+        if let Some(t) = s.tabs.iter_mut().find(|t| t.id == 9004) {
+            t.locked = true;
+            t.veiled = true;
+        }
+        s.lock = Some(super::UiLock { app: false, hello: Some(true), note: String::new() });
+        s.full = true;
+    }
+    // The secret downloads, opened.
+    if fake_has("secret") {
+        s.secret_open = true;
+        s.secret = vec![
+            super::UiSecret { name: "tax-return-2025.pdf".into(), size: 1_840_000 },
+            super::UiSecret { name: "passport-scan.jpg".into(), size: 3_210_000 },
+        ];
+    }
+    // Lumen's own lock, over the whole window.
+    if fake_has("applock") {
+        s.lock = Some(super::UiLock { app: true, hello: Some(true), note: "Not unlocked. Try again when you are ready.".into() });
+        s.full = true;
     }
     if fake_has("page") {
         // The active tab is a secure, bookmarked page: lock, star and the offer chips show.
@@ -492,7 +516,7 @@ pub fn fake(s: &mut UiState) {
     }
     // Only while the page has nothing: after a real reset the numbers must be the
     // real, empty ones.
-    if fake_has("report") && s.report.is_none() {
+    if fake_has("report") && s.report.as_ref().is_none_or(|r| r.all.blocked() == 0) {
         use crate::privacy_stats::{Bar, Counts, SiteRow, Snapshot};
         let day = |n: u64, blocked: u64, bytes: u64| Bar { day: format!("2026-10-{n:02}"), blocked, bytes };
         let c = Counts {

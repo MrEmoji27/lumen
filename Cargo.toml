@@ -12,6 +12,8 @@ default-run = "lumen"
 release = "6.1"
 
 [dependencies]
+# Windows Hello answers asynchronously; join() waits for it off the UI thread.
+windows-future = "0.3"
 servo = { version = "0.7", optional = true }
 euclid = { version = "0.22", optional = true }
 url = { version = "2.5", optional = true }
@@ -38,6 +40,9 @@ webview2-com = "0.39"
 window-vibrancy = "0.8"
 windows-numerics = "0.3"
 windows = { version = "0.62", features = [
+    "Foundation",
+    "Security_Credentials_UI",
+    "Win32_System_WinRT",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
