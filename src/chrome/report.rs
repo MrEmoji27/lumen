@@ -1,4 +1,4 @@
-//! The privacy report: what Lumen stopped, by day and by site, like another browser's.
+//! The privacy report: what Lumen stopped, by day and by site.
 //!
 //! The numbers come from `privacy_stats::Snapshot`, filled into `UiState.report` only while
 //! this page is open. Every number on it is a count of something that happened: no
@@ -107,7 +107,7 @@ fn numeral(i: &Inner, size: f32) -> super::gfx::Font {
     }
 }
 
-/// Blocked, as another browser draws it: the total, one stacked bar of what it was, and a legend of
+/// Blocked: the total, one stacked bar of what it was, and a legend of
 /// columns with each kind's number under its name. Each look skins it: Signal's bar is ink,
 /// Glass's is lit with a glow under its biggest part, Precise's is square and adds shares.
 fn blocked_panel(i: &mut Inner, col: R, y: f32, c: &Counts, prev: &Counts, range: &str, one_site: bool) -> f32 {
@@ -190,7 +190,7 @@ fn blocked_panel(i: &mut Inner, col: R, y: f32, c: &Counts, prev: &Counts, range
     r.bottom() + i.look.s4
 }
 
-/// A panel of rows, as another browser lists Saved and Other statistics: an icon in a rounded square,
+/// A panel of rows, for Other statistics: an icon in a rounded square,
 /// a name, a line under it, the number at the right. Rows with nothing to say are left out.
 fn rows_panel(i: &mut Inner, col: R, y: f32, title: &str, rows: &[(&str, &str, String, &str)]) -> f32 {
     let th = i.theme;

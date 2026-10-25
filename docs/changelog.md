@@ -10,7 +10,7 @@ bumps the last one (0.6.7.6 -> 0.6.7.6.1).
 
 ## 0.6.7.7 — 2026-10-25
 
-- **The privacy report, redrawn.** Laid out like another browser's: the total blocked, one bar of what it
+- **The privacy report, redrawn.** The total blocked, one bar of what it
   was with each number under its name, then everything else Lumen did, one row each. Signal,
   Glass and Precise each draw it their own way. Every number is counted, none estimated: "data
   saved" and "time saved" are gone, here and on the dashboard.
