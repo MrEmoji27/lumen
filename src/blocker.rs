@@ -1008,6 +1008,13 @@ fn list_max_age(text: &str) -> Duration {
     said.map(Duration::from_secs).unwrap_or(MAX_AGE).clamp(MIN_AGE, MAX_AGE)
 }
 
+/// The lists on disk: how many are there, of how many, and how many are past their own
+/// `Expires:`. Reading only; no network.
+pub fn list_state(dir: &Path, now: SystemTime) -> (usize, usize, usize) {
+    let present = LISTS.iter().filter(|(name, _)| dir.join(name).is_file()).count();
+    (present, LISTS.len(), stale_lists(dir, now).len())
+}
+
 /// The lists whose file is missing or older than the list's own expiry.
 fn stale_lists(dir: &Path, now: SystemTime) -> Vec<&'static str> {
     LISTS

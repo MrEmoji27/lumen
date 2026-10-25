@@ -295,7 +295,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// A URL or a Windows path becomes "…". The report may not carry an address, a
 /// host or a place on disk, and the only way to be sure of that is to keep none
 /// of it. Newlines become spaces: one line stays one line.
-fn scrub(text: &str) -> String {
+pub(crate) fn scrub(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some((at, len)) = next_private(rest) {
@@ -332,7 +332,7 @@ fn next_private(s: &str) -> Option<(usize, usize)> {
 }
 
 /// "YYYY-MM-DD.jsonl" and nothing else.
-fn day_file(name: &str) -> bool {
+pub(crate) fn day_file(name: &str) -> bool {
     let Some(day) = name.strip_suffix(".jsonl") else { return false };
     let bytes = day.as_bytes();
     bytes.len() == 10

@@ -11,6 +11,7 @@ mod motion;
 mod pages;
 mod report;
 mod dashboard;
+mod doctor;
 mod color;
 mod form;
 mod confirm;
@@ -333,6 +334,8 @@ pub struct UiState {
     pub dl_unseen: bool,
     /// The Drive panel's run: steps, the agent's own words. Filled only while it is open.
     pub drive: Option<DriveView>,
+    /// The check-up, filled only while its page is open.
+    pub doctor: Option<DoctorView>,
     /// The problem report, plain text, while its page is open.
     pub bug_report: Option<String>,
     /// That report has been sent.
@@ -361,6 +364,13 @@ pub struct UiOther {
     pub ws_name: String,
     pub title: String,
     pub url: String,
+}
+
+/// The check-up page: the report once its checks answer, and nothing until then.
+#[derive(Clone, Debug)]
+pub struct DoctorView {
+    /// None while the checks are still running.
+    pub report: Option<crate::doctor::Report>,
 }
 
 /// What the Drive panel shows of one run: whether it is going, its step list (the tool

@@ -642,6 +642,13 @@ fn place_exe(dir: &Path) -> Option<PathBuf> {
     Some(exe)
 }
 
+/// aria2c.exe if it was ever fetched: None when it is not there, Some(true) when it matches
+/// the pinned hash, Some(false) when it does not.
+pub fn pinned_state(data_dir: &Path) -> Option<bool> {
+    let sha = sha_of_file(&data_dir.join("aria2").join(EXE))?;
+    Some(sha == EXE_SHA256)
+}
+
 /// Bytes over the wire, written to disk. False if they never arrive.
 fn fetch(url: &str, to: &Path) -> bool {
     let config = ureq::config::Config::builder().timeout_global(Some(FETCH_TIMEOUT)).build();

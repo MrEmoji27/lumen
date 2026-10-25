@@ -117,6 +117,8 @@ pub enum PageHit {
     CrashSeen,
     /// The start page's "what is new" note, put away unread.
     SeenVersion,
+    /// The check-up: run every check again.
+    DoctorRun,
 }
 
 /// Where "Made by zemo" goes.
@@ -414,6 +416,7 @@ pub(super) fn settings_schema() -> Vec<(&'static str, Vec<Item>)> {
         ("About", vec![
             Button(concat!("Lumen ", env!("LUMEN_VERSION")), "What changed in this version and every one before it, from the changelog built into Lumen.", "What's new", PageHit::Panels("changes")),
             Button("Report a problem", "A plain-text report you read in full before it goes anywhere: version, Windows, your setup, recent crashes and stalls. No addresses, no page titles, nothing typed into pages.", "Make a report…", PageHit::Panels("bugreport")),
+            Button("Run a check-up", "What is wrong with this Lumen, and what to do about it: WebView2, the data folder, the filter lists, the helpers, Windows Hello, the default browser, the agent door, and the crashes. Nothing goes over the network.", "Open…", PageHit::Panels("doctor")),
         ]),
     ]
 }
@@ -613,6 +616,7 @@ fn draw_page(i: &mut Inner, st: R, s: &UiState) {
         "dashboard" => super::dashboard::draw(i, st, s),
         "changes" => draw_changes(i, st),
         "bugreport" => draw_bugreport(i, st, s),
+        "doctor" => super::doctor::draw(i, st, s),
         _ => draw_control(i, st, s),
     }
 }
@@ -3527,6 +3531,7 @@ pub fn click(i: &mut Inner, p: PageHit) {
             }
         }
         PageHit::BugSave => send(&i.proxy, json!({"t": "bugSave"})),
+        PageHit::DoctorRun => send(&i.proxy, json!({"t": "doctorRun"})),
     }
 }
 

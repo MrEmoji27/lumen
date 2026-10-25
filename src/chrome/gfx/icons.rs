@@ -101,6 +101,9 @@ pub static TABLE: &[Entry] = &[
     lucide!("send", "send"),
     // The way back to the page a pin was made on.
     lucide!("home", "house"),
+    // The check-up: a check that passed, a warning that did not.
+    lucide!("check", "check"),
+    lucide!("alert", "triangle-alert"),
 ];
 
 /// Every name `Gfx::geometry_icon` can draw by hand. Lucide has all of them; the hand-made
@@ -281,7 +284,11 @@ mod tests {
     fn every_icon_name_in_the_chrome_has_a_drawing() {
         let mut bad = Vec::new();
         let mut seen = 0;
-        for (file, src) in [("mod.rs", include_str!("../mod.rs")), ("pages.rs", include_str!("../pages.rs"))] {
+        for (file, src) in [
+            ("mod.rs", include_str!("../mod.rs")),
+            ("pages.rs", include_str!("../pages.rs")),
+            ("doctor.rs", include_str!("../doctor.rs")),
+        ] {
             for n in names_used(src) {
                 if known(&n) {
                     seen += 1;

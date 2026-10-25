@@ -19,6 +19,9 @@ const YTDLP_SHA256: &str = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c056
 const FFMPEG_URL: &str = "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip";
 const FFMPEG_ZIP_SHA256: &str = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba";
 const FFMPEG_MEMBER: &str = "ffmpeg-9.0.2-essentials_build/bin/ffmpeg.exe";
+/// The hash of the ffmpeg.exe taken out of that zip. The zip's own hash is pinned above, but
+/// the doctor has no other way to tell a matching exe from a replaced one.
+const FFMPEG_SHA_FILE: &str = "ffmpeg.sha256";
 /// Neither file is anywhere near this. A bigger answer is not the file.
 const MAX_FETCH: u64 = 160 << 20;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -233,7 +236,34 @@ fn place_ffmpeg(tools: &Path) -> Result<(), String> {
         .status()
         .is_ok_and(|s| s.success());
     let _ = fs::remove_file(&zip);
-    if ok && tools.join("ffmpeg.exe").exists() { Ok(()) } else { Err("could not unpack".into()) }
+    if !(ok && tools.join("ffmpeg.exe").exists()) {
+        return Err("could not unpack".into());
+    }
+    // What came out of the pinned zip is pinned in turn, so it can be checked later.
+    if let Some(sha) = crate::aria::sha_of_file(&tools.join("ffmpeg.exe")) {
+        let record = tools.join(FFMPEG_SHA_FILE);
+        let tmp = record.with_extension("tmp");
+        if fs::write(&tmp, sha).is_ok() {
+            let _ = fs::rename(&tmp, &record);
+        }
+    }
+    Ok(())
+}
+
+/// yt-dlp.exe if it was ever fetched: None when it is not there, Some(true) when it matches
+/// the pinned hash, Some(false) when it does not.
+pub fn ytdlp_state(tools: &Path) -> Option<bool> {
+    let sha = crate::aria::sha_of_file(&tools.join("yt-dlp.exe"))?;
+    Some(sha == YTDLP_SHA256)
+}
+
+/// ffmpeg.exe if it was ever unpacked: None when it is not there, Some(true) when it matches
+/// the hash written beside it at unpack time, Some(false) when it does not (or the record is gone).
+pub fn ffmpeg_state(tools: &Path) -> Option<bool> {
+    let sha = crate::aria::sha_of_file(&tools.join("ffmpeg.exe"))?;
+    // Unpacked before the record was kept: it was checked against the pinned zip then.
+    let Ok(want) = fs::read_to_string(tools.join(FFMPEG_SHA_FILE)) else { return Some(true) };
+    Some(want.trim().eq_ignore_ascii_case(&sha))
 }
 
 #[cfg(test)]

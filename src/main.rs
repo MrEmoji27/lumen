@@ -21,6 +21,7 @@ mod bugreport;
 mod changelog;
 mod chrome;
 mod defaultapp;
+mod doctor;
 mod engine;
 mod extlink;
 mod favicons;
@@ -158,6 +159,8 @@ enum Panel {
     Changes,
     /// Report a problem: a plain-text report to read, copy or save.
     Bug,
+    /// The check-up: what is wrong with this Lumen, and what to do.
+    Doctor,
 }
 
 impl Panel {
@@ -180,6 +183,7 @@ impl Panel {
             Panel::Sites => "sites",
             Panel::Changes => "changes",
             Panel::Bug => "bugreport",
+            Panel::Doctor => "doctor",
         }
     }
 }
@@ -734,6 +738,8 @@ struct App {
     bug_kind: &'static str,
     /// This report has gone: Send does not send it twice.
     bug_sent: bool,
+    /// The check-up's answer. None while it is still being made.
+    doctor: Option<doctor::Report>,
     /// The run before this one never said goodbye: the start page offers a report, once.
     unclean_last: bool,
     born: Instant,
@@ -961,9 +967,18 @@ fn register_from_cli() -> String {
     }
 }
 
-/// A windowless program has no stdout. Borrow the console of whoever started it, if any.
+/// Say a line on the console: the borrowed parent console, or the handle stdout was pointed
+/// at when someone redirects it (`lumen --doctor > report.txt`). A windowless program has
+/// neither until one of those.
 fn say_on_console(msg: &str) {
     use std::io::Write;
+    let text = crlf(msg);
+    if redirected() {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
+        return;
+    }
     use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
     unsafe {
         if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
@@ -971,8 +986,33 @@ fn say_on_console(msg: &str) {
         }
     }
     if let Ok(mut out) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
-        let _ = writeln!(out, "{msg}");
+        let _ = out.write_all(text.as_bytes());
     }
+}
+
+/// True when stdout was pointed at a file or a pipe rather than a console.
+fn redirected() -> bool {
+    use windows::Win32::{
+        Storage::FileSystem::{FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType},
+        System::Console::{GetStdHandle, STD_OUTPUT_HANDLE},
+    };
+    unsafe {
+        let Ok(h) = GetStdHandle(STD_OUTPUT_HANDLE) else { return false };
+        let kind = GetFileType(h);
+        kind == FILE_TYPE_DISK || kind == FILE_TYPE_PIPE
+    }
+}
+
+/// The text with Windows line ends, so a captured report reads as separate lines in Notepad.
+fn crlf(msg: &str) -> String {
+    let text = msg.replace("\r\n", "\n");
+    let body = text.strip_suffix('\n').unwrap_or(&text);
+    let mut out = String::with_capacity(body.len() + 8);
+    for line in body.split('\n') {
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out
 }
 
 /// Show the main window: normally, or, headless, out of sight and without stealing focus.
@@ -1038,6 +1078,13 @@ fn main() {
     if std::env::args().any(|a| a == "--version") {
         say_on_console(&format!("Lumen {VERSION}"));
         return;
+    }
+    // `lumen.exe --doctor`: the self-check, then 0 or 1. No window, and it runs beside
+    // another Lumen: it never claims the instance or starts the engine.
+    if std::env::args().any(|a| a == "--doctor") {
+        let report = doctor::run(&doctor::Live::default());
+        say_on_console(&report.text());
+        std::process::exit(if report.failed() { 1 } else { 0 });
     }
     HEADLESS.store(
         std::env::var_os("LUMEN_HEADLESS").is_some_and(|v| v != "0") || std::env::args().any(|a| a == "--headless"),
@@ -1241,6 +1288,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
         bug_report: None,
         bug_kind: "problem",
         bug_sent: false,
+        doctor: None,
         unclean_last: false,
         born: Instant::now(),
         next_tick: Instant::now() + TICK,
@@ -1414,6 +1462,7 @@ let bg = if dark { (24, 24, 26) } else { (243, 243, 244) };
             Ok("sites") => Panel::Sites,
             Ok("changes") => Panel::Changes,
             Ok("bugreport") => Panel::Bug,
+            Ok("doctor") => Panel::Doctor,
             _ => Panel::None,
         };
         if panel != Panel::None || app.settings.compact {
@@ -2695,6 +2744,7 @@ impl App {
                 essentials,
                 archived: self.archived.iter().rev().map(|a| chrome::UiArchived { url: a.url.clone(), title: a.title.clone(), when: ago(a.when) }).collect(),
                 bug_report: (self.panel == Panel::Bug).then(|| self.bug_report.clone()).flatten(),
+                doctor: (self.panel == Panel::Doctor).then(|| chrome::DoctorView { report: self.doctor.clone() }),
                 bug_sent: self.bug_sent,
                 unclean_last: self.unclean_last && !headless(),
                 agent_cmd: self.agent.setup_command(self.settings.agent_port),
@@ -4043,6 +4093,12 @@ impl App {
             self.bug_sent = false;
             self.bug_report = Some(self.make_bug_report());
         }
+        // The check-up runs when its page opens, so it says how things are now, and never
+        // while nobody is looking at it.
+        if p == Panel::Doctor && was != Panel::Doctor {
+            self.doctor = None;
+            self.run_doctor();
+        }
         // The page is open now: the dot on the footer button has done its job.
         if p == Panel::Downloads {
             self.dl_unseen = false;
@@ -4056,6 +4112,16 @@ impl App {
         self.layout();
         self.focus_page();
         self.push();
+    }
+
+    /// The check-up, run off the UI thread: it writes to disks, asks Windows Hello and knocks
+    /// on the agent door. The answer arrives as `Ev::Doctor`.
+    fn run_doctor(&self) {
+        let live = doctor::Live { in_app: true, locked: self.settings.lock_app || self.tabs.iter().any(|t| t.locked) };
+        let proxy = self.ctx.proxy.clone();
+        let _ = std::thread::Builder::new().name("lumen-doctor".into()).spawn(move || {
+            let _ = proxy.send_event(Ev::Doctor(Box::new(doctor::run(&live))));
+        });
     }
 
     /// The problem report: facts about this Lumen and this PC, and the journal's crashes and
@@ -5468,6 +5534,13 @@ impl App {
                 self.push();
             }
             Ev::Hello(what, id, verdict) => self.on_hello(what, id, verdict),
+            Ev::Doctor(report) => {
+                self.doctor = Some(*report);
+                // The page may have closed while the checks ran. Nothing to push then.
+                if self.panel == Panel::Doctor {
+                    self.push();
+                }
+            }
             Ev::PopupBlocked(tab, target, site) => {
                 // A pop-up the person did not ask for. The chrome says so over the
                 // page, with the way back: allow this site, or let it go.
@@ -5743,6 +5816,11 @@ impl App {
             }
             "crashSeen" => {
                 self.unclean_last = false;
+                self.push();
+            }
+            "doctorRun" => {
+                self.doctor = None;
+                self.run_doctor();
                 self.push();
             }
             "popupAllow" => {
@@ -6098,6 +6176,7 @@ impl App {
                     (true, Some("sites")) => Panel::Sites,
                     (true, Some("changes")) => Panel::Changes,
                     (true, Some("bugreport")) => Panel::Bug,
+                    (true, Some("doctor")) => Panel::Doctor,
                     (true, _) => Panel::Settings,
                 };
                 self.set_panel(p);

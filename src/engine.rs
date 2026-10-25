@@ -193,7 +193,8 @@ pub enum Ev {
     SplitReset,
     /// A page answered with its language and its text: (tab, target language, JSON).
     TrPage(u64, String, String),
-    /// The model for a language pair is on disk (or could not be fetched).
+    /// The check-up is done: its report, made on its own thread.
+    Doctor(Box<crate::doctor::Report>),    /// The model for a language pair is on disk (or could not be fetched).
     TrModel(u64, bool, String),
     /// A message from the translator page: JSON, tagged with "lumen":"tr".
     TrMsg(String),
@@ -404,15 +405,22 @@ fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Vec<u8> {
     out
 }
 
-/// The WebView2 runtime's version, for the problem report. Empty when none has started.
-/// The WebView2 Runtime is on this PC. Without it Lumen cannot show a page. A debug build
-/// pretends it is missing under LUMEN_TEST_NO_WEBVIEW2, to look at the window that says so.
-pub fn webview2_present() -> bool {
+/// The WebView2 runtime's version, without starting it. None when the runtime is not there.
+/// A debug build pretends it is missing under LUMEN_TEST_NO_WEBVIEW2, to look at the window
+/// that says so.
+pub fn runtime_version() -> Option<String> {
     if cfg!(debug_assertions) && std::env::var_os("LUMEN_TEST_NO_WEBVIEW2").is_some() {
-        return false;
+        return None;
     }
     let mut v = PWSTR::null();
-    unsafe { GetAvailableCoreWebView2BrowserVersionString(PCWSTR::null(), &mut v) }.is_ok() && !take(v).is_empty()
+    unsafe { GetAvailableCoreWebView2BrowserVersionString(PCWSTR::null(), &mut v) }.ok()?;
+    let text = take(v);
+    (!text.is_empty()).then_some(text)
+}
+
+/// The WebView2 Runtime is on this PC. Without it Lumen cannot show a page.
+pub fn webview2_present() -> bool {
+    runtime_version().is_some()
 }
 
 pub fn browser_version(env: &ICoreWebView2Environment) -> String {
